@@ -1,6 +1,7 @@
+from ai_agent.tools.memory import memory_search_tool, memory_write_tool
 from ai_agent.tools.weather import weather_tool
 
-TOOLS = [weather_tool]
+TOOLS = [weather_tool, memory_search_tool, memory_write_tool]   
 TOOLS_MAP = {t.name: t for t in TOOLS}
 
 

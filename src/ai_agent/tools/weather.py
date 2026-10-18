@@ -1,5 +1,6 @@
-from ai_agent.tools.base import Tool
 from pydantic import BaseModel, Field
+
+from ai_agent.tools.base import Tool
 
 
 class WeatherArgs(BaseModel):

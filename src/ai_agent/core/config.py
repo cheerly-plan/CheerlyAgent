@@ -20,5 +20,14 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    database_url: str
+    embedding_model: str
+    embedding_dim: int
+    memory_top_k: int
+    memory_score_threshold: float
+
+    short_term_memory_max_turns: int
+    short_term_memory_max_tokens: int
+
 
 settings = Settings()

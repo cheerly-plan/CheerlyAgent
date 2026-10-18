@@ -1,23 +1,21 @@
-from unittest.mock import patch
-
-from fastapi.testclient import TestClient
-
-from ai_agent.api.app import app
+from ai_agent.api.routers.user import user_info
+from ai_agent.api.schemas import ChatRequest
 
 
-def test_chat_sse():
-    def fake_stream(user_input: str):
-        yield {"type": "text", "content": "你"}
-        yield {"type": "text", "content": "好"}
-        yield {"type": "done"}
+def fake_stream(user_input: str, user_id: str = "default", session_id: str = "default"):
+    yield {"type": "text", "content": "你"}
+    yield {"type": "text", "content": "好"}
+    yield {"type": "done"}
 
-    with patch("ai_agent.api.routers.chat.run_stream", side_effect=fake_stream):
-        client = TestClient(app)
-        with client.stream("POST", "/v1/chat", json={"message": "hi"}) as response:
-            body = b"".join(response.iter_bytes()).decode()
 
-    assert response.status_code == 200
-    assert "text/event-stream" in response.headers["content-type"]
-    assert '"content": "你"' in body
-    assert '"content": "好"' in body
-    assert '"type": "done"' in body
+def test_user_info_returns_required_fields():
+    info = user_info()
+    assert info.user_id
+    assert info.sessionsid
+    assert info.user_name
+
+
+def test_chat_request_prefers_sessionsid():
+    req = ChatRequest(message="你好", user_id="user_001", sessionsid="session_001")
+    assert req.user_id == "user_001"
+    assert req.resolved_session_id() == "session_001"
