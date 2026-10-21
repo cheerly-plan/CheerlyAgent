@@ -6,7 +6,7 @@ from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
-from ai_agent.memory.short_term import short_term_memory
+from ai_agent.memory.short_term import compact, short_term_memory
 from ai_agent.memory.store import store, user_scope
 from ai_agent.tools.registry import execute, schemas
 
@@ -33,20 +33,39 @@ def _system_prompt(user_id: str) -> str:
     return f"{SYSTEM_PROMPT}\n\n{block}"
 
 
+def _working_messages(user_id: str, chat_session_id: str) -> list[ChatMessage]:
+    messages = short_term_memory.load(chat_session_id, user_id=user_id)
+    if messages:
+        return messages
+    try:
+        raw = store.load_chat(
+            user_id, chat_session_id, limit=short_term_memory.max_turns
+        )
+    except Exception:
+        logger.exception("会话记忆加载失败")
+        return []
+    return compact(raw, short_term_memory.max_turns)
+
+
 def run_stream(
-    user_input: str, user_id: str = "default", session_id: str = "default"
+    user_input: str, user_id: str = "default", chat_session_id: str = "default"
 ) -> Iterator[ChatEvent]:
-    messages = short_term_memory.load(session_id)
+    messages = _working_messages(user_id, chat_session_id)
     system = {"role": "system", "content": _system_prompt(user_id)}
     if messages and messages[0]["role"] == "system":
         messages[0] = system
     else:
         messages = [system, *messages]
+    persisted = len(messages)
     messages.append({"role": "user", "content": user_input})
     try:
         yield from run_loop(messages, user_id)
     finally:
-        short_term_memory.save(session_id, messages)
+        try:
+            store.append_chat(user_id, chat_session_id, messages[persisted:])
+        except Exception:
+            logger.exception("会话记忆保存失败")
+        short_term_memory.save(chat_session_id, messages, user_id=user_id)
 
 
 def run_loop(
@@ -92,9 +111,11 @@ def run_loop(
     yield {"type": "error", "message": f"已超过最大轮数 {settings.max_turns}。"}
 
 
-def run(user_input: str, user_id: str = "default", session_id: str = "default") -> str:
+def run(
+    user_input: str, user_id: str = "default", chat_session_id: str = "default"
+) -> str:
     parts: list[str] = []
-    for event in run_stream(user_input, user_id, session_id):
+    for event in run_stream(user_input, user_id, chat_session_id):
         if event["type"] == "text":
             parts.append(event.get("content") or "")
         elif event["type"] == "error":

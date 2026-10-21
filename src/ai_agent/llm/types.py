@@ -1,7 +1,9 @@
 from typing import Any, Literal, TypedDict
 
 Role = Literal["system", "user", "assistant", "tool"]
-ChatEventType = Literal["text", "tool_start", "tool_end", "done", "error"]
+ChatEventType = Literal[
+    "text", "tool_start", "tool_end", "done", "error", "title_updated"
+]
 
 
 class ToolCall(TypedDict):
@@ -28,3 +30,5 @@ class ChatEvent(TypedDict, total=False):
     content: str
     name: str
     message: str
+    session_id: str
+    title: str

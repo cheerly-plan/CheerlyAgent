@@ -6,7 +6,7 @@ router = APIRouter(prefix="/user", tags=["user"])
 
 _DEMO_USER = UserInfo(
     user_id="user_001",
-    sessionsid="session_001",
+    chat_session_id="session_001",
     user_name="ppl",
 )
 

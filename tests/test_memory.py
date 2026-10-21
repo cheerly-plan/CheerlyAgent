@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from ai_agent.core.config import settings
@@ -19,9 +21,25 @@ def fake_embed(texts: list[str]) -> list[list[float]]:
 _TEST_USERS = ("a", "b")
 
 
+def _chat_seqs(store: MemoryStore, user_id: str, chat_session_id: str) -> list[int]:
+    with store._get_pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT seq
+            FROM agent_chat_history
+            WHERE user_id = %s AND chat_session_id = %s
+            ORDER BY seq
+            """,
+            (user_id, chat_session_id),
+        ).fetchall()
+    return [int(row["seq"]) for row in rows]
+
+
 def _clear_test_users(store: MemoryStore) -> None:
     for uid in _TEST_USERS:
-        store.clear(user_id=uid)
+        store.clear_long_term(user_id=uid)
+        store.clear_chat(uid)
+        store.clear_sessions(uid)
 
 
 @pytest.fixture
@@ -42,36 +60,36 @@ def mem_store(monkeypatch):
 
 
 def test_vector_search_is_semantic(mem_store):
-    mem_store.write("我日常用 pytest 写单测", user_id="a")
-    hits = mem_store.search("pytest 单测", user_id="a")
+    mem_store.write_episode("我日常用 pytest 写单测", user_id="a")
+    hits = mem_store.search_episode("pytest 单测", user_id="a")
     assert hits
     assert "pytest" in hits[0].text
 
 
 def test_store_isolates_users(mem_store):
-    mem_store.write("喜欢 pytest", user_id="a")
-    mem_store.write("喜欢 jest", user_id="b")
-    hits = mem_store.search("pytest", user_id="a")
+    mem_store.write_episode("喜欢 pytest", user_id="a")
+    mem_store.write_episode("喜欢 jest", user_id="b")
+    hits = mem_store.search_episode("pytest", user_id="a")
     assert all(item.user_id == "a" for item in hits)
     assert all("jest" not in item.text for item in hits)
 
 
-def test_write_dedup(mem_store):
-    first = mem_store.write("喜欢 uv", user_id="a")
-    second = mem_store.write("喜欢 uv", user_id="a")
+def test_write_episode_dedup(mem_store):
+    first = mem_store.write_episode("喜欢 uv", user_id="a")
+    second = mem_store.write_episode("喜欢 uv", user_id="a")
     assert first.id == second.id
 
 
 def test_profile_is_listed_without_embedding(mem_store):
     mem_store.write_profile("喜欢 pytest", user_id="a")
-    mem_store.write("上周用 pytest 修过登录", user_id="a")
+    mem_store.write_episode("上周用 pytest 修过登录", user_id="a")
     profile = mem_store.list_profile("a")
     assert [item.text for item in profile] == ["喜欢 pytest"]
 
 
-def test_search_does_not_return_profile(mem_store):
+def test_search_episode_does_not_return_profile(mem_store):
     mem_store.write_profile("喜欢 pytest", user_id="a")
-    hits = mem_store.search("pytest", user_id="a")
+    hits = mem_store.search_episode("pytest", user_id="a")
     assert hits == []
 
 
@@ -86,3 +104,249 @@ def test_profile_write_dedup(mem_store):
     first = mem_store.write_profile("喜欢 uv", user_id="a")
     second = mem_store.write_profile("喜欢 uv", user_id="a")
     assert first.id == second.id
+
+
+def test_chat_roundtrip_keeps_tool_calls(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "system", "content": "不应入库"},
+            {"role": "user", "content": "北京天气"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "name": "get_weather",
+                        "arguments": {"city": "北京"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "name": "get_weather",
+                "content": "20度",
+            },
+            {"role": "assistant", "content": "20度"},
+        ],
+    )
+    loaded = mem_store.load_chat("a", "s1")
+    assert [m["role"] for m in loaded] == ["user", "assistant", "tool", "assistant"]
+    assert loaded[1]["tool_calls"][0]["name"] == "get_weather"
+    assert loaded[1]["tool_calls"][0]["arguments"] == {"city": "北京"}
+    assert loaded[2]["tool_call_id"] == "c1"
+    assert loaded[2]["content"] == "20度"
+
+
+def test_chat_append_is_incremental(mem_store):
+    mem_store.append_chat("a", "s1", [{"role": "user", "content": "1"}])
+    mem_store.append_chat("a", "s1", [{"role": "assistant", "content": "a1"}])
+    loaded = mem_store.load_chat("a", "s1")
+    assert [m["content"] for m in loaded] == ["1", "a1"]
+    assert _chat_seqs(mem_store, "a", "s1") == [1, 2]
+
+
+def test_chat_isolates_sessions(mem_store):
+    mem_store.append_chat("a", "s1", [{"role": "user", "content": "会话1"}])
+    mem_store.append_chat("a", "s2", [{"role": "user", "content": "会话2"}])
+    mem_store.append_chat("b", "s1", [{"role": "user", "content": "用户b"}])
+    assert [m["content"] for m in mem_store.load_chat("a", "s1")] == ["会话1"]
+    assert [m["content"] for m in mem_store.load_chat("a", "s2")] == ["会话2"]
+    assert [m["content"] for m in mem_store.load_chat("b", "s1")] == ["用户b"]
+
+
+def test_chat_keeps_duplicate_content(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好"},
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好"},
+        ],
+    )
+    loaded = mem_store.load_chat("a", "s1")
+    assert len(loaded) == 4
+    assert _chat_seqs(mem_store, "a", "s1") == [1, 2, 3, 4]
+
+
+def test_chat_skips_system_only(mem_store):
+    mem_store.append_chat("a", "s1", [{"role": "system", "content": "sys"}])
+    assert mem_store.load_chat("a", "s1") == []
+
+
+def test_load_chat_limit_returns_recent(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "2"},
+            {"role": "assistant", "content": "a2"},
+        ],
+    )
+    loaded = mem_store.load_chat("a", "s1", limit=2)
+    assert [m["content"] for m in loaded] == ["2", "a2"]
+
+
+def test_load_chat_page_returns_recent_and_cursor(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "3"},
+            {"role": "assistant", "content": "a3"},
+        ],
+    )
+    page = mem_store.load_chat_page("a", "s1", limit=2)
+    assert [m["content"] for m in page.messages] == ["3", "a3"]
+    assert page.has_more is True
+    assert page.next_before_seq == 5
+
+    older = mem_store.load_chat_page("a", "s1", limit=2, before_seq=page.next_before_seq)
+    assert [m["content"] for m in older.messages] == ["2", "a2"]
+    assert older.has_more is True
+    assert older.next_before_seq == 3
+
+    first = mem_store.load_chat_page("a", "s1", limit=2, before_seq=older.next_before_seq)
+    assert [m["content"] for m in first.messages] == ["1", "a1"]
+    assert first.has_more is False
+    assert first.next_before_seq is None
+
+
+def test_load_chat_page_keeps_tool_chain_intact(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "旧"},
+            {"role": "assistant", "content": "旧答"},
+            {"role": "user", "content": "查天气"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "name": "get_weather", "arguments": {"city": "北京"}}
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "name": "get_weather",
+                "content": "20度",
+            },
+            {"role": "assistant", "content": "现在20度"},
+        ],
+    )
+    page = mem_store.load_chat_page("a", "s1", limit=3)
+    assert [m["role"] for m in page.messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert page.messages[0]["content"] == "查天气"
+    assert page.has_more is True
+
+
+def test_clear_long_term_does_not_delete_chat(mem_store):
+    mem_store.append_chat("a", "s1", [{"role": "user", "content": "留下"}])
+    mem_store.write_episode("情景", user_id="a")
+    mem_store.write_profile("画像", user_id="a")
+    mem_store.clear_long_term(user_id="a")
+    assert mem_store.search_episode("情景", user_id="a") == []
+    assert mem_store.list_profile("a") == []
+    assert [m["content"] for m in mem_store.load_chat("a", "s1")] == ["留下"]
+
+
+def test_clear_chat_does_not_delete_long_term(mem_store):
+    mem_store.append_chat("a", "s1", [{"role": "user", "content": "对话"}])
+    mem_store.write_episode("情景", user_id="a")
+    mem_store.write_profile("画像", user_id="a")
+    mem_store.clear_chat("a", "s1")
+    assert mem_store.load_chat("a", "s1") == []
+    assert mem_store.search_episode("情景", user_id="a")
+    assert [item.text for item in mem_store.list_profile("a")] == ["画像"]
+
+
+def test_append_chat_concurrent_seq_is_unique(mem_store):
+    def write(i: int) -> None:
+        mem_store.append_chat(
+            "a",
+            "s1",
+            [
+                {"role": "user", "content": f"u{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ],
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(write, range(8)))
+
+    loaded = mem_store.load_chat("a", "s1")
+    assert len(loaded) == 16
+    assert _chat_seqs(mem_store, "a", "s1") == list(range(1, 17))
+
+
+def test_create_session_defaults_unnamed_and_is_idempotent(mem_store):
+    first = mem_store.create_session("a", "key-1")
+    second = mem_store.create_session("a", "key-1")
+    other = mem_store.create_session("a", "key-2")
+    assert first.title == "新会话"
+    assert first.id == second.id
+    assert other.id != first.id
+    listed = mem_store.list_sessions("a")
+    assert {item.id for item in listed} == {first.id, other.id}
+
+
+def test_update_session_title_only_when_unnamed(mem_store):
+    session = mem_store.create_session("a", "title-1")
+    assert mem_store.update_session_title("a", session.id, "天气咨询") == "天气咨询"
+    assert mem_store.update_session_title("a", session.id, "别改") is None
+    assert mem_store.get_session("a", session.id).title == "天气咨询"
+
+
+def test_cleanup_deletes_empty_unnamed_sessions_only(mem_store):
+    empty = mem_store.create_session("a", "empty")
+    named = mem_store.create_session("a", "named")
+    filled = mem_store.create_session("a", "filled")
+    mem_store.update_session_title("a", named.id, "已命名")
+    mem_store.append_chat("a", filled.id, [{"role": "user", "content": "你好"}])
+
+    deleted = mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=0)
+    assert deleted == 1
+    assert mem_store.get_session("a", empty.id) is None
+    assert mem_store.get_session("a", named.id) is not None
+    assert mem_store.get_session("a", filled.id) is not None
+
+
+def test_rename_session_overwrites_existing_title(mem_store):
+    session = mem_store.create_session("a", "rename-1")
+    mem_store.update_session_title("a", session.id, "旧标题")
+    assert mem_store.update_session_title("a", session.id, "新标题", only_if_default=False) == "新标题"
+    assert mem_store.get_session("a", session.id).title == "新标题"
+
+
+def test_delete_session_hides_session_and_clears_chat(mem_store):
+    session = mem_store.create_session("a", "del-1")
+    mem_store.append_chat("a", session.id, [{"role": "user", "content": "你好"}])
+    assert mem_store.delete_session("a", session.id) is True
+    assert mem_store.get_session("a", session.id) is None
+    assert mem_store.load_chat("a", session.id) == []
+    assert mem_store.delete_session("a", session.id) is False
+
+
+def test_cleanup_keeps_recent_empty_unnamed_sessions(mem_store):
+    session = mem_store.create_session("a", "recent")
+    deleted = mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600)
+    assert deleted == 0
+    assert mem_store.get_session("a", session.id) is not None

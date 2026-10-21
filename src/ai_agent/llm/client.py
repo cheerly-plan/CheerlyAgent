@@ -94,3 +94,35 @@ def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[Stre
         "result",
         {"content": "".join(content_parts), "tool_calls": tool_calls},
     )
+
+
+def complete_chat(
+    messages: list[ChatMessage],
+    model: str | None = None,
+    timeout: float | None = None,
+    max_retries: int | None = None,
+    max_tokens: int | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> str:
+    options: dict[str, float | int] = {}
+    if timeout is not None:
+        options["timeout"] = timeout
+    if max_retries is not None:
+        options["max_retries"] = max_retries
+    client = _client.with_options(**options) if options else _client
+    payload: dict[str, Any] = {
+        "model": model or settings.model,
+        "messages": _to_openai_messages(messages),
+        "stream": False,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if extra_body is not None:
+        payload["extra_body"] = extra_body
+    try:
+        response = client.chat.completions.create(**payload)
+    except Exception as e:
+        raise LLMError(str(e)) from e
+    if not response.choices:
+        return ""
+    return (response.choices[0].message.content or "").strip()
