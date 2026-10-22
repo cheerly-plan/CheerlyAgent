@@ -164,6 +164,7 @@ class MemoryStore:
                     id UUID PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '新会话',
+                    summary TEXT NOT NULL DEFAULT '',
                     idempotency_key TEXT NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -187,11 +188,9 @@ class MemoryStore:
             )
             conn.execute(
                 """
-                UPDATE agent_session
-                SET title = %s
-                WHERE title = '未命名' AND deleted_at IS NULL
-                """,
-                (DEFAULT_SESSION_TITLE,),
+                ALTER TABLE agent_session
+                ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''
+                """
             )
             conn.commit()
 
@@ -494,6 +493,65 @@ class MemoryStore:
             next_before_seq=int(chronological[0]["seq"]) if has_more else None,
         )
 
+    def load_recent_turns(
+        self, user_id: str, chat_session_id: str, turns: int
+    ) -> list[ChatMessage]:
+        if turns <= 0:
+            return []
+        with self._get_pool().connection() as conn:
+            start = conn.execute(
+                """
+                SELECT MIN(seq) AS start_seq
+                FROM (
+                    SELECT seq
+                    FROM agent_chat_history
+                    WHERE user_id = %s AND chat_session_id = %s AND role = 'user'
+                    ORDER BY seq DESC
+                    LIMIT %s
+                ) recent_users
+                """,
+                (user_id, chat_session_id, turns),
+            ).fetchone()
+            start_seq = start["start_seq"] if start else None
+            if start_seq is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT role, content, tool_calls, tool_call_id, name
+                FROM agent_chat_history
+                WHERE user_id = %s AND chat_session_id = %s AND seq >= %s
+                ORDER BY seq
+                """,
+                (user_id, chat_session_id, start_seq),
+            ).fetchall()
+        return [_chat_message_from_row(row) for row in rows]
+
+    def get_session_summary(self, user_id: str, session_id: str) -> str:
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT summary
+                FROM agent_session
+                WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
+                """,
+                (user_id, session_id),
+            ).fetchone()
+        return (row["summary"] or "").strip() if row else ""
+
+    def update_session_summary(
+        self, user_id: str, session_id: str, summary: str
+    ) -> None:
+        with self._get_pool().connection() as conn:
+            conn.execute(
+                """
+                UPDATE agent_session
+                SET summary = %s
+                WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
+                """,
+                (summary, user_id, session_id),
+            )
+            conn.commit()
+
     def clear_long_term(self, user_id: str | None = None) -> None:
         with self._get_pool().connection() as conn:
             if user_id:
@@ -516,9 +574,21 @@ class MemoryStore:
                     """,
                     (user_id, chat_session_id),
                 )
+                conn.execute(
+                    """
+                    UPDATE agent_session
+                    SET summary = ''
+                    WHERE user_id = %s AND id::text = %s
+                    """,
+                    (user_id, chat_session_id),
+                )
             else:
                 conn.execute(
                     "DELETE FROM agent_chat_history WHERE user_id = %s",
+                    (user_id,),
+                )
+                conn.execute(
+                    "UPDATE agent_session SET summary = '' WHERE user_id = %s",
                     (user_id,),
                 )
             conn.commit()

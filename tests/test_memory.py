@@ -179,6 +179,59 @@ def test_chat_skips_system_only(mem_store):
     assert mem_store.load_chat("a", "s1") == []
 
 
+def test_load_recent_turns_keeps_complete_tool_chain(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "天气"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "name": "get_weather", "arguments": {"city": "北京"}}
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "name": "get_weather",
+                "content": "20度",
+            },
+            {"role": "assistant", "content": "20度"},
+            {"role": "user", "content": "3"},
+            {"role": "assistant", "content": "a3"},
+        ],
+    )
+    loaded = mem_store.load_recent_turns("a", "s1", turns=2)
+    assert [m["content"] for m in loaded if m["role"] != "tool"] == [
+        "天气",
+        "",
+        "20度",
+        "3",
+        "a3",
+    ]
+    assert [m["role"] for m in loaded] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
+def test_session_summary_roundtrip_and_clears_with_chat(mem_store):
+    session = mem_store.create_session("a", "sum-1")
+    assert mem_store.get_session_summary("a", session.id) == ""
+    mem_store.update_session_summary("a", session.id, "用户在问天气")
+    assert mem_store.get_session_summary("a", session.id) == "用户在问天气"
+    mem_store.clear_chat("a", session.id)
+    assert mem_store.get_session_summary("a", session.id) == ""
+
+
 def test_load_chat_limit_returns_recent(mem_store):
     mem_store.append_chat(
         "a",

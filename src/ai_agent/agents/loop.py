@@ -6,8 +6,9 @@ from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
-from ai_agent.memory.short_term import compact, short_term_memory
+from ai_agent.memory.short_term import assemble, compress, short_term_memory
 from ai_agent.memory.store import store, user_scope
+from ai_agent.memory.summarize import summarize_session
 from ai_agent.tools.registry import execute, schemas
 
 logger = get_logger(__name__)
@@ -33,29 +34,28 @@ def _system_prompt(user_id: str) -> str:
     return f"{SYSTEM_PROMPT}\n\n{block}"
 
 
-def _working_messages(user_id: str, chat_session_id: str) -> list[ChatMessage]:
-    messages = short_term_memory.load(chat_session_id, user_id=user_id)
-    if messages:
-        return messages
+def _session_state(
+    user_id: str, chat_session_id: str
+) -> tuple[list[ChatMessage], str]:
+    cached = short_term_memory.load(chat_session_id, user_id=user_id)
+    if cached is not None:
+        return cached.messages, cached.summary
     try:
-        raw = store.load_chat(
-            user_id, chat_session_id, limit=short_term_memory.max_turns
+        summary = store.get_session_summary(user_id, chat_session_id)
+        recent = store.load_recent_turns(
+            user_id, chat_session_id, turns=short_term_memory.max_turns
         )
     except Exception:
         logger.exception("会话记忆加载失败")
-        return []
-    return compact(raw, short_term_memory.max_turns)
+        return [], ""
+    return recent, summary
 
 
 def run_stream(
     user_input: str, user_id: str = "default", chat_session_id: str = "default"
 ) -> Iterator[ChatEvent]:
-    messages = _working_messages(user_id, chat_session_id)
-    system = {"role": "system", "content": _system_prompt(user_id)}
-    if messages and messages[0]["role"] == "system":
-        messages[0] = system
-    else:
-        messages = [system, *messages]
+    recent, summary = _session_state(user_id, chat_session_id)
+    messages = assemble(_system_prompt(user_id), summary, recent)
     persisted = len(messages)
     messages.append({"role": "user", "content": user_input})
     try:
@@ -65,7 +65,24 @@ def run_stream(
             store.append_chat(user_id, chat_session_id, messages[persisted:])
         except Exception:
             logger.exception("会话记忆保存失败")
-        short_term_memory.save(chat_session_id, messages, user_id=user_id)
+        window, new_summary = messages, summary
+        try:
+            window, new_summary = compress(
+                messages,
+                keep=short_term_memory.max_turns,
+                old_summary=summary,
+                summarize=summarize_session,
+            )
+        except Exception:
+            logger.exception("短期记忆压缩失败")
+        if new_summary != summary:
+            try:
+                store.update_session_summary(user_id, chat_session_id, new_summary)
+            except Exception:
+                logger.exception("会话摘要保存失败")
+        short_term_memory.save(
+            chat_session_id, window, user_id=user_id, summary=new_summary
+        )
 
 
 def run_loop(

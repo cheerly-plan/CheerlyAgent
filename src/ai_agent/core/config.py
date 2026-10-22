@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
     title_model: str = ""
     short_term_summary_model: str = ""
+    short_term_summary_timeout_seconds: float = 12
     title_timeout_seconds: float = 20
     session_cleanup_interval_seconds: int = 300
     session_empty_max_age_seconds: int = 3600

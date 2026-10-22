@@ -4,8 +4,14 @@ from unittest.mock import patch
 import pytest
 
 from ai_agent.agents.loop import run, run_stream
-from ai_agent.memory.short_term import short_term_memory
+from ai_agent.memory.short_term import SUMMARY_USER_PREFIX, short_term_memory
 from ai_agent.memory.store import MemoryItem
+
+
+def _fake_summarize(previous, overflow):
+    bits = [m.get("content") or "" for m in overflow if m.get("role") == "user"]
+    prefix = f"{previous};" if previous else ""
+    return prefix + ",".join(bits) if bits else previous
 
 
 @pytest.fixture(autouse=True)
@@ -13,8 +19,11 @@ def _isolate_loop_memory():
     short_term_memory.clear()
     with (
         patch("ai_agent.agents.loop.store.list_profile", return_value=[]),
-        patch("ai_agent.agents.loop.store.load_chat", return_value=[]),
+        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=[]),
+        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.update_session_summary"),
         patch("ai_agent.agents.loop.store.append_chat"),
+        patch("ai_agent.agents.loop.summarize_session", side_effect=_fake_summarize),
     ):
         yield
     short_term_memory.clear()
@@ -81,30 +90,47 @@ def test_loop_keeps_session_history():
     assert seen[0] == ["system", "user"]
     assert seen[1] == ["system", "user", "assistant", "user"]
     history = short_term_memory.load("s1")
-    assert [m["role"] for m in history] == [
-        "system",
+    assert history is not None
+    assert [m["role"] for m in history.messages] == [
         "user",
         "assistant",
         "user",
         "assistant",
     ]
-    assert history[-1]["content"] == "ok"
+    assert history.messages[-1]["content"] == "ok"
+    assert history.summary == ""
 
 
-def test_loop_compacts_short_term_on_save():
+def test_loop_summarizes_overflow_turns():
     original = short_term_memory.max_turns
     short_term_memory.max_turns = 2
+    seen: list[list[str]] = []
+
+    def fake_stream(messages, tools):
+        seen.append([m.get("content") or "" for m in messages if m["role"] != "system"])
+        yield from _ok_stream(messages, tools)
+
     try:
-        with patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream):
+        with patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream):
             run("第一句", chat_session_id="s-compact")
             run("第二句", chat_session_id="s-compact")
+            run("第三句", chat_session_id="s-compact")
+            run("第四句", chat_session_id="s-compact")
         history = short_term_memory.load("s-compact")
-        assert [m["content"] for m in history if m["role"] != "system"] == [
-            "第二句",
-            "ok",
-        ]
     finally:
         short_term_memory.max_turns = original
+
+    assert history is not None
+    assert history.summary == "第一句;第二句"
+    assert [m["content"] for m in history.messages] == [
+        "第三句",
+        "ok",
+        "第四句",
+        "ok",
+    ]
+    assert seen[3][0].startswith(SUMMARY_USER_PREFIX)
+    assert "第一句" in seen[3][0]
+    assert seen[3][2:] == ["第二句", "ok", "第三句", "ok", "第四句"]
 
 
 def test_loop_injects_profile_memory():
@@ -213,12 +239,36 @@ def test_run_stream_hydrates_from_db_when_memory_empty():
         yield from _ok_stream(messages, tools)
 
     with (
-        patch("ai_agent.agents.loop.store.load_chat", return_value=history),
+        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=history),
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
     ):
         run("下一句", user_id="u1", chat_session_id="s-miss")
 
     assert seen[0] == ["system", "user", "assistant", "user"]
+
+
+def test_run_stream_hydrates_summary_conversation():
+    history = [
+        {"role": "user", "content": "第二句"},
+        {"role": "assistant", "content": "第二答"},
+    ]
+    seen: list[list[str]] = []
+
+    def fake_stream(messages, tools):
+        seen.append([m.get("content") or "" for m in messages])
+        yield from _ok_stream(messages, tools)
+
+    with (
+        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=history),
+        patch("ai_agent.agents.loop.store.get_session_summary", return_value="第一轮在问天气"),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
+    ):
+        run("第三句", user_id="u1", chat_session_id="s-sum")
+
+    assert seen[0][0]
+    assert seen[0][1].startswith(SUMMARY_USER_PREFIX)
+    assert "第一轮在问天气" in seen[0][1]
+    assert seen[0][3:] == ["第二句", "第二答", "第三句"]
 
 
 def test_run_stream_skips_db_load_when_short_term_exists():
@@ -233,7 +283,7 @@ def test_run_stream_skips_db_load_when_short_term_exists():
         run("第一句", user_id="u1", chat_session_id="s-hot")
 
     with (
-        patch("ai_agent.agents.loop.store.load_chat", return_value=poison),
+        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=poison),
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
     ):
         run("第二句", user_id="u1", chat_session_id="s-hot")
@@ -256,7 +306,7 @@ def test_run_stream_survives_append_chat_failure():
 def test_run_stream_survives_load_chat_failure():
     with (
         patch(
-            "ai_agent.agents.loop.store.load_chat",
+            "ai_agent.agents.loop.store.load_recent_turns",
             side_effect=RuntimeError("db down"),
         ),
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
@@ -266,47 +316,44 @@ def test_run_stream_survives_load_chat_failure():
 
 def test_run_stream_requests_chat_window():
     with (
-        patch("ai_agent.agents.loop.store.load_chat", return_value=[]) as load_chat,
+        patch(
+            "ai_agent.agents.loop.store.load_recent_turns", return_value=[]
+        ) as load_recent_turns,
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
     ):
         run("hi", user_id="u1", chat_session_id="s-lim")
-    load_chat.assert_called_once_with(
-        "u1", "s-lim", limit=short_term_memory.max_turns
+    load_recent_turns.assert_called_once_with(
+        "u1", "s-lim", turns=short_term_memory.max_turns
     )
-
-
-def test_run_stream_compacts_hydrated_history():
-    history = [
-        {"role": "user", "content": "1"},
-        {"role": "assistant", "content": "a1"},
-        {"role": "user", "content": "2"},
-        {"role": "assistant", "content": "a2"},
-        {"role": "user", "content": "3"},
-        {"role": "assistant", "content": "a3"},
-    ]
-    seen: list[list[str]] = []
-    original = short_term_memory.max_turns
-    short_term_memory.max_turns = 2
-
-    def fake_stream(messages, tools):
-        seen.append([m["content"] for m in messages if m["role"] != "system"])
-        yield from _ok_stream(messages, tools)
-
-    try:
-        with (
-            patch("ai_agent.agents.loop.store.load_chat", return_value=history),
-            patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
-        ):
-            run("新", user_id="u1", chat_session_id="s-win")
-    finally:
-        short_term_memory.max_turns = original
-
-    assert seen[0] == ["3", "a3", "新"]
 
 
 def test_loop_isolates_short_term_by_user():
     with patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream):
         run("给a", user_id="a", chat_session_id="same")
         run("给b", user_id="b", chat_session_id="same")
-    assert short_term_memory.load("same", user_id="a")[-2]["content"] == "给a"
-    assert short_term_memory.load("same", user_id="b")[-2]["content"] == "给b"
+    assert short_term_memory.load("same", user_id="a").messages[-2]["content"] == "给a"
+    assert short_term_memory.load("same", user_id="b").messages[-2]["content"] == "给b"
+
+
+def test_loop_persists_summary_when_overflow():
+    original = short_term_memory.max_turns
+    short_term_memory.max_turns = 1
+    updated: list[str] = []
+
+    def fake_update(user_id, session_id, summary):
+        updated.append(summary)
+
+    try:
+        with (
+            patch(
+                "ai_agent.agents.loop.store.update_session_summary",
+                side_effect=fake_update,
+            ),
+            patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
+        ):
+            run("第一句", user_id="u1", chat_session_id="s-sum-save")
+            run("第二句", user_id="u1", chat_session_id="s-sum-save")
+    finally:
+        short_term_memory.max_turns = original
+
+    assert updated == ["第一句"]
