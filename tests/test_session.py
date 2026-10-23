@@ -3,19 +3,23 @@ from concurrent.futures import Future
 
 import pytest
 
-from ai_agent.api.routers.chat import chat_stream, sse_events
+from ai_agent.api.dependencies import get_current_user
+from ai_agent.api.routers.chat import chat, chat_stream, sse_events
 from ai_agent.api.routers.session import (
     create_session,
     delete_session,
+    get_session_title,
     list_sessions,
     rename_session,
 )
 from ai_agent.api.schemas import (
+    ChatRequest,
     SessionCreateRequest,
     SessionDeleteRequest,
     SessionRenameRequest,
 )
 from ai_agent.core.exceptions import AgentError
+from ai_agent.memory.db import UserRecord
 from ai_agent.memory.store import DEFAULT_SESSION_TITLE, SessionRecord
 from ai_agent.tasks.title import (
     generate_session_title,
@@ -25,6 +29,11 @@ from ai_agent.tasks.title import (
     wait_title_event,
 )
 from fastapi import HTTPException
+
+# 各接口的 user 现在从登录令牌解析，直接调用时显式传入
+_USER = UserRecord(
+    user_id="user_001", username="user_001", display_name="ppl"
+)
 
 
 def _session(session_id="s1", title=DEFAULT_SESSION_TITLE) -> SessionRecord:
@@ -51,13 +60,20 @@ def test_normalize_title_rejects_copied_question():
     assert normalize_title("豆包水印去除方法", question=question) == "豆包水印去除方法"
 
 
+def test_normalize_title_never_returns_default_with_question():
+    # LLM 对无主题问候可能输出默认标题，应回退为压缩后的问题
+    assert normalize_title("新会话", question="hello") == "hello"
+    assert normalize_title("新会话", question="你好呀！") == "你好"
+    assert normalize_title("新会话", question="") == DEFAULT_SESSION_TITLE
+
+
 def test_create_session_returns_default_title(monkeypatch):
     monkeypatch.setattr(
         "ai_agent.api.routers.session.store.create_session",
         lambda user_id, key: _session("sid-1"),
     )
     result = create_session(
-        SessionCreateRequest(user_id="user_001", idempotency_key="idem-key-1")
+        SessionCreateRequest(idempotency_key="idem-key-1"), user=_USER
     )
     assert result.session_id == "sid-1"
     assert result.title == DEFAULT_SESSION_TITLE
@@ -73,10 +89,10 @@ def test_create_session_is_idempotent_at_api(monkeypatch):
 
     monkeypatch.setattr("ai_agent.api.routers.session.store.create_session", fake_create)
     first = create_session(
-        SessionCreateRequest(user_id="user_001", idempotency_key="same-key-xx")
+        SessionCreateRequest(idempotency_key="same-key-xx"), user=_USER
     )
     second = create_session(
-        SessionCreateRequest(user_id="user_001", idempotency_key="same-key-xx")
+        SessionCreateRequest(idempotency_key="same-key-xx"), user=_USER
     )
     assert first.session_id == second.session_id == "sid-same"
     assert calls["n"] == 2
@@ -89,7 +105,7 @@ def test_create_session_raises_when_store_fails(monkeypatch):
     monkeypatch.setattr("ai_agent.api.routers.session.store.create_session", fail)
     with pytest.raises(AgentError, match="创建会话失败"):
         create_session(
-            SessionCreateRequest(user_id="user_001", idempotency_key="idem-key-1")
+            SessionCreateRequest(idempotency_key="idem-key-1"), user=_USER
         )
 
 
@@ -101,7 +117,7 @@ def test_list_sessions_returns_user_sessions(monkeypatch):
             _session("s2", DEFAULT_SESSION_TITLE),
         ],
     )
-    result = list_sessions(user_id="user_001", limit=100)
+    result = list_sessions(user=_USER, limit=100)
     assert result.user_id == "user_001"
     assert [item.title for item in result.sessions] == ["天气咨询", DEFAULT_SESSION_TITLE]
 
@@ -116,7 +132,7 @@ def test_rename_session_api(monkeypatch):
         lambda *_args, **_kwargs: _session("s1", "豆包去水印"),
     )
     result = rename_session(
-        SessionRenameRequest(user_id="user_001", session_id="s1", title="豆包去水印")
+        SessionRenameRequest(session_id="s1", title="豆包去水印"), user=_USER
     )
     assert result.title == "豆包去水印"
 
@@ -126,7 +142,7 @@ def test_delete_session_api(monkeypatch):
         "ai_agent.api.routers.session.store.delete_session",
         lambda *_args, **_kwargs: True,
     )
-    assert delete_session(SessionDeleteRequest(user_id="user_001", session_id="s1")) == {
+    assert delete_session(SessionDeleteRequest(session_id="s1"), user=_USER) == {
         "ok": True
     }
 
@@ -136,7 +152,7 @@ def test_chat_stream_404_when_session_missing(monkeypatch):
         "ai_agent.api.routers.chat.store.get_session", lambda *_args, **_kwargs: None
     )
     with pytest.raises(HTTPException) as exc:
-        chat_stream(content="你好", user_id="user_001", session_id="missing")
+        chat_stream(user=_USER, content="你好", session_id="missing")
     assert exc.value.status_code == 404
 
 
@@ -151,14 +167,35 @@ def test_chat_stream_accepts_sessionId_query(monkeypatch):
     )
     app = FastAPI()
     app.include_router(router)
+    app.dependency_overrides[get_current_user] = lambda: _USER
     response = TestClient(app).get(
         "/v1/chat/stream",
-        params={"sessionId": "missing", "content": "你好", "user_id": "user_001"},
+        params={"sessionId": "missing", "content": "你好"},
     )
     assert response.status_code == 404
 
 
-def test_sse_emits_title_updated_after_answer(monkeypatch):
+def test_chat_404_when_session_missing(monkeypatch):
+    monkeypatch.setattr(
+        "ai_agent.api.routers.chat.store.get_session", lambda *_args, **_kwargs: None
+    )
+    with pytest.raises(HTTPException) as exc:
+        chat(
+            ChatRequest(message="你好", chat_session_id="missing"), user=_USER
+        )
+    assert exc.value.status_code == 404
+
+
+def test_chat_skips_session_check_for_default_session(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("default 会话不应查询数据库")
+
+    monkeypatch.setattr("ai_agent.api.routers.chat.store.get_session", boom)
+    response = chat(ChatRequest(message="你好"), user=_USER)
+    assert response.status_code == 200
+
+
+def test_sse_ends_after_done_and_starts_title_job(monkeypatch):
     future: Future[str | None] = Future()
     future.set_result("天气咨询")
     calls: list[tuple[str, str]] = []
@@ -167,7 +204,7 @@ def test_sse_emits_title_updated_after_answer(monkeypatch):
         calls.append((question, answer))
         return future
 
-    def fake_stream(user_input, user_id="default", chat_session_id="default"):
+    def fake_stream(user_input, user_id="default", chat_session_id="default", **_kwargs):
         yield {"type": "text", "content": "今天晴"}
         yield {"type": "text", "content": "，20度"}
         yield {"type": "done"}
@@ -181,11 +218,37 @@ def test_sse_emits_title_updated_after_answer(monkeypatch):
     ]
     types = [event["type"] for event in events]
     assert calls == [("北京天气", "今天晴，20度")]
-    assert types[-1] == "title_updated"
-    assert types[:3] == ["text", "text", "done"]
-    title_event = events[-1]
-    assert title_event["session_id"] == "s1"
-    assert title_event["title"] == "天气咨询"
+    assert types == ["text", "text", "done"]
+    assert not any(event["type"] == "title_updated" for event in events)
+
+
+def test_get_session_title(monkeypatch):
+    monkeypatch.setattr(
+        "ai_agent.api.routers.session.store.get_session",
+        lambda *_args, **_kwargs: _session("s1", "天气咨询"),
+    )
+    result = get_session_title(user=_USER, session_id="s1")
+    assert result.session_id == "s1"
+    assert result.title == "天气咨询"
+
+
+def test_get_session_title_default_session(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("default 会话不应查询数据库")
+
+    monkeypatch.setattr("ai_agent.api.routers.session.store.get_session", boom)
+    result = get_session_title(user=_USER, session_id="default")
+    assert result.title == DEFAULT_SESSION_TITLE
+
+
+def test_get_session_title_404(monkeypatch):
+    monkeypatch.setattr(
+        "ai_agent.api.routers.session.store.get_session",
+        lambda *_args, **_kwargs: None,
+    )
+    with pytest.raises(HTTPException) as exc:
+        get_session_title(user=_USER, session_id="missing")
+    assert exc.value.status_code == 404
 
 
 def test_generate_session_title_uses_question_and_answer(monkeypatch):

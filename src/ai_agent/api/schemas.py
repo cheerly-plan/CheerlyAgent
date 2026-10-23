@@ -1,6 +1,10 @@
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# user_id / session_id 会被写库、写日志，限制为无空白字符的短字符串，
+# 同时防止日志注入（换行符）与超长字符串滥用存储。
+SafeId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^\S+$")]
 
 
 class UserInfo(BaseModel):
@@ -10,9 +14,8 @@ class UserInfo(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1)
-    user_id: str = Field(default="default")
-    chat_session_id: str = "default"
+    message: str = Field(min_length=1, max_length=8000)
+    chat_session_id: SafeId = "default"
 
 
 class ChatMemoryMessage(BaseModel):
@@ -34,8 +37,7 @@ class ChatMemoryResponse(BaseModel):
 
 
 class SessionCreateRequest(BaseModel):
-    user_id: str = Field(default="default")
-    idempotency_key: str = Field(min_length=8, max_length=128)
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^\S+$")
 
 
 class SessionInfo(BaseModel):
@@ -45,17 +47,46 @@ class SessionInfo(BaseModel):
     updated_at: str | None = None
 
 
+class SessionTitleResponse(BaseModel):
+    session_id: str
+    title: str
+
+
 class SessionListResponse(BaseModel):
     user_id: str
     sessions: list[SessionInfo]
 
 
 class SessionRenameRequest(BaseModel):
-    user_id: str = Field(default="default")
-    session_id: str = Field(min_length=1)
+    session_id: SafeId
     title: str = Field(min_length=1, max_length=30)
 
 
 class SessionDeleteRequest(BaseModel):
-    user_id: str = Field(default="default")
-    session_id: str = Field(min_length=1)
+    session_id: SafeId
+
+
+# 登录用户名即 user_id，沿用 SafeId 的约束（无空白、长度有限）
+Username = Annotated[str, Field(min_length=2, max_length=32, pattern=r"^\S+$")]
+
+
+class RegisterRequest(BaseModel):
+    username: Username
+    password: str = Field(min_length=6, max_length=64)
+    display_name: str = Field("", max_length=32)
+
+
+class LoginRequest(BaseModel):
+    username: Username
+    password: str = Field(min_length=6, max_length=64)
+
+
+class AuthUser(BaseModel):
+    user_id: str
+    user_name: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    expires_at: str
+    user: AuthUser

@@ -19,15 +19,10 @@ class EpisodeStore(Database):
         uid = user_id or current_user_id()
         text = text.strip()
         src_vector = Vector(embed_texts([text])[0])
-        hits = self._find_similar_episodes(src_vector, uid)
-        merged_text = (
-            compact_episode_texts([*(hit.text for hit in hits), text]) if hits else text
-        )
-        merged_vector = (
-            Vector(embed_texts([merged_text])[0]) if merged_text != text else src_vector
-        )
-        now = datetime.now(timezone.utc).isoformat()
         with self._get_pool().connection() as conn:
+            # 相似检索统一放在 advisory lock 事务内，避免事务外预查：
+            # 1) 省一次 embedding 相似查询；2) 消除两次查询结果不一致时
+            # 用过期 hits 生成 merged_text 的竞态。
             conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
                 (uid, "agent_episode"),
@@ -41,12 +36,12 @@ class EpisodeStore(Database):
             )
             if not hits:
                 item = MemoryItem(
-                    id=str(self._point_id("agent_episode", uid, merged_text)),
+                    id=str(self._point_id("agent_episode", uid, text)),
                     user_id=uid,
-                    text=merged_text,
-                    created_at=now,
+                    text=text,
+                    created_at=datetime.now(timezone.utc).isoformat(),
                 )
-                self._upsert_episode(conn, item, merged_vector)
+                self._upsert_episode(conn, item, src_vector)
                 conn.commit()
                 return item
 
@@ -60,6 +55,13 @@ class EpisodeStore(Database):
                     """,
                     (uid, stale_ids),
                 )
+            merged_text = compact_episode_texts([*(hit.text for hit in hits), text])
+            merged_vector = (
+                Vector(embed_texts([merged_text])[0])
+                if merged_text != text
+                else src_vector
+            )
+            now = datetime.now(timezone.utc).isoformat()
             if merged_text != keeper.text or stale_ids:
                 conn.execute(
                     """
@@ -82,28 +84,12 @@ class EpisodeStore(Database):
                     len(stale_ids),
                     merged_text,
                 )
-                keeper = MemoryItem(
-                    id=keeper.id,
-                    user_id=uid,
-                    text=merged_text,
-                    created_at=now,
-                )
             conn.commit()
             return MemoryItem(
                 id=keeper.id,
                 user_id=uid,
                 text=merged_text,
-                created_at=keeper.created_at,
-            )
-
-    def _find_similar_episodes(self, vector: Vector, user_id: str) -> list[MemoryItem]:
-        with self._get_pool().connection() as conn:
-            return self._similar_episodes(
-                conn,
-                vector,
-                user_id,
-                settings.memory_top_k,
-                settings.memory_merge_threshold,
+                created_at=keeper.created_at if merged_text == keeper.text else now,
             )
 
     def search_episode(

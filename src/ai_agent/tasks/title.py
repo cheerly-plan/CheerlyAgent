@@ -13,7 +13,7 @@ from ai_agent.memory.store import DEFAULT_SESSION_TITLE, store
 
 logger = get_logger(__name__)
 
-_TITLE_MAX_LEN = 16
+_TITLE_MAX_LEN = 25
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="session-title")
 _pool_closed = False
 
@@ -25,7 +25,7 @@ TITLE_SYSTEM = """
 3. 结合问题和回答的实际内容，简洁关键词化，禁止标点、引号、书名号；
 4. 不能是半截句子，不要直接复述用户整句话；
 5. 禁止回答问题、禁止附加任何解释；
-6. 问题和回答都没有有效主题时，固定输出：新会话
+6. 问题和回答都没有有效主题时（如打招呼、问候、闲聊），输出简短主题词，例如「问候闲聊」；禁止输出“新会话”
 
 示例：
 用户：clinic.js 和 --inspect 有什么区别
@@ -51,6 +51,9 @@ def normalize_title(raw: str, fallback: str = "", question: str = "") -> str:
     if not text:
         text = _one_line(fallback)
     if not text or _copied_question(text, question):
+        text = _compress_question(question)
+    # LLM 仍可能输出默认标题，回退为压缩后的问题，避免标题永远是“新会话”
+    if text == DEFAULT_SESSION_TITLE:
         text = _compress_question(question)
     if len(text) > _TITLE_MAX_LEN:
         text = text[:_TITLE_MAX_LEN]

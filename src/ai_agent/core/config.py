@@ -18,8 +18,12 @@ class Settings(BaseSettings):
     small_model: str = ""
     max_turns: int = 8
     log_level: str = "INFO"
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8000
+    # 服务端访问令牌：非空时 /v1/** 要求携带 X-API-Key 或 Bearer Token
+    auth_token: str = ""
+    # 聊天流并发上限，超出直接返回 429
+    max_concurrent_chats: int = 20
 
     database_url: str
     embedding_model: str

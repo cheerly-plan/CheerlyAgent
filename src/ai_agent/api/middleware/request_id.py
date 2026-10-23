@@ -1,6 +1,10 @@
+import re
 import uuid
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+# 只接受安全的 request id，防止把异常字符回写进响应头
+_REQUEST_ID_RE = re.compile(r"^[\w.-]{1,64}$")
 
 
 class RequestIdMiddleware:
@@ -15,7 +19,9 @@ class RequestIdMiddleware:
         request_id = uuid.uuid4().hex
         for key, value in scope.get("headers", []):
             if key == b"x-request-id" and value:
-                request_id = value.decode()
+                raw = value.decode("ascii", errors="ignore").strip()
+                if _REQUEST_ID_RE.fullmatch(raw):
+                    request_id = raw
                 break
 
         async def send_with_id(message: Message) -> None:

@@ -1,12 +1,17 @@
+from ai_agent.core.logging import get_logger
 from ai_agent.tools.memory import memory_search_tool, memory_write_tool
 from ai_agent.tools.weather import weather_tool
 
-TOOLS = [weather_tool, memory_search_tool, memory_write_tool]   
+logger = get_logger(__name__)
+
+TOOLS = [weather_tool, memory_search_tool, memory_write_tool]
 TOOLS_MAP = {t.name: t for t in TOOLS}
+_TOOL_SCHEMAS = [t.schema() for t in TOOLS]
 
 
 def schemas() -> list[dict]:
-    return [t.schema() for t in TOOLS]
+    # 工具 schema 是静态的，模块级预计算，避免每轮对话重复生成
+    return list(_TOOL_SCHEMAS)
 
 
 def execute(name: str, arguments: dict) -> str:
@@ -16,4 +21,6 @@ def execute(name: str, arguments: dict) -> str:
     try:
         return tool.run(**arguments)[:3000]
     except Exception as e:
-        return f"ERROR: {type(e).__name__}: {e}"
+        # 异常详情（可能包含 SQL/连接信息）只进日志，不回传给模型
+        logger.exception("工具执行失败 name=%s", name)
+        return f"ERROR: 工具执行失败（{type(e).__name__}）"

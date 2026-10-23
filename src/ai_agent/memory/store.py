@@ -1,8 +1,10 @@
+from ai_agent.memory.auth_store import AuthStore
 from ai_agent.memory.db import (
     DEFAULT_SESSION_TITLE,
     ChatHistoryPage,
     MemoryItem,
     SessionRecord,
+    UserRecord,
     current_user_id,
     user_scope,
 )
@@ -16,13 +18,14 @@ __all__ = [
     "MemoryItem",
     "MemoryStore",
     "SessionRecord",
+    "UserRecord",
     "current_user_id",
     "store",
     "user_scope",
 ]
 
 
-class MemoryStore(EpisodeStore, ProfileStore, SessionStore):
+class MemoryStore(AuthStore, EpisodeStore, ProfileStore, SessionStore):
     def clear_long_term(self, user_id: str | None = None) -> None:
         with self._get_pool().connection() as conn:
             if user_id:

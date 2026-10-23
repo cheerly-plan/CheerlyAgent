@@ -1,10 +1,16 @@
 import pytest
 
+from ai_agent.api.dependencies import get_current_user
 from ai_agent.api.routers.chat import chat_memory
 from ai_agent.api.routers.user import user_info
 from ai_agent.api.schemas import ChatRequest
 from ai_agent.core.exceptions import AgentError
+from ai_agent.memory.db import UserRecord
 from ai_agent.memory.store import ChatHistoryPage
+
+_USER = UserRecord(
+    user_id="user_001", username="user_001", display_name="ppl"
+)
 
 
 def fake_stream(
@@ -15,16 +21,44 @@ def fake_stream(
     yield {"type": "done"}
 
 
-def test_user_info_returns_required_fields():
-    info = user_info()
-    assert info.user_id
+class _FakeRequest:
+    def __init__(self, headers: dict[str, str] | None = None) -> None:
+        self.headers = headers or {}
+
+
+def test_user_info_returns_logged_in_user(monkeypatch):
+    import ai_agent.api.dependencies as deps
+
+    logged = UserRecord(
+        user_id="6f1c2b3a-0000-4000-8000-000000000001",
+        username="user_001",
+        display_name="ppl",
+    )
+    monkeypatch.setattr(
+        deps.store,
+        "resolve_token",
+        lambda token: logged if token == "token-abc" else None,
+    )
+    request = _FakeRequest({"authorization": "Bearer token-abc"})
+    info = user_info(get_current_user(request))
+    # user_id 是服务端生成的 UUID，不再是用户名
+    assert info.user_id == "6f1c2b3a-0000-4000-8000-000000000001"
     assert info.chat_session_id
-    assert info.user_name
+    assert info.user_name == "ppl"
+
+
+def test_user_info_requires_token(monkeypatch):
+    import ai_agent.api.dependencies as deps
+
+    monkeypatch.setattr(deps.store, "resolve_token", lambda token: None)
+    with pytest.raises(Exception, match="未登录"):
+        get_current_user(_FakeRequest())
+    with pytest.raises(Exception, match="未登录"):
+        get_current_user(_FakeRequest({"authorization": "Bearer bad-token"}))
 
 
 def test_chat_request_uses_chat_session_id():
-    req = ChatRequest(message="你好", user_id="user_001", chat_session_id="session_001")
-    assert req.user_id == "user_001"
+    req = ChatRequest(message="你好", chat_session_id="session_001")
     assert req.chat_session_id == "session_001"
 
 
@@ -34,8 +68,8 @@ def test_session_create_request_requires_idempotency_key():
     from ai_agent.api.schemas import SessionCreateRequest
 
     with pytest.raises(ValidationError):
-        SessionCreateRequest(user_id="user_001", idempotency_key="short")
-    req = SessionCreateRequest(user_id="user_001", idempotency_key="idem-key-1")
+        SessionCreateRequest(idempotency_key="short")
+    req = SessionCreateRequest(idempotency_key="idem-key-1")
     assert req.idempotency_key == "idem-key-1"
 
 
@@ -73,7 +107,7 @@ def test_chat_memory_returns_session_messages(monkeypatch):
 
     monkeypatch.setattr("ai_agent.api.routers.chat.store.load_chat_page", fake_load)
     result = chat_memory(
-        user_id="user_001",
+        user=_USER,
         chat_session_id="session_001",
         limit=20,
         before_seq=None,
@@ -111,7 +145,7 @@ def test_chat_memory_paginates_older_page(monkeypatch):
 
     monkeypatch.setattr("ai_agent.api.routers.chat.store.load_chat_page", fake_load)
     result = chat_memory(
-        user_id="user_001",
+        user=_USER,
         chat_session_id="session_001",
         limit=2,
         before_seq=5,
@@ -129,7 +163,7 @@ def test_chat_memory_empty(monkeypatch):
         ),
     )
     result = chat_memory(
-        user_id="user_001",
+        user=_USER,
         chat_session_id="session_001",
         limit=20,
         before_seq=None,
@@ -145,4 +179,4 @@ def test_chat_memory_raises_when_store_fails(monkeypatch):
 
     monkeypatch.setattr("ai_agent.api.routers.chat.store.load_chat_page", fail)
     with pytest.raises(AgentError, match="会话记忆加载失败"):
-        chat_memory(user_id="user_001", chat_session_id="session_001")
+        chat_memory(user=_USER, chat_session_id="session_001")

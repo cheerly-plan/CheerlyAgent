@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 from ai_agent.agents.prompts import SYSTEM_PROMPT
 from ai_agent.core.config import settings
@@ -14,6 +15,10 @@ from ai_agent.memory.summarize import summarize_session
 from ai_agent.tools.registry import execute, schemas
 
 logger = get_logger(__name__)
+
+# 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
+# 不再阻塞 SSE 尾部延迟；进程退出时由解释器统一 join。
+_turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-finalize")
 
 
 def _profile_prompt(user_id: str) -> str:
@@ -50,8 +55,56 @@ def _session_state(
     return recent, summary
 
 
+def _persist_turn(
+    user_id: str, chat_session_id: str, turn: list[ChatMessage]
+) -> None:
+    try:
+        store.append_chat(user_id, chat_session_id, turn)
+    except Exception:
+        logger.exception("会话记忆保存失败")
+
+
+def _capture_turn(
+    user_id: str, turn: list[ChatMessage], summary: str, user_input: str
+) -> None:
+    try:
+        capture_long_term(user_id, turn, summary, user_input)
+    except Exception:
+        logger.exception("长期记忆抽取失败")
+
+
+def _compress_and_cache(
+    user_id: str,
+    chat_session_id: str,
+    messages: list[ChatMessage],
+    summary: str,
+) -> None:
+    window, new_summary = messages, summary
+    try:
+        window, new_summary = compress(
+            messages,
+            keep=short_term_memory.max_turns,
+            old_summary=summary,
+            summarize=summarize_session,
+        )
+    except Exception:
+        logger.exception("短期记忆压缩失败")
+    if new_summary != summary:
+        try:
+            store.update_session_summary(user_id, chat_session_id, new_summary)
+        except Exception:
+            logger.exception("会话摘要保存失败")
+    short_term_memory.save(
+        chat_session_id, window, user_id=user_id, summary=new_summary
+    )
+
+
 def run_stream(
-    user_input: str, user_id: str = "default", chat_session_id: str = "default"
+    user_input: str,
+    user_id: str = "default",
+    chat_session_id: str = "default",
+    *,
+    finalize_background: bool = False,
 ) -> Iterator[ChatEvent]:
     recent, summary = _session_state(user_id, chat_session_id)
     messages = assemble(_system_prompt(user_id), summary, recent)
@@ -60,32 +113,24 @@ def run_stream(
     try:
         yield from run_loop(messages, user_id)
     finally:
-        try:
-            store.append_chat(user_id, chat_session_id, messages[persisted:])
-        except Exception:
-            logger.exception("会话记忆保存失败")
-        try:
-            capture_long_term(user_id, messages[persisted:], summary, user_input)
-        except Exception:
-            logger.exception("长期记忆抽取失败")
-        window, new_summary = messages, summary
-        try:
-            window, new_summary = compress(
-                messages,
-                keep=short_term_memory.max_turns,
-                old_summary=summary,
-                summarize=summarize_session,
+        turn = messages[persisted:]
+        if finalize_background:
+            # 先同步完成快路径（落库 + 热缓存），保证下一轮上下文连续；
+            # 慢路径（记忆抽取、摘要压缩，含多次 LLM 调用）交给后台线程。
+            _persist_turn(user_id, chat_session_id, turn)
+            short_term_memory.save(
+                chat_session_id, messages, user_id=user_id, summary=summary
             )
-        except Exception:
-            logger.exception("短期记忆压缩失败")
-        if new_summary != summary:
-            try:
-                store.update_session_summary(user_id, chat_session_id, new_summary)
-            except Exception:
-                logger.exception("会话摘要保存失败")
-        short_term_memory.save(
-            chat_session_id, window, user_id=user_id, summary=new_summary
-        )
+            _turn_finalizer.submit(
+                _capture_turn, user_id, turn, summary, user_input
+            )
+            _turn_finalizer.submit(
+                _compress_and_cache, user_id, chat_session_id, messages, summary
+            )
+        else:
+            _persist_turn(user_id, chat_session_id, turn)
+            _capture_turn(user_id, turn, summary, user_input)
+            _compress_and_cache(user_id, chat_session_id, messages, summary)
 
 
 def run_loop(
@@ -100,7 +145,9 @@ def run_loop(
                 else:
                     result = payload
         except LLMError as e:
-            yield {"type": "error", "message": str(e)}
+            # 详情只进日志；上游异常文本可能带出 URL/响应片段，不透传给客户端
+            logger.error("LLM 调用失败: %s", e)
+            yield {"type": "error", "message": "模型服务暂时不可用，请稍后重试"}
             return
 
         if result is None:

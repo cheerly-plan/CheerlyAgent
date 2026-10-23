@@ -64,8 +64,8 @@ def main() -> None:
     serve_parser.add_argument(
         "--reload",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="代码变更后自动重启，生产环境请加 --no-reload",
+        default=False,
+        help="开发环境代码变更后自动重启；默认关闭，生产环境务必保持关闭",
     )
 
     args = parser.parse_args()
