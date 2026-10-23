@@ -78,7 +78,7 @@ class Database:
             self._pool = ConnectionPool(
                 conninfo=self._database_url,
                 min_size=1,
-                max_size=8,
+                max_size=settings.db_pool_max_size,
                 kwargs={"row_factory": dict_row},
                 configure=self._configure_connection,
                 open=True,
@@ -207,6 +207,41 @@ class Database:
                 ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_user (
+                    id UUID PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS agent_user_username_uidx
+                ON agent_user (username)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_auth_token (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES agent_user(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    expires_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_auth_token_user_id_idx
+                ON agent_auth_token (user_id)
+                """
+            )
+            # 迁移必须放在 agent_user / agent_auth_token 建表之后：
+            # 旧库可能只有旧 agent_user 表而没有 token 表，先跑迁移会引用不存在的表
             # 迁移：旧版 agent_user 用用户名当主键，改为服务端生成的 UUID 主键，
             # 用户名降级为登录名唯一索引，业务数据（会话/历史/记忆）统一重映射到新 id
             conn.execute(
@@ -249,39 +284,6 @@ class Database:
                             FROM agent_user u WHERE p.user_id = u.username;
                     END IF;
                 END $$;
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agent_user (
-                    id UUID PRIMARY KEY,
-                    username TEXT NOT NULL,
-                    display_name TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS agent_user_username_uidx
-                ON agent_user (username)
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agent_auth_token (
-                    token_hash TEXT PRIMARY KEY,
-                    user_id UUID NOT NULL REFERENCES agent_user(id) ON DELETE CASCADE,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    expires_at TIMESTAMPTZ NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS agent_auth_token_user_id_idx
-                ON agent_auth_token (user_id)
                 """
             )
             conn.commit()

@@ -17,8 +17,13 @@ from ai_agent.tools.registry import execute, schemas
 logger = get_logger(__name__)
 
 # 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
-# 不再阻塞 SSE 尾部延迟；进程退出时由解释器统一 join。
+# 不再阻塞 SSE 尾部延迟；进程退出时由 lifespan 调 shutdown_turn_finalizer 等待。
 _turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-finalize")
+
+
+def shutdown_turn_finalizer(wait: bool = True) -> None:
+    """等待在途的记忆抽取/摘要任务完成后再关停，避免重启丢长期记忆。"""
+    _turn_finalizer.shutdown(wait=wait, cancel_futures=False)
 
 
 def _profile_prompt(user_id: str) -> str:
@@ -64,6 +69,16 @@ def _persist_turn(
         logger.exception("会话记忆保存失败")
 
 
+def _replace_last_turn(
+    user_id: str, chat_session_id: str, turn: list[ChatMessage]
+) -> None:
+    """重新生成成功后的落库：同一事务内删旧回答、写新回答。"""
+    try:
+        store.replace_chat_after_last_user(user_id, chat_session_id, turn)
+    except Exception:
+        logger.exception("重新生成结果保存失败")
+
+
 def _capture_turn(
     user_id: str, turn: list[ChatMessage], summary: str, user_input: str
 ) -> None:
@@ -105,19 +120,44 @@ def run_stream(
     chat_session_id: str = "default",
     *,
     finalize_background: bool = False,
+    regenerate: bool = False,
 ) -> Iterator[ChatEvent]:
     recent, summary = _session_state(user_id, chat_session_id)
-    messages = assemble(_system_prompt(user_id), summary, recent)
-    persisted = len(messages)
-    messages.append({"role": "user", "content": user_input})
+    replacing = False
+    if regenerate:
+        # 重新生成最后一条回答：仅从内存上下文里剔除旧 assistant 消息后重问，
+        # 数据库里的旧回答在生成成功前不动（失败不丢）
+        while recent and recent[-1].get("role") != "user":
+            recent.pop()
+        if not recent:
+            return
+        replacing = True
+        user_input = str(recent[-1].get("content") or "")
+        messages = assemble(_system_prompt(user_id), summary, recent)
+        persisted = len(messages)
+    else:
+        messages = assemble(_system_prompt(user_id), summary, recent)
+        persisted = len(messages)
+        messages.append({"role": "user", "content": user_input})
+    failed = False
     try:
-        yield from run_loop(messages, user_id)
+        for event in run_loop(messages, user_id):
+            if event.get("type") == "error":
+                failed = True
+            yield event
     finally:
         turn = messages[persisted:]
+        if replacing and (failed or not any(m.get("role") == "assistant" for m in turn)):
+            # 重新生成失败（LLM 超时/报错/空结果）：什么都不写，
+            # 库里的旧回答和热缓存原样保留，用户可再点一次
+            return
+        if replacing:
+            _replace_last_turn(user_id, chat_session_id, turn)
         if finalize_background:
             # 先同步完成快路径（落库 + 热缓存），保证下一轮上下文连续；
             # 慢路径（记忆抽取、摘要压缩，含多次 LLM 调用）交给后台线程。
-            _persist_turn(user_id, chat_session_id, turn)
+            if not replacing:
+                _persist_turn(user_id, chat_session_id, turn)
             short_term_memory.save(
                 chat_session_id, messages, user_id=user_id, summary=summary
             )
@@ -128,7 +168,8 @@ def run_stream(
                 _compress_and_cache, user_id, chat_session_id, messages, summary
             )
         else:
-            _persist_turn(user_id, chat_session_id, turn)
+            if not replacing:
+                _persist_turn(user_id, chat_session_id, turn)
             _capture_turn(user_id, turn, summary, user_input)
             _compress_and_cache(user_id, chat_session_id, messages, summary)
 

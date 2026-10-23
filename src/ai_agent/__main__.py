@@ -42,12 +42,18 @@ def _chat(message: str | None) -> None:
 
 
 def _serve(host: str, port: int, reload: bool) -> None:
+    # 安全要点：uvicorn 默认 proxy_headers=True 且默认信任来自 127.0.0.1 的连接，
+    # 会用请求头里的 X-Forwarded-For 直接改写 request.client——等于把限流的
+    # IP 判断权交给客户端。只有显式声明部署在可信反代之后
+    # （TRUST_FORWARDED_FOR=true）才开启，且仅信任 FORWARDER_ALLOW_IPS 列出的地址。
     uvicorn.run(
         "ai_agent.api.app:app",
         host=host,
         port=port,
         reload=reload,
         reload_dirs=[str(Path(__file__).resolve().parents[1])],
+        proxy_headers=settings.trust_forwarded_for,
+        forwarded_allow_ips=settings.forwarded_allow_ips,
     )
 
 

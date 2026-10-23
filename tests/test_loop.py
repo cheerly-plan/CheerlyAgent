@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from ai_agent.agents.loop import run, run_stream
+from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.short_term import SUMMARY_USER_PREFIX, short_term_memory
 from ai_agent.memory.store import MemoryItem
 
@@ -373,3 +374,83 @@ def test_loop_persists_summary_when_overflow():
         short_term_memory.max_turns = original
 
     assert updated == ["第一句"]
+
+
+_REGEN_HISTORY = [
+    {"role": "user", "content": "北京天气"},
+    {"role": "assistant", "content": "旧回答"},
+]
+
+
+def test_regenerate_success_replaces_old_answer_atomically():
+    replaced: list[list[dict]] = []
+
+    def fake_replace(user_id, chat_session_id, messages):
+        replaced.append(messages)
+
+    with (
+        patch(
+            "ai_agent.agents.loop.store.load_recent_turns",
+            return_value=_REGEN_HISTORY,
+        ),
+        patch(
+            "ai_agent.agents.loop.store.replace_chat_after_last_user",
+            side_effect=fake_replace,
+        ),
+        patch("ai_agent.agents.loop.store.append_chat") as fake_append,
+        patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
+    ):
+        events = list(
+            run_stream("", user_id="u1", chat_session_id="s-regen", regenerate=True)
+        )
+
+    assert [e["type"] for e in events] == ["text", "done"]
+    # 成功才替换：同一事务删旧写新，走 replace 而非 append
+    assert len(replaced) == 1
+    assert [m["role"] for m in replaced[0]] == ["assistant"]
+    assert replaced[0][0]["content"] == "ok"
+    fake_append.assert_not_called()
+
+
+def _regenerate_failure_cases():
+    def llm_error(messages, tools):
+        raise LLMError("upstream timeout")
+        yield  # pragma: no cover
+
+    def empty_result(messages, tools):
+        yield ("result", None)
+
+    return [llm_error, empty_result]
+
+
+@pytest.mark.parametrize("failing", _regenerate_failure_cases())
+def test_regenerate_failure_keeps_old_answer(failing):
+    replaced: list[list[dict]] = []
+    appended: list[list[dict]] = []
+
+    with (
+        patch(
+            "ai_agent.agents.loop.store.load_recent_turns",
+            return_value=_REGEN_HISTORY,
+        ),
+        patch(
+            "ai_agent.agents.loop.store.replace_chat_after_last_user",
+            side_effect=lambda *_a: replaced.append(_a[2]),
+        ),
+        patch(
+            "ai_agent.agents.loop.store.append_chat",
+            side_effect=lambda *_a, **_k: appended.append(_a[2]),
+        ),
+        patch("ai_agent.agents.loop.capture_long_term") as capture,
+        patch("ai_agent.agents.loop.stream_chat", side_effect=failing),
+    ):
+        events = list(
+            run_stream("", user_id="u1", chat_session_id="s-regen-fail", regenerate=True)
+        )
+
+    # 失败时旧回答原样保留：不删库、不写库、不抽取记忆、不污染热缓存
+    assert events[-1]["type"] == "error"
+    assert replaced == []
+    assert appended == []
+    capture.assert_not_called()
+    assert short_term_memory.load("s-regen-fail") is None

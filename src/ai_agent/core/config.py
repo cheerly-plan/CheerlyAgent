@@ -22,8 +22,20 @@ class Settings(BaseSettings):
     port: int = 8000
     # 服务端访问令牌：非空时 /v1/** 要求携带 X-API-Key 或 Bearer Token
     auth_token: str = ""
-    # 聊天流并发上限，超出直接返回 429
+    # 聊天流并发上限，超出返回 429
     max_concurrent_chats: int = 20
+    # 数据库连接池上限，需 ≥ 聊天并发 + 标题线程池 + 收尾线程池之和
+    db_pool_max_size: int = 28
+    # 允许的跨域来源，逗号分隔，如 "http://localhost:5173,https://chat.example.com"
+    cors_origins: str = "http://localhost:5173"
+    # 仅当部署在可信反向代理之后才开启：开启后限流取 X-Forwarded-For 最右侧 IP
+    # （由自己的反代追加，客户端无法伪造）；默认关闭，直接取 socket 对端地址，
+    # 防止伪造 XFF 绕过限流
+    trust_forwarded_for: bool = False
+    # trust_forwarded_for 开启时，视哪些地址为可信反代（uvicorn forwarded_allow_ips）
+    forwarded_allow_ips: str = "127.0.0.1"
+    # 开放注册开关：本机开发可开；对外暴露前建议关闭（403），改为管理员建号
+    registration_enabled: bool = True
 
     database_url: str
     embedding_model: str

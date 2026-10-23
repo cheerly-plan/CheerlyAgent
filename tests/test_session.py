@@ -4,7 +4,7 @@ from concurrent.futures import Future
 import pytest
 
 from ai_agent.api.dependencies import get_current_user
-from ai_agent.api.routers.chat import chat, chat_stream, sse_events
+from ai_agent.api.routers.chat import chat, sse_events
 from ai_agent.api.routers.session import (
     create_session,
     delete_session,
@@ -145,34 +145,6 @@ def test_delete_session_api(monkeypatch):
     assert delete_session(SessionDeleteRequest(session_id="s1"), user=_USER) == {
         "ok": True
     }
-
-
-def test_chat_stream_404_when_session_missing(monkeypatch):
-    monkeypatch.setattr(
-        "ai_agent.api.routers.chat.store.get_session", lambda *_args, **_kwargs: None
-    )
-    with pytest.raises(HTTPException) as exc:
-        chat_stream(user=_USER, content="你好", session_id="missing")
-    assert exc.value.status_code == 404
-
-
-def test_chat_stream_accepts_sessionId_query(monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    from ai_agent.api.routers.chat import router
-
-    monkeypatch.setattr(
-        "ai_agent.api.routers.chat.store.get_session", lambda *_args, **_kwargs: None
-    )
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_current_user] = lambda: _USER
-    response = TestClient(app).get(
-        "/v1/chat/stream",
-        params={"sessionId": "missing", "content": "你好"},
-    )
-    assert response.status_code == 404
 
 
 def test_chat_404_when_session_missing(monkeypatch):

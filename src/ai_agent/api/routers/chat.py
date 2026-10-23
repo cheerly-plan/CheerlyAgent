@@ -31,9 +31,7 @@ def _pack(event: dict) -> str:
 
 
 def sse_events(user_id: str, session_id: str, content: str) -> Iterator[str]:
-    if not _CHAT_SLOTS.acquire(blocking=False):
-        yield _pack({"type": "error", "message": "当前对话并发已达上限，请稍后再试"})
-        return
+    # 并发槽已在路由处理器里 acquire（超限返回 429）；这里只负责释放
     try:
         answer_parts: list[str] = []
         for event in run_stream(
@@ -61,10 +59,18 @@ def _stream(user_id: str, session_id: str, content: str) -> StreamingResponse:
     )
 
 
+def _acquire_chat_slot() -> None:
+    """并发槽必须在返回 StreamingResponse 前获取，超限才能真正响应 429。"""
+    if not _CHAT_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="当前对话并发已达上限，请稍后再试")
+
+
 @router.post("/chat")
 def chat(
     req: ChatRequest, user: UserRecord = Depends(get_current_user)
 ) -> StreamingResponse:
+    if not req.regenerate and not req.message.strip():
+        raise HTTPException(status_code=422, detail="消息不能为空")
     # 内置 default 会话无需预先创建，其余会话必须真实存在，防止垃圾历史堆积
     if req.chat_session_id != "default":
         try:
@@ -73,29 +79,31 @@ def chat(
             raise AgentError("会话查询失败") from e
         if session is None:
             raise HTTPException(status_code=404, detail="会话不存在")
+    _acquire_chat_slot()
+    if req.regenerate:
+        return _stream_regenerate(user.user_id, req.chat_session_id)
     return _stream(user.user_id, req.chat_session_id, req.message)
 
 
-@router.get("/chat/stream")
-def chat_stream(
-    user: UserRecord = Depends(get_current_user),
-    content: str = Query(..., min_length=1, max_length=8000),
-    session_id: SafeId | None = Query(None),
-    sessionId: SafeId | None = Query(None),
-) -> StreamingResponse:
-    # 兼容原生 EventSource（只支持 GET、不能带 header）；
-    # 若前端可改用 fetch-event-source，建议走 POST /chat，消息不进 URL 访问日志
-    sid = sessionId or session_id
-    if not sid:
-        raise HTTPException(status_code=422, detail="缺少 sessionId")
-    if sid != "default":
+def _stream_regenerate(user_id: str, session_id: str) -> StreamingResponse:
+    """重新生成最后一条回答：不重复保存用户消息，末尾旧回答先从历史剔除。"""
+
+    def events() -> Iterator[str]:
         try:
-            session = store.get_session(user.user_id, sid)
-        except Exception as e:
-            raise AgentError("会话查询失败") from e
-        if session is None:
-            raise HTTPException(status_code=404, detail="会话不存在")
-    return _stream(user.user_id, sid, content)
+            for event in run_stream(
+                "",
+                user_id=user_id,
+                chat_session_id=session_id,
+                finalize_background=True,
+                regenerate=True,
+            ):
+                yield _pack(event)
+        finally:
+            _CHAT_SLOTS.release()
+
+    return StreamingResponse(
+        events(), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
 
 @router.get("/chat/memory", response_model_exclude_none=True)

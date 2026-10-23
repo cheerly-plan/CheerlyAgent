@@ -109,6 +109,91 @@ class SessionStore(Database):
             )
             conn.commit()
 
+    def replace_chat_after_last_user(
+        self, user_id: str, chat_session_id: str, messages: list[ChatMessage]
+    ) -> None:
+        """重新生成成功后的原子落库：在同一事务内删除最后一条用户消息之后的
+        旧回答，并写入新生成的内容。删除与插入同事务提交，任一步失败整体回滚，
+        旧回答不会丢。messages 为空时不动历史（保留旧回答）。"""
+        rows = [m for m in messages if m.get("role") != "system"]
+        if not rows:
+            return
+        values = [
+            (
+                str(uuid.uuid4()),
+                msg["role"],
+                msg.get("content") or "",
+                Jsonb(msg["tool_calls"]) if msg.get("tool_calls") else None,
+                msg.get("tool_call_id"),
+                msg.get("name"),
+            )
+            for msg in rows
+        ]
+        with self._get_pool().connection() as conn:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                (user_id, chat_session_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM agent_chat_history
+                WHERE user_id = %s AND chat_session_id = %s AND seq > (
+                    SELECT COALESCE(MAX(seq), 0)
+                    FROM agent_chat_history
+                    WHERE user_id = %s AND chat_session_id = %s AND role = 'user'
+                )
+                """,
+                (user_id, chat_session_id, user_id, chat_session_id),
+            )
+            last = conn.execute(
+                """
+                SELECT COALESCE(MAX(seq), 0) AS seq
+                FROM agent_chat_history
+                WHERE user_id = %s AND chat_session_id = %s
+                """,
+                (user_id, chat_session_id),
+            ).fetchone()
+            start = int(last["seq"]) if last else 0
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO agent_chat_history
+                        (id, user_id, chat_session_id, seq, role, content,
+                         tool_calls, tool_call_id, name)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            mid,
+                            user_id,
+                            chat_session_id,
+                            start + offset,
+                            role,
+                            content,
+                            tool_calls,
+                            tool_call_id,
+                            name,
+                        )
+                        for offset, (
+                            mid,
+                            role,
+                            content,
+                            tool_calls,
+                            tool_call_id,
+                            name,
+                        ) in enumerate(values, start=1)
+                    ],
+                )
+            conn.execute(
+                """
+                UPDATE agent_session
+                SET updated_at = now()
+                WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
+                """,
+                (user_id, chat_session_id),
+            )
+            conn.commit()
+
     def load_chat(
         self,
         user_id: str,

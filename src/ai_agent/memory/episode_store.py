@@ -19,10 +19,9 @@ class EpisodeStore(Database):
         uid = user_id or current_user_id()
         text = text.strip()
         src_vector = Vector(embed_texts([text])[0])
+        # 锁事务只做相似检索；LLM 合并与 embedding 是网络调用，
+        # 放在锁外，避免堵住同一用户的其他记忆写入
         with self._get_pool().connection() as conn:
-            # 相似检索统一放在 advisory lock 事务内，避免事务外预查：
-            # 1) 省一次 embedding 相似查询；2) 消除两次查询结果不一致时
-            # 用过期 hits 生成 merged_text 的竞态。
             conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
                 (uid, "agent_episode"),
@@ -34,19 +33,48 @@ class EpisodeStore(Database):
                 settings.memory_top_k,
                 settings.memory_merge_threshold,
             )
-            if not hits:
+            conn.commit()  # 事务结束即释放 advisory lock
+
+        if not hits:
+            item = MemoryItem(
+                id=str(self._point_id("agent_episode", uid, text)),
+                user_id=uid,
+                text=text,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            with self._get_pool().connection() as conn:
+                self._upsert_episode(conn, item, src_vector)
+                conn.commit()
+            return item
+
+        keeper = hits[0]
+        stale_ids = [uuid.UUID(hit.id) for hit in hits[1:]]
+        # 网络/LLM 调用在锁外执行
+        merged_text = compact_episode_texts([*(hit.text for hit in hits), text])
+        merged_vector = (
+            Vector(embed_texts([merged_text])[0])
+            if merged_text != text
+            else src_vector
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_pool().connection() as conn:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                (uid, "agent_episode"),
+            )
+            # 拿到锁后复核 hits 未被并发写入改动；变了就走安全路径直接新增，
+            # 避免用过期 hits 覆盖他人的合并结果
+            current = self._episode_texts(conn, uid, [hit.id for hit in hits])
+            if not all(current.get(hit.id) == hit.text for hit in hits):
                 item = MemoryItem(
                     id=str(self._point_id("agent_episode", uid, text)),
                     user_id=uid,
                     text=text,
-                    created_at=datetime.now(timezone.utc).isoformat(),
+                    created_at=now,
                 )
                 self._upsert_episode(conn, item, src_vector)
                 conn.commit()
                 return item
-
-            keeper = hits[0]
-            stale_ids = [uuid.UUID(hit.id) for hit in hits[1:]]
             if stale_ids:
                 conn.execute(
                     """
@@ -55,13 +83,6 @@ class EpisodeStore(Database):
                     """,
                     (uid, stale_ids),
                 )
-            merged_text = compact_episode_texts([*(hit.text for hit in hits), text])
-            merged_vector = (
-                Vector(embed_texts([merged_text])[0])
-                if merged_text != text
-                else src_vector
-            )
-            now = datetime.now(timezone.utc).isoformat()
             if merged_text != keeper.text or stale_ids:
                 conn.execute(
                     """
@@ -91,6 +112,19 @@ class EpisodeStore(Database):
                 text=merged_text,
                 created_at=keeper.created_at if merged_text == keeper.text else now,
             )
+
+    def _episode_texts(
+        self, conn: Connection, user_id: str, ids: list[str]
+    ) -> dict[str, str]:
+        rows = conn.execute(
+            """
+            SELECT id::text AS id, text
+            FROM agent_episode
+            WHERE user_id = %s AND id = ANY(%s)
+            """,
+            (user_id, [uuid.UUID(i) for i in ids]),
+        ).fetchall()
+        return {row["id"]: row["text"] for row in rows}
 
     def search_episode(
         self,

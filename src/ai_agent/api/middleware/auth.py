@@ -42,7 +42,11 @@ class AuthTokenMiddleware:
             query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
             provided = (query.get("api_key") or [""])[0].strip()
 
-        if not provided or not hmac.compare_digest(provided, settings.auth_token):
+        # 用字节比较：str 版 compare_digest 遇到非 ASCII 会抛 TypeError，
+        # bytes 版对任意输入安全且仍是常量时间
+        if not provided or not hmac.compare_digest(
+            provided.encode("utf-8"), settings.auth_token.encode("utf-8")
+        ):
             # 静态令牌不匹配时，回退尝试登录会话令牌（Bearer 位置），二者任一有效即放行
             from ai_agent.memory.store import store
 

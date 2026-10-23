@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from ai_agent.agents.loop import shutdown_turn_finalizer
 from ai_agent.api.middleware.auth import AuthTokenMiddleware
 from ai_agent.api.middleware.request_id import RequestIdMiddleware
 from ai_agent.api.routers.auth import router as auth_router
@@ -11,6 +12,7 @@ from ai_agent.api.routers.chat import router as chat_router
 from ai_agent.api.routers.health import router as health_router
 from ai_agent.api.routers.session import router as session_router
 from ai_agent.api.routers.user import router as user_router
+from ai_agent.core.config import settings
 from ai_agent.core.exceptions import AgentError
 from ai_agent.core.logging import setup_logging
 from ai_agent.memory.short_term import short_term_memory
@@ -28,6 +30,8 @@ async def lifespan(_app: FastAPI):
     empty_session_cleaner.stop()
     short_term_memory.stop_cleanup()
     shutdown_title_jobs()
+    # 等在途的长期记忆抽取/摘要跑完再关连接池，重启不丢记忆
+    shutdown_turn_finalizer()
     store.close()
 
 
@@ -38,7 +42,11 @@ def create_app() -> FastAPI:
     app.add_middleware(AuthTokenMiddleware)
     app.add_middleware(
         CORSMiddleware,
-            allow_origins=["http://localhost:5173"],
+            allow_origins=[
+                origin.strip()
+                for origin in settings.cors_origins.split(",")
+                if origin.strip()
+            ],
         allow_methods=["*"],
         allow_headers=["*"],
     )

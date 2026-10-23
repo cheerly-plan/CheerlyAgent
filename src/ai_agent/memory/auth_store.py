@@ -5,6 +5,8 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from psycopg import errors as pg_errors
+
 from ai_agent.memory.db import UserRecord
 
 # pbkdf2 迭代次数；写入哈希串头部，未来可平滑升级
@@ -53,27 +55,34 @@ class AuthStore:
     def create_user(
         self, username: str, password: str, display_name: str = ""
     ) -> UserRecord | None:
-        """创建用户，user_id 由服务端生成（UUID）；用户名已存在时返回 None。"""
+        """创建用户，user_id 由服务端生成（UUID）；用户名已存在时返回 None。
+
+        并发注册同名用户时，唯一索引兜底，捕获冲突同样返回 None（路由转 409）。
+        """
         with self._get_pool().connection() as conn:
             exists = conn.execute(
                 "SELECT 1 FROM agent_user WHERE username = %s", (username,)
             ).fetchone()
             if exists:
                 return None
-            row = conn.execute(
-                """
-                INSERT INTO agent_user (id, username, display_name, password_hash)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id, username, display_name, created_at
-                """,
-                (
-                    uuid.uuid4(),
-                    username,
-                    display_name or username,
-                    hash_password(password),
-                ),
-            ).fetchone()
-            conn.commit()
+            try:
+                row = conn.execute(
+                    """
+                    INSERT INTO agent_user (id, username, display_name, password_hash)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id, username, display_name, created_at
+                    """,
+                    (
+                        uuid.uuid4(),
+                        username,
+                        display_name or username,
+                        hash_password(password),
+                    ),
+                ).fetchone()
+                conn.commit()
+            except pg_errors.UniqueViolation:
+                conn.rollback()
+                return None
         return UserRecord(
             user_id=str(row["id"]),
             username=row["username"],
