@@ -31,26 +31,30 @@ def test_execute_missing_city():
 
 
 def test_write_memory_profile_kind():
-    item = SimpleNamespace(text="喜欢 pytest")
     with (
-        patch("ai_agent.tools.memory.store.write_profile", return_value=item) as write_profile,
+        patch(
+            "ai_agent.tools.memory.apply_profile_text",
+            return_value="已写入用户画像: 喜欢 pytest",
+        ) as apply_profile,
         patch("ai_agent.tools.memory.store.write_episode") as write_episode,
     ):
         result = execute("write_memory", {"content": "喜欢 pytest", "kind": "profile"})
     assert "用户画像" in result
-    write_profile.assert_called_once_with("喜欢 pytest")
+    apply_profile.assert_called_once_with("喜欢 pytest")
     write_episode.assert_not_called()
 
 
 def test_write_memory_defaults_to_profile():
-    item = SimpleNamespace(text="喜欢 pytest")
     with (
-        patch("ai_agent.tools.memory.store.write_profile", return_value=item) as write_profile,
+        patch(
+            "ai_agent.tools.memory.apply_profile_text",
+            return_value="已写入用户画像: 喜欢 pytest",
+        ) as apply_profile,
         patch("ai_agent.tools.memory.store.write_episode") as write_episode,
     ):
         result = execute("write_memory", {"content": "喜欢 pytest"})
     assert "用户画像" in result
-    write_profile.assert_called_once_with("喜欢 pytest")
+    apply_profile.assert_called_once_with("喜欢 pytest")
     write_episode.assert_not_called()
 
 

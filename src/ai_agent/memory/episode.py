@@ -1,7 +1,6 @@
-from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.llm.client import complete_chat
+from ai_agent.memory.parse import complete_memory_chat
 
 logger = get_logger(__name__)
 
@@ -68,22 +67,14 @@ def compact_episode_texts(parts: list[str]) -> str:
     fallback = merge_episode_texts(unique)
     if fallback in unique:
         return fallback
-    model = settings.llm_for_memory()
     numbered = "\n".join(f"- {item}" for item in unique)
     try:
-        raw = complete_chat(
+        raw = complete_memory_chat(
             [
                 {"role": "system", "content": MERGE_SYSTEM},
                 {"role": "user", "content": f"请合并这些情景记忆：\n{numbered}"},
             ],
-            model=model,
-            timeout=settings.memory_merge_timeout_seconds,
-            max_retries=0,
             max_tokens=256,
-            extra_body={
-                "enable_thinking": False,
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
         )
     except LLMError as e:
         logger.warning("合并情景记忆失败，回退为拼接: %s", e)

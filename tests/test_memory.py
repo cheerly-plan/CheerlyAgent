@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from ai_agent.core.config import settings
-from ai_agent.memory.compact import merge_episode_text, merge_episode_texts
+from ai_agent.memory.episode import merge_episode_text, merge_episode_texts
 from ai_agent.memory.store import MemoryStore
 
 
@@ -60,12 +60,12 @@ def _clear_test_users(store: MemoryStore) -> None:
 @pytest.fixture
 def mem_store(monkeypatch):
     monkeypatch.setattr(settings, "memory_merge_threshold", 0.6)
-    monkeypatch.setattr("ai_agent.memory.store.embed_texts", fake_embed)
+    monkeypatch.setattr("ai_agent.memory.episode_store.embed_texts", fake_embed)
     monkeypatch.setattr(
-        "ai_agent.memory.store.embed_query", lambda q: fake_embed([q])[0]
+        "ai_agent.memory.episode_store.embed_query", lambda q: fake_embed([q])[0]
     )
     monkeypatch.setattr(
-        "ai_agent.memory.store.compact_episode_texts", merge_episode_texts
+        "ai_agent.memory.episode_store.compact_episode_texts", merge_episode_texts
     )
     store = MemoryStore()
     try:
@@ -138,7 +138,7 @@ def test_write_episode_merges_similar(mem_store):
 
 def test_write_episode_stores_compacted_sentence(mem_store, monkeypatch):
     monkeypatch.setattr(
-        "ai_agent.memory.store.compact_episode_texts",
+        "ai_agent.memory.episode_store.compact_episode_texts",
         lambda parts: "learning nodejs bff with koa aggregation",
     )
     first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
@@ -180,6 +180,28 @@ def test_profile_write_dedup(mem_store):
     first = mem_store.write_profile("喜欢 uv", user_id="a")
     second = mem_store.write_profile("喜欢 uv", user_id="a")
     assert first.id == second.id
+
+
+def test_write_profile_replaces_same_facet(mem_store):
+    first = mem_store.write_profile("我是画家", user_id="a", facet="occupation")
+    second = mem_store.write_profile("我是后端工程师", user_id="a", facet="occupation")
+    assert first.id == second.id
+    profile = mem_store.list_profile("a")
+    assert [item.text for item in profile] == ["我是后端工程师"]
+    assert profile[0].facet == "occupation"
+
+
+def test_write_profile_keeps_different_facets(mem_store):
+    mem_store.write_profile("我是后端", user_id="a", facet="occupation")
+    mem_store.write_profile("喜欢 pytest", user_id="a", facet="preference")
+    texts = {item.facet: item.text for item in mem_store.list_profile("a")}
+    assert texts == {"occupation": "我是后端", "preference": "喜欢 pytest"}
+
+
+def test_delete_profile_facet(mem_store):
+    mem_store.write_profile("住北京", user_id="a", facet="locale")
+    assert mem_store.delete_profile_facet("locale", user_id="a") is True
+    assert mem_store.list_profile("a") == []
 
 
 def test_chat_roundtrip_keeps_tool_calls(mem_store):

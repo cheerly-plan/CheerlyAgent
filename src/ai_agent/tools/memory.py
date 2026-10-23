@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ai_agent.memory.profile import apply_profile_text
 from ai_agent.memory.store import store
 from ai_agent.tools.base import Tool
 
@@ -33,8 +34,7 @@ def search_memory(query: str) -> str:
 
 def write_memory(content: str, kind: str = "profile") -> str:
     if kind == "profile":
-        item = store.write_profile(content)
-        return f"已写入用户画像: {item.text}"
+        return apply_profile_text(content)
     item = store.write_episode(content)
     return f"已写入情景记忆: {item.text}"
 

@@ -6,7 +6,8 @@ from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
-from ai_agent.memory.extract import ExtractedMemory, extract_turn_memories
+from ai_agent.memory.long_term import capture_long_term
+from ai_agent.memory.facets import format_profile_block
 from ai_agent.memory.short_term import assemble, compress, short_term_memory
 from ai_agent.memory.store import store, user_scope
 from ai_agent.memory.summarize import summarize_session
@@ -22,10 +23,7 @@ def _profile_prompt(user_id: str) -> str:
     except Exception:
         logger.exception("用户画像读取失败")
         return ""
-    if not items:
-        return ""
-    lines = "\n".join(f"- {item.text}" for item in items)
-    return f"用户画像（稳定偏好/约束）：\n{lines}"
+    return format_profile_block(items)
 
 
 def _system_prompt(user_id: str) -> str:
@@ -67,7 +65,7 @@ def run_stream(
         except Exception:
             logger.exception("会话记忆保存失败")
         try:
-            _capture_long_term(user_id, messages[persisted:], summary, user_input)
+            capture_long_term(user_id, messages[persisted:], summary, user_input)
         except Exception:
             logger.exception("长期记忆抽取失败")
         window, new_summary = messages, summary
@@ -88,36 +86,6 @@ def run_stream(
         short_term_memory.save(
             chat_session_id, window, user_id=user_id, summary=new_summary
         )
-
-
-def _capture_long_term(
-    user_id: str,
-    turn: list[ChatMessage],
-    summary: str,
-    user_input: str,
-) -> None:
-    if not any(msg.get("role") == "assistant" for msg in turn):
-        return
-    existing: list[str] = []
-    try:
-        existing = [
-            item.text for item in store.search_episode(user_input, k=3, user_id=user_id)
-        ]
-    except Exception:
-        logger.exception("相近情景记忆检索失败")
-    items = extract_turn_memories(turn, summary, existing)
-    for item in items:
-        _write_extracted(user_id, item)
-
-
-def _write_extracted(user_id: str, item: ExtractedMemory) -> None:
-    try:
-        if item.kind == "profile":
-            store.write_profile(item.content, user_id=user_id)
-        else:
-            store.write_episode(item.content, user_id=user_id)
-    except Exception:
-        logger.exception("长期记忆写入失败 kind=%s", item.kind)
 
 
 def run_loop(

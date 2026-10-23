@@ -24,7 +24,7 @@ def _isolate_loop_memory():
         patch("ai_agent.agents.loop.store.update_session_summary"),
         patch("ai_agent.agents.loop.store.append_chat"),
         patch("ai_agent.agents.loop.summarize_session", side_effect=_fake_summarize),
-        patch("ai_agent.agents.loop._capture_long_term"),
+        patch("ai_agent.agents.loop.capture_long_term"),
     ):
         yield
     short_term_memory.clear()
@@ -296,7 +296,7 @@ def test_run_stream_skips_db_load_when_short_term_exists():
 def test_run_stream_captures_long_term_after_reply():
     with (
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
-        patch("ai_agent.agents.loop._capture_long_term") as capture,
+        patch("ai_agent.agents.loop.capture_long_term") as capture,
     ):
         run("我想用 Koa 做 BFF", user_id="u1", chat_session_id="s-extract")
     capture.assert_called_once()
