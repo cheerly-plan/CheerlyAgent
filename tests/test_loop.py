@@ -24,6 +24,7 @@ def _isolate_loop_memory():
         patch("ai_agent.agents.loop.store.update_session_summary"),
         patch("ai_agent.agents.loop.store.append_chat"),
         patch("ai_agent.agents.loop.summarize_session", side_effect=_fake_summarize),
+        patch("ai_agent.agents.loop._capture_long_term"),
     ):
         yield
     short_term_memory.clear()
@@ -290,6 +291,21 @@ def test_run_stream_skips_db_load_when_short_term_exists():
 
     assert "不该出现" not in seen[1]
     assert seen[1] == ["第一句", "ok", "第二句"]
+
+
+def test_run_stream_captures_long_term_after_reply():
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
+        patch("ai_agent.agents.loop._capture_long_term") as capture,
+    ):
+        run("我想用 Koa 做 BFF", user_id="u1", chat_session_id="s-extract")
+    capture.assert_called_once()
+    user_id, turn, summary, user_input = capture.call_args.args
+    assert user_id == "u1"
+    assert user_input == "我想用 Koa 做 BFF"
+    assert summary == ""
+    assert [m["role"] for m in turn] == ["user", "assistant"]
+    assert turn[0]["content"] == "我想用 Koa 做 BFF"
 
 
 def test_run_stream_survives_append_chat_failure():

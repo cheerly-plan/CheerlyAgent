@@ -42,13 +42,25 @@ def test_write_memory_profile_kind():
     write_episode.assert_not_called()
 
 
-def test_write_memory_defaults_to_episode():
+def test_write_memory_defaults_to_profile():
+    item = SimpleNamespace(text="喜欢 pytest")
+    with (
+        patch("ai_agent.tools.memory.store.write_profile", return_value=item) as write_profile,
+        patch("ai_agent.tools.memory.store.write_episode") as write_episode,
+    ):
+        result = execute("write_memory", {"content": "喜欢 pytest"})
+    assert "用户画像" in result
+    write_profile.assert_called_once_with("喜欢 pytest")
+    write_episode.assert_not_called()
+
+
+def test_write_memory_episode_kind():
     item = SimpleNamespace(text="上周修过登录")
     with (
         patch("ai_agent.tools.memory.store.write_profile") as write_profile,
         patch("ai_agent.tools.memory.store.write_episode", return_value=item) as write_episode,
     ):
-        result = execute("write_memory", {"content": "上周修过登录"})
+        result = execute("write_memory", {"content": "上周修过登录", "kind": "episode"})
     assert "情景记忆" in result
     write_episode.assert_called_once_with("上周修过登录")
     write_profile.assert_not_called()

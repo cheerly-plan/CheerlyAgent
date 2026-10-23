@@ -12,14 +12,13 @@ class MemorySearchArgs(BaseModel):
 
 class MemoryWriteArgs(BaseModel):
     content: str = Field(
-        description="精炼的记忆内容。一条只写一件事，禁止将身份和近况混写。"
+        description="一条只写一件事。身份/偏好用完整陈述，不要把当前任务写进来。"
     )
     kind: Literal["profile", "episode"] = Field(
-        default="episode",
+        default="profile",
         description=(
             "profile: 长期成立的姓名、职业、身份、语言、偏好、约束。\n"
-            "episode: 当前阶段、正在做的任务、近期事件。\n"
-            "拿不准时用 episode。"
+            "episode: 仅当用户明确要求记住某件近况时使用。"
         ),
     )
 
@@ -32,7 +31,7 @@ def search_memory(query: str) -> str:
     return "相关情景记忆：\n" + "\n".join(lines)
 
 
-def write_memory(content: str, kind: str = "episode") -> str:
+def write_memory(content: str, kind: str = "profile") -> str:
     if kind == "profile":
         item = store.write_profile(content)
         return f"已写入用户画像: {item.text}"
@@ -54,11 +53,11 @@ memory_search_tool = Tool(
 memory_write_tool = Tool(
     name="write_memory",
     description=(
-        "写入当前用户的长期记忆，不要把整段对话写进去。"
-        "【核心规则】一条消息同时包含身份和近况时，必须调用两次并按 kind 拆开，禁止整句写入。"
-        "例如「我是画家，最近在画星河」：必须调两次，一次写 profile='我是画家'，一次写 episode='正在画星河'。"
-        "【触发条件】用户陈述姓名、职业、身份、长期偏好，即使没说「请记住」也要写。"
-        "【禁止条件】用户只是在提问或要建议，且没有陈述新的身份/偏好时，绝对不要写入。"
+        "仅在用户明确要求记住，或清楚陈述姓名、职业、身份、长期偏好时写入。"
+        "当前任务、正在学习或讨论的技术方案不要在此写入，系统会在本轮结束后自动抽取。"
+        "一条只写一件事：身份/偏好用 profile；只有用户明确要求记住近况时才用 episode。"
+        "例如「我是画家，请记住」只写 profile='我是画家'。"
+        "【禁止条件】用户只是提问、要建议、讨论方案时，绝对不要调用。"
     ),
     func=write_memory,
     args_model=MemoryWriteArgs,

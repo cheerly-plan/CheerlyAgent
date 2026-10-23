@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     base_url: str
     api_key: str
     model: str
+    small_model: str = ""
     max_turns: int = 8
     log_level: str = "INFO"
     host: str = "0.0.0.0"
@@ -25,6 +26,15 @@ class Settings(BaseSettings):
     embedding_dim: int
     memory_top_k: int
     memory_score_threshold: float
+    memory_merge_threshold: float = 0.7
+    memory_merge_timeout_seconds: float = 8
+    memory_model: str = ""
+
+    def resolve_llm(self, business_model: str = "") -> str:
+        return business_model or self.small_model or self.model
+
+    def llm_for_memory(self) -> str:
+        return self.resolve_llm(self.memory_model)
 
     short_term_memory_max_turns: int
     short_term_memory_max_tokens: int

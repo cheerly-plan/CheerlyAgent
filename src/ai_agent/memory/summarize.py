@@ -26,7 +26,7 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
         user_content = f"已有摘要：\n{previous.strip()}\n\n新增对话：\n{source}"
     else:
         user_content = f"对话内容：\n{source}"
-    model = settings.short_term_summary_model or settings.model
+    model = settings.resolve_llm(settings.short_term_summary_model)
     try:
         raw = complete_chat(
             [

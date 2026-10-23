@@ -21,7 +21,7 @@ TITLE_SYSTEM = """
 你是会话标题摘要器。根据用户问题和助手回答，提取这次对话的核心主题生成标题。
 规则：
 1. 只输出标题本身，不要输出“标题：”等前缀；
-2. 长度8至14个汉字，Node、SSR、CSR这类英文缩写视为一个整体词，不计入汉字数量；
+2. 长度8至25个汉字，Node、SSR、CSR这类英文缩写视为一个整体词，不计入汉字数量；
 3. 结合问题和回答的实际内容，简洁关键词化，禁止标点、引号、书名号；
 4. 不能是半截句子，不要直接复述用户整句话；
 5. 禁止回答问题、禁止附加任何解释；
@@ -58,7 +58,7 @@ def normalize_title(raw: str, fallback: str = "", question: str = "") -> str:
 
 
 def generate_session_title(question: str, answer: str = "") -> str:
-    model = settings.title_model or settings.short_term_summary_model or settings.model
+    model = settings.resolve_llm(settings.title_model)
     try:
         raw = complete_chat(
             [

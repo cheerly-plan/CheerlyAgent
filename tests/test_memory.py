@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from ai_agent.core.config import settings
+from ai_agent.memory.compact import merge_episode_text, merge_episode_texts
 from ai_agent.memory.store import MemoryStore
 
 
@@ -19,6 +20,20 @@ def fake_embed(texts: list[str]) -> list[list[float]]:
 
 
 _TEST_USERS = ("a", "b")
+
+
+def _episode_texts(store: MemoryStore, user_id: str) -> list[str]:
+    with store._get_pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT text
+            FROM agent_episode
+            WHERE user_id = %s
+            ORDER BY created_at, text
+            """,
+            (user_id,),
+        ).fetchall()
+    return [row["text"] for row in rows]
 
 
 def _chat_seqs(store: MemoryStore, user_id: str, chat_session_id: str) -> list[int]:
@@ -44,9 +59,13 @@ def _clear_test_users(store: MemoryStore) -> None:
 
 @pytest.fixture
 def mem_store(monkeypatch):
+    monkeypatch.setattr(settings, "memory_merge_threshold", 0.6)
     monkeypatch.setattr("ai_agent.memory.store.embed_texts", fake_embed)
     monkeypatch.setattr(
         "ai_agent.memory.store.embed_query", lambda q: fake_embed([q])[0]
+    )
+    monkeypatch.setattr(
+        "ai_agent.memory.store.compact_episode_texts", merge_episode_texts
     )
     store = MemoryStore()
     try:
@@ -74,10 +93,67 @@ def test_store_isolates_users(mem_store):
     assert all("jest" not in item.text for item in hits)
 
 
+def test_merge_episode_text_skips_contained_or_duplicate():
+    assert merge_episode_text("最近在学习 Node.js BFF", "最近在学习 node.js bff") == (
+        "最近在学习 Node.js BFF"
+    )
+    assert merge_episode_text("学习 Node.js BFF 使用 Koa 框架", "学习 Node.js BFF") == (
+        "学习 Node.js BFF 使用 Koa 框架"
+    )
+    assert merge_episode_text("学习 Node.js BFF", "学习 Node.js BFF 使用 Koa 框架") == (
+        "学习 Node.js BFF 使用 Koa 框架"
+    )
+
+
+def test_merge_episode_texts_combines_related_facts():
+    merged = merge_episode_texts(
+        [
+            "最近在学习nodejs bff",
+            "学习 Node.js BFF 使用 Koa 框架",
+            "用 Koa 实现 BFF 数据聚合",
+        ]
+    )
+    assert "nodejs" in merged.lower() or "node.js" in merged.lower()
+    assert "koa" in merged.lower()
+    assert "数据聚合" in merged
+    assert merged.count("；") == 2
+
+
 def test_write_episode_dedup(mem_store):
     first = mem_store.write_episode("喜欢 uv", user_id="a")
     second = mem_store.write_episode("喜欢 uv", user_id="a")
     assert first.id == second.id
+    assert _episode_texts(mem_store, "a") == ["喜欢 uv"]
+
+
+def test_write_episode_merges_similar(mem_store):
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")
+    assert second.id == first.id
+    texts = _episode_texts(mem_store, "a")
+    assert len(texts) == 1
+    assert "koa" in texts[0]
+    assert "aggregation" in texts[0]
+
+
+def test_write_episode_stores_compacted_sentence(mem_store, monkeypatch):
+    monkeypatch.setattr(
+        "ai_agent.memory.store.compact_episode_texts",
+        lambda parts: "learning nodejs bff with koa aggregation",
+    )
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")
+    assert second.id == first.id
+    assert _episode_texts(mem_store, "a") == [
+        "learning nodejs bff with koa aggregation"
+    ]
+
+
+def test_write_episode_keeps_unrelated(mem_store):
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    second = mem_store.write_episode("bought a piano yesterday", user_id="a")
+    assert first.id != second.id
+    assert len(_episode_texts(mem_store, "a")) == 2
 
 
 def test_profile_is_listed_without_embedding(mem_store):
