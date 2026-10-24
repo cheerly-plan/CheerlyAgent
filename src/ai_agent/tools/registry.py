@@ -9,12 +9,12 @@ TOOLS_MAP = {t.name: t for t in TOOLS}
 _TOOL_SCHEMAS = [t.schema() for t in TOOLS]
 
 
-def schemas() -> list[dict]:
+def tool_schemas() -> list[dict]:
     # 工具 schema 是静态的，模块级预计算，避免每轮对话重复生成
     return list(_TOOL_SCHEMAS)
 
 
-def execute(name: str, arguments: dict) -> str:
+def execute_tool(name: str, arguments: dict) -> str:
     tool = TOOLS_MAP.get(name)
     if tool is None:
         return f"ERROR: 未知工具 {name}"

@@ -1,4 +1,5 @@
 from ai_agent.memory.auth_store import AuthStore
+from ai_agent.memory.checkpoint_store import CheckpointStore
 from ai_agent.memory.db import (
     DEFAULT_SESSION_TITLE,
     ChatHistoryPage,
@@ -10,7 +11,7 @@ from ai_agent.memory.db import (
 )
 from ai_agent.memory.episode_store import EpisodeStore
 from ai_agent.memory.profile_store import ProfileStore
-from ai_agent.memory.sessions import SessionStore
+from ai_agent.memory.session_store import SessionStore
 
 __all__ = [
     "DEFAULT_SESSION_TITLE",
@@ -25,7 +26,7 @@ __all__ = [
 ]
 
 
-class MemoryStore(AuthStore, EpisodeStore, ProfileStore, SessionStore):
+class MemoryStore(AuthStore, EpisodeStore, ProfileStore, SessionStore, CheckpointStore):
     def clear_long_term(self, user_id: str | None = None) -> None:
         with self._get_pool().connection() as conn:
             if user_id:

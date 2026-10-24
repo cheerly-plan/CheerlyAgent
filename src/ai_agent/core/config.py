@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     forwarded_allow_ips: str = "127.0.0.1"
     # 开放注册开关：本机开发可开；对外暴露前建议关闭（403），改为管理员建号
     registration_enabled: bool = True
+    # 断点续跑模式：True = prefill 续写（半截 assistant 留在上下文尾部，
+    # 模型接着往下写，观感是"继续生成"）；False = 整段重生成（更兼容，
+    # 适用于上下文以 assistant 结尾会被 API 忽略/报错的情况）
+    resume_prefill: bool = True
 
     database_url: str
     embedding_model: str

@@ -7,7 +7,7 @@ from ai_agent.memory.store import store
 logger = get_logger(__name__)
 
 
-class EmptySessionCleaner:
+class MaintenanceCleaner:
     def __init__(self) -> None:
         self._stop = Event()
         self._thread: Thread | None = None
@@ -44,6 +44,19 @@ class EmptySessionCleaner:
                     logger.info("清理空会话 %s 条", deleted)
             except Exception:
                 logger.exception("清理空会话失败")
+            try:
+                stale = store.cleanup_stale_checkpoints(stale_seconds=1800)
+                if stale:
+                    logger.info("清理僵尸 checkpoint %s 个", stale)
+            except Exception:
+                logger.exception("清理僵尸 checkpoint 失败")
+            try:
+                # failed/interrupted 只为断点续跑服务，7 天后删除防累积
+                expired = store.cleanup_old_checkpoints(max_age_seconds=7 * 24 * 3600)
+                if expired:
+                    logger.info("清理过期 checkpoint %s 个", expired)
+            except Exception:
+                logger.exception("清理过期 checkpoint 失败")
 
 
-empty_session_cleaner = EmptySessionCleaner()
+maintenance_cleaner = MaintenanceCleaner()

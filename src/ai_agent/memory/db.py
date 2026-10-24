@@ -240,50 +240,38 @@ class Database:
                 ON agent_auth_token (user_id)
                 """
             )
-            # 迁移必须放在 agent_user / agent_auth_token 建表之后：
-            # 旧库可能只有旧 agent_user 表而没有 token 表，先跑迁移会引用不存在的表
-            # 迁移：旧版 agent_user 用用户名当主键，改为服务端生成的 UUID 主键，
-            # 用户名降级为登录名唯一索引，业务数据（会话/历史/记忆）统一重映射到新 id
             conn.execute(
                 """
-                DO $$
-                DECLARE
-                    has_old_user_id boolean;
-                    has_id boolean;
-                BEGIN
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'agent_user' AND column_name = 'user_id'
-                    ) INTO has_old_user_id;
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'agent_user' AND column_name = 'id'
-                    ) INTO has_id;
-
-                    IF has_old_user_id AND NOT has_id THEN
-                        ALTER TABLE agent_user RENAME COLUMN user_id TO username;
-                        ALTER TABLE agent_user ADD COLUMN id UUID;
-                        UPDATE agent_user SET id = gen_random_uuid();
-                        ALTER TABLE agent_user ALTER COLUMN id SET NOT NULL;
-                        ALTER TABLE agent_user DROP CONSTRAINT agent_user_pkey;
-                        ALTER TABLE agent_user ADD PRIMARY KEY (id);
-                        -- 登录令牌是瞬态数据，迁移期间直接清空后换列类型并挂外键
-                        DELETE FROM agent_auth_token;
-                        ALTER TABLE agent_auth_token ALTER COLUMN user_id TYPE UUID
-                            USING user_id::uuid;
-                        ALTER TABLE agent_auth_token ADD CONSTRAINT agent_auth_token_user_fk
-                            FOREIGN KEY (user_id) REFERENCES agent_user(id) ON DELETE CASCADE;
-                        -- 历史 user_id 存的是用户名，重映射到新生成的 id
-                        UPDATE agent_session s SET user_id = u.id::text
-                            FROM agent_user u WHERE s.user_id = u.username;
-                        UPDATE agent_chat_history h SET user_id = u.id::text
-                            FROM agent_user u WHERE h.user_id = u.username;
-                        UPDATE agent_episode e SET user_id = u.id::text
-                            FROM agent_user u WHERE e.user_id = u.username;
-                        UPDATE agent_user_profile p SET user_id = u.id::text
-                            FROM agent_user u WHERE p.user_id = u.username;
-                    END IF;
-                END $$;
+                CREATE TABLE IF NOT EXISTS agent_checkpoint (
+                    run_id          UUID PRIMARY KEY,
+                    user_id         TEXT NOT NULL,
+                    chat_session_id TEXT NOT NULL,
+                    status          TEXT NOT NULL DEFAULT 'running',
+                    step            INT NOT NULL DEFAULT 0,
+                    messages        JSONB NOT NULL,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            # 启动时不存在本进程的进行中 run（单进程部署）：残留的 running
+            # 一律是上次进程异常退出留下的僵尸，标为 interrupted（进程被杀
+            # 属于中断而非失败，两者均可被 /chat/resume 认领续跑），
+            # 否则既无法恢复又会触发 session 互斥把会话锁死
+            conn.execute(
+                """
+                UPDATE agent_checkpoint
+                SET status = 'interrupted', updated_at = now()
+                WHERE status = 'running'
+                """
+            )
+            # DB 级互斥兜底：同会话同时最多一个 running checkpoint，
+            # 路由层预检（has_running_checkpoint）之后的并发竞态由它裁决
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS agent_checkpoint_running_uidx
+                ON agent_checkpoint (user_id, chat_session_id)
+                WHERE status = 'running'
                 """
             )
             conn.commit()

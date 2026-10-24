@@ -501,3 +501,107 @@ def test_cleanup_keeps_recent_empty_unnamed_sessions(mem_store):
     deleted = mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600)
     assert deleted == 0
     assert mem_store.get_session("a", session.id) is not None
+
+
+def test_checkpoint_session_mutex_and_cleanup(mem_store):
+    """DB 级互斥：同会话第二个 running 写入被部分唯一索引拒绝；
+    failed/interrupted 行保留 7 天供恢复，过期后由清理任务删除。"""
+    import uuid as _uuid
+
+    uid = "cp_mutex_user"
+    try:
+        assert (
+            mem_store.create_checkpoint(str(_uuid.uuid4()), uid, "cp_s1", [])
+            is True
+        )
+        # 同会话第二个并发 run：路由层预检后的竞态兜底
+        assert (
+            mem_store.create_checkpoint(str(_uuid.uuid4()), uid, "cp_s1", [])
+            is False
+        )
+        # 不同会话不受影响
+        assert (
+            mem_store.create_checkpoint(str(_uuid.uuid4()), uid, "cp_s2", [])
+            is True
+        )
+        # 过期 failed 行被清理，未过期的不动
+        expired_run = str(_uuid.uuid4())
+        fresh_run = str(_uuid.uuid4())
+        assert (
+            mem_store.create_checkpoint(expired_run, uid, "cp_s3", [])
+            is True
+        )
+        mem_store.mark_checkpoint(expired_run, "failed")
+        assert mem_store.create_checkpoint(fresh_run, uid, "cp_s4", []) is True
+        mem_store.mark_checkpoint(fresh_run, "interrupted")
+        with mem_store._get_pool().connection() as conn:
+            conn.execute(
+                "UPDATE agent_checkpoint SET updated_at = now() - interval '8 days' "
+                "WHERE run_id = %s",
+                (expired_run,),
+            )
+            conn.commit()
+        deleted = mem_store.cleanup_old_checkpoints(max_age_seconds=7 * 24 * 3600)
+        assert deleted >= 1
+        assert mem_store.load_resumable_checkpoint(expired_run) is None
+        assert mem_store.load_resumable_checkpoint(fresh_run) is not None
+
+        leftover = str(_uuid.uuid4())
+        assert mem_store.create_checkpoint(leftover, uid, "cp_s5", []) is True
+        mem_store.mark_checkpoint(leftover, "interrupted")
+        assert mem_store.discard_resumable_checkpoints(uid, "cp_s5") == 1
+        assert mem_store.load_resumable_checkpoint(leftover) is None
+        assert str(mem_store.latest_resumable_run(uid, "cp_s4")) == fresh_run
+    finally:
+        with mem_store._get_pool().connection() as conn:
+            conn.execute("DELETE FROM agent_checkpoint WHERE user_id = %s", (uid,))
+            conn.commit()
+
+
+def test_ensure_schema_collapses_stale_running_checkpoints(mem_store):
+    """进程重启场景：启动时把残留 running 收敛为 interrupted，可被 resume 认领。"""
+    import uuid as _uuid
+
+    uid = "cp_restart_user"
+    run_id = str(_uuid.uuid4())
+    try:
+        assert mem_store.create_checkpoint(run_id, uid, "cp_restart_s1", []) is True
+        mem_store.ensure_schema()  # 模拟重启后的 schema 收敛
+        with mem_store._get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM agent_checkpoint WHERE run_id = %s", (run_id,)
+            ).fetchone()
+        assert row is not None and row["status"] == "interrupted"
+        # 收敛后即可被恢复
+        assert mem_store.load_resumable_checkpoint(run_id) is not None
+    finally:
+        with mem_store._get_pool().connection() as conn:
+            conn.execute("DELETE FROM agent_checkpoint WHERE user_id = %s", (uid,))
+            conn.commit()
+
+
+def test_new_run_invalidates_old_resumable_checkpoints(mem_store):
+    """发起新问题即作废同会话旧的 failed/interrupted checkpoint：
+    否则刷新后"继续生成"会恢复过期 run，替换落库还会删掉中间的新问答。"""
+    import uuid as _uuid
+
+    uid, sid = "cp_invalidate_user", "cp_invalidate_s1"
+    stale_run = str(_uuid.uuid4())
+    try:
+        assert mem_store.create_checkpoint(stale_run, uid, sid, []) is True
+        mem_store.mark_checkpoint(stale_run, "interrupted")
+        assert str(mem_store.latest_resumable_run(uid, sid)) == stale_run
+
+        # 用户改发新问题：新 run 的 C0 同事务清掉旧的可恢复行
+        new_run = str(_uuid.uuid4())
+        assert mem_store.create_checkpoint(new_run, uid, sid, []) is True
+        assert mem_store.load_resumable_checkpoint(stale_run) is None
+        assert mem_store.latest_resumable_run(uid, sid) is None
+
+        # 新 run 自己再中断 → 可恢复的是它，不是更早的
+        mem_store.mark_checkpoint(new_run, "interrupted")
+        assert str(mem_store.latest_resumable_run(uid, sid)) == new_run
+    finally:
+        with mem_store._get_pool().connection() as conn:
+            conn.execute("DELETE FROM agent_checkpoint WHERE user_id = %s", (uid,))
+            conn.commit()

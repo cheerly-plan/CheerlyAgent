@@ -94,3 +94,7 @@ class AuthResponse(BaseModel):
     token: str
     expires_at: str
     user: AuthUser
+
+class ResumeRequest(BaseModel):
+    run_id: str = Field(min_length=8, max_length=64)
+    chat_session_id: SafeId = "default"

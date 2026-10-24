@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ai_agent.tools.registry import execute, schemas
+from ai_agent.tools.registry import execute_tool, tool_schemas
 from ai_agent.tools.weather import get_weather
 
 
@@ -11,22 +11,22 @@ def test_get_weather():
 
 
 def test_schemas_include_weather():
-    names = [item["function"]["name"] for item in schemas()]
+    names = [item["function"]["name"] for item in tool_schemas()]
     assert "get_weather" in names
 
 
 def test_execute_weather():
-    result = execute("get_weather", {"city": "上海"})
+    result = execute_tool("get_weather", {"city": "上海"})
     assert "上海" in result
 
 
 def test_execute_unknown_tool():
-    result = execute("not_exist", {})
+    result = execute_tool("not_exist", {})
     assert result.startswith("ERROR:")
 
 
 def test_execute_missing_city():
-    result = execute("get_weather", {})
+    result = execute_tool("get_weather", {})
     assert result.startswith("ERROR:")
 
 
@@ -38,7 +38,7 @@ def test_write_memory_profile_kind():
         ) as apply_profile,
         patch("ai_agent.tools.memory.store.write_episode") as write_episode,
     ):
-        result = execute("write_memory", {"content": "喜欢 pytest", "kind": "profile"})
+        result = execute_tool("write_memory", {"content": "喜欢 pytest", "kind": "profile"})
     assert "用户画像" in result
     apply_profile.assert_called_once_with("喜欢 pytest")
     write_episode.assert_not_called()
@@ -52,7 +52,7 @@ def test_write_memory_defaults_to_profile():
         ) as apply_profile,
         patch("ai_agent.tools.memory.store.write_episode") as write_episode,
     ):
-        result = execute("write_memory", {"content": "喜欢 pytest"})
+        result = execute_tool("write_memory", {"content": "喜欢 pytest"})
     assert "用户画像" in result
     apply_profile.assert_called_once_with("喜欢 pytest")
     write_episode.assert_not_called()
@@ -64,7 +64,7 @@ def test_write_memory_episode_kind():
         patch("ai_agent.tools.memory.store.write_profile") as write_profile,
         patch("ai_agent.tools.memory.store.write_episode", return_value=item) as write_episode,
     ):
-        result = execute("write_memory", {"content": "上周修过登录", "kind": "episode"})
+        result = execute_tool("write_memory", {"content": "上周修过登录", "kind": "episode"})
     assert "情景记忆" in result
     write_episode.assert_called_once_with("上周修过登录")
     write_profile.assert_not_called()
@@ -73,6 +73,6 @@ def test_write_memory_episode_kind():
 def test_search_memory_uses_episode_store():
     item = SimpleNamespace(text="上周修过登录")
     with patch("ai_agent.tools.memory.store.search_episode", return_value=[item]) as search:
-        result = execute("search_memory", {"query": "登录"})
+        result = execute_tool("search_memory", {"query": "登录"})
     assert "上周修过登录" in result
     search.assert_called_once_with("登录")

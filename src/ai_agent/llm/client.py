@@ -38,6 +38,10 @@ def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
             item["tool_call_id"] = msg["tool_call_id"]
         if "name" in msg:
             item["name"] = msg["name"]
+        if msg.get("partial"):
+            # 消息级续写标记：告诉服务端这条 assistant 是半截，
+            # 从断点接着生成（仅出现在断点续跑的种子消息上）
+            item["partial"] = True
         payload.append(item)
     return payload
 

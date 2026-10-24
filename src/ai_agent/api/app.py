@@ -17,7 +17,7 @@ from ai_agent.core.exceptions import AgentError
 from ai_agent.core.logging import setup_logging
 from ai_agent.memory.short_term import short_term_memory
 from ai_agent.memory.store import store
-from ai_agent.tasks.cleanup import empty_session_cleaner
+from ai_agent.tasks.cleanup import maintenance_cleaner
 from ai_agent.tasks.title import shutdown_title_jobs
 
 
@@ -25,9 +25,9 @@ from ai_agent.tasks.title import shutdown_title_jobs
 async def lifespan(_app: FastAPI):
     store.ensure_schema()
     short_term_memory.start_cleanup()
-    empty_session_cleaner.start()
+    maintenance_cleaner.start()
     yield
-    empty_session_cleaner.stop()
+    maintenance_cleaner.stop()
     short_term_memory.stop_cleanup()
     shutdown_title_jobs()
     # 等在途的长期记忆抽取/摘要跑完再关连接池，重启不丢记忆

@@ -2,7 +2,13 @@ from typing import Any, Literal, TypedDict
 
 Role = Literal["system", "user", "assistant", "tool"]
 ChatEventType = Literal[
-    "text", "tool_start", "tool_end", "done", "error", "title_updated"
+    "run_started",
+    "text",
+    "tool_start",
+    "tool_end",
+    "done",
+    "error",
+    "title_updated",
 ]
 
 
@@ -32,3 +38,4 @@ class ChatEvent(TypedDict, total=False):
     message: str
     session_id: str
     title: str
+    run_id: str

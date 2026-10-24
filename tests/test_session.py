@@ -4,7 +4,7 @@ from concurrent.futures import Future
 import pytest
 
 from ai_agent.api.dependencies import get_current_user
-from ai_agent.api.routers.chat import chat, sse_events
+from ai_agent.api.routers.chat import _CHAT_SLOTS, chat, chat_sse_events
 from ai_agent.api.routers.session import (
     create_session,
     delete_session,
@@ -184,9 +184,12 @@ def test_sse_ends_after_done_and_starts_title_job(monkeypatch):
     monkeypatch.setattr("ai_agent.api.routers.chat.start_title_job", fake_start)
     monkeypatch.setattr("ai_agent.api.routers.chat.run_stream", fake_stream)
 
+    # chat_sse_events 结束时会释放并发槽（正常由路由层先 acquire），直连调用
+    # 必须先自己拿一个，否则 BoundedSemaphore 会因超额释放报 ValueError
+    assert _CHAT_SLOTS.acquire(blocking=False)
     events = [
         json.loads(chunk[6:].strip())
-        for chunk in sse_events("user_001", "s1", "北京天气")
+        for chunk in chat_sse_events("user_001", "s1", "北京天气")
     ]
     types = [event["type"] for event in events]
     assert calls == [("北京天气", "今天晴，20度")]
