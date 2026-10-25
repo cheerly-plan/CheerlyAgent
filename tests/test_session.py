@@ -3,7 +3,6 @@ from concurrent.futures import Future
 
 import pytest
 
-from ai_agent.api.dependencies import get_current_user
 from ai_agent.api.routers.chat import _CHAT_SLOTS, chat, chat_sse_events
 from ai_agent.api.routers.session import (
     create_session,

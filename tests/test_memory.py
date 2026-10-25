@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from ai_agent.core.config import settings
-from ai_agent.memory.episode import merge_episode_text, merge_episode_texts
+from ai_agent.memory.episode_merge import merge_episode_text, merge_episode_texts
 from ai_agent.memory.store import MemoryStore
 
 
@@ -196,6 +196,35 @@ def test_write_profile_keeps_different_facets(mem_store):
     mem_store.write_profile("喜欢 pytest", user_id="a", facet="preference")
     texts = {item.facet: item.text for item in mem_store.list_profile("a")}
     assert texts == {"occupation": "我是后端", "preference": "喜欢 pytest"}
+
+
+def test_write_profile_accumulates_preference(mem_store):
+    """累积型 facet：不同偏好各自一行，互不覆盖。"""
+    mem_store.write_profile("喜欢简洁回答", user_id="a", facet="preference")
+    mem_store.write_profile("对历史话题感兴趣", user_id="a", facet="preference")
+    mem_store.write_profile("周末不想被打扰", user_id="a", facet="preference")
+    texts = [item.text for item in mem_store.list_profile("a")]
+    assert sorted(texts) == sorted(
+        ["喜欢简洁回答", "对历史话题感兴趣", "周末不想被打扰"]
+    )
+
+
+def test_write_profile_preference_same_text_idempotent(mem_store):
+    first = mem_store.write_profile("喜欢简洁回答", user_id="a", facet="preference")
+    second = mem_store.write_profile("喜欢简洁回答", user_id="a", facet="preference")
+    assert first.id == second.id
+    assert len(mem_store.list_profile("a")) == 1
+
+
+def test_delete_single_preference_keeps_others(mem_store):
+    mem_store.write_profile("喜欢简洁回答", user_id="a", facet="preference")
+    mem_store.write_profile("对历史话题感兴趣", user_id="a", facet="preference")
+    deleted = mem_store.delete_profile_facet(
+        "preference", user_id="a", text="喜欢简洁回答"
+    )
+    assert deleted is True
+    texts = [item.text for item in mem_store.list_profile("a")]
+    assert texts == ["对历史话题感兴趣"]
 
 
 def test_delete_profile_facet(mem_store):

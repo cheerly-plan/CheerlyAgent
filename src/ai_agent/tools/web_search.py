@@ -1,7 +1,7 @@
 """联网搜索工具。
 
 设计约束：
-- 零第三方依赖：三个搜索源都是一次 REST 调用，标准库 urllib 足够；
+- 零第三方依赖：三个搜索源都是一次 REST 调用，走 core.http 共享客户端；
 - 级联策略：按配置的 key 组成候选链（tavily > bocha > serper），
   逐个尝试——失败或空结果自动落到下一个源，第一个有结果的胜出；
   都未配置时返回引导文案（不报错——工具层异常会被 execute_tool 吞成
@@ -13,11 +13,9 @@
   execute_tool 统一截断到 3000 字符。
 """
 
-import json
-import urllib.request
-
 from pydantic import BaseModel, Field
 
+from ai_agent.core import http
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.tools.base import Tool
@@ -45,7 +43,10 @@ _BOCHA_FRESHNESS = {
 class WebSearchArgs(BaseModel):
     query: str = Field(description="搜索关键词，尽量具体，可用引号精确匹配短语")
     max_results: int = Field(
-        default=5, ge=1, le=10, description="返回结果条数，默认 5"
+        default=settings.web_search_max_results,
+        ge=1,
+        le=10,
+        description=f"返回结果条数，默认 {settings.web_search_max_results}",
     )
     freshness: str = Field(
         default="",
@@ -58,16 +59,9 @@ class WebSearchArgs(BaseModel):
 
 
 def _http_json(url: str, body: dict, headers: dict) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", **headers},
-        method="POST",
+    return http.request_json(
+        url, body=body, headers=headers, timeout=settings.web_search_timeout_seconds
     )
-    with urllib.request.urlopen(
-        req, timeout=settings.web_search_timeout_seconds
-    ) as resp:
-        return json.loads(resp.read().decode())
 
 
 def _tavily_search(query: str, max_results: int, freshness: str) -> list[dict]:

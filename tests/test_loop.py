@@ -73,12 +73,47 @@ def test_loop_runs_weather_tool():
         yield ("text", tool_msg["content"])
         yield ("result", {"content": tool_msg["content"], "tool_calls": []})
 
-    with patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream):
+    from ai_agent.tools import weather as wt
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
+        patch.object(
+            wt,
+            "_geocode",
+            return_value={
+                "name": "北京",
+                "admin1": "北京市",
+                "country": "中国",
+                "latitude": 39.9,
+                "longitude": 116.4,
+            },
+        ),
+        patch.object(
+            wt,
+            "_fetch_forecast",
+            return_value={
+                "current": {
+                    "temperature_2m": 20.5,
+                    "apparent_temperature": 19.0,
+                    "relative_humidity_2m": 45,
+                    "weather_code": 2,
+                    "wind_speed_10m": 3.2,
+                },
+                "daily": {
+                    "time": ["2026-10-25"],
+                    "weather_code": [2],
+                    "temperature_2m_max": [22.0],
+                    "temperature_2m_min": [12.0],
+                    "precipitation_probability_max": [10],
+                },
+            },
+        ),
+    ):
         result = run("北京天气怎么样？")
 
     assert calls["n"] == 2
     assert "北京" in result
-    assert "20度" in result
+    assert "气温 20.5°C" in result
 
 
 def test_loop_keeps_session_history():

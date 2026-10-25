@@ -48,6 +48,78 @@ def test_sanitize_warns_but_does_not_block_redundant_occupation(caplog):
     assert "redundant" in caplog.text
 
 
+def test_sanitize_skips_redundant_preference():
+    """累积 facet：与已有条目高度相似直接 skip，防同义偏好堆积。"""
+    existing = [_item("喜欢简洁回答", "preference")]
+    action = ProfileAction(op="add", facet="preference", content="喜欢简洁回答。")
+    cleaned = sanitize_profile_action(action, existing)
+    assert cleaned.op == "skip"
+
+
+def test_apply_profile_action_skips_jev_duplicate():
+    """Jev 判定与已有条目同一偏好：不写入。"""
+    existing = [_item("喜欢简洁回答", "preference")]
+    with (
+        patch("ai_agent.memory.profile.store.list_profile", return_value=existing),
+        patch(
+            "ai_agent.memory.profile.jev_noul_batch",
+            return_value={"dup_0": 0.9},
+        ) as jev,
+        patch("ai_agent.memory.profile.store.write_profile") as write_profile,
+    ):
+        result = apply_profile_action(
+            ProfileAction(op="add", facet="preference", content="希望回复简短一些"),
+            user_id="a",
+        )
+    assert result is None
+    jev.assert_called_once()
+    write_profile.assert_not_called()
+
+
+def test_apply_profile_action_jev_fail_open_writes():
+    """Jev 不可用（未配 key/失败）：放行写入，行为与无去重一致。"""
+    existing = [_item("喜欢简洁回答", "preference")]
+    item = _item("希望回复简短一些", "preference")
+    with (
+        patch("ai_agent.memory.profile.store.list_profile", return_value=existing),
+        patch(
+            "ai_agent.memory.profile.jev_noul_batch", return_value=None
+        ) as jev,
+        patch(
+            "ai_agent.memory.profile.store.write_profile", return_value=item
+        ) as write_profile,
+    ):
+        result = apply_profile_action(
+            ProfileAction(op="add", facet="preference", content="希望回复简短一些"),
+            user_id="a",
+        )
+    assert result is item
+    jev.assert_called_once()
+    write_profile.assert_called_once()
+
+
+def test_apply_profile_action_jev_low_prob_writes():
+    """Jev 判定不是重复：正常写入。"""
+    existing = [_item("喜欢简洁回答", "preference")]
+    item = _item("周末不想被打扰", "preference")
+    with (
+        patch("ai_agent.memory.profile.store.list_profile", return_value=existing),
+        patch(
+            "ai_agent.memory.profile.jev_noul_batch",
+            return_value={"dup_0": 0.15},
+        ),
+        patch(
+            "ai_agent.memory.profile.store.write_profile", return_value=item
+        ) as write_profile,
+    ):
+        result = apply_profile_action(
+            ProfileAction(op="add", facet="preference", content="周末不想被打扰"),
+            user_id="a",
+        )
+    assert result is item
+    write_profile.assert_called_once()
+
+
 def test_sanitize_does_not_drop_richer_occupation_update():
     existing = [_item("后端", "occupation")]
     action = ProfileAction(
@@ -189,4 +261,45 @@ def test_apply_profile_text_deletes_facet():
     ):
         result = apply_profile_text("我不在北京了", user_id="a")
     assert "删除" in result
-    delete_facet.assert_called_once_with("locale", user_id="a")
+    delete_facet.assert_called_once_with("locale", user_id="a", text=None)
+
+
+def test_apply_profile_action_preference_adds_are_kept_separately():
+    """累积 facet 的多条 add 不被合并，逐条写入。"""
+    item_a = _item("喜欢简洁回答", "preference")
+    item_b = _item("对历史话题感兴趣", "preference")
+    raw = (
+        '{"actions":['
+        '{"op":"add","facet":"preference","content":"喜欢简洁回答"},'
+        '{"op":"add","facet":"preference","content":"对历史话题感兴趣"}'
+        "]}"
+    )
+    with (
+        patch("ai_agent.memory.profile.store.list_profile", return_value=[]),
+        patch("ai_agent.memory.profile.complete_memory_chat", return_value=raw),
+        patch(
+            "ai_agent.memory.profile.store.write_profile",
+            side_effect=[item_a, item_b],
+        ) as write_profile,
+    ):
+        result = apply_profile_text("我喜欢简洁的回答，也对历史感兴趣", user_id="a")
+    assert write_profile.call_count == 2
+    assert "喜欢简洁回答" in result and "对历史话题感兴趣" in result
+
+
+def test_apply_profile_action_preference_delete_is_scoped():
+    """累积 facet 的 delete 带 content，只删被否定的那一条。"""
+    with (
+        patch("ai_agent.memory.profile.store.list_profile", return_value=[]),
+        patch(
+            "ai_agent.memory.profile.store.delete_profile_facet",
+            return_value=True,
+        ) as delete_facet,
+    ):
+        apply_profile_action(
+            ProfileAction(op="delete", facet="preference", content="喜欢简洁回答"),
+            user_id="a",
+        )
+    delete_facet.assert_called_once_with(
+        "preference", user_id="a", text="喜欢简洁回答"
+    )

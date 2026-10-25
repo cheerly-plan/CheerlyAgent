@@ -5,18 +5,29 @@ from typing import Literal
 
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
+from ai_agent.memory.db import MemoryItem, current_user_id
 from ai_agent.memory.facets import (
     FACET_LABELS,
     FACET_WRITE_RULES,
     coalesce_by_facet,
     format_profile_line,
+    is_mutex_facet,
     normalize_facet,
 )
+from ai_agent.memory.gate import jev_noul_batch
 from ai_agent.memory.parse import complete_memory_chat, load_llm_json
-from ai_agent.memory.db import MemoryItem, current_user_id
 from ai_agent.memory.store import store
 
 logger = get_logger(__name__)
+
+# Jev 语义去重阈值：新条目与某条已有条目「同一偏好」概率达到该值即跳过写入。
+# 刻意偏高（宁可漏去重不可错杀新偏好），跑一段时间看日志再调
+_JEV_DUP_THRESHOLD = 0.7
+
+_DUP_INSTRUCTIONS = (
+    "判断两条用户画像条目是否表达同一个事实或偏好（意思相同或高度相近，"
+    "只是措辞不同也算）。是则输出高概率，不是则输出低概率。"
+)
 
 _OCCUPATION_JOB_HINTS = (
     "工程师",
@@ -51,6 +62,7 @@ facet:
 3. 已有相同事实或只是换种说法：skip
 4. 用户明确否定旧事实：delete
 5. 不要把当前任务写成画像
+6. preference / constraint 的独立新事实输出 add 新条目，不要 update 合并已有条目
 """
 
 
@@ -97,13 +109,60 @@ def sanitize_profile_action(
     if cleaned.op in ("add", "update") and is_redundant_profile(
         cleaned.content, cleaned.facet, existing
     ):
-        logger.warning(
-            "profile action looks redundant op=%s facet=%s text=%s",
-            cleaned.op,
-            cleaned.facet,
-            cleaned.content,
-        )
+        if is_mutex_facet(cleaned.facet):
+            # 互斥 facet 交给 update 覆盖语义（如职业补充完善），只告警不拦截
+            logger.warning(
+                "profile action looks redundant op=%s facet=%s text=%s",
+                cleaned.op,
+                cleaned.facet,
+                cleaned.content,
+            )
+        else:
+            # 累积 facet（preference/constraint/other）：与已有条目高度相似
+            # 就不写，防止同义偏好无限堆积
+            logger.info(
+                "profile 条目与已有条目高度相似，跳过 facet=%s text=%s",
+                cleaned.facet,
+                cleaned.content,
+            )
+            return ProfileAction(op="skip", facet=facet, content=cleaned.content)
     return cleaned
+
+
+def _jev_duplicate(content: str, facet: str, existing: list[MemoryItem]) -> bool:
+    """Jev 语义去重：新条目是否与同 facet 已有条目表达同一件事。
+
+    一次请求对每条已有条目并行发一个 Noul；任一命中阈值即视为重复。
+    返回 False 含「Jev 不可用」——fail-open，放行写入。
+    """
+    candidates = [
+        item.text
+        for item in existing
+        if (item.facet or "other") == facet and item.text and item.text != content
+    ]
+    if not candidates:
+        return False
+    state = (
+        f"新条目：{content}\n\n已有条目：\n"
+        + "\n".join(f"{i}. {text}" for i, text in enumerate(candidates))
+    )
+    answers = jev_noul_batch(
+        {f"dup_{i}": _DUP_INSTRUCTIONS for i in range(len(candidates))},
+        state,
+    )
+    if answers is None:
+        return False
+    for i, text in enumerate(candidates):
+        if answers[f"dup_{i}"] >= _JEV_DUP_THRESHOLD:
+            logger.info(
+                "Jev 判定条目重复 facet=%s new=%s old=%s prob=%.2f",
+                facet,
+                content,
+                text,
+                answers[f"dup_{i}"],
+            )
+            return True
+    return False
 
 
 def apply_profile_action(
@@ -116,8 +175,16 @@ def apply_profile_action(
         return None
     facet = normalize_facet(cleaned.facet)
     if cleaned.op == "delete":
-        store.delete_profile_facet(facet, user_id=uid)
-        logger.info("delete_profile user_id=%s facet=%s", uid, facet)
+        # 互斥 facet 删整行；累积 facet 只删 content 精确匹配的那条，
+        # 防止否定一条偏好时把同 facet 的其他条目全清掉
+        text = None if is_mutex_facet(facet) else (cleaned.content or None)
+        store.delete_profile_facet(facet, user_id=uid, text=text)
+        logger.info(
+            "delete_profile user_id=%s facet=%s text=%s", uid, facet, text or "*"
+        )
+        return None
+    # 累积 facet 写入前过 Jev 语义去重（模型转述的近义条目拦在这里）
+    if not is_mutex_facet(facet) and _jev_duplicate(cleaned.content, facet, existing):
         return None
     return store.write_profile(cleaned.content, user_id=uid, facet=facet)
 
@@ -188,12 +255,16 @@ def _parse_actions(raw: str, fallback: str) -> list[ProfileAction] | None:
         action = _action_from_row(row, fallback)
         if action is not None:
             items.append(action)
-    return coalesce_by_facet(
-        items,
+    # 互斥 facet 同名冲突取最后一条；累积 facet（preference/constraint/other）
+    # 的多条独立事实各自保留，不能合并
+    mutex = coalesce_by_facet(
+        [item for item in items if is_mutex_facet(item.facet)],
         facet_of=lambda item: item.facet,
         op_of=lambda item: item.op,
         skip=lambda item: item.op == "skip",
     )
+    acc = [item for item in items if not is_mutex_facet(item.facet)]
+    return mutex + acc
 
 
 def _action_from_row(row: object, fallback: str) -> ProfileAction | None:

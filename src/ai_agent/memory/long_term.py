@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage
@@ -12,6 +13,7 @@ from ai_agent.memory.facets import (
     format_profile_line,
     normalize_facet,
 )
+from ai_agent.memory.gate import jev_noul
 from ai_agent.memory.parse import complete_memory_chat, load_llm_json
 from ai_agent.memory.profile import ProfileAction, apply_profile_action
 from ai_agent.memory.store import store
@@ -30,10 +32,11 @@ kind:
 
 episode 的 content 必须是可检索的完整近况（约 40～120 字），尽量包含：正在做什么、技术栈或约束、目标、本轮已确认的进展。不要写成「最近在学 X」这种标签。
 
-profile 必须带 op 和 facet。同一侧面只输出一条：
+profile 必须带 op 和 facet。name / occupation / locale / language 同一侧面只输出一条：
 - add: 新的侧面
 - update: 同一侧面事实变化或更完整，content 写成该侧面的完整当前描述
 - delete: 用户明确否定旧事实
+preference / constraint 是累积型：每条独立事实单独输出一个 add，可多条并存，不要 update 合并已有条目；否定某一条时 delete 并在 content 写该条原文。
 {FACET_WRITE_RULES}
 若已有 other 把姓名/职业混在一起，要拆开写入正确 facet，并 delete other。
 已有相同事实、只是换种说法、闲聊、助手单方面建议：不要输出该条。
@@ -60,6 +63,10 @@ def capture_long_term(
     user_input: str,
 ) -> None:
     if not any(msg.get("role") == "assistant" for msg in turn):
+        return
+    # Jev 门控：命中阈值以下直接跳过，省掉向量检索 + 小模型抽取；
+    # 未配 key 或门控失败时放行，行为与旧版一致
+    if _gate_blocks(turn, summary):
         return
     existing_episodes: list[str] = []
     try:
@@ -127,6 +134,52 @@ def _write_extracted(user_id: str, item: ExtractedMemory) -> None:
             store.write_episode(item.content, user_id=user_id)
     except Exception:
         logger.exception("长期记忆写入失败 kind=%s", item.kind)
+
+
+GATE_INSTRUCTIONS = (
+    "这段对话是否包含值得写入跨会话长期记忆的信息？"
+    "值得记忆：用户明确陈述的姓名、职业、身份、语言、长期偏好或约束，"
+    "双方确认的技术选型，当前阶段任务的实质性进展。"
+    "不值得记忆：日常问答、闲聊、编写代码的过程本身、助手单方面的建议。"
+)
+
+
+def _gate_blocks(turn: list[ChatMessage], summary: str) -> bool:
+    """Jev 门控：True = 本轮不值得抽取，直接跳过。
+
+    fail-open——门控不可用（未配 key / 调用失败）时返回 False 放行，
+    行为退化为旧的「每轮都调小模型抽取」。阈值刻意偏低：
+    门控漏判 = 静默丢记忆，比多花一次抽取调用严重。
+    """
+    state = _build_gate_state(turn, summary)
+    if not state:
+        return False
+    probability = jev_noul(GATE_INSTRUCTIONS, state)
+    if probability is None:
+        logger.info("Jev 门控不可用（未配 key 或调用失败），放行抽取")
+        return False
+    threshold = settings.memory_gate_threshold
+    passed = probability >= threshold
+    logger.info(
+        "Jev 门控判定 prob=%.2f threshold=%.2f → %s",
+        probability,
+        threshold,
+        "放行，继续抽取" if passed else "拦截，跳过本轮",
+    )
+    return not passed
+
+
+def _build_gate_state(turn: list[ChatMessage], summary: str) -> str:
+    """门控输入只送「摘要 + 本轮对话」，已有画像/相近记忆不喂给 Jev——
+    去重交给抽取阶段看完整上下文处理，门控只做语义门槛判断。"""
+    parts: list[str] = []
+    text = summary.strip()
+    if text:
+        parts.append(f"会话摘要：{text[:600]}")
+    turn_text = _format_turn(turn)[:6000]
+    if turn_text:
+        parts.append(f"本轮对话：\n{turn_text}")
+    return "\n\n".join(parts)
 
 
 def _build_user_content(

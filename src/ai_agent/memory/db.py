@@ -134,20 +134,28 @@ class Database:
                 ADD COLUMN IF NOT EXISTS facet TEXT NOT NULL DEFAULT 'other'
                 """
             )
+            # 历史遗留：全 facet 唯一索引会把多条独立偏好挤成一行，
+            # 只保留互斥型 facet 的单行约束，其余 facet 允许多条共存
+            conn.execute(
+                "DROP INDEX IF EXISTS agent_user_profile_user_facet_uidx"
+            )
             conn.execute(
                 """
                 DELETE FROM agent_user_profile a
-                WHERE a.ctid NOT IN (
+                WHERE a.facet IN ('name', 'language', 'locale', 'occupation')
+                  AND a.ctid NOT IN (
                     SELECT DISTINCT ON (user_id, facet) ctid
                     FROM agent_user_profile
+                    WHERE facet IN ('name', 'language', 'locale', 'occupation')
                     ORDER BY user_id, facet, created_at DESC
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE UNIQUE INDEX IF NOT EXISTS agent_user_profile_user_facet_uidx
+                CREATE UNIQUE INDEX IF NOT EXISTS agent_user_profile_mutex_uidx
                 ON agent_user_profile (user_id, facet)
+                WHERE facet IN ('name', 'language', 'locale', 'occupation')
                 """
             )
             conn.execute(

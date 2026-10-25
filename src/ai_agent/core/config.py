@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     memory_merge_timeout_seconds: float = 8
     memory_model: str = ""
 
+    # Jev 门控（System One 决策模型）：长期记忆抽取的前置判断——Noul 概率
+    # 低于 memory_gate_threshold 时跳过本轮抽取，省掉一次小模型调用。
+    # 未配 key 时门控关闭，行为退化为每轮直接抽取；门控任何失败都
+    # fail-open 放行，不影响记忆链路
+    jev_api_key: str = ""
+    jev_base_url: str = "https://api.typesafe.ai"
+    jev_model: str = "jev-latest"
+    memory_gate_threshold: float = 0.4
+    jev_timeout_seconds: float = 4
+
     def resolve_llm(self, business_model: str = "") -> str:
         return business_model or self.small_model or self.model
 

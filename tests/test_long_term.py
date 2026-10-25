@@ -211,3 +211,48 @@ def test_capture_long_term_applies_profile_update():
     assert action.op == "update"
     assert action.facet == "occupation"
     assert action.content == "用户是后端工程师"
+
+
+def test_capture_long_term_gate_blocks_low_probability(monkeypatch):
+    """Jev 判定低概率时整轮跳过，连向量检索和抽取都不发生。"""
+    with (
+        patch("ai_agent.memory.long_term.jev_noul", return_value=0.05),
+        patch("ai_agent.memory.long_term.store.search_episode") as search,
+        patch("ai_agent.memory.long_term.extract_turn_memories") as extract,
+    ):
+        capture_long_term("u1", TURN, "", "随便聊聊")
+    search.assert_not_called()
+    extract.assert_not_called()
+
+
+def test_capture_long_term_gate_fail_open_on_error():
+    """门控不可用（未配 key / 调用失败返回 None）时放行，走原抽取链路。"""
+    item = ExtractedMemory(kind="episode", content="用户在做 BFF 聚合层")
+    with (
+        patch("ai_agent.memory.long_term.jev_noul", return_value=None),
+        patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
+        patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
+        patch(
+            "ai_agent.memory.long_term.extract_turn_memories", return_value=[item]
+        ) as extract,
+        patch("ai_agent.memory.long_term.store.write_episode") as write_episode,
+    ):
+        capture_long_term("u1", TURN, "", TURN[0]["content"])
+    extract.assert_called_once()
+    write_episode.assert_called_once()
+
+
+def test_capture_long_term_gate_passes_high_probability():
+    item = ExtractedMemory(kind="episode", content="用户在做 BFF 聚合层")
+    with (
+        patch("ai_agent.memory.long_term.jev_noul", return_value=0.9),
+        patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
+        patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
+        patch(
+            "ai_agent.memory.long_term.extract_turn_memories", return_value=[item]
+        ) as extract,
+        patch("ai_agent.memory.long_term.store.write_episode") as write_episode,
+    ):
+        capture_long_term("u1", TURN, "", TURN[0]["content"])
+    extract.assert_called_once()
+    write_episode.assert_called_once()

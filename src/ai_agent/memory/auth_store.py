@@ -5,9 +5,8 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from psycopg import errors as pg_errors
-
 from ai_agent.memory.db import UserRecord
+from psycopg import errors as pg_errors
 
 # pbkdf2 迭代次数；写入哈希串头部，未来可平滑升级
 _PBKDF2_ITERATIONS = 240_000
