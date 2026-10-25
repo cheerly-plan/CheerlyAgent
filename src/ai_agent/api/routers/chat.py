@@ -98,7 +98,9 @@ def _close_sync_generator(gen: Iterator[str]) -> None:
             time.sleep(0.2)
 
 
-def chat_sse_events(user_id: str, session_id: str, content: str) -> Iterator[str]:
+def chat_sse_events(
+    user_id: str, session_id: str, content: str, use_web_search: bool = True
+) -> Iterator[str]:
     # 并发槽已在路由处理器里 acquire（超限返回 429）；这里只负责释放
     try:
         answer_parts: list[str] = []
@@ -107,6 +109,7 @@ def chat_sse_events(user_id: str, session_id: str, content: str) -> Iterator[str
             user_id=user_id,
             chat_session_id=session_id,
             finalize_background=True,
+            use_web_search=use_web_search,
         ):
             if event.get("type") == "text":
                 answer_parts.append(event.get("content") or "")
@@ -119,8 +122,12 @@ def chat_sse_events(user_id: str, session_id: str, content: str) -> Iterator[str
         _CHAT_SLOTS.release()
 
 
-def _stream(user_id: str, session_id: str, content: str) -> StreamingResponse:
-    return _stream_response(chat_sse_events(user_id, session_id, content))
+def _stream(
+    user_id: str, session_id: str, content: str, use_web_search: bool
+) -> StreamingResponse:
+    return _stream_response(
+        chat_sse_events(user_id, session_id, content, use_web_search)
+    )
 
 
 def _acquire_chat_slot() -> None:
@@ -154,11 +161,15 @@ def chat(
             raise HTTPException(status_code=404, detail="会话不存在")
     _acquire_chat_slot()
     if req.regenerate:
-        return _stream_regenerate(user.user_id, req.chat_session_id)
-    return _stream(user.user_id, req.chat_session_id, req.message)
+        return _stream_regenerate(
+            user.user_id, req.chat_session_id, req.web_search
+        )
+    return _stream(user.user_id, req.chat_session_id, req.message, req.web_search)
 
 
-def _stream_regenerate(user_id: str, session_id: str) -> StreamingResponse:
+def _stream_regenerate(
+    user_id: str, session_id: str, use_web_search: bool
+) -> StreamingResponse:
     """重新生成最后一条回答：不重复保存用户消息，末尾旧回答先从历史剔除。"""
 
     def events() -> Iterator[str]:
@@ -170,6 +181,7 @@ def _stream_regenerate(user_id: str, session_id: str) -> StreamingResponse:
                 chat_session_id=session_id,
                 finalize_background=True,
                 regenerate=True,
+                use_web_search=use_web_search,
             ):
                 if event.get("type") == "text":
                     answer_parts.append(event.get("content") or "")

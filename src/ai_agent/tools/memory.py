@@ -41,6 +41,7 @@ def write_memory(content: str, kind: str = "profile") -> str:
 
 memory_search_tool = Tool(
     name="search_memory",
+    display_name="记忆检索",
     description=(
         "检索当前用户的跨会话情景记忆，不是当前对话。"
         "【触发条件】用户询问过去的事情、需要历史细节或过往结论，且当前上下文不够时调用。"
@@ -52,6 +53,7 @@ memory_search_tool = Tool(
 
 memory_write_tool = Tool(
     name="write_memory",
+    display_name="记忆写入",
     description=(
         "仅在用户明确要求记住，或清楚陈述姓名、职业、身份、长期偏好时写入。"
         "当前任务、正在学习或讨论的技术方案不要在此写入，系统会在本轮结束后自动抽取。"

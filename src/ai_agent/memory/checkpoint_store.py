@@ -11,6 +11,7 @@ class CheckpointStore(Database):
         user_id: str,
         chat_session_id: str,
         messages: list[ChatMessage],
+        use_web_search: bool = True,
     ) -> bool:
         """返回 False 表示触发 DB 级互斥：同会话已有 running 的 checkpoint
         （部分唯一索引兜底，路由层预检后的并发竞态由这里裁决）。"""
@@ -30,14 +31,16 @@ class CheckpointStore(Database):
                 conn.execute(
                     """
                     INSERT INTO agent_checkpoint
-                        (run_id, user_id, chat_session_id, status, step, messages)
-                    VALUES (%s, %s, %s, 'running', 0, %s)
+                        (run_id, user_id, chat_session_id, status, step, messages,
+                         use_web_search)
+                    VALUES (%s, %s, %s, 'running', 0, %s, %s)
                     ON CONFLICT (run_id) DO UPDATE
                         SET messages = EXCLUDED.messages,
                             step = EXCLUDED.step,
+                            use_web_search = EXCLUDED.use_web_search,
                             updated_at = now()
                     """,
-                    (run_id, user_id, chat_session_id, Jsonb(messages)),
+                    (run_id, user_id, chat_session_id, Jsonb(messages), use_web_search),
                 )
                 conn.commit()
         except pg_errors.UniqueViolation:
@@ -120,7 +123,7 @@ class CheckpointStore(Database):
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 """
-                SELECT run_id, user_id, chat_session_id, messages
+                SELECT run_id, user_id, chat_session_id, messages, use_web_search
                 FROM agent_checkpoint
                 WHERE run_id = %s AND status IN ('failed', 'interrupted')
                 """,
@@ -133,6 +136,7 @@ class CheckpointStore(Database):
             "user_id": row["user_id"],
             "chat_session_id": row["chat_session_id"],
             "messages": row["messages"],
+            "use_web_search": row["use_web_search"],
         }
 
     def claim_resumable_checkpoint(self, run_id: str) -> dict | None:
@@ -144,7 +148,7 @@ class CheckpointStore(Database):
                 """
                 DELETE FROM agent_checkpoint
                 WHERE run_id = %s AND status IN ('failed', 'interrupted')
-                RETURNING user_id, chat_session_id, messages
+                RETURNING user_id, chat_session_id, messages, use_web_search
                 """,
                 (run_id,),
             ).fetchone()
@@ -155,6 +159,7 @@ class CheckpointStore(Database):
             "user_id": row["user_id"],
             "chat_session_id": row["chat_session_id"],
             "messages": row["messages"],
+            "use_web_search": row["use_web_search"],
         }
 
     def has_running_checkpoint(self, user_id: str, chat_session_id: str) -> bool:

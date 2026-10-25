@@ -13,7 +13,7 @@ from ai_agent.memory.long_term import capture_long_term
 from ai_agent.memory.short_term import assemble, compress, short_term_memory
 from ai_agent.memory.store import store, user_scope
 from ai_agent.memory.summarize import summarize_session
-from ai_agent.tools.registry import execute_tool, tool_schemas
+from ai_agent.tools.registry import execute_tool, tool_label, tool_schemas
 
 logger = get_logger(__name__)
 
@@ -49,13 +49,22 @@ def _system_prompt(user_id: str) -> str:
 
 
 def _checkpoint_create(
-    run_id: str, user_id: str, chat_session_id: str, messages: list[ChatMessage]
+    run_id: str,
+    user_id: str,
+    chat_session_id: str,
+    messages: list[ChatMessage],
+    use_web_search: bool = True,
 ) -> bool:
     """返回 False 表示 DB 级互斥冲突（同会话已有进行中的 run）；
     其他异常不阻断对话，只失去断点续跑能力。"""
     try:
         # 旧测试桩可能返回 None（无返回值），视为写入成功
-        return store.create_checkpoint(run_id, user_id, chat_session_id, messages) is not False
+        return (
+            store.create_checkpoint(
+                run_id, user_id, chat_session_id, messages, use_web_search
+            )
+            is not False
+        )
     except Exception:
         logger.exception("checkpoint C0 写入失败 run_id=%s", run_id)
         return True
@@ -215,6 +224,7 @@ def run_stream(
     finalize_background: bool = False,
     regenerate: bool = False,
     resume_run_id: str | None = None,
+    use_web_search: bool = True,
 ) -> Iterator[ChatEvent]:
     if resume_run_id and regenerate:
         raise ValueError("regenerate 与 resume_run_id 互斥")
@@ -233,6 +243,9 @@ def run_stream(
             yield {"type": "error", "message": "对话无法恢复，请重新发送消息"}
             return
         chat_session_id = claimed["chat_session_id"]
+        # 断点续跑沿用原 run 的「智能搜索」开关状态：中断时工具列表是什么样，
+        # 续跑就是什么样，不受前端当前开关影响
+        use_web_search = bool(claimed.get("use_web_search", True))
         try:
             summary = store.get_session_summary(user_id, chat_session_id)
         except Exception:
@@ -278,7 +291,9 @@ def run_stream(
             messages = assemble(_system_prompt(user_id), summary, recent)
             persisted = len(messages)
             messages.append({"role": "user", "content": user_input})
-    if not _checkpoint_create(run_id, user_id, chat_session_id, messages):
+    if not _checkpoint_create(
+        run_id, user_id, chat_session_id, messages, use_web_search
+    ):
         # DB 级互斥兜底：路由层预检之后另一条并发请求抢先开跑了
         yield {"type": "error", "message": "该会话有正在进行的回复"}
         return
@@ -294,7 +309,9 @@ def run_stream(
         for msg in messages[persisted:]:
             if msg.get("role") == "assistant" and msg.get("content"):
                 yield {"type": "text", "content": str(msg["content"])}
-        for event in run_loop(messages, user_id, run_id=run_id):
+        for event in run_loop(
+            messages, user_id, run_id=run_id, use_web_search=use_web_search
+        ):
             if event.get("type") == "error":
                 failed = True
             if event.get("type") == "done":
@@ -337,14 +354,26 @@ def run_stream(
 
 
 def run_loop(
-    messages: list[ChatMessage], user_id: str = "default", *, run_id: str | None = None
+    messages: list[ChatMessage],
+    user_id: str = "default",
+    *,
+    run_id: str | None = None,
+    use_web_search: bool = True,
 ) -> Iterator[ChatEvent]:
+    # 前端「智能搜索」开关关闭时，把 web_search 从工具列表里剔除，
+    # 模型这轮就没有联网能力（而不是靠 prompt 约定）
+    if use_web_search:
+        tools = tool_schemas()
+    else:
+        tools = [
+            s for s in tool_schemas() if s["function"]["name"] != "web_search"
+        ]
     step = 0
     for _ in range(settings.max_turns):
         result: ChatResult | None = None
         streamed = ""
         try:
-            for kind, payload in stream_chat(messages, tool_schemas()):
+            for kind, payload in stream_chat(messages, tools):
                 if kind == "text":
                     streamed += payload
                     yield {"type": "text", "content": payload}
@@ -393,7 +422,12 @@ def run_loop(
             yield {"type": "done"}
             return
         for call in result["tool_calls"]:
-            yield {"type": "tool_start", "name": call["name"]}
+            # label 为用户可读展示名，前端「正在调用 xx」直接用它渲染
+            yield {
+                "type": "tool_start",
+                "name": call["name"],
+                "label": tool_label(call["name"]),
+            }
             with user_scope(user_id):
                 output = execute_tool(call["name"], call["arguments"])
             yield {"type": "tool_end", "name": call["name"]}

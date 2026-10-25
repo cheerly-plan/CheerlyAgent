@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     # 适用于上下文以 assistant 结尾会被 API 忽略/报错的情况）
     resume_prefill: bool = True
 
+    # 联网搜索工具：按配置的 key 自动选择搜索源（都未配置时工具返回
+    # 引导文案）。tavily 免费额度 1000 次/月；bocha 为国内服务，直连可达；
+    # serper 走 Google。多个 key 同时配置时按 tavily > bocha > serper 优先
+    tavily_api_key: str = ""
+    bocha_api_key: str = ""
+    serper_api_key: str = ""
+    web_search_max_results: int = 5
+    web_search_timeout_seconds: float = 15
+
     database_url: str
     embedding_model: str
     embedding_dim: int

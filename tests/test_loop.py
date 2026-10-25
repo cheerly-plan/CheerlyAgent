@@ -468,7 +468,11 @@ def test_run_stream_checkpoint_lifecycle_success():
     def record(kind: str):
         def _fn(*a, **k):
             # messages 是后续会被继续 append 的同一列表对象，拍快照留存
-            calls.append((kind, a[:-1] + (list(a[-1]),) if a and isinstance(a[-1], list) else a))
+            # （列表参数可能在任意位置，逐个拷贝）
+            calls.append(
+                (kind, tuple(list(x) if isinstance(x, list) else x for x in a))
+            )
+
         return _fn
 
     with (
@@ -982,3 +986,79 @@ def test_dedupe_seam_removes_repeated_sentence():
     assert _dedupe_seam("答案是", "是的，没错") == "是的，没错"
     # 完全无重叠
     assert _dedupe_seam("从前有座山", "山里有座庙") == "山里有座庙"
+
+
+def test_run_loop_use_web_search_false_excludes_tool():
+    """「智能搜索」开关关闭时，web_search 从工具列表剔除（不是靠 prompt 约定）。"""
+    fake_schemas = [
+        {"function": {"name": "get_weather"}},
+        {"function": {"name": "web_search"}},
+        {"function": {"name": "memory_search"}},
+    ]
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.store.append_chat"),
+    ):
+        list(run_loop([{"role": "user", "content": "你好"}], use_web_search=False))
+        list(run_loop([{"role": "user", "content": "你好"}]))
+
+    assert seen_tools[0] == ["get_weather", "memory_search"]
+    assert seen_tools[1] == ["get_weather", "web_search", "memory_search"]
+
+
+def test_run_stream_resume_restores_use_web_search_flag():
+    """断点续跑沿用原 run 的「智能搜索」开关：checkpoint 里存的 False
+    即使在 run_stream 入参默认 True 的情况下也要生效。"""
+    claimed = {
+        "user_id": "u1",
+        "chat_session_id": "s-resume",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "你好"},
+        ],
+        "use_web_search": False,
+    }
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch(
+            "ai_agent.agents.loop.store.claim_resumable_checkpoint",
+            return_value=claimed,
+        ),
+        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch(
+            "ai_agent.agents.loop.store.replace_chat_after_last_user",
+            side_effect=lambda *a: None,
+        ),
+        patch(
+            "ai_agent.agents.loop.tool_schemas",
+            return_value=[
+                {"function": {"name": "get_weather"}},
+                {"function": {"name": "web_search"}},
+            ],
+        ),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+    ):
+        list(
+            run_stream(
+                "",
+                user_id="u1",
+                chat_session_id="whatever",
+                resume_run_id="old-run",
+            )
+        )
+
+    assert seen_tools == [["get_weather"]]

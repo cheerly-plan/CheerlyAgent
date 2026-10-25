@@ -13,6 +13,7 @@ def get_weather(city: str) -> str:
 
 weather_tool = Tool(
     name="get_weather",
+    display_name="天气查询",
     description="获取天气信息",
     func=get_weather,
     args_model=WeatherArgs,

@@ -19,6 +19,8 @@ class ChatRequest(BaseModel):
     chat_session_id: SafeId = "default"
     # regenerate=True：重新生成最后一条回答，不重复落库用户消息
     regenerate: bool = False
+    # 前端「智能搜索」开关：True 时本轮提供 web_search 工具
+    web_search: bool = False
 
 
 class ChatMemoryMessage(BaseModel):
