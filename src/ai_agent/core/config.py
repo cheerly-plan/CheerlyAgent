@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     api_key: str
     model: str
     small_model: str = ""
-    max_turns: int = 8
+    max_turns: int = 10
     log_level: str = "INFO"
     host: str = "127.0.0.1"
     port: int = 8000

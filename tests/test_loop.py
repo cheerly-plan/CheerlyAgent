@@ -1097,3 +1097,52 @@ def test_run_stream_resume_restores_use_web_search_flag():
         )
 
     assert seen_tools == [["get_weather"]]
+
+
+def test_run_loop_budget_exhaustion_yields_error():
+    """预算用尽：模型连续请求工具时按 Budget.max_steps 截停，不无限循环。"""
+    from ai_agent.agents.budget import Budget
+
+    def endless_tool_stream(messages, tools, **kwargs):
+        yield (
+            "result",
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"c{len(messages)}",
+                        "name": "get_weather",
+                        "arguments": {},
+                    }
+                ],
+            },
+        )
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=endless_tool_stream),
+        patch("ai_agent.agents.loop.execute_tool", return_value="晴 20 度"),
+    ):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "循环"}],
+                "u1",
+                budget=Budget(max_steps=2),
+            )
+        )
+
+    assert [e for e in events if e["type"] == "error"] == [
+        {"type": "error", "message": "已超过最大轮数 2。"}
+    ]
+    assert sum(1 for e in events if e["type"] == "tool_start") == 2
+
+
+def test_run_loop_budget_completion_defaults_to_settings():
+    """不传 budget 时回落到 settings.max_turns，行为与旧版一致。"""
+    from ai_agent.core.config import settings
+
+    with patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream):
+        events = list(run_loop([{"role": "user", "content": "你好"}], "u1"))
+
+    assert events[-1] == {"type": "done"}
+    assert settings.max_turns >= 1
+

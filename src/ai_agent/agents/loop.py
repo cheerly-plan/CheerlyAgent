@@ -2,6 +2,7 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
+from ai_agent.agents.budget import Budget
 from ai_agent.agents.prompts import SYSTEM_PROMPT
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
@@ -359,7 +360,10 @@ def run_loop(
     *,
     run_id: str | None = None,
     use_web_search: bool = True,
+    budget: Budget | None = None,
 ) -> Iterator[ChatEvent]:
+    if budget is None:
+        budget = Budget.from_settings()
     # 前端「智能搜索」开关关闭时，把 web_search 从工具列表里剔除，
     # 模型这轮就没有联网能力（而不是靠 prompt 约定）
     if use_web_search:
@@ -369,7 +373,7 @@ def run_loop(
             s for s in tool_schemas() if s["function"]["name"] != "web_search"
         ]
     step = 0
-    for _ in range(settings.max_turns):
+    for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
         try:
@@ -419,6 +423,12 @@ def run_loop(
             step += 1
             _checkpoint_update(run_id, messages, step)
         if not result["tool_calls"]:
+            logger.info(
+                "run_loop 完成 run_id=%s steps=%d budget=%d",
+                run_id,
+                turn + 1,
+                budget.max_steps,
+            )
             yield {"type": "done"}
             return
         for call in result["tool_calls"]:
@@ -442,7 +452,12 @@ def run_loop(
             if run_id:
                 step += 1
                 _checkpoint_update(run_id, messages, step)
-    yield {"type": "error", "message": f"已超过最大轮数 {settings.max_turns}。"}
+    logger.warning(
+        "run_loop 超出预算 run_id=%s steps=%d（工具循环疑似失控）",
+        run_id,
+        budget.max_steps,
+    )
+    yield {"type": "error", "message": f"已超过最大轮数 {budget.max_steps}。"}
 
 
 def run(
