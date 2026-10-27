@@ -1,19 +1,31 @@
 """检索质量回归评测：黄金问答 → hit@k。
 
 背景：embedding 底座变更、检索策略调整（混合检索、重排开关、图谱融合）
-都可能悄悄改变召回排序。人眼抽查靠不住，这里用一组「query → 必须命中
-的原文子串」当回归用例：每次改检索相关代码后跑一遍，hit@3 掉了就拦住。
+都可能悄悄改变召回排序。人眼抽查靠不住，这里用一组「query → 必须命中的
+原文子串」当回归用例：每次改检索相关代码后跑一遍，hit@3 掉了就拦住。
 
 用例存放在 scripts/retrieval_eval_cases.json，与库内真实切片对应；
-知识库内容变化（增删文件）后需要同步维护用例集。
+知识库内容变化（增删文件、重新切片）后需要同步维护用例集——用例失效
+不再伪装成"检索 miss"，由校验环节直接指出。
+
+用例的证据写法（expect 两种形态）：
+    {"expect": {"filename": "某文档", "text": "原文子串"}}          单段证据
+    {"expect": {"filename": "某文档", "text_all": ["片段A", "片段B"]}} 同一 slice 内多段
+    {"expect": {"sources": [{"filename": "文档A", "text_all": [...]},
+                            {"filename": "文档B", "text": "..."}]}}   跨文件多段证据
+
+注意：text 必须是**切片原文的子串**，按 markdown 原文照抄，不要自己
+用「；」把两句拼起来——拼接串永远不会出现在单个切片里，那条用例从
+写下的那一刻就不可能命中。
 
 用法：
     uv run python scripts/eval_retrieval.py            # 全量评测（默认关重排，纯检索质量）
+    uv run python scripts/eval_retrieval.py --validate # 只校验用例与语料是否对齐
     uv run python scripts/eval_retrieval.py --rerank   # 带上 LLM 重排（需模型可用，较慢）
     uv run python scripts/eval_retrieval.py --dump     # 列出库内切片，便于编写用例
     uv run python scripts/eval_retrieval.py --top-k 10 # 调大观察窗口
 
-退出码：hit@3 低于阈值（默认 0.85）返回 1，可接入 CI。
+退出码：0 通过；1 hit@3 低于阈值（默认 0.85）；2 用例失效（语料已变）。
 """
 
 import argparse
@@ -37,24 +49,99 @@ def load_cases() -> list[dict]:
         return json.load(fh)
 
 
-def dump_chunks() -> None:
-    """列出库内切片（文件名 / seq / 位置 / 开头），编写用例时对照用。"""
+def fetch_chunks() -> list[dict]:
+    """库里全部切片（filename + text），校验与命中判定都基于它。"""
     with store._get_pool().connection() as conn:
-        rows = conn.execute(
+        return conn.execute(
             """
-            SELECT f.filename, c.seq, c.page, c.kind, left(c.text, 90) AS head
+            SELECT f.filename, c.seq, c.page, c.kind, c.text
             FROM agent_kb_chunk c JOIN agent_kb_file f ON f.id = c.file_id
             ORDER BY f.filename, c.seq
             """
         ).fetchall()
+
+
+def normalize_expect(expect: dict) -> list[dict]:
+    """把用例的 expect 规整成 [{"filename", "texts"}]，兼容三种写法。
+
+    统一成列表后，命中判定只需处理"多条证据是否都出现"这一种情况：
+    单段证据就是长度为 1 的列表，跨文件证据就是多项。
+    """
+    if "sources" in expect:
+        sources = []
+        for src in expect["sources"]:
+            texts = src.get("text_all") or [src["text"]]
+            sources.append({"filename": src["filename"], "texts": texts})
+        return sources
+    texts = expect.get("text_all") or [expect["text"]]
+    return [{"filename": expect["filename"], "texts": texts}]
+
+
+def validate_cases(cases: list[dict], rows: list[dict]) -> list[tuple[str, str]]:
+    """校验用例与当前语料是否对齐，返回 (query, 原因) 列表。
+
+    两类失效：期望的文件已经不在库里、期望的片段不在该文件的任何切片中。
+    后者几乎都是同一类错误——拿两句话拼成一个期望串，而切片里没有这个拼接。
+    """
+    problems: list[tuple[str, str]] = []
+    for case in cases:
+        for src in normalize_expect(case["expect"]):
+            same_file = [r for r in rows if src["filename"] in (r["filename"] or "")]
+            if not same_file:
+                problems.append((case["query"], f"文件不在库里：{src['filename']}"))
+                continue
+            for text in src["texts"]:
+                if not any(text in (r["text"] or "") for r in same_file):
+                    hint = "（拼接串？）" if "；" in text else ""
+                    problems.append(
+                        (
+                            case["query"],
+                            f"片段不在《{src['filename']}》任何切片里{hint}：{text[:40]}",
+                        )
+                    )
+    return problems
+
+
+def report_invalid(problems: list[tuple[str, str]]) -> None:
+    print(f"⚠️  {len(problems)} 处用例与语料对不上：")
+    seen: set[str] = set()
+    for query, why in problems:
+        label = query if query not in seen else ""
+        seen.add(query)
+        print(f"  {'✗ ' + label[:26] if label else ' ' * 28} {why}")
+
+
+def dump_chunks() -> None:
+    """列出库内切片（文件名 / seq / 位置 / 开头），编写用例时对照用。"""
+    rows = fetch_chunks()
     print(f"共 {len(rows)} 个切片")
     for row in rows:
-        head = (row["head"] or "").replace("\n", " ")
-        print(f"{row['filename']} #{row['seq']} ({row['kind']}, p{row['page']}) | {head}")
+        head = (row["text"] or "").replace("\n", " ")
+        print(f"{row['filename']} #{row['seq']} ({row['kind']}, p{row['page']}) | {head[:90]}")
+
+
+def hit_rank(hits: list, expect: dict) -> int | None:
+    """返回证据凑齐的名次；凑不齐返回 None。
+
+    跨多条证据时，"凑齐"的名次取最后一条命中的位置——比如第一段在第 1 条、
+    第二段在第 3 条，就算 hit@3 命中，这与模型实际拿到的上下文一致。
+    """
+    sources = normalize_expect(expect)
+    done = [False] * len(sources)
+    for rank, hit in enumerate(hits, start=1):
+        text = hit.text or ""
+        for i, src in enumerate(sources):
+            if done[i] or src["filename"] not in (hit.filename or ""):
+                continue
+            if all(piece in text for piece in src["texts"]):
+                done[i] = True
+        if all(done):
+            return rank
+    return None
 
 
 def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
-    # 延迟导入：--dump 不需要碰 embedding/LLM
+    # 延迟导入：--validate / --dump 不需要碰 embedding/LLM
     from ai_agent.kb import retrieval
     from ai_agent.memory.embeddings import embed_texts
 
@@ -70,16 +157,8 @@ def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
     print(f"{'query':<28} hit@  命中位置")
     print("-" * 64)
     for case in cases:
-        expect = case["expect"]
         hits = retrieval.search_knowledge(case["query"], top_k=top_k)
-
-        rank: int | None = None
-        for i, hit in enumerate(hits, start=1):
-            text_ok = expect["text"] in (hit.text or "")
-            file_ok = expect["filename"] in (hit.filename or "")
-            if text_ok and file_ok:
-                rank = i
-                break
+        rank = hit_rank(hits, case["expect"])
 
         at1 = rank == 1
         at3 = rank is not None and rank <= 3
@@ -108,6 +187,8 @@ def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="知识库检索回归评测")
     parser.add_argument("--dump", action="store_true", help="列出库内切片后退出")
+    parser.add_argument("--validate", action="store_true", help="只校验用例与语料是否对齐")
+    parser.add_argument("--skip-invalid", action="store_true", help="跳过失效用例继续评测")
     parser.add_argument("--rerank", action="store_true", help="启用 LLM 重排（默认关闭）")
     parser.add_argument("--top-k", type=int, default=5, help="观察窗口大小（默认 5）")
     args = parser.parse_args()
@@ -120,8 +201,31 @@ def main() -> int:
     if not cases:
         print("用例集为空", file=sys.stderr)
         return 1
+
+    # 每次评测前先对齐语料：语料变了（换文档、重新切片）用例会静默失效，
+    # 那种 miss 不是检索的问题，必须先修用例，否则分数没有意义
+    problems = validate_cases(cases, fetch_chunks())
+    if problems:
+        report_invalid(problems)
+        if not args.skip_invalid:
+            print("请先修正用例：`--dump` 可查看切片原文；或加 --skip-invalid 暂时跳过")
+            return 2
+        bad = {query for query, _ in problems}
+        cases = [c for c in cases if c["query"] not in bad]
+        print(f"已跳过 {len(bad)} 条失效用例，剩余 {len(cases)} 条参与评测\n")
+
+    if args.validate:
+        print(f"用例校验通过：{len(cases)} 条全部与语料对齐")
+        return 0
+
     return evaluate(cases, args.top_k, args.rerank)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # 显式关连接池：留着让 GC 收尾会在退出时打印
+    # "couldn't stop thread 'pool-1-scheduler' within 5.0 seconds"
+    try:
+        code = main()
+    finally:
+        store.close()
+    raise SystemExit(code)
