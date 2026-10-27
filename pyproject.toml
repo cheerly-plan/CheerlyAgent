@@ -39,4 +39,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tests/test_eval_retrieval.py 直接 import scripts.eval_retrieval，
+# 需要仓库根目录在 sys.path 上（否则只能靠调用方手动设 PYTHONPATH）
+pythonpath = ["."]
 

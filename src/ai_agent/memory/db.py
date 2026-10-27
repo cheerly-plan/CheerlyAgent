@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -67,6 +68,7 @@ class Database:
     def __init__(self, database_url: str | None = None) -> None:
         self._database_url = database_url or settings.database_url
         self._pool: ConnectionPool | None = None
+        self._atexit_hooked = False
 
     def _configure_connection(self, conn: Connection) -> None:
         # 扩展创建放在 ensure_schema 里做一次即可；
@@ -83,6 +85,13 @@ class Database:
                 configure=self._configure_connection,
                 open=True,
             )
+            # 脚本/一次性进程没人调 close 时，ConnectionPool 会走 __del__，
+            # 那里只能限时等 scheduler 线程退出，等不到就打
+            # "couldn't stop thread 'pool-1-scheduler' within 5.0 seconds"。
+            # 服务的 lifespan 已显式 close，这里只是兜底，close 幂等。
+            if not self._atexit_hooked:
+                atexit.register(self.close)
+                self._atexit_hooked = True
         return self._pool
 
     def _point_id(self, table: str, user_id: str, text: str) -> uuid.UUID:
