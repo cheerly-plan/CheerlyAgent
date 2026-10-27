@@ -2,7 +2,7 @@ import json
 from collections.abc import Iterator
 from typing import Any, Literal
 
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
@@ -13,7 +13,21 @@ _client = OpenAI(
     api_key=settings.api_key,
 )
 
+# 流式对话专用客户端：显式超时 + 关闭自动重试。
+# 默认客户端 timeout=600s：LLM 挂死时一个并发槽 + SSE 线程被占最长 10 分钟，
+# 并发槽全满后聊天接口整体 429。流式重试还会从断点重复 yield 已发内容，
+# 必须关掉；彻底失败由上层走断点续跑兜底。
+_stream_client = _client.with_options(
+    timeout=settings.llm_stream_timeout_seconds,
+    max_retries=0,
+)
+
 StreamItem = tuple[Literal["text"], str] | tuple[Literal["result"], ChatResult]
+
+
+def _status_of(exc: Exception) -> int | None:
+    """取上游 HTTP 状态码，用于上层区分鉴权失败和临时故障。"""
+    return exc.status_code if isinstance(exc, APIStatusError) else None
 
 
 def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
@@ -48,7 +62,7 @@ def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
 
 def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[StreamItem]:
     try:
-        stream = _client.chat.completions.create(
+        stream = _stream_client.chat.completions.create(
             model=settings.model,
             messages=_to_openai_messages(messages),
             tools=tools,
@@ -56,7 +70,7 @@ def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[Stre
             stream=True,
         )
     except Exception as e:
-        raise LLMError(str(e)) from e
+        raise LLMError(str(e), status_code=_status_of(e)) from e
 
     content_parts: list[str] = []
     tool_acc: dict[int, dict[str, str]] = {}
@@ -126,7 +140,7 @@ def complete_chat(
     try:
         response = client.chat.completions.create(**payload)
     except Exception as e:
-        raise LLMError(str(e)) from e
+        raise LLMError(str(e), status_code=_status_of(e)) from e
     if not response.choices:
         return ""
     return (response.choices[0].message.content or "").strip()

@@ -20,6 +20,10 @@ def _chat_message_from_row(row: dict) -> ChatMessage:
         msg["tool_call_id"] = row["tool_call_id"]
     if row["name"]:
         msg["name"] = row["name"]
+    # meta 只在有内容时回填：老数据这一列是 NULL，多写一个空对象没意义
+    meta = row.get("meta")
+    if meta:
+        msg["meta"] = meta
     return msg
 
 
@@ -50,6 +54,7 @@ class SessionStore(Database):
                 Jsonb(msg["tool_calls"]) if msg.get("tool_calls") else None,
                 msg.get("tool_call_id"),
                 msg.get("name"),
+                Jsonb(msg["meta"]) if msg.get("meta") else None,
             )
             for msg in rows
         ]
@@ -72,8 +77,8 @@ class SessionStore(Database):
                     """
                     INSERT INTO agent_chat_history
                         (id, user_id, chat_session_id, seq, role, content,
-                         tool_calls, tool_call_id, name)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         tool_calls, tool_call_id, name, meta)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
                         (
@@ -86,6 +91,7 @@ class SessionStore(Database):
                             tool_calls,
                             tool_call_id,
                             name,
+                            meta,
                         )
                         for offset, (
                             mid,
@@ -96,6 +102,7 @@ class SessionStore(Database):
                             tool_calls,
                             tool_call_id,
                             name,
+                            meta,
                         ) in enumerate(values, start=1)
                     ],
                 )
@@ -126,6 +133,7 @@ class SessionStore(Database):
                 Jsonb(msg["tool_calls"]) if msg.get("tool_calls") else None,
                 msg.get("tool_call_id"),
                 msg.get("name"),
+                Jsonb(msg["meta"]) if msg.get("meta") else None,
             )
             for msg in rows
         ]
@@ -159,8 +167,8 @@ class SessionStore(Database):
                     """
                     INSERT INTO agent_chat_history
                         (id, user_id, chat_session_id, seq, role, content,
-                         tool_calls, tool_call_id, name)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         tool_calls, tool_call_id, name, meta)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
                         (
@@ -173,6 +181,7 @@ class SessionStore(Database):
                             tool_calls,
                             tool_call_id,
                             name,
+                            meta,
                         )
                         for offset, (
                             mid,
@@ -181,6 +190,7 @@ class SessionStore(Database):
                             tool_calls,
                             tool_call_id,
                             name,
+                            meta,
                         ) in enumerate(values, start=1)
                     ],
                 )
@@ -204,7 +214,7 @@ class SessionStore(Database):
             return []
         if limit is None:
             sql = """
-                SELECT role, content, tool_calls, tool_call_id, name
+                SELECT role, content, tool_calls, tool_call_id, name, meta
                 FROM agent_chat_history
                 WHERE user_id = %s AND chat_session_id = %s
                 ORDER BY seq
@@ -212,9 +222,9 @@ class SessionStore(Database):
             params: tuple = (user_id, chat_session_id)
         else:
             sql = """
-                SELECT role, content, tool_calls, tool_call_id, name
+                SELECT role, content, tool_calls, tool_call_id, name, meta
                 FROM (
-                    SELECT role, content, tool_calls, tool_call_id, name, seq
+                    SELECT role, content, tool_calls, tool_call_id, name, meta, seq
                     FROM agent_chat_history
                     WHERE user_id = %s AND chat_session_id = %s
                     ORDER BY seq DESC
@@ -241,7 +251,7 @@ class SessionStore(Database):
             if before_seq is None:
                 rows = conn.execute(
                     """
-                    SELECT seq, role, content, tool_calls, tool_call_id, name
+                    SELECT seq, role, content, tool_calls, tool_call_id, name, meta
                     FROM agent_chat_history
                     WHERE user_id = %s AND chat_session_id = %s
                     ORDER BY seq DESC
@@ -252,7 +262,7 @@ class SessionStore(Database):
             else:
                 rows = conn.execute(
                     """
-                    SELECT seq, role, content, tool_calls, tool_call_id, name
+                    SELECT seq, role, content, tool_calls, tool_call_id, name, meta
                     FROM agent_chat_history
                     WHERE user_id = %s AND chat_session_id = %s
                       AND seq < %s
@@ -268,7 +278,7 @@ class SessionStore(Database):
             if oldest["role"] != "user":
                 extra = conn.execute(
                     """
-                    SELECT seq, role, content, tool_calls, tool_call_id, name
+                    SELECT seq, role, content, tool_calls, tool_call_id, name, meta
                     FROM agent_chat_history
                     WHERE user_id = %s AND chat_session_id = %s
                       AND seq < %s
@@ -328,7 +338,7 @@ class SessionStore(Database):
                 return []
             rows = conn.execute(
                 """
-                SELECT role, content, tool_calls, tool_call_id, name
+                SELECT role, content, tool_calls, tool_call_id, name, meta
                 FROM agent_chat_history
                 WHERE user_id = %s AND chat_session_id = %s AND seq >= %s
                 ORDER BY seq

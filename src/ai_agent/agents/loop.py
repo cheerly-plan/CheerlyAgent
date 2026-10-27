@@ -7,11 +7,21 @@ from ai_agent.agents.prompts import SYSTEM_PROMPT
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
+from ai_agent.kb.citations import collect_citations, merge_sources
+from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
 from ai_agent.memory.facets import format_profile_block
 from ai_agent.memory.long_term import capture_long_term
-from ai_agent.memory.short_term import assemble, compress, short_term_memory
+from ai_agent.memory.short_term import (
+    assemble,
+    compress,
+    flatten,
+    iter_turns,
+    short_term_memory,
+    take_summary,
+    take_system,
+)
 from ai_agent.memory.store import store, user_scope
 from ai_agent.memory.summarize import summarize_session
 from ai_agent.tools.registry import execute_tool, tool_label, tool_schemas
@@ -30,6 +40,19 @@ _turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-fin
 def shutdown_turn_finalizer(wait: bool = True) -> None:
     """等待在途的记忆抽取/摘要任务完成后再关停，避免重启丢长期记忆。"""
     _turn_finalizer.shutdown(wait=wait, cancel_futures=False)
+
+
+def _llm_error_message(error: LLMError) -> str:
+    """把上游错误翻成用户能照着做的一句话。
+
+    403/401 重试永远不会好（模型未开通、key 无权限、账户欠费），
+    对用户说「请稍后重试」只会让他反复点；必须指向真因。
+    """
+    if error.is_permission_denied:
+        return "模型服务拒绝了本次调用（模型未开通或无权限），请联系管理员检查模型账户"
+    if error.is_rate_limited:
+        return "模型服务繁忙，请稍后再试"
+    return "模型服务暂时不可用，请稍后重试"
 
 
 def _profile_prompt(user_id: str) -> str:
@@ -55,6 +78,7 @@ def _checkpoint_create(
     chat_session_id: str,
     messages: list[ChatMessage],
     use_web_search: bool = True,
+    use_kb: bool = True,
 ) -> bool:
     """返回 False 表示 DB 级互斥冲突（同会话已有进行中的 run）；
     其他异常不阻断对话，只失去断点续跑能力。"""
@@ -62,7 +86,7 @@ def _checkpoint_create(
         # 旧测试桩可能返回 None（无返回值），视为写入成功
         return (
             store.create_checkpoint(
-                run_id, user_id, chat_session_id, messages, use_web_search
+                run_id, user_id, chat_session_id, messages, use_web_search, use_kb
             )
             is not False
         )
@@ -131,6 +155,48 @@ def _pop_incomplete_assistant(messages: list[ChatMessage]) -> list[ChatMessage]:
     ):
         return messages[:-1]
     return messages
+
+
+def _messages_chars(messages: list[ChatMessage]) -> int:
+    """上下文长度的粗估（字符数）。中文场景 1 字符 ≈ 0.6~1 token，
+    用字符数做预算天然偏保守，不会把上下文撑爆。"""
+    total = 0
+    for msg in messages:
+        total += len(str(msg.get("content") or ""))
+        for call in msg.get("tool_calls") or []:
+            total += len(str(call.get("arguments") or ""))
+    return total
+
+
+def _fit_context(messages: list[ChatMessage], max_chars: int) -> list[ChatMessage]:
+    """超预算时对送模型的副本做裁剪：从最旧的完整轮次开始整轮丢弃。
+
+    只动副本，原列表原封不动——落库、checkpoint 快照都依赖原始 messages，
+    裁剪绝不能影响它们。整轮（user + 其后的 assistant/tool）一起丢，
+    保证 assistant(tool_calls) 和它的 tool 结果永远成对，不会因裁剪
+    出现孤儿 tool 消息（会被 API 400）。摘要对保留，丢了早期轮次的
+    信息至少还有摘要兜底；最后一个 turn 是当前进行中的回合，永不丢。
+    """
+    if max_chars <= 0 or _messages_chars(messages) <= max_chars:
+        return messages
+    system, rest = take_system(messages)
+    summary, rest = take_summary(rest)
+    turns = iter_turns(rest)
+    while len(turns) > 1:
+        turns.pop(0)
+        if _messages_chars([*system, *flatten(turns)]) <= max_chars:
+            break
+    sys_text = str(system[0].get("content") or "") if system else ""
+    fitted = assemble(sys_text, summary, flatten(turns))
+    if not sys_text and fitted and fitted[0].get("role") == "system":
+        fitted = fitted[1:]
+    logger.info(
+        "上下文超预算已裁剪 chars=%d budget=%d kept_turns=%d",
+        _messages_chars(messages),
+        max_chars,
+        len(turns),
+    )
+    return fitted
 
 
 def _keep_prefill_tail(messages: list[ChatMessage]) -> bool:
@@ -226,6 +292,8 @@ def run_stream(
     regenerate: bool = False,
     resume_run_id: str | None = None,
     use_web_search: bool = True,
+    use_kb: bool = True,
+    kb_file_ids: tuple[str, ...] = (),
 ) -> Iterator[ChatEvent]:
     if resume_run_id and regenerate:
         raise ValueError("regenerate 与 resume_run_id 互斥")
@@ -244,9 +312,10 @@ def run_stream(
             yield {"type": "error", "message": "对话无法恢复，请重新发送消息"}
             return
         chat_session_id = claimed["chat_session_id"]
-        # 断点续跑沿用原 run 的「智能搜索」开关状态：中断时工具列表是什么样，
-        # 续跑就是什么样，不受前端当前开关影响
+        # 断点续跑沿用原 run 的开关状态（智能搜索/知识库）：中断时工具
+        # 列表是什么样，续跑就是什么样，不受前端当前开关影响
         use_web_search = bool(claimed.get("use_web_search", True))
+        use_kb = bool(claimed.get("use_kb", True))
         try:
             summary = store.get_session_summary(user_id, chat_session_id)
         except Exception:
@@ -293,7 +362,7 @@ def run_stream(
             persisted = len(messages)
             messages.append({"role": "user", "content": user_input})
     if not _checkpoint_create(
-        run_id, user_id, chat_session_id, messages, use_web_search
+        run_id, user_id, chat_session_id, messages, use_web_search, use_kb
     ):
         # DB 级互斥兜底：路由层预检之后另一条并发请求抢先开跑了
         yield {"type": "error", "message": "该会话有正在进行的回复"}
@@ -311,7 +380,12 @@ def run_stream(
             if msg.get("role") == "assistant" and msg.get("content"):
                 yield {"type": "text", "content": str(msg["content"])}
         for event in run_loop(
-            messages, user_id, run_id=run_id, use_web_search=use_web_search
+            messages,
+            user_id,
+            run_id=run_id,
+            use_web_search=use_web_search,
+            use_kb=use_kb,
+            kb_file_ids=kb_file_ids,
         ):
             if event.get("type") == "error":
                 failed = True
@@ -337,20 +411,26 @@ def run_stream(
                 _replace_last_turn(user_id, chat_session_id, turn)
             else:
                 _persist_turn(user_id, chat_session_id, turn)
+            # 长期记忆只从完整回合抽取：中断/失败的半截回答进记忆库，
+            # 之后会被当成"用户说过的话"反复召回，污染长期画像。
+            # 摘要压缩照跑——它只是窗口管理，半截留在短期上下文里
+            # 让下一轮对话保持连续（历史里也看得到半截）。
             if finalize_background:
                 # 先同步完成快路径（落库 + 热缓存），保证下一轮上下文连续；
                 # 慢路径（记忆抽取、摘要压缩，含多次 LLM 调用）交给后台线程。
                 short_term_memory.save(
                     chat_session_id, messages, user_id=user_id, summary=summary
                 )
-                _turn_finalizer.submit(
-                    _capture_turn, user_id, turn, summary, user_input
-                )
+                if completed:
+                    _turn_finalizer.submit(
+                        _capture_turn, user_id, turn, summary, user_input
+                    )
                 _turn_finalizer.submit(
                     _compress_and_cache, user_id, chat_session_id, messages, summary
                 )
             else:
-                _capture_turn(user_id, turn, summary, user_input)
+                if completed:
+                    _capture_turn(user_id, turn, summary, user_input)
                 _compress_and_cache(user_id, chat_session_id, messages, summary)
 
 
@@ -360,24 +440,32 @@ def run_loop(
     *,
     run_id: str | None = None,
     use_web_search: bool = True,
+    use_kb: bool = True,
+    kb_file_ids: tuple[str, ...] = (),
     budget: Budget | None = None,
 ) -> Iterator[ChatEvent]:
     if budget is None:
         budget = Budget.from_settings()
-    # 前端「智能搜索」开关关闭时，把 web_search 从工具列表里剔除，
-    # 模型这轮就没有联网能力（而不是靠 prompt 约定）
-    if use_web_search:
-        tools = tool_schemas()
-    else:
-        tools = [
-            s for s in tool_schemas() if s["function"]["name"] != "web_search"
-        ]
+    # 开关直接决定工具列表：智能搜索关闭 → 剔除 web_search；
+    # 知识库关闭 → 剔除 kb_search 和 kg_search（图谱检索同属知识库能力）。
+    # 模型这轮就没有对应能力，而不是靠 prompt 约定「别用」
+    excluded: set[str] = set()
+    if not use_web_search:
+        excluded.add("web_search")
+    if not use_kb:
+        excluded.update({"kb_search", "kg_search"})
+    tools = [s for s in tool_schemas() if s["function"]["name"] not in excluded]
     step = 0
+    # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
+    # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库
+    turn_sources: list[dict] = []
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
         try:
-            for kind, payload in stream_chat(messages, tools):
+            # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
+            context = _fit_context(messages, settings.llm_context_char_budget)
+            for kind, payload in stream_chat(context, tools):
                 if kind == "text":
                     streamed += payload
                     yield {"type": "text", "content": payload}
@@ -387,11 +475,19 @@ def run_loop(
             # 详情只进日志；上游异常文本可能带出 URL/响应片段，不透传给客户端
             logger.error("LLM 调用失败: %s", e)
             _stash_partial_assistant(messages, streamed, run_id, step)
-            yield {"type": "error", "message": "模型服务暂时不可用，请稍后重试"}
+            yield {"type": "error", "message": _llm_error_message(e)}
             return
         except GeneratorExit:
             _stash_partial_assistant(messages, streamed, run_id, step)
             raise
+        except Exception:
+            # 流已经建立、读到一半才炸（连接被掐、网关返回非 JSON 等）：
+            # 不兜住的话异常会穿透 SSE 生成器，前端只看到连接断掉，
+            # 半个回答留在气泡里且没有任何提示
+            logger.exception("模型流式输出中断 run_id=%s", run_id)
+            _stash_partial_assistant(messages, streamed, run_id, step)
+            yield {"type": "error", "message": "模型输出中断，请稍后重试"}
+            return
 
         if result is None:
             _stash_partial_assistant(messages, streamed, run_id, step)
@@ -429,7 +525,14 @@ def run_loop(
                 turn + 1,
                 budget.max_steps,
             )
-            yield {"type": "done"}
+            # 引用挂在最终回答上：它是这一轮"给出结论"的那条消息，
+            # 挂在带 tool_calls 的中间消息上，前端历史里会被跳过
+            if turn_sources and messages[-1].get("role") == "assistant":
+                messages[-1]["meta"] = {"sources": turn_sources}
+            done_event: ChatEvent = {"type": "done"}
+            if turn_sources:
+                done_event["sources"] = turn_sources
+            yield done_event
             return
         for call in result["tool_calls"]:
             # label 为用户可读展示名，前端「正在调用 xx」直接用它渲染
@@ -438,9 +541,20 @@ def run_loop(
                 "name": call["name"],
                 "label": tool_label(call["name"]),
             }
-            with user_scope(user_id):
-                output = execute_tool(call["name"], call["arguments"])
-            yield {"type": "tool_end", "name": call["name"]}
+            # 范围必须在工具执行这一层同栈设置：run_stream 的生成器会被
+            # 不同线程轮流 next() 推进，外层设的 contextvar 传不进来
+            scope_token = set_kb_scope(kb_file_ids)
+            try:
+                with collect_citations() as cited:
+                    with user_scope(user_id):
+                        output = execute_tool(call["name"], call["arguments"])
+            finally:
+                reset_kb_scope(scope_token)
+            turn_sources = merge_sources(turn_sources, cited)
+            end_event: ChatEvent = {"type": "tool_end", "name": call["name"]}
+            if turn_sources:
+                end_event["sources"] = turn_sources
+            yield end_event
             messages.append(
                 {
                     "role": "tool",

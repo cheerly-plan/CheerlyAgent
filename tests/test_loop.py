@@ -1049,6 +1049,99 @@ def test_run_loop_use_web_search_false_excludes_tool():
     assert seen_tools[1] == ["get_weather", "web_search", "memory_search"]
 
 
+def test_run_loop_use_kb_false_excludes_kb_search():
+    """「知识库」开关关闭时 kb_search 不挂载；打开则恢复。两者互不干扰。"""
+    fake_schemas = [
+        {"function": {"name": "get_weather"}},
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "kg_search"}},
+        {"function": {"name": "web_search"}},
+    ]
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.store.append_chat"),
+    ):
+        list(run_loop([{"role": "user", "content": "你好"}], use_kb=False))
+        list(run_loop([{"role": "user", "content": "你好"}], use_kb=True))
+        # 两个开关同时关：各剔各的
+        list(
+            run_loop(
+                [{"role": "user", "content": "你好"}],
+                use_kb=False,
+                use_web_search=False,
+            )
+        )
+
+    # kg_search（图谱检索）同属知识库能力，随 kb_search 一起摘掉
+    assert seen_tools[0] == ["get_weather", "web_search"]
+    assert seen_tools[1] == [
+        "get_weather",
+        "kb_search",
+        "kg_search",
+        "web_search",
+    ]
+    assert seen_tools[2] == ["get_weather"]
+
+
+def test_run_stream_resume_restores_use_kb_flag():
+    """断点续跑沿用原 run 的「知识库」开关，与智能搜索同一套机制。"""
+    claimed = {
+        "user_id": "u1",
+        "chat_session_id": "s-resume-kb",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "你好"},
+        ],
+        "use_web_search": True,
+        "use_kb": False,
+    }
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch(
+            "ai_agent.agents.loop.store.claim_resumable_checkpoint",
+            return_value=claimed,
+        ),
+        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch(
+            "ai_agent.agents.loop.store.replace_chat_after_last_user",
+            side_effect=lambda *a: None,
+        ),
+        patch(
+            "ai_agent.agents.loop.tool_schemas",
+            return_value=[
+                {"function": {"name": "kb_search"}},
+                {"function": {"name": "web_search"}},
+            ],
+        ),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+    ):
+        list(
+            run_stream(
+                "",
+                user_id="u1",
+                chat_session_id="whatever",
+                resume_run_id="old-run",
+                use_kb=True,  # 前端现在开着，也要被 checkpoint 里的 False 覆盖
+            )
+        )
+
+    assert seen_tools == [["web_search"]]
+
+
 def test_run_stream_resume_restores_use_web_search_flag():
     """断点续跑沿用原 run 的「智能搜索」开关：checkpoint 里存的 False
     即使在 run_stream 入参默认 True 的情况下也要生效。"""
@@ -1146,3 +1239,147 @@ def test_run_loop_budget_completion_defaults_to_settings():
     assert events[-1] == {"type": "done"}
     assert settings.max_turns >= 1
 
+
+
+def test_interrupted_turn_skips_long_term_capture():
+    """中断/失败的半截回答不进长期记忆（完整回合才抽取）。"""
+    from ai_agent.agents.loop import _capture_turn  # noqa: F401  确认可导入
+
+    def failing(messages, tools, **kwargs):
+        yield ("text", "半截")
+        raise LLMError("boom")
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=failing),
+        patch("ai_agent.agents.loop.capture_long_term") as capture,
+    ):
+        events = list(
+            run_stream("问题", user_id="u1", chat_session_id="s-interrupt")
+        )
+
+    assert events[-1]["type"] == "error"
+    capture.assert_not_called()
+
+
+def test_fit_context_drops_oldest_turns_keeps_summary_and_last():
+    """超预算裁剪：丢最旧整轮，保留 system/摘要对/最后一个 turn，原列表不动。"""
+    from ai_agent.agents.loop import _fit_context
+
+    messages = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": SUMMARY_USER_PREFIX + "摘要"},
+        {"role": "assistant", "content": "已了解"},
+        {"role": "user", "content": "A" * 500},
+        {"role": "assistant", "content": "B" * 500},
+        {"role": "user", "content": "C" * 500},
+        {"role": "assistant", "content": "D" * 20},
+    ]
+    import copy
+
+    snapshot = copy.deepcopy(messages)
+
+    # 预算只够容纳 system+摘要+C/D 两轮，A/B 轮被丢
+    fitted = _fit_context(messages, 1100)
+
+    assert messages == snapshot  # 原列表不被修改
+    roles = [m["role"] for m in fitted]
+    assert fitted[0]["content"] == "SYS"
+    assert fitted[1]["content"].startswith(SUMMARY_USER_PREFIX)
+    assert fitted[-1]["content"] == "D" * 20
+    assert "A" * 500 not in [m.get("content") for m in fitted]
+    assert roles.count("user") >= 1  # 至少保留当前回合的 user
+    # 不超预算时原样返回（同一对象，零开销路径）
+    assert _fit_context(messages, 10**9) is messages
+    # budget<=0 关闭功能
+    assert _fit_context(messages, 0) is messages
+
+
+def test_fit_context_never_orphans_tool_messages():
+    """裁剪按整轮丢，assistant(tool_calls) 与 tool 结果不会被拆开。"""
+    from ai_agent.agents.loop import _fit_context
+
+    messages = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "U1" * 400},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "name": "kb_search", "arguments": {"q": "x"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "kb_search", "content": "T" * 400},
+        {"role": "user", "content": "U2"},
+        {"role": "assistant", "content": "A2"},
+    ]
+    fitted = _fit_context(messages, 900)
+
+    tool_msgs = [m for m in fitted if m.get("role") == "tool"]
+    calls = {
+        c["id"]
+        for m in fitted
+        for c in (m.get("tool_calls") or [])
+    }
+    for msg in tool_msgs:
+        assert msg["tool_call_id"] in calls  # 没有孤儿 tool 结果
+    assert fitted[-1]["content"] == "A2"  # 当前回合保留
+
+
+def test_permission_denied_is_not_reported_as_retryable():
+    """403/401 不该提示「稍后重试」——重试永远不会成功，只会让用户反复点。"""
+    from ai_agent.agents.loop import _llm_error_message
+
+    for code in (401, 403):
+        denied = _llm_error_message(LLMError("AccessDenied.Unpurchased", status_code=code))
+        assert "稍后重试" not in denied
+        assert "未开通" in denied or "无权限" in denied
+
+    assert "繁忙" in _llm_error_message(LLMError("429", status_code=429))
+    # 没有状态码（超时、连接断开）仍是可重试的坦白说法
+    assert "稍后重试" in _llm_error_message(LLMError("timeout"))
+
+
+def test_run_loop_emits_permission_message_for_403():
+    """上游 403 时 SSE 下发的是「权限」提示，而不是通用的稍后重试。"""
+
+    def _denied(messages, tools, **kwargs):
+        raise LLMError("Error code: 403 - AccessDenied.Unpurchased", status_code=403)
+        yield  # pragma: no cover
+
+    with patch("ai_agent.agents.loop.stream_chat", _denied):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "hi"}],
+                user_id="u1",
+                run_id="r1",
+                use_web_search=False,
+            )
+        )
+
+    errors = [e for e in events if e.get("type") == "error"]
+    assert len(errors) == 1
+    assert "未开通" in errors[0]["message"] or "无权限" in errors[0]["message"]
+    assert "稍后重试" not in errors[0]["message"]
+
+
+def test_mid_stream_error_is_reported_instead_of_killing_the_stream():
+    """流建立后才出错（非 LLMError）也要转成 error 事件，不能让 SSE 直接断掉。"""
+
+    def _boom(messages, tools, **kwargs):
+        yield ("text", "半截回答")
+        raise ConnectionResetError("peer reset")
+
+    with patch("ai_agent.agents.loop.stream_chat", _boom):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "hi"}],
+                user_id="u1",
+                run_id="r1",
+                use_web_search=False,
+            )
+        )
+
+    assert {"type": "text", "content": "半截回答"} in events
+    errors = [e for e in events if e.get("type") == "error"]
+    assert len(errors) == 1
+    assert "中断" in errors[0]["message"]
