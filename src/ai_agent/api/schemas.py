@@ -11,6 +11,33 @@ class UserInfo(BaseModel):
     user_id: str
     chat_session_id: str
     user_name: str
+    # 管理员可上传/删除知识库文件（前端据此隐藏入口，后端 403 才是真防线）
+    is_admin: bool = False
+
+
+class KbInitRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0)
+    # 可选标签：建档时顺手打标；管理页也可事后改（PATCH /tags）
+    tags: list[str] = Field(default_factory=list, max_length=8)
+
+
+class KbTagsRequest(BaseModel):
+    """全量覆盖式设置文件标签：传空数组即清空。"""
+
+    tags: list[str] = Field(max_length=8)
+
+
+class KbChunkEditRequest(BaseModel):
+    """人工修订切片正文：保存即单片重嵌入。"""
+
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class KgBuildRequest(BaseModel):
+    """管理员选文件批量生成图谱。"""
+
+    file_ids: list[str] = Field(min_length=1, max_length=20)
 
 
 class ChatRequest(BaseModel):
@@ -21,6 +48,11 @@ class ChatRequest(BaseModel):
     regenerate: bool = False
     # 前端「智能搜索」开关：True 时本轮提供 web_search 工具
     web_search: bool = False
+    # 前端「知识库」开关：True 时本轮提供 kb_search 工具（默认关闭，不挂载）
+    use_kb: bool = False
+    # 会话级知识库范围：用户在输入框里选定只看这几份文件；
+    # 为空 = 全库。约束的是 kb_search 工具的默认检索范围
+    kb_file_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ChatMemoryMessage(BaseModel):
@@ -31,6 +63,8 @@ class ChatMemoryMessage(BaseModel):
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+    # 消息级附属信息（sources：这一轮回答引用的知识库切片），前端渲染引用用
+    meta: dict[str, Any] | None = None
 
 
 class ChatMemoryResponse(BaseModel):
@@ -90,6 +124,8 @@ class LoginRequest(BaseModel):
 class AuthUser(BaseModel):
     user_id: str
     user_name: str
+    # 管理员才显示知识库入口（后端 403 才是真防线）
+    is_admin: bool = False
 
 
 class AuthResponse(BaseModel):

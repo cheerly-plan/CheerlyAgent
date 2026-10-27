@@ -1,3 +1,5 @@
+from ai_agent.kb.graph_store import KgStore
+from ai_agent.kb.store import KbStore
 from ai_agent.memory.auth_store import AuthStore
 from ai_agent.memory.checkpoint_store import CheckpointStore
 from ai_agent.memory.db import (
@@ -26,7 +28,15 @@ __all__ = [
 ]
 
 
-class MemoryStore(AuthStore, EpisodeStore, ProfileStore, SessionStore, CheckpointStore):
+class MemoryStore(
+    AuthStore,
+    EpisodeStore,
+    ProfileStore,
+    SessionStore,
+    CheckpointStore,
+    KbStore,
+    KgStore,
+):
     def clear_long_term(self, user_id: str | None = None) -> None:
         with self._get_pool().connection() as conn:
             if user_id:

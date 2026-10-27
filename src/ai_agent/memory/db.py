@@ -181,6 +181,15 @@ class Database:
                 )
                 """
             )
+            # 存量库迁移：消息级附属信息（目前是知识库引用 sources）。
+            # 单独一列而不是塞进 content：正文要原样回放给模型，附件信息
+            # 只用于前端渲染，混在一起会让历史消息和模型输入失真
+            conn.execute(
+                """
+                ALTER TABLE agent_chat_history
+                ADD COLUMN IF NOT EXISTS meta JSONB
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_session (
@@ -258,6 +267,7 @@ class Database:
                     step            INT NOT NULL DEFAULT 0,
                     messages        JSONB NOT NULL,
                     use_web_search  BOOLEAN NOT NULL DEFAULT TRUE,
+                    use_kb          BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
@@ -268,6 +278,13 @@ class Database:
                 """
                 ALTER TABLE agent_checkpoint
                 ADD COLUMN IF NOT EXISTS use_web_search BOOLEAN NOT NULL DEFAULT TRUE
+                """
+            )
+            # 同上：知识库工具开关（工具是否挂载要跟原 run 保持一致）
+            conn.execute(
+                """
+                ALTER TABLE agent_checkpoint
+                ADD COLUMN IF NOT EXISTS use_kb BOOLEAN NOT NULL DEFAULT TRUE
                 """
             )
             # 启动时不存在本进程的进行中 run（单进程部署）：残留的 running
@@ -288,6 +305,179 @@ class Database:
                 CREATE UNIQUE INDEX IF NOT EXISTS agent_checkpoint_running_uidx
                 ON agent_checkpoint (user_id, chat_session_id)
                 WHERE status = 'running'
+                """
+            )
+            # 知识库：元数据在 agent_kb_file，切片在 agent_kb_chunk
+            # （外键级联删除，删文件即清空切片）
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kb_file (
+                    id UUID PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    size_bytes BIGINT NOT NULL,
+                    mime TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'uploaded',
+                    error TEXT NOT NULL DEFAULT '',
+                    chunk_count INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_file_user_id_idx
+                ON agent_kb_file (user_id)
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS agent_kb_chunk (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL,
+                    seq INT NOT NULL,
+                    page INT,
+                    kind TEXT NOT NULL DEFAULT 'text',
+                    text TEXT NOT NULL,
+                    embedding vector({dim}) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (file_id, seq)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_chunk_embedding_hnsw
+                ON agent_kb_chunk USING hnsw (embedding vector_cosine_ops)
+                """
+            )
+            # 既有库的增量列：CREATE IF NOT EXISTS 不会补列，靠 ALTER 兜底
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_chunk
+                ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'text'
+                """
+            )
+            # 知识图谱（P2）：实体 / 关系 / 提及三层。
+            # 全部挂在文件上做外键级联，删文件即清空图谱，不留脏数据；
+            # embedding 维度跟随 EMBEDDING_DIM（与切片向量同模型），供实体语义检索。
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS agent_kg_entity (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    norm_name TEXT NOT NULL,
+                    type TEXT NOT NULL DEFAULT 'other',
+                    description TEXT NOT NULL DEFAULT '',
+                    embedding vector({dim}),
+                    mention_count INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (file_id, norm_name, type)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_entity_file_idx
+                ON agent_kg_entity (file_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_entity_norm_idx
+                ON agent_kg_entity (norm_name)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_entity_embedding_hnsw
+                ON agent_kg_entity USING hnsw (embedding vector_cosine_ops)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kg_relation (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    source_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    target_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    relation TEXT NOT NULL DEFAULT '相关',
+                    description TEXT NOT NULL DEFAULT '',
+                    weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    chunk_seq INT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_relation_file_idx
+                ON agent_kg_relation (file_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_relation_source_idx
+                ON agent_kg_relation (source_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_relation_target_idx
+                ON agent_kg_relation (target_id)
+                """
+            )
+            # 提及表：实体出现在哪些切片，供前端「点实体 → 回溯原文」
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kg_mention (
+                    entity_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    chunk_seq INT NOT NULL,
+                    hits INT NOT NULL DEFAULT 1,
+                    PRIMARY KEY (entity_id, chunk_seq)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_mention_file_idx
+                ON agent_kg_mention (file_id)
+                """
+            )
+            # 文件表的图谱进度：'' 未构建 / building 构建中 / ready / stale 切片修订后待重建 / failed
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_status TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_entity_count INT NOT NULL DEFAULT 0
+                """
+            )
+            # 管理能力：标签（读侧过滤/展示）与内容指纹（上传去重）
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS content_hash TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_file_hash_idx
+                ON agent_kb_file (content_hash)
                 """
             )
             conn.commit()

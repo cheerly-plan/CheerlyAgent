@@ -18,6 +18,17 @@ class Settings(BaseSettings):
     small_model: str = ""
     max_turns: int = 10
     log_level: str = "INFO"
+    # 流式对话的 HTTP 超时（秒）：openai 客户端默认 600s 且自动重试 2 次，
+    # LLM 挂死会占住并发槽与 SSE 线程最久 10 分钟（20 槽全满 → 全站 429）。
+    # 流式场景下该超时作用于「连接 + 首 chunk」以及 chunk 之间的最大间隔，
+    # 正常生成（chunk 间隔远小于 120s）不受影响。流式不做自动重试
+    # （重试会从断点重复 yield 已发内容），彻底失败走断点续跑兜底。
+    llm_stream_timeout_seconds: float = 120
+    # 送模型的上下文预算（字符数，0 = 不限制）：超过时从最旧的完整轮次开始
+    # 整轮丢弃（摘要对与当前回合保留），防止长对话 + 多步工具输出撑爆
+    # 模型上下文窗口导致整轮报错。中文 1 字符 ≈ 0.6~1 token，40000 字符
+    # 对 32k 窗口的模型是安全值；部署更大窗口的模型可调高。
+    llm_context_char_budget: int = 40000
     host: str = "127.0.0.1"
     port: int = 8000
     # 服务端访问令牌：非空时 /v1/** 要求携带 X-API-Key 或 Bearer Token
@@ -50,6 +61,72 @@ class Settings(BaseSettings):
     web_search_max_results: int = 5
     web_search_timeout_seconds: float = 15
 
+    # 管理员用户名白名单（逗号分隔）：只有这些账号能上传/删除知识库文件。
+    # 空 = 没有任何管理员，所有写操作 403（只读浏览不受影响）
+    admin_usernames: str = ""
+
+    # 知识库（P1）：文件上传、切片向量化与检索
+    kb_upload_dir: Path = _PROJECT_ROOT / "data" / "uploads"
+    kb_max_file_mb: int = 100
+    kb_part_size_mb: int = 4
+    kb_chunk_size: int = 500
+    kb_chunk_overlap: int = 50
+    # 单批条数：DashScope 兼容接口限制单次 input 最多 10 条，超限整批报
+    # InvalidParameter（表现为文件处理 failed），默认对齐上限
+    kb_embedding_batch: int = 10
+    kb_pipeline_workers: int = 2
+    # 表格：单个工作表最多取多少行，防止超大表撑爆切片与向量库
+    kb_sheet_max_rows: int = 2000
+
+    # 图表识别（视觉模型）：ECharts 等图表的数值不在 PDF/Word 里，
+    # 只能整页渲染后交给视觉模型近似还原。模型名为空即整体关闭——
+    # 每张图一次调用是真实成本，必须由部署方显式开启。
+    kb_vision_model: str = ""
+    kb_vision_max_pages: int = 20
+    kb_vision_dpi: int = 150
+    # 无位图时（ECharts 走 SVG 导出），矢量路径数超过该值视为图表页
+    kb_vision_vector_paths: int = 150
+
+    # 知识图谱（P2）：切片入库后异步抽取实体关系（每批 = 一次 LLM 调用）。
+    # 默认开启；关闭后新上传的文件不再生成图谱，已有图谱保留、仍可检索。
+    # 抽取失败只影响图谱（graph_status=failed），文件本身仍是 ready、照常检索。
+    kb_graph_enabled: bool = True
+    # 空 = 跟随 MODEL（主模型）。不用 SMALL_MODEL：抽取是长 JSON 结构化任务，
+    # 小模型漏关系严重，而且部署方的 SMALL_MODEL 不一定真的开通了
+    kb_graph_model: str = ""
+    kb_graph_batch_chunks: int = 8
+    kb_graph_timeout_seconds: float = 45
+    # 检索时取多少个种子实体、向前端返回的图最大节点数
+    kb_graph_top_k: int = 6
+    kb_graph_max_nodes: int = 200
+    # 没有名称/关键词依据的候选，向量相似度必须过这条线。
+    # 向量模型对无关词也会给 0.45~0.52 的基线，低于 0.55 基本只是话题沾边；
+    # 名称命中或关键词命中到一半以上的候选不受此限制。
+    kb_graph_min_score: float = 0.55
+
+    # 检索质量：向量召回的候选数、距离门槛、重排与邻接扩展。
+    # 候选先多召回（16 条），再重排 + 去重后取 top_k —— 直接取最近邻的
+    # 3 条经常全是同一段话的变体，真正回答问题的片段反而排在第四位。
+    kb_search_candidates: int = 16
+    # 余弦距离上限（0 完全相同、2 完全相反）。中文 embedding 对无关内容
+    # 也有 0.55~0.65 的基线距离，超过 0.72 基本只是话题沾边，宁缺毋滥；
+    # 设 2.0 等于关闭这条门槛。
+    kb_search_max_distance: float = 0.72
+    # LLM 重排：多一次模型调用（约 1~2 秒），换来排序质量。关掉即退回向量顺序
+    kb_rerank_enabled: bool = True
+    # 空 = 跟随 MODEL（主模型）。重排是短文本判别，不需要大模型
+    kb_rerank_model: str = ""
+    kb_rerank_timeout_seconds: float = 30.0
+    # 命中切片前后各带几段一起给模型：跨段落的答案常常被切片边界切断
+    kb_neighbor_expand: int = 1
+    # 混合检索：关键词直查 + 向量召回做 RRF 融合。向量对制度编号、
+    # 专有名词、精确表述不敏感，关键词路补这个盲区；关掉即纯向量
+    kb_hybrid_enabled: bool = True
+    # 从查询里提取的关键词上限（jieba TF-IDF）
+    kb_hybrid_keywords: int = 6
+    # 关键词路的召回条数：与向量路同量级，融合后一起去重/重排
+    kb_hybrid_candidates: int = 12
+
     database_url: str
     embedding_model: str
     embedding_dim: int
@@ -74,6 +151,12 @@ class Settings(BaseSettings):
 
     def llm_for_memory(self) -> str:
         return self.resolve_llm(self.memory_model)
+
+    def is_admin_username(self, username: str) -> bool:
+        """管理员判定：用户名命中 ADMIN_USERNAMES 白名单（大小写敏感）。"""
+        return username in {
+            name.strip() for name in self.admin_usernames.split(",") if name.strip()
+        }
 
     short_term_memory_max_turns: int
     short_term_memory_max_tokens: int
