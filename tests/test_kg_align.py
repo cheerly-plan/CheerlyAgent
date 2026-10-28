@@ -166,3 +166,20 @@ def test_oversized_cluster_is_skipped(monkeypatch):
         for i in range(len(members) - 1)
     ]
     assert align.plan_merges(members, pairs) == []
+
+
+def test_judge_aborts_after_consecutive_failures(monkeypatch):
+    # 模型卡死时不能逐批空等：连续三次失败就整轮中止，交给上层标 failed
+    from ai_agent.core.exceptions import LLMError
+
+    monkeypatch.setattr(align, "complete_chat", lambda *a, **k: (_ for _ in ()).throw(LLMError("timeout")))
+    monkeypatch.setattr(settings, "kg_align_batch", 2)
+    pairs = [
+        {"a": ent(f"实体{i}"), "b": ent(f"实体{i}号"), "score": 0.9, "why": "vector"}
+        for i in range(10)
+    ]
+    try:
+        align.judge_pairs(pairs)
+    except align.AlignUnavailable:
+        return
+    raise AssertionError("连续失败应抛 AlignUnavailable")

@@ -156,6 +156,9 @@ class Settings(BaseSettings):
     kg_align_batch: int = 8
     # 单次对齐最多裁决多少对（成本闸门，超出的按相似度截断）
     kg_align_max_pairs: int = 240
+    # 单次裁决调用的超时（秒）。裁决提示词很短、正常几秒返回，
+    # 用抽取那套 180 秒只会在模型卡住时把整轮对齐拖死
+    kg_align_timeout_seconds: float = 45.0
     # 一个簇最多并几个成员：超过这个数通常是"包含链把一片法人串起来"的
     # 误判，整簇跳过不合并（宁可图稀疏，也不能把二十个法人压成一个点）
     kg_align_max_cluster: int = 4

@@ -177,12 +177,30 @@ def _format_pairs(pairs: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# 连续失败到这个次数就认为通道整体不可用，不再逐批空等
+_MAX_CONSECUTIVE_FAILURES = 3
+
+
+class AlignUnavailable(RuntimeError):
+    """裁决模型不可用（连续超时/报错），整轮对齐中止。
+
+    不中止的代价实测过：单批超时 180 秒 × 两次重试，30 批要空转一个半小时，
+    期间 Ollama 一直被占着，连正常问答都排队。宁可快速失败、把状态标成
+    failed 让用户重试。
+    """
+
+
 def judge_pairs(pairs: list[dict]) -> list[bool]:
-    """把灰区对子交给模型裁决；调用失败的对子保守判 0（不合并）。"""
+    """把灰区对子交给模型裁决；调用失败的对子保守判 0（不合并）。
+
+    模型连续失败（超时/返回不可解析）时抛 AlignUnavailable 快速退出——
+    失败一次通常是模型偶发卡顿，连续三次就是服务有问题，继续跑只是白等。
+    """
     if not pairs:
         return []
     batch = max(1, settings.kg_align_batch)
     verdicts: list[bool] = []
+    failures = 0
     for start in range(0, len(pairs), batch):
         part = pairs[start : start + batch]
         try:
@@ -196,19 +214,32 @@ def judge_pairs(pairs: list[dict]) -> list[bool]:
                     ),
                 ],
                 model=settings.kb_graph_model or settings.model,
-                timeout=settings.kb_graph_timeout_seconds,
-                max_retries=1,
+                # 裁决的提示词只有几百字、输出不到 100 字，正常几秒就回；
+                # 等 180 秒只会在服务卡死时把整轮对齐拖垮
+                timeout=settings.kg_align_timeout_seconds,
+                max_retries=0,
                 max_tokens=256,
                 extra_body={"enable_thinking": False},
             )
             data = load_llm_json(raw)
             same = _Verdict.model_validate(data).same if isinstance(data, dict) else []
+            failures = 0
         except (LLMError, ValueError, TypeError) as e:
-            logger.warning("实体对齐裁决失败（第 %d 对起 %d 对）：%s", start, len(part), e)
+            failures += 1
+            logger.warning(
+                "实体对齐裁决失败（第 %d 对起 %d 对，连续 %d 次）：%s",
+                start,
+                len(part),
+                failures,
+                e,
+            )
             same = []
         except Exception:
+            failures += 1
             logger.exception("实体对齐裁决异常（第 %d 对起）", start)
             same = []
+        if failures >= _MAX_CONSECUTIVE_FAILURES:
+            raise AlignUnavailable(f"裁决模型连续 {failures} 次不可用，已中止对齐")
         # 模型少给/多给都按位置对齐，缺的判 0（保守）
         for i in range(len(part)):
             verdicts.append(bool(same[i]) if i < len(same) else False)
