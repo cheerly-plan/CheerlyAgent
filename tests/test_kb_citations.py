@@ -149,7 +149,12 @@ def test_run_loop_keeps_sources_from_every_tool_round(monkeypatch):
             yield "result", {
                 "content": "",
                 "tool_calls": [
-                    {"id": f"c{rounds['n']}", "name": "kb_search", "arguments": {}}
+                    {
+                        "id": f"c{rounds['n']}",
+                        "name": "kb_search",
+                        # 参数必须不同：完全相同的调用会被去重短路
+                        "arguments": {"query": f"问题{rounds['n']}"},
+                    }
                 ],
             }
         else:

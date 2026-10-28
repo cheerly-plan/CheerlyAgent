@@ -1192,27 +1192,41 @@ def test_run_stream_resume_restores_use_web_search_flag():
     assert seen_tools == [["get_weather"]]
 
 
-def test_run_loop_budget_exhaustion_yields_error():
-    """预算用尽：模型连续请求工具时按 Budget.max_steps 截停，不无限循环。"""
+def test_run_loop_budget_exhaustion_forces_final_answer():
+    """预算用尽：不再直接报错，剥掉工具强制模型基于已检索内容收尾。
+
+    旧行为是 yield「已超过最大轮数」——用户手里只有模型说「我即将检索」
+    的半截话，检索已经花了的成本全部白费。收尾必须给最终回答。
+    """
     from ai_agent.agents.budget import Budget
 
-    def endless_tool_stream(messages, tools, **kwargs):
-        yield (
-            "result",
-            {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": f"c{len(messages)}",
-                        "name": "get_weather",
-                        "arguments": {},
-                    }
-                ],
-            },
-        )
+    tool_args: list[list] = []
+
+    def stream(messages, tools, **kwargs):
+        tool_args.append(list(tools))
+        if tools:  # 正常轮：模型反复请求工具
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{len(messages)}",
+                            "name": "get_weather",
+                            "arguments": {"city": "杭州"},
+                        }
+                    ],
+                },
+            )
+        else:  # 收尾轮：没有工具可用，只能回答
+            yield "text", "根据检索结果，今天晴，20 度。"
+            yield (
+                "result",
+                {"content": "根据检索结果，今天晴，20 度。", "tool_calls": []},
+            )
 
     with (
-        patch("ai_agent.agents.loop.stream_chat", side_effect=endless_tool_stream),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
         patch("ai_agent.agents.loop.execute_tool", return_value="晴 20 度"),
     ):
         events = list(
@@ -1223,10 +1237,70 @@ def test_run_loop_budget_exhaustion_yields_error():
             )
         )
 
-    assert [e for e in events if e["type"] == "error"] == [
-        {"type": "error", "message": "已超过最大轮数 2。"}
+    assert [e for e in events if e["type"] == "error"] == []
+    done = events[-1]
+    assert done["type"] == "done"
+    # 收尾那次调用不再带工具
+    assert tool_args[-1] == []
+    assert any(
+        e.get("type") == "text" and "今天晴" in str(e.get("content"))
+        for e in events
+    )
+
+
+def test_run_loop_dedupes_identical_tool_calls():
+    """完全相同的 (工具, 参数) 只执行一次，重复请求收到提示而非结果。
+
+    实测本地模型会原样重发同一个 kg_search 六次，每次都返回相同的
+    实体列表，把预算轮数烧光后没有轮次留给最终回答。
+    """
+    from ai_agent.agents.budget import Budget
+
+    executed: list[str] = []
+
+    def stream(messages, tools, **kwargs):
+        # 模拟真实死循环：模型前两轮原样重发同一个 kg_search，
+        # 收到「已调用过」的提示后才老实作答
+        tool_rounds = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_rounds >= 2:
+            yield "text", "答"
+            yield ("result", {"content": "答", "tool_calls": []})
+        else:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{len(messages)}",
+                            "name": "kg_search",
+                            "arguments": {"query": "同一句话"},
+                        }
+                    ],
+                },
+            )
+
+    def execute(name, arguments):
+        executed.append(arguments["query"])
+        return "命中实体：甲公司"
+
+    messages: list = [{"role": "user", "content": "查"}]
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=execute),
+    ):
+        events = list(run_loop(messages, "u1", budget=Budget(max_steps=4)))
+
+    assert executed == ["同一句话"]  # 第二次同参数调用被短路，没有执行
+    # 上下文里留了提示，模型知道为什么没拿到新结果
+    hints = [
+        m
+        for m in messages
+        if m.get("role") == "tool" and "完全相同的参数" in str(m.get("content"))
     ]
-    assert sum(1 for e in events if e["type"] == "tool_start") == 2
+    assert len(hints) == 1
+    done = events[-1]
+    assert done["type"] == "done"
 
 
 def test_run_loop_budget_completion_defaults_to_settings():

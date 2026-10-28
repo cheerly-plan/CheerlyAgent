@@ -1,3 +1,4 @@
+import json
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -516,6 +517,11 @@ def run_loop(
     # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
     # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库
     turn_sources: list[dict] = []
+    # 本轮已执行过的 (工具, 参数)：完全相同的调用结果不会变，短路掉。
+    # 本地模型会陷入「再查一次试试」的循环——实测同一 kg_search 原样
+    # 调了 6 次，每次都返回同样的实体列表，把预算轮数烧光后没有轮次
+    # 留给最终回答，用户只看到「我即将检索」就断了
+    seen_calls: set[tuple[str, str]] = set()
     # 预检索注入：只在新一轮提问的入口做（最后一条是 user 且其后还没有
     # 注入块）。断点续跑中断在工具轮时，注入块已在 checkpoint 快照里，
     # 最后一条是 assistant/tool，不会重复注入。
@@ -607,6 +613,31 @@ def run_loop(
             yield done_event
             return
         for call in result["tool_calls"]:
+            dedupe_key = (
+                call["name"],
+                json.dumps(call["arguments"], sort_keys=True, ensure_ascii=False),
+            )
+            if dedupe_key in seen_calls:
+                # 协议要求每个 tool_call 都有对应 tool 消息，用提示文本占位；
+                # 不发 tool_start/tool_end 事件——前端没开始过这次调用
+                logger.info(
+                    "工具同参数重复调用已短路 run_id=%s tool=%s",
+                    run_id,
+                    call["name"],
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call["name"],
+                        "content": (
+                            "（系统）你已用完全相同的参数调用过该工具，结果不会变化。"
+                            "请更换检索词、改用其他工具，或基于已有信息直接作答。"
+                        ),
+                    }
+                )
+                continue
+            seen_calls.add(dedupe_key)
             # label 为用户可读展示名，前端「正在调用 xx」直接用它渲染
             yield {
                 "type": "tool_start",
@@ -639,11 +670,63 @@ def run_loop(
                 step += 1
                 _checkpoint_update(run_id, messages, step)
     logger.warning(
-        "run_loop 超出预算 run_id=%s steps=%d（工具循环疑似失控）",
+        "run_loop 超出预算 run_id=%s steps=%d（工具循环疑似失控），强制收尾",
         run_id,
         budget.max_steps,
     )
-    yield {"type": "error", "message": f"已超过最大轮数 {budget.max_steps}。"}
+    # 预算耗尽不直接报错：前面几轮检索已经花了成本，用户手里只有模型
+    # 说「我即将检索」的半截话。剥掉工具再问最后一次，强制它基于已
+    # 拿到的结果给出回答——收尾消息用 system（前端不渲染、不污染气泡）。
+    # 这次也失败才真正报错。
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "（系统提示）检索轮次已用完，不能再调用任何工具。"
+                "请立即基于以上已获取的信息给出最终回答；"
+                "确实缺少关键数据时，明确说明缺什么即可。"
+            ),
+        }
+    )
+    streamed = ""
+
+    def _stash_final(content: str) -> None:
+        # 收尾场景 messages 尾部是 tool 消息，_stash_partial_assistant
+        # 只认「最后一条是 assistant」的 prefill 场景，这里手动落
+        if content:
+            messages.append({"role": "assistant", "content": content})
+
+    try:
+        context = _fit_context(messages, settings.llm_context_char_budget)
+        result: ChatResult | None = None
+        for kind, payload in stream_chat(context, []):
+            if kind == "text":
+                streamed += payload
+                yield {"type": "text", "content": payload}
+            else:
+                result = payload
+        final_content = str((result or {}).get("content") or "") or streamed
+        _stash_final(final_content)
+        if run_id:
+            step += 1
+            _checkpoint_update(run_id, messages, step)
+        if turn_sources and messages[-1].get("role") == "assistant":
+            messages[-1]["meta"] = {"sources": turn_sources}
+        done_event: ChatEvent = {"type": "done"}
+        if turn_sources:
+            done_event["sources"] = turn_sources
+        yield done_event
+    except GeneratorExit:
+        _stash_final(streamed)
+        raise
+    except LLMError as e:
+        logger.error("预算收尾回答失败: %s", e)
+        _stash_final(streamed)
+        yield {"type": "error", "message": _llm_error_message(e)}
+    except Exception:
+        logger.exception("预算收尾回答异常 run_id=%s", run_id)
+        _stash_final(streamed)
+        yield {"type": "error", "message": "模型输出中断，请稍后重试"}
 
 
 def run(
