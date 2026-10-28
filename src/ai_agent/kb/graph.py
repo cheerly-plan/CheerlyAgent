@@ -20,6 +20,9 @@
 - 每 kb_graph_flush_batches 批落一次库，中断也留着部分图，不用从头再抽。
 
 抽取失败不抛给上层：图谱是增强能力，失败只是没有图，不能拖垮已经可检索的文件。
+
+prompt 分两层（见 kb/doc_profiles.py）：通用底座固定，文档相关的
+实体范围/谓词/别名在运行时按 doc_type 注入。换文档是换配置，不是换抽取器。
 """
 
 import re
@@ -35,6 +38,12 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import Chunk
+from ai_agent.kb.doc_profiles import (
+    DEFAULT_LEVEL,
+    build_system_prompt,
+    normalize_level,
+    resolve_profile,
+)
 from ai_agent.llm.client import complete_chat
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.embeddings import embed_texts_parallel
@@ -90,26 +99,6 @@ _DISPLAY_TRIM = re.compile(
     r"[\s\"'“”‘’《》〈〉<>,.;:!?\-—–_/\\|\[\]【】{}·]+$"
 )
 _PUNCT_ONLY = re.compile(r"^[\W_]+$", re.UNICODE)
-
-_SYSTEM = """你是知识图谱抽取器。从给定文档片段中抽取实体与它们之间的明确关系。
-
-要求：
-1. 实体是专有名词或关键概念：公司、机构、人物、产品/型号、技术、指标、事件、地点、业务概念。
-2. 禁止抽取：通用描述词、章节名称、页眉文字、时间词、通用量词。
-3. 不要抽取泛化词（如"文档""行业""数据""报告"）、纯数字、代词。
-4. 关系必须是片段中明确陈述的，relation 用 2-8 个汉字的动词或名词短语（如"供应商""属于""投资""量产""依赖""同比增长"）。
-5. 原文没有明确关系，不要强行造三元组；找不到关系就只输出实体，但是尽量少产出低价值实体。
-6. type 只能取：person / org / product / technology / metric / event / location / concept / other。
-7. e 的每项是 [名称, 类型, 说明, 片段序号]；r 的每项是 [主体, 客体, 关系, 说明, 片段序号]。
-   说明是不超过 20 字的身份或作用，片段里信息不足就留空字符串；
-   片段序号表示它出现在输入的第几个片段（从 0 开始，必须是实际出现的那一片，不要瞎填）。
-8. 只输出一行 JSON，不要解释、不要 Markdown 代码块。格式：
-{"e":[["某某公司","org","",0]],"r":[["某某公司","某某产品","生产","",0]]}
-
-注意：上面的 JSON 只是格式示意，"某某公司""某某产品"是占位符。
-实体和关系的名称一律取自片段原文；片段里没出现的词严禁输出，
-也不要把格式示例里的占位符当成实体。"""
-
 
 class _Entity(BaseModel):
     name: str
@@ -281,10 +270,12 @@ def _build_prompt(chunks: list[Chunk], start_seq: int) -> str:
     )
 
 
-def _extract_batch(chunks: list[Chunk], start_seq: int, _depth: int = 0) -> _Extraction:
+def _extract_batch(
+    chunks: list[Chunk], start_seq: int, system_prompt: str, _depth: int = 0
+) -> _Extraction:
     raw = complete_chat(
         [
-            ChatMessage(role="system", content=_SYSTEM),
+            ChatMessage(role="system", content=system_prompt),
             ChatMessage(role="user", content=_build_prompt(chunks, start_seq)),
         ],
         # 默认用主模型而不是 small_model：抽取是长 JSON 结构化任务，
@@ -312,8 +303,8 @@ def _extract_batch(chunks: list[Chunk], start_seq: int, _depth: int = 0) -> _Ext
             len(raw or ""),
         )
         return _merge_extractions(
-            _extract_batch(chunks[:mid], start_seq, _depth + 1),
-            _extract_batch(chunks[mid:], start_seq + mid, _depth + 1),
+            _extract_batch(chunks[:mid], start_seq, system_prompt, _depth + 1),
+            _extract_batch(chunks[mid:], start_seq + mid, system_prompt, _depth + 1),
             offset=mid,
         )
     logger.warning(
@@ -388,6 +379,7 @@ def _batch_bounds(
 def _extract_all(
     chunks: list[Chunk],
     batch_size: int,
+    system_prompt: str,
     sink: Callable[[int, int, list[Chunk], _Extraction], None] | None = None,
 ) -> list[tuple[int, list[Chunk], _Extraction]]:
     """并行抽取所有批，返回 (起始 seq, 本批切片, 抽取结果)，按批序排列。
@@ -430,7 +422,7 @@ def _extract_all(
         # LLMError（超时、限流、返回异常）是预期内的外部故障，只记一行——
         # 本地小模型超时时会连堆栈刷屏，日志淹没有用信息；其余异常才是 bug，留全栈
         try:
-            result: _Extraction | None = _extract_batch(batch, start)
+            result: _Extraction | None = _extract_batch(batch, start, system_prompt)
         except LLMError as e:
             logger.warning(
                 "kb 图谱抽取批失败（片段 %d 起）：%s（超时上限 %.0fs）",
@@ -624,13 +616,21 @@ def build_file_graph(
     file_id: uuid.UUID,
     chunks: list[Chunk],
     *,
+    doc_type: str | None = None,
+    level: str = DEFAULT_LEVEL,
     progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """抽取并写入某个文件的图谱，返回计数。
 
+    doc_type 决定注入哪套文档配置（招股书/年报/法律意见书/通用…），
+    未知或为空时走通用配置；level 是同一配置下的轻重粒度（完整/轻量）。
+    两者都只影响 prompt，抽取与合并逻辑一份代码通吃。
+
     progress 在每次阶段落库后回调（带当前累计计数），上层拿它更新
     graph_status 的 entity_count，前端就能看到"建到一半"的进度。
     """
+    profile = resolve_profile(doc_type)
+    system_prompt = build_system_prompt(profile.key, level)
     kept = [c for c in chunks if _worth_extracting(c.text)]
     if len(kept) < len(chunks):
         logger.info(
@@ -669,11 +669,14 @@ def build_file_graph(
             if progress is not None:
                 progress(counts)
 
-    _extract_all(kept, batch_size, sink=sink)
+    _extract_all(kept, batch_size, system_prompt, sink=sink)
     counts = accumulator.flush()
     logger.info(
-        "kb 图谱抽取完成 file_id=%s batches=%d chunks=%d(过滤前 %d) 实体=%d 关系=%d %.0fs",
+        "kb 图谱抽取完成 file_id=%s doc_type=%s level=%s batches=%d chunks=%d(过滤前 %d) "
+        "实体=%d 关系=%d %.0fs",
         file_id,
+        profile.key,
+        normalize_level(level),
         total_batches,
         len(kept),
         len(chunks),

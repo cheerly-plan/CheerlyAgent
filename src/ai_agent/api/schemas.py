@@ -44,6 +44,22 @@ class KgBuildRequest(BaseModel):
     """管理员选文件批量生成图谱。"""
 
     file_ids: list[str] = Field(min_length=1, max_length=20)
+    # 可选：给这批文件统一套一套抽取配置（空 = 各文件用自己已保存的配置，
+    # 都没存过就走全局默认的通用配置）
+    doc_type: str = Field(default="", max_length=40)
+    level: str = Field(default="", max_length=10)
+
+
+class KgDocTypeRequest(BaseModel):
+    """给单个文件选抽取配置（文档类型 + 粒度）。
+
+    doc_type 是配置 key（prospectus / annual_report / legal_opinion /
+    due_diligence / announcement / general，或 data/kb_doc_profiles.json
+    里自定义的），不是中文名——后端按 key 找配置块。
+    """
+
+    doc_type: str = Field(default="general", max_length=40)
+    level: str = Field(default="full", max_length=10)
 
 
 class ChatRequest(BaseModel):

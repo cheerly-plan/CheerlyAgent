@@ -282,7 +282,7 @@ def test_bad_output_splits_batch_and_offsets_chunk(monkeypatch):
 
     monkeypatch.setattr(graph, "complete_chat", fake_complete)
     chunks = [Chunk(_long_text(f"片段{i}")) for i in range(4)]
-    result = graph._extract_batch(chunks, 0)
+    result = graph._extract_batch(chunks, 0, "你是抽取器")
 
     assert len(calls) == 3  # 1 次整批失败 + 2 次半批
     assert len(result.entities) == 2
@@ -389,3 +389,51 @@ def test_relation_links_across_batches(monkeypatch):
     assert rel["relation"] == "采购"
     # chunk_seq 要落在第二批（第 8 段起），不能因为跨批就被记成 0
     assert rel["chunk_seq"] == 8
+
+
+def test_doc_type_switches_config_block_in_system_prompt(monkeypatch):
+    """换文档类型 = 换配置块，而不是换抽取器。
+
+    同一份切片、同一个抽取函数，doc_type 不同时 system prompt 必须不同，
+    且各自的实体范围要出现在里面；通用类型不能带上招股书的白名单。
+    """
+    monkeypatch.setattr(settings, "kb_graph_min_chunk_chars", 1)
+    monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 1)
+    systems: list[str] = []
+
+    def fake_complete(messages, **kwargs):
+        systems.append(messages[0]["content"])
+        # 不返回实体，避免 flush 走到向量化/落库（本用例只验 prompt 装配）
+        return '{"e": [], "r": []}'
+
+    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    chunks = [Chunk("国电电力发展股份有限公司向控股子公司采购煤炭，装机容量同比增长。")]
+
+    build_file_graph(uuid.uuid4(), chunks, doc_type="prospectus", level="light")
+    build_file_graph(uuid.uuid4(), chunks, doc_type="general")
+
+    assert len(systems) == 2
+    assert "募投项目" in systems[0] and "抽取粒度：轻量" in systems[0]
+    assert "不限定白名单" in systems[1]
+    assert "募投项目" not in systems[1]
+    # 底座与输出契约两份完全一致：变的是配置，不是抽取规则
+    assert "只输出一行 JSON" in systems[0] and "只输出一行 JSON" in systems[1]
+
+
+def test_unknown_doc_type_falls_back_to_general(monkeypatch):
+    """配置里没有的类型不能把建图搞挂：回落通用，照常抽。"""
+    monkeypatch.setattr(settings, "kb_graph_min_chunk_chars", 1)
+    monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 1)
+    seen: dict[str, str] = {}
+
+    def fake_complete(messages, **kwargs):
+        seen["system"] = messages[0]["content"]
+        return '{"e": [], "r": []}'
+
+    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    counts = build_file_graph(
+        uuid.uuid4(), [Chunk("某份不知道类型的商业文档，提到若干主体。")], doc_type="没这个类型"
+    )
+
+    assert counts == {"entities": 0, "relations": 0}
+    assert "通用商业文档" in seen["system"]

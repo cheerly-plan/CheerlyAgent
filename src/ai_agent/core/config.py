@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     # 名称命中或关键词命中到一半以上的候选不受此限制。
     kb_graph_min_score: float = 0.55
 
+    # 抽取 prompt 的文档配置（通用底座 + 可插拔配置块，见 kb/doc_profiles.py）。
+    # 路径不存在就只用内置配置；业务方加新文档类型改这个 JSON 即可，不用改代码。
+    # 格式见 kb/doc_profiles.example.json（复制成该路径即生效）
+    kb_doc_profiles_path: Path = _PROJECT_ROOT / "data" / "kb_doc_profiles.json"
+    # 没指定文档类型时的兜底：通用配置（不限白名单、不锁谓词）
+    kb_default_doc_type: str = "general"
+
     # 实体对齐（图谱质量 P2）：把「亚厦股份 / 浙江亚厦装饰股份有限公司」
     # 这类同一实体的不同写法合并，孤立点大多由此产生。
     # 向量召回下限：低于它的对子连候选都不进（实体向量基线约 0.45~0.55）

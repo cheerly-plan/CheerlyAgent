@@ -159,9 +159,16 @@ class KbPipeline:
             ]
             if not chunks:
                 raise RuntimeError("文件没有可用的切片，请先重新解析")
+            # 抽取配置跟着文件走：doc_type 决定注入哪套配置块，level 决定轻重。
+            # 空 doc_type（老文件/未指定）= 全局默认的通用配置
+            record = store.get_kb_file(file_id) or {}
+            doc_type = (record.get("doc_type") or "").strip() or settings.kb_default_doc_type
+            level = (record.get("extract_level") or "").strip() or "full"
             counts = build_file_graph(
                 file_id,
                 chunks,
+                doc_type=doc_type,
+                level=level,
                 progress=lambda c: store.update_graph_status(
                     file_id, "building", entity_count=c["entities"]
                 ),

@@ -50,7 +50,8 @@ class KbStore:
                 -- 对外字段名统一叫 file_id（与 POST /v1/kb/files 的返回值一致），
                 -- 直接 SELECT id 会让前端拿到 undefined 拼出 /files/undefined
                 SELECT id AS file_id, filename, size_bytes, mime, status, error,
-                       chunk_count, graph_status, graph_entity_count, tags, created_at
+                       chunk_count, graph_status, graph_entity_count, tags,
+                       doc_type, extract_level, created_at
                 FROM agent_kb_file
                 WHERE (%(q)s::text = '' OR filename ILIKE %(q_like)s)
                   AND (%(tag)s::text = '' OR %(tag)s = ANY(tags))
@@ -129,12 +130,34 @@ class KbStore:
         with self._get_pool().connection() as conn:
             return conn.execute(
                 """
-                SELECT id, filename, size_bytes, status
+                SELECT id, filename, size_bytes, status, doc_type, extract_level
                 FROM agent_kb_file
                 WHERE id = %s
                 """,
                 (file_id,),
             ).fetchone()
+
+    def set_kb_extract_config(
+        self, file_id: uuid.UUID, *, doc_type: str, level: str
+    ) -> bool:
+        """保存该文件的抽取配置（文档类型 + 粒度）。
+
+        只改配置不动图谱：配置变了旧图就过期了，但要不要重抽是用户的决定
+        （一次重抽是几十分钟的模型算力），前端提示「需重建生效」即可。
+        返回 False 表示文件不存在。
+        """
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE agent_kb_file
+                SET doc_type = %s, extract_level = %s, updated_at = now()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (doc_type, level, file_id),
+            ).fetchone()
+            conn.commit()
+        return row is not None
 
     def update_kb_status(
         self,

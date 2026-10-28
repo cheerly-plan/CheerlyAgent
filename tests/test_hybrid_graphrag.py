@@ -322,7 +322,7 @@ def _chunk(seq):
     return Chunk(text=f"片段{seq}", page=None, kind="text")
 
 
-def _extract_with_marker(chunks, start_seq):
+def _extract_with_marker(chunks, start_seq, _system=None):
     """让结果携带 start_seq，验证批序与分批正确性。"""
     from ai_agent.kb.graph import _Entity, _Extraction
 
@@ -339,7 +339,7 @@ def test_extract_all_keeps_batch_order(monkeypatch):
     monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 4)
 
     chunks = [_chunk(i) for i in range(20)]  # 8/批 → 3 批
-    out = graph._extract_all(chunks, 8)
+    out = graph._extract_all(chunks, 8, "sys")
 
     assert [start for start, _b, _r in out] == [0, 8, 16]
     assert [r.entities[0].name for _s, _b, r in out] == ["e0", "e8", "e16"]
@@ -352,7 +352,7 @@ def test_extract_all_skips_failed_batch(monkeypatch):
 
     calls = []
 
-    def flaky(chunks, start_seq):
+    def flaky(chunks, start_seq, _system=None):
         calls.append(start_seq)
         if start_seq == 8:
             raise ConnectionError("网关抖动")
@@ -362,7 +362,7 @@ def test_extract_all_skips_failed_batch(monkeypatch):
     monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 2)
 
     chunks = [_chunk(i) for i in range(24)]
-    out = graph._extract_all(chunks, 8)
+    out = graph._extract_all(chunks, 8, "sys")
 
     assert sorted(calls) == [0, 8, 16]
     assert [
@@ -376,7 +376,7 @@ def test_extract_all_raises_when_all_batches_fail(monkeypatch):
 
     from ai_agent.kb import graph
 
-    def boom(chunks, start_seq):
+    def boom(chunks, start_seq, _system=None):
         raise ConnectionError("模型不存在")
 
     monkeypatch.setattr(graph, "_extract_batch", boom)
@@ -384,7 +384,7 @@ def test_extract_all_raises_when_all_batches_fail(monkeypatch):
 
     chunks = [_chunk(i) for i in range(16)]
     with _pytest.raises(RuntimeError):
-        graph._extract_all(chunks, 8)
+        graph._extract_all(chunks, 8, "sys")
 
 
 def test_extract_all_serial_when_concurrency_one(monkeypatch):
@@ -393,7 +393,7 @@ def test_extract_all_serial_when_concurrency_one(monkeypatch):
     monkeypatch.setattr(graph, "_extract_batch", _extract_with_marker)
     monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 1)
 
-    out = graph._extract_all([_chunk(i) for i in range(8)], 8)
+    out = graph._extract_all([_chunk(i) for i in range(8)], 8, "sys")
     assert len(out) == 1 and out[0][2].entities[0].name == "e0"
 
 

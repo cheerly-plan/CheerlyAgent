@@ -518,6 +518,21 @@ class Database:
                 ADD COLUMN IF NOT EXISTS graph_entity_count INT NOT NULL DEFAULT 0
                 """
             )
+            # 抽取配置：文档类型（决定注入哪套配置块）与粒度（完整/轻量）。
+            # 存在文件上而不是每次建图现传：重建时不用再问一次，也让
+            # 「这张图是按什么 prompt 抽的」有据可查。空串 = 用全局默认（general）
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS doc_type TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS extract_level TEXT NOT NULL DEFAULT 'full'
+                """
+            )
             # 管理能力：标签（读侧过滤/展示）与内容指纹（上传去重）
             conn.execute(
                 """

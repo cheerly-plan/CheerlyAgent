@@ -583,7 +583,18 @@ def test_rebuild_graph_reads_chunks_from_db(monkeypatch):
         ],
     )
     monkeypatch.setattr(pl.store, "update_graph_status", lambda *a, **k: seen.setdefault("status", a[1]))
-    monkeypatch.setattr(pl, "build_file_graph", lambda fid, chunks, **k: seen.update(chunks=chunks) or {"entities": 3})
+    # 抽取配置跟着文件走：重建时读库里的 doc_type/level 传给抽取器，
+    # 不读库就得每次重建都让人重选一遍
+    monkeypatch.setattr(
+        pl.store,
+        "get_kb_file",
+        lambda fid: {"doc_type": "prospectus", "extract_level": "light"},
+    )
+    monkeypatch.setattr(
+        pl,
+        "build_file_graph",
+        lambda fid, chunks, **k: seen.update(chunks=chunks, **k) or {"entities": 3},
+    )
 
     def boom(*a, **k):
         raise AssertionError("重建图谱不该重新解析源文件")
@@ -597,6 +608,9 @@ def test_rebuild_graph_reads_chunks_from_db(monkeypatch):
         "第二段正文，报告期内营收增长。",
     ]
     assert [c.page for c in seen["chunks"]] == [1, 2]
+    # 库里的抽取配置要原样传下去，否则重建会悄悄换成默认 prompt
+    assert seen["doc_type"] == "prospectus"
+    assert seen["level"] == "light"
 
 
 def test_format_hit_renders_page_range_and_section():
