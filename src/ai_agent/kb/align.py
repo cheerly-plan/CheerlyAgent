@@ -54,6 +54,8 @@ _SYSTEM = """你在做实体消歧：判断每一对名称是否指**同一个�
    中英文名、带或不带地名/行业后缀、曾用名、明显的错别字；
 2. 只要有一方可能是**不同的对象**就判 0：母公司与子公司、同一集团下两个厂、
    型号相近但不同的产品（"iPhone 15" / "iPhone 15 Pro"）、数值型指标的不同口径；
+   特别注意：**一个名字是另一个的前缀，不等于同一实体**——「国电电力」是发行人的
+   简称，但「国电电力大同发电有限责任公司」是另一家法人，三者不能并成一个；
 3. 拿不准时判 0——错并比漏并更糟，并把两个不相关的部分连成一片。
 
 只输出一行 JSON：{"same":[1,0,1,...]}，个数与输入对数一致，1=同一个，0=不同。
@@ -144,17 +146,21 @@ def candidate_pairs(
 
 
 def auto_accept(pair: dict) -> bool:
-    """不用问模型就能定的对子：字面包含，或极高相似度且同类型。
+    """不用问模型就能定的对子：**只有归一化后完全同名**的。
 
-    阈值刻意收紧——自动合并错了没有任何人会发现，而漏合并只是图稀疏一点。
+    两道人工验证过的红线，都别指望用相似度兜：
+    - 字面包含：「国电电力」既是发行人简称，又是「国电电力大同发电…」的前缀，
+      自动合并会顺着前缀把一片独立法人串成一个点；
+    - 高向量相似：「中国华电集团公司」和「中国华能集团公司」只差一个字，
+      实测相似度过 0.95，但这是两家公司——这类错并没人会去翻账单发现。
+    所以只有"名字一模一样、只是类型判得不一样"才自动合，其余一律交模型裁决；
+    模型不可用时宁可不合并（图上多几个重复点，也比把两家公司并成一家强）。
     """
-    if pair["why"] == "contain":
-        return True
     a, b = pair["a"], pair["b"]
-    return (
-        pair["score"] >= settings.kg_align_auto_sim
-        and a["type"] == b["type"]
-        and a["type"] not in _SOFT_TYPES
+    if not type_compatible(a["type"], b["type"]):
+        return False
+    return (a.get("norm_name") or normalize_name(a["name"])) == (
+        b.get("norm_name") or normalize_name(b["name"])
     )
 
 
@@ -237,8 +243,19 @@ def plan_merges(entities: list[dict], accepted: list[dict]) -> list[dict]:
         clusters.setdefault(find(sid), []).append(sid)
 
     merges: list[dict] = []
+    limit = max(2, settings.kg_align_max_cluster)
     for root, members in clusters.items():
         if len(members) < 2:
+            continue
+        if len(members) > limit:
+            # 一个簇大到这个程度，多半是"某条包含链把一片法人串起来了"，
+            # 而不是真有那么多写法。宁可整簇不合并，也别把图压成一团
+            logger.warning(
+                "实体对齐跳过异常大簇（%d 个成员，上限 %d）：%s",
+                len(members),
+                limit,
+                "、".join(by_id[m]["name"] for m in members[:5]),
+            )
             continue
         canonical = max(
             members,

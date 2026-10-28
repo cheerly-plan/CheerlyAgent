@@ -49,8 +49,13 @@ def find_file(filename: str) -> dict | None:
 
 
 def load_graph(file_id: uuid.UUID) -> tuple[list[dict], list[dict], list[dict]]:
+    """库层返回的是 source_id/target_id，指标层统一用 source/target。"""
     graph = store.get_file_graph(file_id, limit=100000)
-    nodes, edges = list(graph["nodes"]), list(graph["edges"])
+    nodes = list(graph["nodes"])
+    edges = [
+        {**dict(e), "source": str(e["source_id"]), "target": str(e["target_id"])}
+        for e in graph["edges"]
+    ]
     aliases = store.list_aliases(file_id)
     return nodes, edges, aliases
 
@@ -111,7 +116,7 @@ def main() -> int:
         if record is None:
             print(f"库里找不到文件：{gold.get('file')}")
             return 1
-        file_id = record["id"]
+        file_id = record.get("id") or record["file_id"]
 
     nodes, edges, aliases = load_graph(file_id)
     if not nodes:

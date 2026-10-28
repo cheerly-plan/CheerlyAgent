@@ -66,21 +66,30 @@ def test_candidate_pairs_dedupes_vector_and_containment():
     assert pairs[0]["why"] == "contain"
 
 
-def test_auto_accept_rules():
+def test_containment_is_candidate_but_not_auto_accepted():
+    # 实测教训：「国电电力」既是发行人简称，也是「国电电力大同发电…」的前缀，
+    # 字面包含一律自动合并会把一片法人压成一个点
     a, b = ent("国电电力", "org"), ent("国电电力发展股份有限公司", "org")
     contain = {"a": a, "b": b, "score": 0.86, "why": "contain"}
-    assert align.auto_accept(contain)
+    assert align.candidate_pairs([a, b], [], min_sim=0.86)
+    assert not align.auto_accept(contain)
 
-    high = {"a": a, "b": ent("国电电力股份", "org"), "score": 0.97, "why": "vector"}
-    assert align.auto_accept(high)
 
-    # 软类型（other/concept）即使很像也要问模型：抽取时类型判错太常见
-    soft = {"a": ent("装机容量", "other"), "b": ent("装机容量", "other"), "score": 0.99,
+def test_auto_accept_only_exact_same_name():
+    # 同名不同型（抽取时类型判错）可以直接合
+    same = {"a": ent("国电电力", "org"), "b": ent("国电电力", "other"), "score": 0.9,
             "why": "vector"}
-    assert not align.auto_accept(soft)
+    assert align.auto_accept(same)
 
-    grey = {"a": a, "b": ent("国电电力", "org"), "score": 0.9, "why": "vector"}
-    assert not align.auto_accept(grey)
+    # 高相似但差一个字的两家公司：实测 0.95 以上，绝不能自动合
+    near = {"a": ent("中国华电集团公司", "org"), "b": ent("中国华能集团公司", "org"),
+            "score": 0.97, "why": "vector"}
+    assert not align.auto_accept(near)
+
+    # 干脆不同名的高相似对子也不自动合，一律交模型
+    high = {"a": ent("国电电力", "org"), "b": ent("国电电力股份", "org"), "score": 0.99,
+            "why": "vector"}
+    assert not align.auto_accept(high)
 
 
 def test_judge_pairs_defaults_to_false_when_model_returns_fewer(monkeypatch):
@@ -121,6 +130,8 @@ def test_align_file_graph_writes_merges_and_reports(monkeypatch):
             {"src": a["id"], "dst": b["id"], "sim": 0.88}
         ]
     )
+    # 包含关系现在要过模型裁决（不再自动合并），这里桩成"判同一实体"
+    monkeypatch.setattr(align, "judge_pairs", lambda pairs: [True] * len(pairs))
     captured = {}
     monkeypatch.setattr(
         align.store, "apply_alignment", lambda fid, merges: captured.update(merges=merges)
@@ -137,6 +148,7 @@ def test_align_file_graph_dry_run_does_not_write(monkeypatch):
     b = ent("国电电力", "org", 20)
     monkeypatch.setattr(align.store, "list_file_entities", lambda fid: [a, b])
     monkeypatch.setattr(align.store, "entity_similar_pairs", lambda fid, **k: [])
+    monkeypatch.setattr(align, "judge_pairs", lambda pairs: [True] * len(pairs))
     called = {"n": 0}
     monkeypatch.setattr(
         align.store, "apply_alignment", lambda fid, merges: called.update(n=called["n"] + 1)
@@ -144,3 +156,13 @@ def test_align_file_graph_dry_run_does_not_write(monkeypatch):
     result = align.align_file_graph(uuid.uuid4(), dry_run=True)
     assert result["merged"] == 1
     assert called["n"] == 0
+
+
+def test_oversized_cluster_is_skipped(monkeypatch):
+    # 包含链把 6 个法人串成一簇时，整簇跳过，一个都不合
+    members = [ent(f"国电电力集团{m}有限公司", "org", m) for m in range(1, 7)]
+    pairs = [
+        {"a": members[i], "b": members[i + 1], "score": 0.9, "why": "vector"}
+        for i in range(len(members) - 1)
+    ]
+    assert align.plan_merges(members, pairs) == []
