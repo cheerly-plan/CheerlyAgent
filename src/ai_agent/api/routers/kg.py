@@ -113,9 +113,12 @@ def file_graph(file_id: str, _user: UserRecord = Depends(get_current_user)):
     record = store.get_kb_file(fid)
     if record is None:
         raise HTTPException(status_code=404, detail="文件不存在")
-    graph = store.get_file_graph(fid, limit=settings.kb_graph_max_nodes)
+    graph = store.get_file_graph(fid, limit=settings.kb_graph_file_max_nodes)
     payload = _shape(graph)
     payload["filename"] = record["filename"]
+    # 统计给的是全量口径（不受节点上限影响）：前端据此判断要不要折叠孤立点，
+    # 也用来解释「画布上怎么只有一半实体」
+    payload["stats"] = store.graph_stats(file_ids=[fid])
     # 文件表的图谱进度，前端据此显示「未构建 / 构建中 / 失败」并可触发重建
     payload.update(store.get_file_graph_status(fid))
     return payload

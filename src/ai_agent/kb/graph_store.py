@@ -251,32 +251,65 @@ class KgStore:
 
 
     def get_file_graph(
-        self, file_id: uuid.UUID, *, limit: int = 200
+        self, file_id: uuid.UUID, *, limit: int = 600
     ) -> dict:
-        """单个文件的图谱：节点 + 边 + 实体总数。"""
+        """单个文件的图谱：节点 + 边。
+
+        节点按**度数**（在本文件里挂了多少条关系）排序，提及数只做次序：
+        招股书这类文档里 55% 的实体是孤立点（407 个实体 / 225 个无边），
+        按提及数取前 N 会把「被反复提到但从不参与关系」的实体塞进画布，
+        而真正把图撑起来的枢纽反而可能被截在门外。
+
+        返回集内重算 degree（与 get_global_graph 语义一致：只数返回边的
+        两端），前端据此折叠孤立点、判断要不要「加载更多」。
+        """
         with self._get_pool().connection() as conn:
             nodes = conn.execute(
                 """
                 SELECT e.id, e.name, e.norm_name, e.type, e.description,
-                       e.mention_count, e.file_id, f.filename
+                       e.mention_count, e.file_id, f.filename,
+                       COALESCE(d.deg, 0) AS full_degree
                 FROM agent_kg_entity e
                 JOIN agent_kb_file f ON f.id = e.file_id
-                WHERE e.file_id = %s
-                ORDER BY e.mention_count DESC, e.name
-                LIMIT %s
+                LEFT JOIN (
+                    SELECT entity_id, count(*) AS deg FROM (
+                        SELECT source_id AS entity_id
+                        FROM agent_kg_relation WHERE file_id = %(fid)s
+                        UNION ALL
+                        SELECT target_id AS entity_id
+                        FROM agent_kg_relation WHERE file_id = %(fid)s
+                    ) t GROUP BY entity_id
+                ) d ON d.entity_id = e.id
+                WHERE e.file_id = %(fid)s
+                ORDER BY COALESCE(d.deg, 0) DESC, e.mention_count DESC, e.name
+                LIMIT %(lim)s
                 """,
-                (file_id, limit),
+                {"fid": file_id, "lim": limit},
             ).fetchall()
+            if not nodes:
+                return {"nodes": [], "edges": []}
+            # 两端都在节点集里的边才算数：LIMIT 截掉的实体如果还挂着边，
+            # 画布上会出现指向空气的线（前端也会筛，这里筛掉省得来回传）
             edges = conn.execute(
                 """
                 SELECT r.id, r.source_id, r.target_id, r.relation,
                        r.description, r.weight, r.chunk_seq
                 FROM agent_kg_relation r
-                WHERE r.file_id = %s
-                LIMIT %s
+                WHERE r.file_id = %(fid)s
+                  AND r.source_id = ANY(%(ids)s::uuid[])
+                  AND r.target_id = ANY(%(ids)s::uuid[])
+                ORDER BY r.weight DESC, r.id
+                LIMIT %(lim)s
                 """,
-                (file_id, limit * 4),
+                {"fid": file_id, "ids": [n["id"] for n in nodes], "lim": limit * 4},
             ).fetchall()
+
+        degree: dict[uuid.UUID, int] = {}
+        for edge in edges:
+            degree[edge["source_id"]] = degree.get(edge["source_id"], 0) + 1
+            degree[edge["target_id"]] = degree.get(edge["target_id"], 0) + 1
+        for node in nodes:
+            node["degree"] = degree.get(node["id"], 0)
         return {"nodes": nodes, "edges": edges}
 
     def get_global_graph(
@@ -610,6 +643,11 @@ class KgStore:
         return grouped
 
     def graph_stats(self, *, file_ids: list[uuid.UUID] | None = None) -> dict:
+        """范围统计。isolated = 一条关系都没挂上的实体数。
+
+        前端拿它决定要不要折叠孤立点，也是「图谱怎么这么稀」的唯一可见
+        指标：孤立占比高说明抽取只拿到了实体、没拿到关系，不是画布的问题。
+        """
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 """
@@ -622,7 +660,14 @@ class KgStore:
                         OR r.file_id = ANY(%(file_ids)s::uuid[])) AS relations,
                     (SELECT count(DISTINCT file_id) FROM agent_kg_entity e
                      WHERE %(file_ids)s::uuid[] IS NULL
-                        OR e.file_id = ANY(%(file_ids)s::uuid[])) AS files
+                        OR e.file_id = ANY(%(file_ids)s::uuid[])) AS files,
+                    (SELECT count(*) FROM agent_kg_entity e
+                     WHERE (%(file_ids)s::uuid[] IS NULL
+                            OR e.file_id = ANY(%(file_ids)s::uuid[]))
+                       AND NOT EXISTS (
+                           SELECT 1 FROM agent_kg_relation r
+                           WHERE r.source_id = e.id OR r.target_id = e.id)
+                    ) AS isolated
                 """,
                 {"file_ids": file_ids or None},
             ).fetchone()
@@ -630,4 +675,5 @@ class KgStore:
             "entities": int(row["entities"]),
             "relations": int(row["relations"]),
             "files": int(row["files"]),
+            "isolated": int(row["isolated"]),
         }
