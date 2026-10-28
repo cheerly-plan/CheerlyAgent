@@ -5,7 +5,7 @@
 """
 
 from ai_agent.kb.chunking import Chunk, chunk_segments, chunk_text
-from ai_agent.kb.parsing import TEXT, Segment
+from ai_agent.kb.parsing import FIGURE, TEXT, Segment
 from ai_agent.kb.sections import (
     Line,
     body_size,
@@ -177,3 +177,32 @@ def test_within_page_mode_still_respects_section_fence():
     chunks = chunk_segments(segments, max_chars=500, overlap=0, within_page=True)
     assert [c.section for c in chunks] == ["第一节 释义", "第二节 概览"]
 
+
+
+def test_noise_figure_description_is_dropped():
+    # 视觉模型对「送审但没图」的页面会照格式编结论，这类片段不能进库
+    segments = [
+        Segment("无图表。", 195, FIGURE),
+        Segment("无图表或图片", 196, FIGURE),
+        Segment("图表类型：无图表 标题：无 坐标轴含义与单位：无", 199, FIGURE),
+        Segment("图 1 装机容量趋势：2004-2006 年逐年上升。", 30, FIGURE),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=0)
+    assert len(chunks) == 1
+    assert "装机容量" in chunks[0].text
+
+
+def test_noise_filter_keeps_real_figure_text_mentioning_none():
+    # 真描述里带了"无坐标轴"这类词不能误杀：只要不是整句否认有图就保留
+    segments = [Segment("截图表；签字盖章页 无坐标轴 无关键数值", 192, FIGURE)]
+    assert len(chunk_segments(segments, max_chars=500, overlap=0)) == 1
+
+
+def test_toc_residue_chunk_is_dropped():
+    segments = [
+        Segment("目 录", 4),
+        Segment("目\t录", 4),
+        Segment("目录结构说明：本文档分为八节。", 4),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=0)
+    assert [c.text for c in chunks] == ["目录结构说明：本文档分为八节。"]

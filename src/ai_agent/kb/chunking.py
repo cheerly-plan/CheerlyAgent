@@ -30,6 +30,15 @@ from ai_agent.kb.parsing import FIGURE, TABLE, TEXT, Segment
 
 # 段落边界：空行或单个换行都算；PDF 抽出来的文本换行很密，宽松处理
 _PARA_SPLIT = re.compile(r"\n+")
+# 视觉模型对「值得送审但实际没图」的页面常常照格式编一句结论，这些描述
+# 不含任何可检索信息，进库只会给图谱喂假实体（"无图表"被当成机构名）。
+# 只认「整句都在否认有图」的短描述，避免误伤真描述里带了"无"字的句子。
+_NO_CHART = re.compile(
+    r"^(图表类型[:：]\s*无|无图表|无图片|没有图表|无任何图表|图中无任何图表|无法总结)",
+)
+_NO_CHART_MAX = 120
+# 目录页被过滤后常只剩「目 录」两字，单成一片是纯噪声
+_TOC_RESIDUE = re.compile(r"^目\s*录$|^contents$", re.IGNORECASE)
 # 句子边界：中英文常见终止符后的位置（保留标点在句尾）
 _SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
 # Markdown 表格的分隔行：|---|---|
@@ -67,7 +76,7 @@ def chunk_segments(
             )
             flow.clear()
 
-    for seg in segments:
+    for seg in _drop_noise(segments):
         if seg.kind == TABLE:
             # 表必须整表成片（超长时重复表头），不能揉进正文流
             flush_flow()
@@ -107,6 +116,26 @@ def chunk_segments(
             flow.append(seg)
     flush_flow()
     return chunks
+
+
+def _drop_noise(segments: list[Segment]) -> list[Segment]:
+    """剔除解析层漏下来的空信息片段（视觉模型的「无图表」、目录残留）。
+
+    放在切片入口而不是解析层：解析层要负责「这一页有没有内容」的判断，
+    切片层负责「这段值不值得进库」，后者是全文统一的最后一道闸。
+    只丢整段都是噪声的，段落级混排（真内容 + 一句无图表）照旧保留。
+    """
+    kept: list[Segment] = []
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        if seg.kind == FIGURE and len(text) <= _NO_CHART_MAX and _NO_CHART.match(text):
+            continue
+        if len(text) <= 6 and _TOC_RESIDUE.match(text):
+            continue
+        kept.append(seg)
+    return kept
 
 
 def _chunk_flow(
