@@ -42,7 +42,7 @@ def test_candidate_pairs_containment_without_high_similarity():
     b = ent("国电电力", "org", 30)
     pairs = align.candidate_pairs([a, b], [], min_sim=0.86)
     assert len(pairs) == 1
-    assert pairs[0]["why"] == "contain"
+    assert pairs[0]["why"] == "suffix"
 
 
 def test_candidate_pairs_skips_incompatible_type_and_far_pairs():
@@ -62,14 +62,15 @@ def test_candidate_pairs_dedupes_vector_and_containment():
     ]
     pairs = align.candidate_pairs([a, b], sim_pairs, min_sim=0.86)
     assert len(pairs) == 1
-    # 字面包含比向量更硬，应覆盖 why 并抬到门槛之上
-    assert pairs[0]["why"] == "contain"
+    # 字面包含比向量更硬，应覆盖 why；纯通用后缀给到最高分
+    assert pairs[0]["why"] == "suffix"
+    assert pairs[0]["score"] > 0.9
 
 
 def test_containment_is_candidate_but_not_auto_accepted():
     # 实测教训：「国电电力」既是发行人简称，也是「国电电力大同发电…」的前缀，
     # 字面包含一律自动合并会把一片法人压成一个点
-    a, b = ent("国电电力", "org"), ent("国电电力发展股份有限公司", "org")
+    a, b = ent("国电电力", "org"), ent("国电电力大同发电有限责任公司", "org")
     contain = {"a": a, "b": b, "score": 0.86, "why": "contain"}
     assert align.candidate_pairs([a, b], [], min_sim=0.86)
     assert not align.auto_accept(contain)
@@ -158,14 +159,21 @@ def test_align_file_graph_dry_run_does_not_write(monkeypatch):
     assert called["n"] == 0
 
 
-def test_oversized_cluster_is_skipped(monkeypatch):
-    # 包含链把 6 个法人串成一簇时，整簇跳过，一个都不合
-    members = [ent(f"国电电力集团{m}有限公司", "org", m) for m in range(1, 7)]
+def test_cluster_cap_cuts_chain_but_keeps_high_score_merges():
+    # 前缀链把 6 个法人串起来时，不能整簇丢弃——那样连"发行人简称"这条
+    # 明显正确的合并也一起丢了。按分数加边、到容量上限停住：
+    # 高分对子先合，靠后的前缀链被截断，簇固定在上限内
+    members = [ent(f"国电电力集团{m}有限公司", "org", 10 - m) for m in range(1, 7)]
     pairs = [
-        {"a": members[i], "b": members[i + 1], "score": 0.9, "why": "vector"}
+        {"a": members[i], "b": members[i + 1], "score": 0.95 - i * 0.01, "why": "vector"}
         for i in range(len(members) - 1)
     ]
-    assert align.plan_merges(members, pairs) == []
+    merges = align.plan_merges(members, pairs)
+    targets = {m["to_id"] for m in merges}
+    # 链在前 4 个处被截断：一个 4 成员的簇（3 条合并）+ 链尾自成一个 2 成员簇
+    assert len(merges) == 4
+    assert len(targets) == 2
+    assert len({m["alias_name"] for m in merges}) == 4  # 每个成员只被合一次
 
 
 def test_judge_aborts_after_consecutive_failures(monkeypatch):
@@ -183,3 +191,23 @@ def test_judge_aborts_after_consecutive_failures(monkeypatch):
     except align.AlignUnavailable:
         return
     raise AssertionError("连续失败应抛 AlignUnavailable")
+
+
+def test_pure_suffix_extension_accepts_legal_tail_only():
+    # 简称补上通用法人后缀 = 全称，字面就能定
+    assert align.pure_suffix_extension("国电电力", "国电电力发展股份有限公司")
+    assert align.pure_suffix_extension("国电电力", "国电电力股份")
+    # 中间多了地名/厂名，是另一家法人
+    assert not align.pure_suffix_extension("国电电力", "国电电力大同发电有限责任公司")
+    assert not align.pure_suffix_extension("国电电力", "国电电力大连庄河发电")
+    # 反过来（全称是短名的前缀）不算
+    assert not align.pure_suffix_extension("国电电力发展股份有限公司", "国电电力")
+
+
+def test_metric_like_pairs_are_never_merged():
+    # 2005年 与 2005 年8 月 向量很近、名字互为前缀，但绝不是同一个东西
+    a, b = ent("2005年", "other"), ent("2005 年8 月", "other")
+    sim_pairs = [{"src": a["id"], "dst": b["id"], "sim": 0.97}]
+    assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
+    assert align.is_metric_like("2005年") and align.is_metric_like("12.5%")
+    assert not align.is_metric_like("国电电力")

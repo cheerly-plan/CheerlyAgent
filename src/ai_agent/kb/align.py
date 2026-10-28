@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from pydantic import BaseModel, Field
@@ -81,6 +82,45 @@ def _pair_key(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a <= b else (b, a)
 
 
+# 纯数字/日期型名字：抽取器会把"2005年""2005 年8 月"这类时间点、以及指标数值
+# 都抽成实体。它们互相之间向量很近、名字也互为前缀，但只要不是一字不差就
+# 绝不是同一个东西——2005年 和 2005年8月 是两个不同的时间点。
+_METRIC_LIKE = re.compile(r"^[\d\s年月日号%．.．·/、+-]+$")
+
+# 法人的通用尾巴：简称补上这些词就是全称，中间没有加任何限定词
+_GENERIC_TAIL = (
+    "发展", "股份", "有限", "责任", "公司", "集团", "控股", "投资",
+    "厂", "总厂", "分公司", "子公司", "（", "）", "(", ")",
+)
+
+
+def is_metric_like(name: str) -> bool:
+    return bool(_METRIC_LIKE.match(name.strip()))
+
+
+def pure_suffix_extension(short: str, long_: str) -> bool:
+    """短名是全称的前缀，且剩下那截只是通用法人后缀（没有加地名/厂名）。
+
+    「国电电力」+「发展股份有限公司」= 同一个法人，这是改名/简称的常见形态，
+    可以放心判同一；而「国电电力」+「大同发电有限责任公司」多了一个地名，
+    是另一家公司——同样满足"前缀"，但绝不该合。这条规则把两者分开。
+    """
+    if short == long_ or not long_.startswith(short):
+        return False
+    rest = long_[len(short) :]
+    if not rest:
+        return False
+    i = 0
+    while i < len(rest):
+        for token in _GENERIC_TAIL:
+            if rest.startswith(token, i):
+                i += len(token)
+                break
+        else:
+            return False
+    return True
+
+
 def candidate_pairs(
     entities: list[dict],
     sim_pairs: list[dict],
@@ -110,6 +150,9 @@ def candidate_pairs(
             continue
         if not type_compatible(a["type"], b["type"]):
             continue
+        # 两个"名字基本是数字/日期"的实体，只有一字不差才可能同一个
+        if is_metric_like(a["name"]) and is_metric_like(b["name"]):
+            continue
         key = _pair_key(src, dst)
         if key in out:
             continue
@@ -127,17 +170,22 @@ def candidate_pairs(
             if not name_contained(norm_a, norm_b):
                 continue
             key = _pair_key(str(a["id"]), str(b["id"]))
+            short, long_ = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
+            # 纯通用后缀扩展（简称 + 发展股份有限公司）是最可靠的一类，给最高分：
+            # 排序靠前，簇容量截断时先保它
+            strong = pure_suffix_extension(short, long_)
+            score = 0.99 if strong else threshold
             existing = out.get(key)
             if existing is not None:
-                existing["why"] = "contain"
+                existing["why"] = "suffix" if strong else "contain"
                 # 包含关系是字面证据，相似度取不低于门槛的值，确保排序靠前
-                existing["score"] = max(existing["score"], threshold)
+                existing["score"] = max(existing["score"], score)
                 continue
             out[key] = {
                 "a": a,
                 "b": b,
-                "score": threshold,
-                "why": "contain",
+                "score": score,
+                "why": "suffix" if strong else "contain",
             }
 
     limit = max(1, settings.kg_align_max_pairs)
@@ -159,6 +207,10 @@ def auto_accept(pair: dict) -> bool:
     a, b = pair["a"], pair["b"]
     if not type_compatible(a["type"], b["type"]):
         return False
+    # 简称 + 纯通用后缀（"国电电力" → "国电电力发展股份有限公司"）是改名/
+    # 全称的固定形态，中间没加任何地名或限定词，字面上就能定
+    if pair.get("why") == "suffix":
+        return True
     return (a.get("norm_name") or normalize_name(a["name"])) == (
         b.get("norm_name") or normalize_name(b["name"])
     )
@@ -247,13 +299,23 @@ def judge_pairs(pairs: list[dict]) -> list[bool]:
 
 
 def plan_merges(entities: list[dict], accepted: list[dict]) -> list[dict]:
-    """并查集成簇，返回 [{from_id, to_id, alias_name, alias_norm, score}]。
+    """带容量上限的并查集，返回 [{from_id, to_id, alias_name, alias_norm, score}]。
 
     每个簇选一个代表（提及次数最多，其次名字更长——长的通常是全称更像正式名），
     其余成员指向代表。纯函数，便于单测。
+
+    为什么要**按分数从高到低**加边、而不是先连完再看簇大小：实测一份招股书
+    里「国电电力」既是发行人简称，也是「国电电力大连庄河发电…」的前缀，
+    几条边一连，一个簇里躺了 5 个不同法人。整簇丢弃会把「国电电力 ↔
+    国电电力发展股份有限公司」这条明显正确的合并也一起丢掉——那正是对齐
+    最该做的事。所以边按置信度排序，超过容量上限的那条边跳过，簇就停在该
+    停的地方：正确的高分对子先合，靠后的一层层前缀链被截断。
     """
     by_id = {str(e["id"]): e for e in entities}
     parent: dict[str, str] = {sid: sid for sid in by_id}
+    size: dict[str, int] = {sid: 1 for sid in by_id}
+    limit = max(2, settings.kg_align_max_cluster)
+    blocked = 0
 
     def find(x: str) -> str:
         while parent[x] != x:
@@ -261,32 +323,32 @@ def plan_merges(entities: list[dict], accepted: list[dict]) -> list[dict]:
             x = parent[x]
         return x
 
-    for pair in accepted:
+    for pair in sorted(accepted, key=lambda p: float(p.get("score") or 0), reverse=True):
         a, b = str(pair["a"]["id"]), str(pair["b"]["id"])
         if a not in parent or b not in parent:
             continue
         ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
+        if ra == rb:
+            continue
+        if size[ra] + size[rb] > limit:
+            blocked += 1
+            continue
+        # 小的挂到大的下面，后续 find 更浅
+        if size[ra] < size[rb]:
+            ra, rb = rb, ra
+        parent[rb] = ra
+        size[ra] += size[rb]
+
+    if blocked:
+        logger.warning("实体对齐有 %d 条合并因超出簇容量上限（%d）被跳过", blocked, limit)
 
     clusters: dict[str, list[str]] = {}
     for sid in by_id:
         clusters.setdefault(find(sid), []).append(sid)
 
     merges: list[dict] = []
-    limit = max(2, settings.kg_align_max_cluster)
     for root, members in clusters.items():
         if len(members) < 2:
-            continue
-        if len(members) > limit:
-            # 一个簇大到这个程度，多半是"某条包含链把一片法人串起来了"，
-            # 而不是真有那么多写法。宁可整簇不合并，也别把图压成一团
-            logger.warning(
-                "实体对齐跳过异常大簇（%d 个成员，上限 %d）：%s",
-                len(members),
-                limit,
-                "、".join(by_id[m]["name"] for m in members[:5]),
-            )
             continue
         canonical = max(
             members,

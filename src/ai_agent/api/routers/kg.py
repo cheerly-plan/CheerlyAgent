@@ -126,6 +126,8 @@ def file_graph(file_id: str, _user: UserRecord = Depends(get_current_user)):
     payload["filename"] = record["filename"]
     # 文件表的图谱进度，前端据此显示「未构建 / 构建中 / 失败」并可触发重建
     payload.update(store.get_file_graph_status(fid))
+    # 对齐进度与合并数（前端决定是否显示「也叫 …」与「对齐」按钮）
+    payload.update(store.get_align_status(fid))
     return payload
 
 

@@ -338,18 +338,19 @@ class KgStore:
                     """,
                     (file_id,),
                 )
+                # 连接池是 dict_row，按列别名取，别用下标
                 remaining = cur.execute(
-                    "SELECT count(*) FROM agent_kg_relation WHERE file_id = %s",
+                    "SELECT count(*) AS n FROM agent_kg_relation WHERE file_id = %s",
                     (file_id,),
-                ).fetchone()[0]
+                ).fetchone()["n"]
                 total = cur.execute(
-                    "SELECT count(*) FROM agent_kg_entity WHERE file_id = %s",
+                    "SELECT count(*) AS n FROM agent_kg_entity WHERE file_id = %s",
                     (file_id,),
-                ).fetchone()[0]
+                ).fetchone()["n"]
                 aliases = cur.execute(
-                    "SELECT count(*) FROM agent_kg_alias WHERE file_id = %s",
+                    "SELECT count(*) AS n FROM agent_kg_alias WHERE file_id = %s",
                     (file_id,),
-                ).fetchone()[0]
+                ).fetchone()["n"]
             conn.commit()
         return {
             "merged": merged,
