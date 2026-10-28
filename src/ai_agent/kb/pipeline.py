@@ -72,6 +72,7 @@ class KbPipeline:
                 segments,
                 max_chars=settings.kb_chunk_size,
                 overlap=settings.kb_chunk_overlap,
+                within_page=settings.kb_chunk_within_page,
             )
             if not chunks:
                 store.update_kb_status(file_id, "failed", error="文档内容为空")
@@ -138,7 +139,14 @@ class KbPipeline:
             store.update_graph_status(file_id, "building")
             rows = store.list_kb_chunk_inputs(file_id)
             chunks = [
-                Chunk(text=r["text"], page=r["page"], kind=r["kind"]) for r in rows
+                Chunk(
+                    text=r["text"],
+                    page=r["page"],
+                    kind=r["kind"],
+                    page_end=r.get("page_end"),
+                    section=r.get("section"),
+                )
+                for r in rows
             ]
             if not chunks:
                 raise RuntimeError("文件没有可用的切片，请先重新解析")

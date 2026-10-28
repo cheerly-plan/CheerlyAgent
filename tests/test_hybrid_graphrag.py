@@ -395,3 +395,79 @@ def test_extract_all_serial_when_concurrency_one(monkeypatch):
 
     out = graph._extract_all([_chunk(i) for i in range(8)], 8)
     assert len(out) == 1 and out[0][2].entities[0].name == "e0"
+
+
+# ---------- 按章节组批（图谱抽取） ----------
+
+
+def _section_chunk(seq, section):
+    from ai_agent.kb.chunking import Chunk
+
+    return Chunk(text=f"片段{seq}", page=None, kind="text", section=section)
+
+
+def test_batch_bounds_never_splits_a_small_section():
+    """一节只有 3 片时不能和上一节的尾巴各切一半：整节成批。"""
+    from ai_agent.kb.graph import _batch_bounds
+
+    chunks = [_section_chunk(i, "第一节") for i in range(3)] + [
+        _section_chunk(i, "第二节") for i in range(3, 6)
+    ]
+    bounds = _batch_bounds(chunks, 8)
+    # 两个小节合进一批（都是小章节），但每节在批内是连续的
+    assert [len(b) for _s, b in bounds] == [6]
+    assert [c.section for c in bounds[0][1]] == ["第一节"] * 3 + ["第二节"] * 3
+
+
+def test_batch_bounds_splits_oversize_section_without_crossing_it():
+    from ai_agent.kb.graph import _batch_bounds
+
+    chunks = [_section_chunk(i, "第一节") for i in range(10)] + [
+        _section_chunk(i, "第二节") for i in range(10, 12)
+    ]
+    bounds = _batch_bounds(chunks, 8)
+    # 第一节占 10 片 → 满批 8 片 + 余 2 片；余量与第二节合批，不留空转批
+    assert [start for start, _b in bounds] == [0, 8]
+    assert [len(b) for _s, b in bounds] == [8, 4]
+    # 第一节的片没有被拆到两批里（2 片连续），第二节接在后面
+    assert [c.section for c in bounds[1][1]] == ["第一节"] * 2 + ["第二节"] * 2
+
+
+def test_batch_bounds_falls_back_to_sequential_without_sections():
+    from ai_agent.kb.graph import _batch_bounds
+
+    chunks = [_chunk(i) for i in range(20)]
+    assert [start for start, _b in _batch_bounds(chunks, 8)] == [0, 8, 16]
+
+
+def test_prompt_carries_section_and_page_range():
+    from ai_agent.kb.chunking import Chunk
+    from ai_agent.kb.graph import _build_prompt
+
+    chunks = [
+        Chunk(
+            text="正文一",
+            page=134,
+            kind="text",
+            page_end=135,
+            section="第十节 管理层讨论与分析",
+        )
+    ]
+    prompt = _build_prompt(chunks, 40)
+    assert "全部来自【第十节 管理层讨论与分析】" in prompt
+    assert "第134–135页" in prompt
+    assert "第十节 管理层讨论与分析" in prompt.split("\n\n")[1]
+
+
+def test_prompt_omits_section_head_for_mixed_batch():
+    from ai_agent.kb.chunking import Chunk
+    from ai_agent.kb.graph import _build_prompt
+
+    chunks = [
+        Chunk(text="甲", page=1, kind="text", section="第一节 释义"),
+        Chunk(text="乙", page=9, kind="text", section="第二节 概览"),
+    ]
+    prompt = _build_prompt(chunks, 0)
+    assert "全部来自" not in prompt
+    # 每片自己的 section 标签仍在，模型分得清片段归属
+    assert "第一节 释义" in prompt and "第二节 概览" in prompt

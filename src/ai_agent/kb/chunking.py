@@ -50,8 +50,13 @@ def chunk_segments(
     *,
     max_chars: int = 500,
     overlap: int = 50,
+    within_page: bool = False,
 ) -> list[Chunk]:
-    """按节成流、按段兜底：同节连续正文合并后聚合，表与无章节段独立处理。"""
+    """按节成流、按段兜底：同节连续正文合并后聚合，表与无章节段独立处理。
+
+    `within_page=True` 时同节内也按页断（一片只落一页，溯源最精确，但
+    跨页的长论述会被切断）；默认 False，允许同节内跨页聚合。
+    """
     chunks: list[Chunk] = []
     flow: list[Segment] = []
 
@@ -91,7 +96,13 @@ def chunk_segments(
                 )
             )
         else:
-            if flow and flow[0].section != seg.section:
+            # 两条栅栏：换节必断；开了单页栅栏时换页也断。
+            # 断点处不保留重叠——重叠只发生在同一片流内部（超长段落二次
+            # 切分时），所以重叠永远不会跨节、跨页（when within_page）。
+            if flow and (
+                flow[0].section != seg.section
+                or (within_page and flow[-1].page != seg.page)
+            ):
                 flush_flow()
             flow.append(seg)
     flush_flow()

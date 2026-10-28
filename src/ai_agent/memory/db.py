@@ -348,6 +348,8 @@ class Database:
                     user_id TEXT NOT NULL,
                     seq INT NOT NULL,
                     page INT,
+                    page_end INT,
+                    section TEXT,
                     kind TEXT NOT NULL DEFAULT 'text',
                     text TEXT NOT NULL,
                     embedding vector({dim}) NOT NULL,
@@ -368,6 +370,16 @@ class Database:
                 ALTER TABLE agent_kb_chunk
                 ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'text'
                 """
+            )
+            # 跨页切片的末页：page 存起始页，page_end 存结束页（单页片两者
+            # 相等）。引用要按「第134–135页」展示，只存起始页会误导溯源
+            conn.execute(
+                "ALTER TABLE agent_kb_chunk ADD COLUMN IF NOT EXISTS page_end INT"
+            )
+            # 所属一级节：「第十节 管理层讨论与分析」。检索/引用/图谱抽取
+            # 都要用它做上下文与分组
+            conn.execute(
+                "ALTER TABLE agent_kb_chunk ADD COLUMN IF NOT EXISTS section TEXT"
             )
             # 知识图谱（P2）：实体 / 关系 / 提及三层。
             # 全部挂在文件上做外键级联，删文件即清空图谱，不留脏数据；

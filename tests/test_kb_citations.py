@@ -194,3 +194,70 @@ def test_run_loop_omits_sources_when_nothing_was_cited(monkeypatch):
     # 没引用时不下发空数组：前端不必区分「空」和「没有」
     assert "sources" not in done
     assert "meta" not in messages[-1]
+
+
+def test_hit_where_renders_page_range_for_cross_page_chunk():
+    """跨页切片不能只说起始页：第134页和第134–135页是两种不同的溯源口径。"""
+    hit = Hit(
+        file_id=str(FILE_ID),
+        filename="招股书.pdf",
+        seq=0,
+        page=134,
+        page_end=135,
+        section="第十节 管理层讨论与分析",
+        kind="text",
+        text="正文",
+        distance=0.1,
+    )
+    assert hit.where == "第134–135页"
+    assert hit.label == "第134–135页 · 第十节 管理层讨论与分析"
+
+
+def test_hit_where_collapses_single_page_chunk():
+    hit = Hit(
+        file_id=str(FILE_ID),
+        filename="招股书.pdf",
+        seq=0,
+        page=134,
+        page_end=134,
+        kind="text",
+        text="正文",
+        distance=0.1,
+    )
+    assert hit.where == "第134页"
+
+
+def test_citation_payload_exposes_page_start_and_end():
+    """前端按 page_start == page_end 决定渲染 P134 还是 P134–P135。"""
+    citation = Citation(
+        file_id=str(FILE_ID),
+        filename="招股书.pdf",
+        seq=7,
+        page=134,
+        page_end=135,
+        section="第十节 管理层讨论与分析",
+        kind="text",
+        where="第134–135页",
+        text="正文",
+    )
+    payload = citation.payload()
+    assert payload["page_start"] == 134
+    assert payload["page_end"] == 135
+    assert payload["section"] == "第十节 管理层讨论与分析"
+    # 旧字段保留：未升级的前端仍读 page
+    assert payload["page"] == 134
+
+
+def test_citation_payload_falls_back_to_page_for_single_page_chunk():
+    citation = Citation(
+        file_id=str(FILE_ID),
+        filename="招股书.pdf",
+        seq=7,
+        page=12,
+        kind="text",
+        where="第12页",
+        text="正文",
+    )
+    payload = citation.payload()
+    assert payload["page_start"] == payload["page_end"] == 12
+    assert payload["section"] is None

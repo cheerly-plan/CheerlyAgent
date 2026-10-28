@@ -582,7 +582,8 @@ class KgStore:
         with self._get_pool().connection() as conn:
             rows = conn.execute(
                 """
-                SELECT m.entity_id, m.chunk_seq, m.hits, c.page, c.kind, c.text,
+                SELECT m.entity_id, m.chunk_seq, m.hits, c.page, c.page_end,
+                       c.section, c.kind, c.text,
                        f.filename, m.file_id
                 FROM agent_kg_mention m
                 JOIN agent_kb_chunk c
@@ -602,6 +603,8 @@ class KgStore:
                         "file_id": row["file_id"],
                         "chunk_seq": row["chunk_seq"],
                         "page": row["page"],
+                        "page_end": row.get("page_end"),
+                        "section": row.get("section"),
                         "kind": row["kind"],
                         "text": row["text"],
                         "filename": row["filename"],

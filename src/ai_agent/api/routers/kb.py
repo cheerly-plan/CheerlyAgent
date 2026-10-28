@@ -366,6 +366,7 @@ def edit_chunk(
                     filename=chunk.get("filename") or "",
                     page=chunk["page"],
                     kind=chunk["kind"],
+                    section=chunk.get("section"),
                 )
             ]
         )[0]

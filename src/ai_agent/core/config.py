@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     # 按章节切块：识别 PDF 的一级节标题（第X节/第X章），剔页眉页脚后
     # 在单节内聚合切片，一片不跨节。关掉即回到「按页切 + 页眉原样保留」
     kb_section_chunking: bool = True
+    # 单页栅栏（默认关）：开启后同节内也强制按页断，一片只落一页。
+    # 溯源最精确（page_start == page_end），但分页会把跨页的长论述、
+    # 表格注释切断，实体/关系更容易被切散到两片里——审计、法律底稿
+    # 这类「每句证据必须绑单页」的场景才打开。
+    # 关闭时（默认）允许同节内跨页聚合，引用按「第134–135页」展示。
+    kb_chunk_within_page: bool = False
     # 单批条数：DashScope 兼容接口限制单次 input 最多 10 条，超限整批报
     # InvalidParameter（表现为文件处理 failed），默认对齐上限
     kb_embedding_batch: int = 10

@@ -156,3 +156,24 @@ def test_flow_chunk_splits_long_paragraph_by_sentence():
     assert len(chunks) > 1
     assert all(len(c.text) <= 100 for c in chunks)
     assert all(isinstance(c, Chunk) and c.section for c in chunks)
+
+
+def test_within_page_mode_breaks_at_page_even_if_short():
+    # 单页栅栏打开：宁可留一片 200 字的短片，也不跨页拼
+    segments = [
+        Segment("甲" * 200, 1, TEXT, "第一节 释义"),
+        Segment("乙" * 200, 2, TEXT, "第一节 释义"),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=50, within_page=True)
+    assert [c.page for c in chunks] == [1, 2]
+    assert all(c.page == c.page_end for c in chunks)
+
+
+def test_within_page_mode_still_respects_section_fence():
+    segments = [
+        Segment("甲" * 200, 1, TEXT, "第一节 释义"),
+        Segment("乙" * 200, 1, TEXT, "第二节 概览"),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=0, within_page=True)
+    assert [c.section for c in chunks] == ["第一节 释义", "第二节 概览"]
+

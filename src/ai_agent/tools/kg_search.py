@@ -46,18 +46,22 @@ class KgSearchArgs(BaseModel):
 
 
 def _evidence_where(item: dict) -> str:
-    """证据切片的引用位置（与 kb_search 的口径一致）。"""
+    """证据切片的引用位置（与 kb_search 的口径一致，含跨页区间与章节）。"""
     kind = item.get("kind") or "text"
     page = item.get("page")
+    page_end = item.get("page_end")
+    section = item.get("section")
     if kind == "figure":
-        return f"第{page}页图表" if page is not None else "图表"
-    if kind == "table":
-        return f"表{page}" if page is not None else "表格"
-    return (
-        f"第{page}页"
-        if page is not None
-        else f"第{int(item['chunk_seq']) + 1}段"
-    )
+        where = f"第{page}页图表" if page is not None else "图表"
+    elif kind == "table":
+        where = f"表{page}" if page is not None else "表格"
+    elif page is None:
+        where = f"第{int(item['chunk_seq']) + 1}段"
+    elif page_end is not None and page_end != page:
+        where = f"第{page}–{page_end}页"
+    else:
+        where = f"第{page}页"
+    return f"{where} · {section}" if section else where
 
 
 def _kg_search(
@@ -192,6 +196,8 @@ def _collect_evidence(
                     "file_id": row["file_id"],
                     "chunk_seq": int(row["seq"]),
                     "page": row.get("page"),
+                    "page_end": row.get("page_end"),
+                    "section": row.get("section"),
                     "kind": row.get("kind") or "text",
                     "text": row.get("text") or "",
                     "filename": row.get("filename") or "",

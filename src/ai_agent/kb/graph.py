@@ -259,9 +259,21 @@ def _build_prompt(chunks: list[Chunk], start_seq: int) -> str:
     parts: list[str] = []
     for i, chunk in enumerate(chunks):
         where = f"第{chunk.page}页" if chunk.page is not None else "无页码"
-        parts.append(f"[{i}] （{chunk.kind} · {where}）\n{chunk.text}")
+        if chunk.page and chunk.page_end and chunk.page_end != chunk.page:
+            where = f"第{chunk.page}–{chunk.page_end}页"
+        tag = f"{chunk.kind} · {where}"
+        if chunk.section:
+            tag += f" · {chunk.section}"
+        parts.append(f"[{i}] （{tag}）\n{chunk.text}")
+    # 整批同属一节时，把节名提到开头：模型据此判断"这些片段是同一个业务
+    # 主题的连续论述"，关系更容易连上；跨节的批不写，免得它硬凑跨节关系
+    sections = {c.section for c in chunks}
+    head = f"以下是文档的第 {start_seq} 段起的连续片段"
+    if len(sections) == 1 and chunks[0].section:
+        head += f"，全部来自【{chunks[0].section}】"
     return (
-        f"以下是文档的第 {start_seq} 段起的连续片段：\n\n"
+        head
+        + "：\n\n"
         + "\n\n".join(parts)
         + "\n\n请抽取这些片段中的实体与关系，按约定 JSON 输出。"
     )
@@ -323,6 +335,54 @@ def _merge_extractions(first: _Extraction, second: _Extraction, *, offset: int) 
     )
 
 
+def _batch_bounds(
+    chunks: list[Chunk], batch_size: int
+) -> list[tuple[int, list[Chunk]]]:
+    """按章节组批：一节的切片不被批边界切开，小章节合批减少调用次数。
+
+    纯按 seq 每 batch_size 片切会把一节拦腰截断（"第十节"的 33 片可能被
+    切进两批，后半批看不到前半批刚定义的实体），关系就更容易抽漏——这
+    正是「597 个实体只有 299 条关系」的一个来源。这里以章节为装箱单位：
+    整节能塞进当前批就塞，塞不下换批；单节大于一批时才在节内均分。
+
+    合批只会在相邻小节之间发生（一节的尾巴 + 下一节的头），每片都带
+    section 标签，模型分得清；拆批则绝不发生在节内。
+    """
+    groups: list[tuple[str | None, int, int]] = []  # (section, start, end)
+    for i, chunk in enumerate(chunks):
+        if groups and groups[-1][0] == chunk.section:
+            groups[-1] = (chunk.section, groups[-1][1], i + 1)
+        else:
+            groups.append((chunk.section, i, i + 1))
+
+    bounds: list[tuple[int, int]] = []
+    current: tuple[int, int] | None = None
+    for _section, start, end in groups:
+        size = end - start
+        if size > batch_size:
+            # 单节就是超一批：只能按批大小顺序切（不超配置的批大小，保证
+            # 单次请求 token 可预估）。切剩的尾部不立刻封批——留给下一节
+            # 合批，避免出现只有 1~2 片的空转调用
+            if current:
+                bounds.append(current)
+            offset = start
+            while offset + batch_size < end:
+                bounds.append((offset, offset + batch_size))
+                offset += batch_size
+            current = (offset, end)
+            continue
+        if current is None:
+            current = (start, end)
+        elif current[1] - current[0] + size <= batch_size:
+            current = (current[0], end)
+        else:
+            bounds.append(current)
+            current = (start, end)
+    if current:
+        bounds.append(current)
+    return [(start, chunks[start:end]) for start, end in bounds]
+
+
 def _extract_all(
     chunks: list[Chunk],
     batch_size: int,
@@ -341,10 +401,7 @@ def _extract_all(
     单批异常只跳过该批（图谱是增强能力，部分图好过没有）；
     但全部批都异常说明是配置类错误（模型名/key），照旧抛给上层标 failed。
     """
-    bounds = [
-        (start, chunks[start : start + batch_size])
-        for start in range(0, len(chunks), batch_size)
-    ]
+    bounds = _batch_bounds(chunks, batch_size)
     results: list[_Extraction | None] = [None] * len(bounds)
     concurrency = max(1, min(settings.kb_graph_concurrency, len(bounds)))
 
@@ -586,7 +643,9 @@ def build_file_graph(
 
     batch_size = max(1, settings.kb_graph_batch_chunks)
     flush_every = max(1, settings.kb_graph_flush_batches)
-    total_batches = (len(kept) + batch_size - 1) // batch_size
+    # 批数要按「章节组批」后的实际批数算：进度百分比和分次落库的节奏都
+    # 依赖它，用 ceil(片数/批大小) 会在小章节合批后偏高
+    total_batches = len(_batch_bounds(kept, batch_size))
     accumulator = _GraphAccumulator(file_id)
     started = time.perf_counter()
     state = {"batches": 0}

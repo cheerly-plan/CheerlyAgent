@@ -199,6 +199,8 @@ class KbStore:
                 user_id,
                 seq_start + i,
                 chunk.page,
+                chunk.page_end,
+                chunk.section,
                 chunk.kind,
                 chunk.text,
                 Vector(vector),
@@ -210,8 +212,9 @@ class KbStore:
                 cur.executemany(
                     """
                     INSERT INTO agent_kb_chunk
-                        (id, file_id, user_id, seq, page, kind, text, embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        (id, file_id, user_id, seq, page, page_end, section,
+                         kind, text, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
@@ -228,7 +231,7 @@ class KbStore:
         with self._get_pool().connection() as conn:
             chunks = conn.execute(
                 """
-                SELECT seq, page, kind, text
+                SELECT seq, page, page_end, section, kind, text
                 FROM agent_kb_chunk
                 WHERE file_id = %s
                 ORDER BY seq
@@ -243,15 +246,16 @@ class KbStore:
         return chunks, int(row["total"])
 
     def list_kb_chunk_inputs(self, file_id: uuid.UUID) -> list[dict]:
-        """改名重嵌用：全量切片的 (id, text, page, kind)，按 seq 排序。
+        """改名重嵌用：全量切片的 (id, text, page, kind, section)，按 seq 排序。
 
         与 list_kb_chunks 的区别：带 id（要回写向量）、不分页（重嵌必须全量）、
-        不取 embedding（大而无用）。
+        不取 embedding（大而无用）。section 必须取：重嵌的语境前缀要跟入库
+        时一致，否则同一份文件里新旧向量不同源，召回会偏。
         """
         with self._get_pool().connection() as conn:
             return conn.execute(
                 """
-                SELECT id, text, page, kind
+                SELECT id, text, page, page_end, kind, section
                 FROM agent_kb_chunk
                 WHERE file_id = %s
                 ORDER BY seq
@@ -278,7 +282,8 @@ class KbStore:
         with self._get_pool().connection() as conn:
             return conn.execute(
                 """
-                SELECT c.id, c.file_id, c.seq, c.page, c.kind, c.text,
+                SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
+                       c.kind, c.text,
                        f.status AS file_status, f.graph_status, f.filename
                 FROM agent_kb_chunk c
                 JOIN agent_kb_file f ON f.id = c.file_id
@@ -325,7 +330,8 @@ class KbStore:
         with self._get_pool().connection() as conn:
             return conn.execute(
                 """
-                SELECT c.id, c.file_id, c.seq, c.page, c.kind, c.text,
+                SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
+                       c.kind, c.text,
                        f.filename, c.embedding <=> %(emb)s AS distance
                 FROM agent_kb_chunk c
                 JOIN agent_kb_file f ON f.id = c.file_id
@@ -377,7 +383,8 @@ class KbStore:
         with self._get_pool().connection() as conn:
             return conn.execute(
                 f"""
-                SELECT c.id, c.file_id, c.seq, c.page, c.kind, c.text,
+                SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
+                       c.kind, c.text,
                        f.filename,
                        ({score_sql})::float8 AS keyword_score
                 FROM agent_kb_chunk c

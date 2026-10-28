@@ -58,17 +58,30 @@ class Hit:
     kind: str
     text: str
     distance: float
+    # 跨页切片的末页（同节内聚合会一片跨两页）；单页片等于 page
+    page_end: int | None = None
+    # 所属一级节，如「第十节 管理层讨论与分析」
+    section: str | None = None
     before: list[str] = field(default_factory=list)
     after: list[str] = field(default_factory=list)
 
     @property
     def where(self) -> str:
-        """引用位置：表格用表号、图表标图像识别、纯文本用页码或段号。"""
+        """引用位置：表格用表号、图表标图像识别、纯文本用页码/页码区间/段号。"""
         if self.kind == TABLE:
             return f"表{self.page}" if self.page is not None else "表格"
         if self.kind == FIGURE:
             return f"第{self.page}页图表" if self.page is not None else "图表"
-        return f"第{self.page}页" if self.page is not None else f"第{self.seq + 1}段"
+        if self.page is None:
+            return f"第{self.seq + 1}段"
+        if self.page_end is not None and self.page_end != self.page:
+            return f"第{self.page}–{self.page_end}页"
+        return f"第{self.page}页"
+
+    @property
+    def label(self) -> str:
+        """完整出处：位置 + 章节（有章节时）。"""
+        return f"{self.where} · {self.section}" if self.section else self.where
 
 
 def search_knowledge(
@@ -249,6 +262,8 @@ def _to_hit(row: dict) -> Hit:
         kind=row.get("kind") or "text",
         text=row.get("text") or "",
         distance=float(row.get("distance") or 0.0),
+        page_end=row.get("page_end"),
+        section=row.get("section"),
     )
 
 

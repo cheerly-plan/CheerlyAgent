@@ -597,3 +597,23 @@ def test_rebuild_graph_reads_chunks_from_db(monkeypatch):
         "第二段正文，报告期内营收增长。",
     ]
     assert [c.page for c in seen["chunks"]] == [1, 2]
+
+
+def test_format_hit_renders_page_range_and_section():
+    """跨页切片按「第134–135页 · 第十节 …」展示：只写起始页会误导溯源。"""
+    from ai_agent.tools.kb_search import _format_hit
+
+    assert _format_hit(
+        {
+            "filename": "招股书.pdf",
+            "page": 134,
+            "page_end": 135,
+            "section": "第十节 管理层讨论与分析",
+            "seq": 0,
+            "text": "正文",
+        }
+    ) == "[招股书.pdf · 第134–135页 · 第十节 管理层讨论与分析]\n正文"
+    # 单页片不带区间
+    assert _format_hit(
+        {"filename": "招股书.pdf", "page": 12, "page_end": 12, "seq": 0, "text": "正文"}
+    ) == "[招股书.pdf · 第12页]\n正文"

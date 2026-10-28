@@ -41,6 +41,11 @@ class Citation:
     kind: str
     where: str
     text: str
+    # 跨页切片的末页；单页片等于 page（前端按 page_start==page_end 决定
+    # 显示「P134」还是「P134–P135」）
+    page_end: int | None = None
+    # 所属一级节，如「第十节 管理层讨论与分析」
+    section: str | None = None
 
     @property
     def key(self) -> str:
@@ -55,7 +60,11 @@ class Citation:
             "file_id": self.file_id,
             "filename": self.filename,
             "seq": self.seq,
+            # page 保留给旧前端；新前端用 page_start/page_end 渲染区间
             "page": self.page,
+            "page_start": self.page,
+            "page_end": self.page_end if self.page_end is not None else self.page,
+            "section": self.section,
             "kind": self.kind,
             "where": self.where,
             "excerpt": excerpt,
