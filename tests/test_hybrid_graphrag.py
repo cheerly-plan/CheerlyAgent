@@ -230,3 +230,168 @@ def test_kg_search_evidence_where_matches_kb_conventions():
 def test_kg_search_reports_empty_graph(monkeypatch):
     monkeypatch.setattr(kg_search.store, "graph_stats", lambda **k: {"entities": 0})
     assert "知识图谱还没有数据" in kg_search._kg_search("任何问题")
+
+
+# ---------- 标签预过滤 ----------
+
+
+def _kb_file(fid, tags, status="ready"):
+    return {"file_id": fid, "tags": tags, "status": status}
+
+
+def test_tag_scope_narrows_to_tagged_match():
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    files = [_kb_file(a, ["考勤制度"]), _kb_file(b, ["FAQ"]), _kb_file(c, ["薪酬"])]
+    assert retrieval._tag_scope_ids(["考勤"], files) == [a]
+
+
+def test_tag_scope_none_when_any_file_untagged():
+    a, b = uuid.uuid4(), uuid.uuid4()
+    files = [_kb_file(a, ["考勤"]), _kb_file(b, [])]
+    # 有文件没标签：标签语义覆盖不了它，收窄会漏，宁可放弃
+    assert retrieval._tag_scope_ids(["考勤"], files) is None
+
+
+def test_tag_scope_none_when_no_discrimination():
+    a, b = uuid.uuid4(), uuid.uuid4()
+    files = [_kb_file(a, ["考勤"]), _kb_file(b, ["考勤制度"])]
+    assert retrieval._tag_scope_ids(["考勤"], files) is None  # 全员命中
+    assert retrieval._tag_scope_ids(["报销"], files) is None  # 全员未命中
+
+
+def test_tag_scope_matches_bidirectional_substring_case_insensitive():
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    files = [_kb_file(a, ["OT-01 考勤"]), _kb_file(b, ["薪酬"]), _kb_file(c, ["FAQ"])]
+    assert retrieval._tag_scope_ids(["ot-01"], files) == [a]  # 大小写不敏感
+    # 方向一：关键词是标签的子串，"考勤" 命中复合标签 "OT-01 考勤"
+    assert retrieval._tag_scope_ids(["考勤"], files) == [a]
+    # 方向二：标签是关键词的子串，"考勤" 命中 "考勤处罚规定"
+    files2 = [_kb_file(a, ["考勤"]), _kb_file(b, ["薪酬"])]
+    assert retrieval._tag_scope_ids(["考勤处罚规定"], files2) == [a]
+
+
+def test_search_with_tag_scope_pads_from_full_search(monkeypatch):
+    from ai_agent.kb.retrieval import Hit
+    from ai_agent.tools import kb_search
+
+    def hit(fid, seq):
+        return Hit(
+            file_id=str(fid), filename="f", seq=seq, page=None,
+            kind="text", text="t", distance=0.4,
+        )
+
+    scoped, other = uuid.uuid4(), uuid.uuid4()
+    monkeypatch.setattr(kb_search, "tag_file_scope", lambda q: [scoped])
+
+    calls = []
+
+    def fake_search(query, file_ids=None, top_k=3):
+        calls.append(file_ids)
+        if file_ids:  # 收窄那一搜只有 1 条：弱召回
+            return [hit(scoped, 0)]
+        return [hit(scoped, 0), hit(other, 1), hit(other, 2)]
+
+    monkeypatch.setattr(kb_search, "search_knowledge", fake_search)
+    hits = kb_search._search_with_tag_scope("考勤怎么算", top_k=3)
+    assert calls == [[scoped], None]  # 先收窄，兜底走全库
+    assert len(hits) == 3
+    assert (hits[0].file_id, hits[0].seq) == (str(scoped), 0)  # 收窄结果排前
+
+
+def test_search_with_tag_scope_skips_when_no_scope(monkeypatch):
+    from ai_agent.tools import kb_search
+
+    monkeypatch.setattr(kb_search, "tag_file_scope", lambda q: None)
+    calls = []
+
+    def fake_search(query, file_ids=None, top_k=3):
+        calls.append(file_ids)
+        return []
+
+    monkeypatch.setattr(kb_search, "search_knowledge", fake_search)
+    kb_search._search_with_tag_scope("随便问", top_k=3)
+    assert calls == [None]  # 没有可用范围：只搜一次全库
+
+
+# ---------- 图谱抽取并行化 ----------
+
+
+def _chunk(seq):
+    from ai_agent.kb.chunking import Chunk
+
+    return Chunk(text=f"片段{seq}", page=None, kind="text")
+
+
+def _extract_with_marker(chunks, start_seq):
+    """让结果携带 start_seq，验证批序与分批正确性。"""
+    from ai_agent.kb.graph import _Entity, _Extraction
+
+    return _Extraction(
+        entities=[_Entity(name=f"e{start_seq}", chunk=0)],
+    )
+
+
+def test_extract_all_keeps_batch_order(monkeypatch):
+    """并发执行但结果按批序排列：合并阶段的跨批语义不因并行而变。"""
+    from ai_agent.kb import graph
+
+    monkeypatch.setattr(graph, "_extract_batch", _extract_with_marker)
+    monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 4)
+
+    chunks = [_chunk(i) for i in range(20)]  # 8/批 → 3 批
+    out = graph._extract_all(chunks, 8)
+
+    assert [start for start, _b, _r in out] == [0, 8, 16]
+    assert [r.entities[0].name for _s, _b, r in out] == ["e0", "e8", "e16"]
+    assert [len(b) for _s, b, _r in out] == [8, 8, 4]  # 尾批不足 8
+
+
+def test_extract_all_skips_failed_batch(monkeypatch):
+    """单批异常只跳过该批，其余批结果保留。"""
+    from ai_agent.kb import graph
+
+    calls = []
+
+    def flaky(chunks, start_seq):
+        calls.append(start_seq)
+        if start_seq == 8:
+            raise ConnectionError("网关抖动")
+        return _extract_with_marker(chunks, start_seq)
+
+    monkeypatch.setattr(graph, "_extract_batch", flaky)
+    monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 2)
+
+    chunks = [_chunk(i) for i in range(24)]
+    out = graph._extract_all(chunks, 8)
+
+    assert sorted(calls) == [0, 8, 16]
+    assert [
+        r.entities[0].name if r.entities else "(跳过)" for _s, _b, r in out
+    ] == ["e0", "(跳过)", "e16"]
+
+
+def test_extract_all_raises_when_all_batches_fail(monkeypatch):
+    """全部批失败 = 配置类错误：抛给上层标 failed，不能伪装成空图。"""
+    import pytest as _pytest
+
+    from ai_agent.kb import graph
+
+    def boom(chunks, start_seq):
+        raise ConnectionError("模型不存在")
+
+    monkeypatch.setattr(graph, "_extract_batch", boom)
+    monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 2)
+
+    chunks = [_chunk(i) for i in range(16)]
+    with _pytest.raises(RuntimeError):
+        graph._extract_all(chunks, 8)
+
+
+def test_extract_all_serial_when_concurrency_one(monkeypatch):
+    from ai_agent.kb import graph
+
+    monkeypatch.setattr(graph, "_extract_batch", _extract_with_marker)
+    monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 1)
+
+    out = graph._extract_all([_chunk(i) for i in range(8)], 8)
+    assert len(out) == 1 and out[0][2].entities[0].name == "e0"

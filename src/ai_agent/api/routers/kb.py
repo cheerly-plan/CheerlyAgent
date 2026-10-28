@@ -12,6 +12,8 @@
   GET    /v1/kb/files                      文件列表（所有登录用户；?q= 文件名
                                            模糊 / ?tag= 标签筛选）
   PATCH  /v1/kb/files/{id}/tags            全量覆盖设置标签（管理员）
+  PATCH  /v1/kb/files/{id}                 重命名（管理员）：DB + 磁盘同步改，
+                                           stem 变化触发后台整份重嵌
   GET    /v1/kb/files/{id}/download        下载原始文件（所有登录用户）
   GET    /v1/kb/files/{id}/chunks          切片明细（所有登录用户）
   PATCH  /v1/kb/files/{id}/chunks/{seq}    修订切片正文，单片重嵌入（管理员）
@@ -31,7 +33,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ai_agent.api.dependencies import get_current_user, require_admin
-from ai_agent.api.schemas import KbChunkEditRequest, KbInitRequest, KbTagsRequest
+from ai_agent.api.schemas import (
+    KbChunkEditRequest,
+    KbInitRequest,
+    KbRenameRequest,
+    KbTagsRequest,
+)
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import embedding_input
@@ -235,6 +242,51 @@ def set_file_tags(
     tags = _clean_tags(req.tags)
     store.set_kb_file_tags(fid, tags)
     return {"ok": True, "tags": tags}
+
+
+@router.patch("/files/{file_id}")
+def rename_file(
+    file_id: str, req: KbRenameRequest, user: UserRecord = Depends(require_admin)
+):
+    """管理员重命名：DB 展示名 + 磁盘文件同步改，stem 变了再后台重嵌。
+
+    两个不能省的联动：
+    - 磁盘文件按 filename 落盘（complete_upload），只改 DB 下载就 404；
+    - 切片向量在嵌入时烧进了《文件名》语境前缀，改名不重嵌，这份文件的
+      向量语境就永远停在旧名上。
+    """
+    fid = _parse_file_id(file_id)
+    record = _get_file(file_id)
+    if record["status"] != "ready":
+        raise HTTPException(status_code=409, detail="文件处理完成后才能改名")
+
+    old_name = record["filename"]
+    new_name = _safe_filename(req.filename)
+    old_suffix = Path(old_name).suffix.lower()
+    if Path(new_name).suffix.lower() != old_suffix:
+        raise HTTPException(
+            status_code=400,
+            detail=f"扩展名需保持 {old_suffix} 不变（解析器与下载类型都按它识别）",
+        )
+    if new_name == old_name:
+        return {"ok": True, "filename": old_name, "reembedding": False}
+
+    stem_changed = Path(new_name).stem != Path(old_name).stem
+    store.rename_kb_file(fid, new_name)
+    old_path = _upload_dir(file_id) / old_name
+    if old_path.is_file():
+        old_path.rename(_upload_dir(file_id) / new_name)
+    if stem_changed:
+        kb_pipeline.submit_reembed(fid)
+    logger.info(
+        "kb 改名 admin=%s file_id=%s %s -> %s reembed=%s",
+        user.username,
+        fid,
+        old_name,
+        new_name,
+        stem_changed,
+    )
+    return {"ok": True, "filename": new_name, "reembedding": stem_changed}
 
 
 @router.get("/files/{file_id}/download")

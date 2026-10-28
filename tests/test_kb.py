@@ -18,6 +18,7 @@ from ai_agent.api.routers.kb import (
     init_upload,
     list_chunks,
     list_files,
+    rename_file,
     set_file_tags,
 )
 from ai_agent.api.routers.kg import build_graphs, entity_chunks, file_graph, global_graph, rebuild_graph, search_graph
@@ -268,7 +269,7 @@ def test_clean_tags_strips_dedupes_and_caps():
     assert _clean_tags([]) == []
 
 
-def _prepare_complete(monkeypatch):
+def _prepare_complete(request, monkeypatch):
     """complete_upload 的公共桩：建档记录 + 分片落盘 + store/pipeline 打桩。
 
     临时目录放项目内（.tmp-kb-test）：系统 tmp 目录在沙箱里写不进去。
@@ -279,7 +280,8 @@ def _prepare_complete(monkeypatch):
     from ai_agent.api.routers import kb as kb_router
 
     base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    base.mkdir(exist_ok=True)
+    if not base.exists():
+        base.mkdir()
     upload_root = base / _uuid.uuid4().hex
     record = {
         "id": _uuid.uuid4(),
@@ -293,7 +295,7 @@ def _prepare_complete(monkeypatch):
     part_dir.mkdir(parents=True)
     (part_dir / "000000.part").write_bytes(b"ABCD")
     # 测试收尾清理整个临时根目录（record 目录已由被测代码自己删）
-    monkeypatch.finalize(lambda: shutil.rmtree(base, ignore_errors=True))
+    request.addfinalizer(lambda: shutil.rmtree(base, ignore_errors=True))
     return kb_router, record
 
 
@@ -339,3 +341,259 @@ def test_check_duplicate_passes_new_content(monkeypatch):
     kb_router._check_duplicate("a" * 64, _uuid.uuid4(), "a.pdf", "alice")
     assert deleted == []
 
+
+
+# ---------- 改名 ----------
+
+
+def _rename_record(request, monkeypatch, status="ready", filename="旧报告.pdf"):
+    """rename_file 的公共桩：ready 记录 + 磁盘上放好旧名文件 + pipeline 打桩。"""
+    import shutil
+    import uuid as _uuid
+
+    from ai_agent.api.routers import kb as kb_router
+
+    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
+    if not base.exists():
+        base.mkdir()
+    upload_root = base / _uuid.uuid4().hex
+    fid = _uuid.uuid4()
+    record = {"id": fid, "filename": filename, "size_bytes": 4, "status": status}
+    monkeypatch.setattr(kb_router, "_parse_file_id", lambda _fid: fid)
+    monkeypatch.setattr(kb_router, "_get_file", lambda _fid: record)
+    monkeypatch.setattr(kb_router.settings, "kb_upload_dir", upload_root)
+    renamed: list = []
+    monkeypatch.setattr(
+        kb_router.store,
+        "rename_kb_file",
+        lambda _fid, name: renamed.append(name) or True,
+    )
+    submitted: list = []
+    monkeypatch.setattr(
+        kb_router.kb_pipeline, "submit_reembed", lambda _fid: submitted.append(_fid)
+    )
+    request.addfinalizer(lambda: shutil.rmtree(base, ignore_errors=True))
+    return kb_router, record, renamed, submitted
+
+
+def test_rename_rejects_suffix_change(request, monkeypatch):
+    from ai_agent.api.schemas import KbRenameRequest
+
+    kb_router, record, renamed, submitted = _rename_record(request, monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        rename_file("x", KbRenameRequest(filename="新报告.docx"), _admin())
+    assert exc.value.status_code == 400
+    assert renamed == [] and submitted == []
+
+
+def test_rename_requires_ready(request, monkeypatch):
+    from ai_agent.api.schemas import KbRenameRequest
+
+    kb_router, record, renamed, submitted = _rename_record(
+        request, monkeypatch, status="parsing"
+    )
+    with pytest.raises(HTTPException) as exc:
+        rename_file("x", KbRenameRequest(filename="新报告.pdf"), _admin())
+    assert exc.value.status_code == 409
+    assert renamed == [] and submitted == []
+
+
+def test_rename_updates_db_disk_and_reembeds(request, monkeypatch):
+    """stem 变了：DB 改名 + 磁盘文件重命名 + 后台重嵌，三件事都发生。"""
+    import uuid as _uuid
+
+    from ai_agent.api.schemas import KbRenameRequest
+
+    kb_router, record, renamed, submitted = _rename_record(request, monkeypatch)
+    upload_dir = kb_router.Path(kb_router.settings.kb_upload_dir) / str(record["id"])
+    upload_dir.mkdir(parents=True)
+    (upload_dir / record["filename"]).write_bytes(b"ABCD")
+
+    result = rename_file(
+        str(record["id"]), KbRenameRequest(filename="2026 新报告.pdf"), _admin()
+    )
+
+    assert result == {"ok": True, "filename": "2026 新报告.pdf", "reembedding": True}
+    assert renamed == ["2026 新报告.pdf"]
+    assert (upload_dir / "2026 新报告.pdf").is_file()
+    assert not (upload_dir / record["filename"]).exists()
+    assert submitted == [record["id"]]
+
+
+def test_rename_same_stem_skips_reembed(request, monkeypatch):
+    """仅扩展名大小写变化（stem 不变）：向量语境没变，不值得整份重嵌。"""
+    from ai_agent.api.schemas import KbRenameRequest
+
+    kb_router, record, renamed, submitted = _rename_record(
+        request, monkeypatch, filename="报告.PDF"
+    )
+    result = rename_file("x", KbRenameRequest(filename="报告.pdf"), _admin())
+    assert result["reembedding"] is False
+    assert renamed == ["报告.pdf"] and submitted == []
+
+
+def _admin():
+    return UserRecord(
+        user_id="u1", username="alice", display_name="Alice",
+        created_at=datetime.now(UTC).isoformat(),
+    )
+
+
+# ---------- 并行向量化与并行视觉 ----------
+
+
+def test_embed_texts_parallel_keeps_order(monkeypatch):
+    """多批并发执行，但结果顺序与输入严格一致（写错位会毁掉全部检索）。"""
+    from ai_agent.memory import embeddings
+
+    def fake_embed(texts):
+        return [[len(t), 0] for t in texts]
+
+    monkeypatch.setattr(embeddings, "embed_texts", fake_embed)
+    texts = [f"t{i:02d}" for i in range(25)]  # 10/批 → 3 批
+    out = embeddings.embed_texts_parallel(texts, concurrency=3)
+    assert out == fake_embed(texts)
+
+
+def test_embed_texts_parallel_single_batch_passthrough(monkeypatch):
+    """不足两批直接走串行路径，不开线程池。"""
+    from ai_agent.memory import embeddings
+
+    called = []
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda ts: called.append(list(ts)) or [[1]]
+    )
+    assert embeddings.embed_texts_parallel(["a"], concurrency=4) == [[1]]
+    assert embeddings.embed_texts_parallel(["a", "b"], concurrency=0) == [[1]]
+    assert embeddings.embed_texts_parallel([], concurrency=4) == []
+
+
+def test_embed_texts_parallel_failure_propagates(monkeypatch):
+    """任一批失败抛 LLMError：与串行版失败语义一致，调用方决定怎么兜。"""
+    import pytest as _pytest
+
+    from ai_agent.core.exceptions import LLMError
+    from ai_agent.memory import embeddings
+
+    def flaky(texts):
+        if texts and texts[0] == "t10":
+            raise LLMError("boom")
+        return [[0] for _ in texts]
+
+    monkeypatch.setattr(embeddings, "embed_texts", flaky)
+    with _pytest.raises(LLMError):
+        embeddings.embed_texts_parallel([f"t{i}" for i in range(20)], concurrency=3)
+
+
+def test_describe_parallel_keeps_order(monkeypatch):
+    """视觉并行：结果顺序与输入一致（页码归属不能乱）。"""
+    from ai_agent.kb import parsing
+
+    def fake_describe(blob, mime):
+        return f"desc-{blob.decode()}"
+
+    monkeypatch.setattr(parsing.vision, "describe_image", fake_describe)
+    jobs = [(b"1", "image/png"), (b"2", "image/png"), (b"3", "image/png")]
+    assert parsing._describe_parallel(jobs) == ["desc-1", "desc-2", "desc-3"]
+
+    monkeypatch.setattr(parsing.settings, "kb_vision_concurrency", 1)
+    assert parsing._describe_parallel(jobs) == ["desc-1", "desc-2", "desc-3"]
+
+
+# ——— 图表页筛选：别把表格页当图表送视觉模型 ———
+
+
+class _FakePage:
+    """只实现 _page_has_chart 用到的那几个方法。"""
+
+    def __init__(self, images=(), drawings=0, size=(600, 800)):
+        self._images = list(images)
+        self._drawings = drawings
+        self.rect = type("Rect", (), {"width": size[0], "height": size[1]})()
+
+    def get_image_info(self):
+        return [{"bbox": (0, 0, w, h)} for w, h in self._images]
+
+    def get_images(self, full=False):
+        return [(1, 0, w, h, 8, "", "", "", "") for w, h in self._images]
+
+    def get_drawings(self):
+        if self._drawings == "boom":
+            raise ValueError("坏页")
+        return [{}] * self._drawings
+
+
+def test_chart_page_skips_dense_text_page():
+    """整页表格：几百条矢量边框 + 上千字正文 —— 不是图表页。
+
+    实测 331 页招股书按「路径数 ≥ 150」误判 124 页，20 页预算全烧在
+    目录和财务报表上，每页还要等一次视觉调用。
+    """
+    from ai_agent.kb import parsing
+
+    page = _FakePage(drawings=215, images=[(80, 60)])
+    assert parsing._page_has_chart(page, text_len=1085) is False
+
+
+def test_chart_page_accepts_large_image_with_little_text():
+    from ai_agent.kb import parsing
+
+    page = _FakePage(images=[(500, 600)])  # 占页面大半
+    assert parsing._page_has_chart(page, text_len=180) is True
+
+
+def test_chart_page_ignores_logo_sized_image():
+    """页眉 logo / 装饰线不算图表：面积占比够不上阈值。"""
+    from ai_agent.kb import parsing
+
+    page = _FakePage(images=[(60, 40)], drawings=3)
+    assert parsing._page_has_chart(page, text_len=200) is False
+
+
+def test_chart_page_accepts_vector_only_chart():
+    """ECharts 走 SVG 导出时没有位图，靠路径数识别（但要求文字少）。"""
+    from ai_agent.kb import parsing
+
+    page = _FakePage(drawings=200)
+    assert parsing._page_has_chart(page, text_len=120) is True
+
+
+def test_chart_page_survives_broken_page():
+    """单页取图信息报错不能把整份解析带崩。"""
+    from ai_agent.kb import parsing
+
+    page = _FakePage(drawings="boom")
+    assert parsing._page_has_chart(page, text_len=100) is False
+
+
+def test_rebuild_graph_reads_chunks_from_db(monkeypatch):
+    """图谱重建不再重新解析源文件：PDF 重新解析要再渲染 + 视觉识别一遍，
+    几分钟白花，而且重切的 seq 与库里的切片对不上。"""
+    import uuid as _uuid
+
+    from ai_agent.kb import pipeline as pl
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        pl.store,
+        "list_kb_chunk_inputs",
+        lambda fid: [
+            {"id": 1, "text": "第一段正文，公司主营装饰工程。", "page": 1, "kind": "text"},
+            {"id": 2, "text": "第二段正文，报告期内营收增长。", "page": 2, "kind": "text"},
+        ],
+    )
+    monkeypatch.setattr(pl.store, "update_graph_status", lambda *a, **k: seen.setdefault("status", a[1]))
+    monkeypatch.setattr(pl, "build_file_graph", lambda fid, chunks, **k: seen.update(chunks=chunks) or {"entities": 3})
+
+    def boom(*a, **k):
+        raise AssertionError("重建图谱不该重新解析源文件")
+
+    monkeypatch.setattr(pl, "parse_segments", boom)
+
+    pl.kb_pipeline._rebuild_graph(_uuid.uuid4())
+
+    assert [c.text for c in seen["chunks"]] == [
+        "第一段正文，公司主营装饰工程。",
+        "第二段正文，报告期内营收增长。",
+    ]
+    assert [c.page for c in seen["chunks"]] == [1, 2]

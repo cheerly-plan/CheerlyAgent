@@ -6,25 +6,36 @@ agent_kb_file.status（parsing → embedding → ready / failed），
 前端轮询文件列表即可看到，不单独建 job 表。
 """
 
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.chunking import chunk_segments, embedding_input
+from ai_agent.kb.chunking import Chunk, chunk_segments, embedding_input
 from ai_agent.kb.graph import build_file_graph
 from ai_agent.kb.parsing import parse_segments
-from ai_agent.memory.embeddings import embed_texts
+from ai_agent.memory.embeddings import embed_texts_parallel
 from ai_agent.memory.store import store
 
 logger = get_logger(__name__)
 
 
 class KbPipeline:
-    def __init__(self, workers: int = 2) -> None:
+    """两条独立线程池：解析/向量化（短任务）与图谱抽取（长任务）。
+
+    分池是必要的：一次图谱抽取是几十分钟的活，跟解析/向量化挤同一个池子时，
+    管理员点了「建图」之后上传的新文件只能排队等它跑完——用户看到的现象是
+    「切片生成也变慢了」，实际是队列被长任务占住了。
+    """
+
+    def __init__(self, workers: int = 2, graph_workers: int = 1) -> None:
         self._pool = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="kb-pipeline"
+        )
+        self._graph_pool = ThreadPoolExecutor(
+            max_workers=max(1, graph_workers), thread_name_prefix="kb-graph"
         )
 
     def recover_stuck(self) -> None:
@@ -39,17 +50,24 @@ class KbPipeline:
     def submit(self, file_id: uuid.UUID, user_id: str, path: Path) -> None:
         self._pool.submit(self._process, file_id, user_id, path)
 
-    def submit_graph(self, file_id: uuid.UUID, path: Path) -> None:
-        """只重建图谱（切片已在库里，不重复入库）。"""
-        self._pool.submit(self._rebuild_graph, file_id, path)
+    def submit_graph(self, file_id: uuid.UUID) -> None:
+        """只重建图谱（切片已在库里，不重复解析源文件）。"""
+        self._graph_pool.submit(self._rebuild_graph, file_id)
+
+    def submit_reembed(self, file_id: uuid.UUID) -> None:
+        """改名后按新文件名重嵌全部切片（后台）。"""
+        self._pool.submit(self._reembed, file_id)
 
     def shutdown(self, wait: bool = True) -> None:
         self._pool.shutdown(wait=wait, cancel_futures=False)
+        self._graph_pool.shutdown(wait=wait, cancel_futures=False)
 
     def _process(self, file_id: uuid.UUID, user_id: str, path: Path) -> None:
         try:
+            stage = time.perf_counter()
             store.update_kb_status(file_id, "parsing")
             segments = parse_segments(path)
+            parse_seconds = time.perf_counter() - stage
             chunks = chunk_segments(
                 segments,
                 max_chars=settings.kb_chunk_size,
@@ -60,32 +78,44 @@ class KbPipeline:
                 return
             store.update_kb_status(file_id, "embedding")
             # 嵌入时带上「文档名 + 页码/表号」的语境前缀（见 chunking.context_prefix）：
-            # 存储的正文不变，只是送进向量模型的那份文本更有辨识度
+            # 存储的正文不变，只是送进向量模型的那份文本更有辨识度。
+            # 批间并行（EMBEDDING_CONCURRENCY），结果顺序与切片一致
             filename = (store.get_kb_file(file_id) or {}).get("filename") or path.name
+            embed_stage = time.perf_counter()
+            vectors = embed_texts_parallel(
+                [
+                    embedding_input(
+                        chunk.text,
+                        filename=filename,
+                        page=chunk.page,
+                        kind=chunk.kind,
+                    )
+                    for chunk in chunks
+                ],
+                concurrency=settings.kb_embedding_concurrency,
+            )
+            embed_seconds = time.perf_counter() - embed_stage
+            db_stage = time.perf_counter()
             done = 0
             batch = settings.kb_embedding_batch
             for seq_start in range(0, len(chunks), batch):
-                part = chunks[seq_start : seq_start + batch]
-                vectors = embed_texts(
-                    [
-                        embedding_input(
-                            chunk.text,
-                            filename=filename,
-                            page=chunk.page,
-                            kind=chunk.kind,
-                        )
-                        for chunk in part
-                    ]
-                )
                 done += store.insert_kb_chunks(
-                    file_id, user_id, part, vectors, seq_start
+                    file_id,
+                    user_id,
+                    chunks[seq_start : seq_start + batch],
+                    vectors[seq_start : seq_start + batch],
+                    seq_start,
                 )
             store.update_kb_status(file_id, "ready", chunk_count=done)
             logger.info(
-                "kb 处理完成 file_id=%s chunks=%d bytes=%d",
+                "kb 处理完成 file_id=%s chunks=%d bytes=%d "
+                "parse=%.1fs embed=%.1fs db=%.1fs",
                 file_id,
                 done,
                 path.stat().st_size,
+                parse_seconds,
+                embed_seconds,
+                time.perf_counter() - db_stage,
             )
             # 图谱不再自动生成：管理员在知识库页人工核对/修订切片后，
             # 自己选文件触发（POST /v1/kg/graph/build）——图谱是贵的 LLM
@@ -95,17 +125,29 @@ class KbPipeline:
             logger.exception("kb 处理失败 file_id=%s", file_id)
             store.update_kb_status(file_id, "failed", error=str(e)[:300])
 
-    def _rebuild_graph(self, file_id: uuid.UUID, path: Path) -> None:
-        """重新解析源文件并重建图谱（切片不重新入库）。"""
+    def _rebuild_graph(self, file_id: uuid.UUID) -> None:
+        """用库里的切片重建图谱（不重新解析源文件）。
+
+        为什么不再 parse：切片已经是「解析 + 人工核对」后的结果，重新解析
+        不仅要再跑一遍（PDF 还要再渲染 + 视觉识别 20 页，几分钟），
+        还可能因为 chunk 参数变化导致 seq 与库里的切片对不上——
+        mention 指向错的原文比没有 mention 更糟。
+        """
         try:
             store.update_graph_status(file_id, "building")
-            segments = parse_segments(path)
-            chunks = chunk_segments(
-                segments,
-                max_chars=settings.kb_chunk_size,
-                overlap=settings.kb_chunk_overlap,
+            rows = store.list_kb_chunk_inputs(file_id)
+            chunks = [
+                Chunk(text=r["text"], page=r["page"], kind=r["kind"]) for r in rows
+            ]
+            if not chunks:
+                raise RuntimeError("文件没有可用的切片，请先重新解析")
+            counts = build_file_graph(
+                file_id,
+                chunks,
+                progress=lambda c: store.update_graph_status(
+                    file_id, "building", entity_count=c["entities"]
+                ),
             )
-            counts = build_file_graph(file_id, chunks)
             store.update_graph_status(
                 file_id, "ready", entity_count=counts["entities"]
             )
@@ -113,5 +155,40 @@ class KbPipeline:
             logger.exception("kb 图谱重建失败 file_id=%s", file_id)
             store.update_graph_status(file_id, "failed")
 
+    def _reembed(self, file_id: uuid.UUID) -> None:
+        """改名重嵌：语境前缀《文件名》在嵌入时就烧进向量里（不落库），
+        改名后同一份文件的向量语境还停在旧名，必须整份重算才干净。
+        只换向量不动文本；失败只影响语境新鲜度，检索照常可用。"""
+        try:
+            record = store.get_kb_file(file_id)
+            if record is None:
+                return
+            filename = record["filename"]
+            chunks = store.list_kb_chunk_inputs(file_id)
+            vectors = embed_texts_parallel(
+                [
+                    embedding_input(
+                        c["text"],
+                        filename=filename,
+                        page=c["page"],
+                        kind=c["kind"],
+                    )
+                    for c in chunks
+                ],
+                concurrency=settings.kb_embedding_concurrency,
+            )
+            done = 0
+            batch = settings.kb_embedding_batch
+            for start in range(0, len(chunks), batch):
+                part = chunks[start : start + batch]
+                done += store.update_kb_chunk_vectors(
+                    list(zip((c["id"] for c in part), vectors[start : start + batch]))
+                )
+            logger.info("kb 改名重嵌完成 file_id=%s chunks=%d", file_id, done)
+        except Exception:
+            logger.exception("kb 改名重嵌失败 file_id=%s", file_id)
 
-kb_pipeline = KbPipeline(workers=settings.kb_pipeline_workers)
+
+kb_pipeline = KbPipeline(
+    workers=settings.kb_pipeline_workers, graph_workers=settings.kb_graph_workers
+)

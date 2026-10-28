@@ -74,7 +74,14 @@ class Settings(BaseSettings):
     # 单批条数：DashScope 兼容接口限制单次 input 最多 10 条，超限整批报
     # InvalidParameter（表现为文件处理 failed），默认对齐上限
     kb_embedding_batch: int = 10
+    # 向量化批间并发：大文件是几十个串行 API 往返，批与批互相独立；
+    # 并发 3 一般安全，网关报 429 就降回 1
+    kb_embedding_concurrency: int = 3
     kb_pipeline_workers: int = 2
+    # 图谱构建的独立线程数。必须和 kb_pipeline_workers 分池：一次图谱抽取
+    # 是 40 分钟级的长任务，跟解析/向量化挤同一个池子时，后上传的文件只能
+    # 排队等它跑完——表现为「切片生成也变慢了」
+    kb_graph_workers: int = 1
     # 表格：单个工作表最多取多少行，防止超大表撑爆切片与向量库
     kb_sheet_max_rows: int = 2000
 
@@ -84,8 +91,22 @@ class Settings(BaseSettings):
     kb_vision_model: str = ""
     kb_vision_max_pages: int = 20
     kb_vision_dpi: int = 150
+    # 视觉识别并发：页面渲染是本地快的，慢的是视觉调用，按并发数分批送
+    kb_vision_concurrency: int = 3
     # 无位图时（ECharts 走 SVG 导出），矢量路径数超过该值视为图表页
     kb_vision_vector_paths: int = 150
+    # 单次视觉调用的硬超时。SDK 默认 600s：本地视觉模型一旦卡死（模型要
+    # 换入显存、图片 token 超上下文），一张图就能堵十分钟，20 页预算就是
+    # 两小时的解析时间——而结果大概率还是 None
+    kb_vision_timeout_seconds: float = 90.0
+    # 连续失败（超时）多少次就熔断本次进程的视觉识别：卡住的调用不是
+    # 「这一张图」的问题，接着试只是把同样的等待重复 20 遍
+    kb_vision_max_failures: int = 2
+    # 正文超过这么多字的页面不算图表页：招股书/财报里整页表格会画出几百条
+    # 矢量边框，按路径数判断会把表格页误送视觉模型（白烧预算还更慢）
+    kb_vision_max_text_chars: int = 600
+    # 位图占页面面积的比例下限：页眉 logo、装饰线、水印都远小于该值
+    kb_vision_min_image_ratio: float = 0.06
 
     # 知识图谱（P2）：切片入库后异步抽取实体关系（每批 = 一次 LLM 调用）。
     # 默认开启；关闭后新上传的文件不再生成图谱，已有图谱保留、仍可检索。
@@ -95,7 +116,19 @@ class Settings(BaseSettings):
     # 小模型漏关系严重，而且部署方的 SMALL_MODEL 不一定真的开通了
     kb_graph_model: str = ""
     kb_graph_batch_chunks: int = 8
-    kb_graph_timeout_seconds: float = 45
+    # 每积累多少批就把当前图谱覆盖落库一次。抽 700 多个切片要跑几十批、
+    # 几十分钟，中途崩了不能前功尽弃：落过库的部分图能直接看，
+    # 前端轮询也能看到实体数往上涨
+    kb_graph_flush_batches: int = 15
+    # 短于该字数的切片不进图谱：目录行、页码、页眉页脚抽不出实体，
+    # 却要付一次完整的 LLM 调用
+    kb_graph_min_chunk_chars: int = 40
+    # 抽取批并发数：批与批互相独立，串行是图谱构建慢的主因。
+    # 3 路 ≈ 快 3 倍；调大前先确认网关限流（偶发 429 只是丢一批，不致命）
+    kb_graph_concurrency: int = 3
+    # 单批抽取的超时：云端模型 45s 够，但本地 7B 模型产出 4k token 的 JSON
+    # 常要 60~150s，给足余量（超时 = 丢一批，宁可慢也别丢）
+    kb_graph_timeout_seconds: float = 180
     # 检索时取多少个种子实体、向前端返回的图最大节点数
     kb_graph_top_k: int = 6
     kb_graph_max_nodes: int = 200
@@ -126,6 +159,11 @@ class Settings(BaseSettings):
     kb_hybrid_keywords: int = 6
     # 关键词路的召回条数：与向量路同量级，融合后一起去重/重排
     kb_hybrid_candidates: int = 12
+    # 标签预过滤：查询关键词命中文件标签时先收窄到这批文件再检索，
+    # 少了别的文件的干扰项（如 FAQ），重排输入更干净。
+    # 代价是可能判窄，所以调用方必须带弱召回兜底（见 tools/kb_search）。
+    # 提取关键词用的是已有逻辑，没有新增 LLM 调用
+    kb_tag_scope_enabled: bool = True
 
     database_url: str
     embedding_model: str

@@ -28,6 +28,12 @@ class KbTagsRequest(BaseModel):
     tags: list[str] = Field(max_length=8)
 
 
+class KbRenameRequest(BaseModel):
+    """管理员重命名文件：DB 展示名与磁盘文件同步改，stem 变了再触发重嵌。"""
+
+    filename: str = Field(min_length=1, max_length=255)
+
+
 class KbChunkEditRequest(BaseModel):
     """人工修订切片正文：保存即单片重嵌入。"""
 

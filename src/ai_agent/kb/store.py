@@ -74,6 +74,24 @@ class KbStore:
             conn.commit()
         return row is not None
 
+    def rename_kb_file(self, file_id: uuid.UUID, filename: str) -> bool:
+        """改文件展示名；文件不存在返回 False（调用方转 404）。
+
+        磁盘文件与展示名同名（complete 时按 filename 落盘），改名必须
+        同步重命名磁盘文件，否则下载 404——这在路由层做，这里只管 DB。
+        """
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE agent_kb_file SET filename = %s, updated_at = now()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (filename, file_id),
+            ).fetchone()
+            conn.commit()
+        return row is not None
+
     def find_kb_file_by_hash(
         self, content_hash: str, *, exclude_file_id: uuid.UUID | None = None
     ) -> dict | None:
@@ -223,6 +241,37 @@ class KbStore:
                 (file_id,),
             ).fetchone()
         return chunks, int(row["total"])
+
+    def list_kb_chunk_inputs(self, file_id: uuid.UUID) -> list[dict]:
+        """改名重嵌用：全量切片的 (id, text, page, kind)，按 seq 排序。
+
+        与 list_kb_chunks 的区别：带 id（要回写向量）、不分页（重嵌必须全量）、
+        不取 embedding（大而无用）。
+        """
+        with self._get_pool().connection() as conn:
+            return conn.execute(
+                """
+                SELECT id, text, page, kind
+                FROM agent_kb_chunk
+                WHERE file_id = %s
+                ORDER BY seq
+                """,
+                (file_id,),
+            ).fetchall()
+
+    def update_kb_chunk_vectors(
+        self, items: list[tuple[uuid.UUID, list[float]]]
+    ) -> int:
+        """批量回写切片向量（一个事务），返回更新条数。文本不动。"""
+        if not items:
+            return 0
+        with self._get_pool().connection() as conn:
+            conn.executemany(
+                "UPDATE agent_kb_chunk SET embedding = %s WHERE id = %s",
+                [(Vector(vector), chunk_id) for chunk_id, vector in items],
+            )
+            conn.commit()
+        return len(items)
 
     def get_kb_chunk(self, file_id: uuid.UUID, seq: int) -> dict | None:
         """取单个切片，带上文件状态：编辑前校验、改完标图谱 stale 都要用。"""

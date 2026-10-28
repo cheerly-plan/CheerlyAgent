@@ -46,7 +46,7 @@ def test_build_file_graph_merges_and_links(monkeypatch):
     """
     monkeypatch.setattr(graph, "complete_chat", lambda *a, **k: payload)
     monkeypatch.setattr(
-        graph, "embed_texts", lambda texts: [[0.01, 0.02] for _ in texts]
+        graph, "embed_texts_parallel", lambda texts, **k: [[0.01, 0.02] for _ in texts]
     )
     captured: dict = {}
     monkeypatch.setattr(
@@ -55,7 +55,12 @@ def test_build_file_graph_merges_and_links(monkeypatch):
         lambda fid, e, r, m: captured.update(entities=e, relations=r, mentions=m),
     )
 
-    counts = build_file_graph(uuid.uuid4(), [Chunk("a"), Chunk("b")])
+    # 切片得够长：太短的碎片在进批之前就被当成低信息切片滤掉了
+    body = (
+        "长鑫存储是国内 DRAM 厂商，报告期内 DRAM 产能持续爬坡，"
+        "产品覆盖 DDR4 与 DDR5 颗粒，客户以模组厂为主。"
+    )
+    counts = build_file_graph(uuid.uuid4(), [Chunk(body), Chunk(body)])
 
     # DRAM 两条合并成一个；「报告」被停用词表过滤
     assert counts["entities"] == 2
@@ -216,3 +221,130 @@ def test_rank_candidates_merges_same_norm_and_picks_top_score():
     # 分数取组内最高，代表记录（提及数）也来自同一实体组
     assert hbm["score"] == 0.80
     assert hbm["mention_count"] == 9
+
+
+# ——— 抽取链路的成本与健壮性 ———
+
+
+def _long_text(seed: str) -> str:
+    """够长的切片，不会被低信息过滤掉。"""
+    return (
+        f"{seed}：报告期内公司产能持续爬坡，产品覆盖 DDR4 与 DDR5 颗粒，"
+        "客户以模组厂为主，毛利率随制程升级而改善。"
+    )
+
+
+def test_parse_extraction_accepts_compact_arrays():
+    """紧凑格式（e/r 数组）是主线：省掉逐项重复的键，输出 token 少一半。"""
+    from ai_agent.kb.graph import _parse_extraction
+
+    parsed = _parse_extraction(
+        {
+            "e": [["长鑫存储", "org", "国产 DRAM 制造商", 1], ["DRAM", "product"]],
+            "r": [["长鑫存储", "DRAM", "生产", "", 1]],
+        }
+    )
+    assert [e.name for e in parsed.entities] == ["长鑫存储", "DRAM"]
+    assert parsed.entities[0].chunk == 1
+    assert parsed.entities[1].type == "product"  # 省略说明也不影响
+    assert parsed.relations[0].target == "DRAM"
+
+
+def test_parse_extraction_still_accepts_verbose_objects():
+    from ai_agent.kb.graph import _parse_extraction
+
+    parsed = _parse_extraction(
+        {"entities": [{"name": "HBM", "type": "product"}], "relations": []}
+    )
+    assert parsed.entities[0].name == "HBM"
+
+
+def test_parse_extraction_rejects_unknown_shape():
+    from ai_agent.kb.graph import _parse_extraction
+
+    assert _parse_extraction({"公司": ["发行人"]}) is None
+    assert _parse_extraction("不是 dict") is None
+
+
+def test_bad_output_splits_batch_and_offsets_chunk(monkeypatch):
+    """上下文吃紧时模型会换个 schema：拆半重试，且后半的片段序号要偏移回来。
+
+    旧实现直接把这种批当"没有实体"丢掉——静默丢人比慢更糟。
+    """
+    calls = []
+
+    def fake_complete(messages, **kwargs):
+        prompt = messages[-1]["content"]
+        calls.append(prompt.count("[0]") + prompt.count("[1]") + prompt.count("[2]") + prompt.count("[3]"))
+        if prompt.count("\n[") >= 4:  # 整批 → 模型跑偏
+            return '{"公司": ["发行人"], "关系": []}'
+        return '{"e": [["发行人马甲公司", "org", "发行人", 0]], "r": []}'
+
+    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    chunks = [Chunk(_long_text(f"片段{i}")) for i in range(4)]
+    result = graph._extract_batch(chunks, 0)
+
+    assert len(calls) == 3  # 1 次整批失败 + 2 次半批
+    assert len(result.entities) == 2
+    # 后半批的 chunk=0 要加上偏移，指回原批的第 2 个片段
+    assert [e.chunk for e in result.entities] == [0, 2]
+
+
+def test_low_value_chunks_are_filtered_before_llm(monkeypatch):
+    """目录行/页码不值一次 LLM 调用，进批前就滤掉。"""
+    monkeypatch.setattr(settings, "kb_graph_min_chunk_chars", 40)
+    seen: list[str] = []
+
+    def fake_extract(batch, start_seq, _depth=0):
+        seen.extend(c.text for c in batch)
+        from ai_agent.kb.graph import _Extraction
+
+        return _Extraction()
+
+    monkeypatch.setattr(graph, "_extract_batch", fake_extract)
+    chunks = [
+        Chunk("目录 ........ 12"),
+        Chunk("12"),
+        Chunk("（此页无正文）"),
+        Chunk(_long_text("正文")),
+    ]
+    graph.build_file_graph(uuid.uuid4(), chunks)
+
+    assert seen == [_long_text("正文")]
+
+
+def test_graph_flushes_progressively(monkeypatch):
+    """每 N 批落一次库：中断也留着部分图，progress 汇报累计计数。"""
+    monkeypatch.setattr(settings, "kb_graph_batch_chunks", 1)
+    monkeypatch.setattr(settings, "kb_graph_flush_batches", 1)
+    monkeypatch.setattr(graph, "embed_texts_parallel", lambda texts, **k: [[0.1] for _ in texts])
+    monkeypatch.setattr(
+        graph,
+        "_extract_batch",
+        lambda batch, start_seq, _depth=0: __import__(
+            "ai_agent.kb.graph", fromlist=["_Extraction"]
+        )._Extraction(
+            entities=[
+                __import__("ai_agent.kb.graph", fromlist=["_Entity"])._Entity(
+                    name=f"实体{start_seq}", type="org", chunk=0
+                )
+            ]
+        ),
+    )
+    writes: list[int] = []
+    monkeypatch.setattr(
+        graph.store,
+        "replace_file_graph",
+        lambda fid, e, r, m: writes.append(len(e)),
+    )
+    progress: list[int] = []
+
+    graph.build_file_graph(
+        uuid.uuid4(),
+        [Chunk(_long_text(f"第{i}段")) for i in range(3)],
+        progress=lambda c: progress.append(c["entities"]),
+    )
+
+    # 3 批各落一次（含最后一次收尾），实体数一路增长
+    assert writes == [1, 2, 3]
+    assert progress == [1, 2, 3]

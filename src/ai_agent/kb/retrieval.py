@@ -131,6 +131,47 @@ def _extract_keywords(query: str) -> list[str]:
     return unique
 
 
+def tag_file_scope(query: str) -> list[uuid.UUID] | None:
+    """按查询关键词与文件标签的匹配推导一个候选文件范围。
+
+    「先圈定范围再搜」的廉价实现：复用关键词提取（jieba + 编号 token，
+    没有新增 LLM 调用），关键词与标签互为子串即算命中（"考勤" 命中
+    "考勤制度"）。返回 None 表示不值得收窄：没提取到关键词、库里有
+    文件没打标签、或全员命中（没有区分度）。调用方必须自带弱召回兜底
+    ——标签判窄了不能变成漏召回。
+    """
+    if not settings.kb_tag_scope_enabled:
+        return None
+    keywords = _extract_keywords(query)
+    if not keywords:
+        return None
+    try:
+        files = store.list_kb_files()
+    except Exception:
+        logger.warning("kb 标签范围推导拿文件列表失败，跳过预过滤", exc_info=True)
+        return None
+    # 只有 ready 的文件才有切片可检索
+    candidates = [f for f in files if f.get("status") == "ready"]
+    return _tag_scope_ids(keywords, candidates)
+
+
+def _tag_scope_ids(
+    keywords: list[str], files: list[dict]
+) -> list[uuid.UUID] | None:
+    """纯函数：关键词 × 标签双向子串匹配，命中部分文件才收窄。"""
+    matched: list[uuid.UUID] = []
+    for item in files:
+        tags = [str(t).strip().lower() for t in (item.get("tags") or []) if str(t).strip()]
+        if not tags:
+            return None  # 有文件没标签，tag 语义上覆盖不了它，收窄会漏
+        hit = any(kw in tag or tag in kw for kw in keywords for tag in tags)
+        if hit:
+            matched.append(item["file_id"])
+    if not matched or len(matched) == len(files):
+        return None
+    return matched
+
+
 def _fuse_with_keywords(
     query: str,
     vector_rows: list[dict],

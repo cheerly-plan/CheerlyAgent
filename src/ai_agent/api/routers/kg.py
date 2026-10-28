@@ -230,7 +230,7 @@ def build_graphs(req: KgBuildRequest, user: UserRecord = Depends(require_admin))
     """管理员选文件批量生成图谱。
 
     上传后不再自动建图：管理员人工核对/修订切片，再在这里显式选择
-    哪些文件进图谱。逐个文件校验并投递到 kb 线程池，接口立即返回，
+    哪些文件进图谱。逐个文件校验并投递到图谱线程池，接口立即返回，
     进度看各文件的 graph_status。
     """
     if not settings.kb_graph_enabled:
@@ -247,12 +247,8 @@ def build_graphs(req: KgBuildRequest, user: UserRecord = Depends(require_admin))
         if record["status"] != "ready":
             results.append({"file_id": raw, "status": "not_ready"})
             continue
-        path = settings.kb_upload_dir / str(fid) / record["filename"]
-        if not path.is_file():
-            results.append({"file_id": raw, "status": "missing_source"})
-            continue
         store.update_graph_status(fid, "building")
-        kb_pipeline.submit_graph(fid, path)
+        kb_pipeline.submit_graph(fid)
         submitted += 1
         results.append({"file_id": raw, "status": "building"})
     if submitted:
@@ -264,10 +260,10 @@ def build_graphs(req: KgBuildRequest, user: UserRecord = Depends(require_admin))
 
 @router.post("/files/{file_id}/rebuild")
 def rebuild_graph(file_id: str, user: UserRecord = Depends(require_admin)):
-    """重建图谱：重新解析源文件并抽取。
+    """重建图谱：用库里已有的切片重新抽取（不重新解析源文件）。
 
     用于「切片修订后图谱过期（stale）」「升级前上传的老文件」
-    或「上次抽取失败」的情况；任务丢进现有的 kb 线程池，
+    或「上次抽取失败」的情况；任务丢进图谱线程池，
     接口立即返回，进度看 graph_status。
     """
     if not settings.kb_graph_enabled:
@@ -276,12 +272,9 @@ def rebuild_graph(file_id: str, user: UserRecord = Depends(require_admin)):
     record = store.get_kb_file(fid)
     if record is None:
         raise HTTPException(status_code=404, detail="文件不存在")
-    path = settings.kb_upload_dir / str(fid) / record["filename"]
-    if not path.is_file():
-        raise HTTPException(
-            status_code=409, detail="源文件已不在磁盘上，无法重建图谱"
-        )
+    if record["status"] != "ready":
+        raise HTTPException(status_code=409, detail="文件还没解析完成，无法建图")
     store.update_graph_status(fid, "building")
-    kb_pipeline.submit_graph(fid, path)
+    kb_pipeline.submit_graph(fid)
     logger.info("kg 重建提交 file_id=%s admin=%s", fid, user.username)
     return {"status": "building"}
