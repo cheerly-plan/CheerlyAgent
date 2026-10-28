@@ -85,17 +85,41 @@ def _pair_key(a: str, b: str) -> tuple[str, str]:
 # 纯数字/日期型名字：抽取器会把"2005年""2005 年8 月"这类时间点、以及指标数值
 # 都抽成实体。它们互相之间向量很近、名字也互为前缀，但只要不是一字不差就
 # 绝不是同一个东西——2005年 和 2005年8月 是两个不同的时间点。
-_METRIC_LIKE = re.compile(r"^[\d\s年月日号%．.．·/、+-]+$")
+# 名字里数字占比过半就当数值/日期型：覆盖 "2005 年8 月"、"1,017,077.00 元"、
+# "12.5%" 这些抽取器很爱当实体的东西。字符类里没有逗号/元/万，靠占比兜住
+_METRIC_CHARS = re.compile(r"[\d\s,，.．·、+\-/%元年万亿千百十]")
 
 # 法人的通用尾巴：简称补上这些词就是全称，中间没有加任何限定词
 _GENERIC_TAIL = (
     "发展", "股份", "有限", "责任", "公司", "集团", "控股", "投资",
-    "厂", "总厂", "分公司", "子公司", "（", "）", "(", ")",
+    "（", "）", "(", ")",
 )
 
 
 def is_metric_like(name: str) -> bool:
-    return bool(_METRIC_LIKE.match(name.strip()))
+    """整条名字基本由数字和计量单位构成（时间点、金额、比例、指标值）。"""
+    text = name.strip()
+    if not text:
+        return False
+    hit = len(_METRIC_CHARS.findall(text))
+    return hit / len(text) >= 0.6 and any(ch.isdigit() for ch in text)
+
+
+# 母公司名 + 这些尾巴 = 下属单位，绝不是同一个实体
+_SUBUNIT_TAIL = ("厂", "部", "分公司", "支行", "车间", "项目部", "分厂", "办事处")
+
+
+def looks_like_subunit(short: str, long_: str) -> bool:
+    """长名是短名的前缀扩展，且尾巴落在「厂/部/分公司」上——是下属单位。
+
+    招股书里「国电电力发展股份有限公司」和「国电电力发展股份有限公司
+    朝阳发电厂」字面上是前缀关系，模型很容易判成同一实体，但一个是上市
+    主体、一个是分公司，合并后母公司的所有关系都会继承电厂的噪声。
+    """
+    if not long_.startswith(short) or short == long_:
+        return False
+    rest = long_[len(short) :]
+    return rest.endswith(_SUBUNIT_TAIL)
 
 
 def pure_suffix_extension(short: str, long_: str) -> bool:
@@ -153,6 +177,14 @@ def candidate_pairs(
         # 两个"名字基本是数字/日期"的实体，只有一字不差才可能同一个
         if is_metric_like(a["name"]) and is_metric_like(b["name"]):
             continue
+        # 概念/指标类只认字面包含：模型在"其他应付款 vs 应付账款"、
+        # "东北地区 vs 华北地区"这种同领域近邻上判错过太多次，光靠向量
+        # 相似度过不了这道关
+        if a["type"] in _SOFT_TYPES and b["type"] in _SOFT_TYPES:
+            na = a.get("norm_name") or normalize_name(a["name"])
+            nb = b.get("norm_name") or normalize_name(b["name"])
+            if not name_contained(na, nb):
+                continue
         key = _pair_key(src, dst)
         if key in out:
             continue
@@ -169,8 +201,11 @@ def candidate_pairs(
                 continue
             if not name_contained(norm_a, norm_b):
                 continue
-            key = _pair_key(str(a["id"]), str(b["id"]))
             short, long_ = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
+            # 前缀 + 厂/部/分公司 = 下属单位，连候选都不进
+            if looks_like_subunit(short, long_):
+                continue
+            key = _pair_key(str(a["id"]), str(b["id"]))
             # 纯通用后缀扩展（简称 + 发展股份有限公司）是最可靠的一类，给最高分：
             # 排序靠前，簇容量截断时先保它
             strong = pure_suffix_extension(short, long_)

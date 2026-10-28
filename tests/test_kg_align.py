@@ -211,3 +211,37 @@ def test_metric_like_pairs_are_never_merged():
     assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
     assert align.is_metric_like("2005年") and align.is_metric_like("12.5%")
     assert not align.is_metric_like("国电电力")
+
+
+def test_subunit_pairs_never_become_candidates():
+    # 上市主体与其分公司不是同一实体：合并后母公司的关系全被电厂噪声污染
+    parent = ent("国电电力发展股份有限公司", "org")
+    plant = ent("国电电力发展股份有限公司朝阳发电厂", "org")
+    dept = ent("中国国电集团公司安全生产部", "org")
+    pairs = align.candidate_pairs([parent, plant, dept], [], min_sim=0.86)
+    assert pairs == []
+    assert align.looks_like_subunit(
+        "国电电力发展股份有限公司", "国电电力发展股份有限公司朝阳发电厂"
+    )
+    # 纯法人后缀扩展不算下属单位
+    assert not align.looks_like_subunit("国电电力", "国电电力发展股份有限公司")
+
+
+def test_money_like_names_are_metric_like():
+    # 财务附注里金额会被抽成实体，两个不同金额绝不能合并
+    assert align.is_metric_like("1,017,077.00 元")
+    assert align.is_metric_like("29,774,299.64 元")
+    a, b = ent("1,017,077.00 元", "metric"), ent("29,774,299.64 元", "metric")
+    sim_pairs = [{"src": a["id"], "dst": b["id"], "sim": 0.95}]
+    assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
+
+
+def test_soft_types_need_literal_containment():
+    # 概念/指标类只认字面包含：模型在"东北地区 vs 华北地区"这类近邻上会判错
+    a, b = ent("东北地区", "concept"), ent("华北地区", "concept")
+    sim_pairs = [{"src": a["id"], "dst": b["id"], "sim": 0.93}]
+    assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
+    # 字面包含的仍然进候选（"每股收益" ⊂ "基本每股收益"）
+    c, d = ent("每股收益", "concept"), ent("基本每股收益", "concept")
+    sim_pairs = [{"src": c["id"], "dst": d["id"], "sim": 0.9}]
+    assert len(align.candidate_pairs([c, d], sim_pairs, min_sim=0.86)) == 1
