@@ -332,6 +332,12 @@ def set_doc_type(
     record = store.get_kb_file(fid)
     if record is None:
         raise HTTPException(status_code=404, detail="文件不存在")
+    # 建图/对齐进行中不许改配置：抽取按批读的是任务开始时的 prompt，
+    # 中途改会让「这张图用的哪套配置」说不清；对齐期间改则让合并结果错乱
+    if store.get_file_graph_status(fid)["graph_status"] == "building":
+        raise HTTPException(status_code=409, detail="该文件正在建图，等完成后再改抽取配置")
+    if store.get_align_status(fid)["align_status"] == "aligning":
+        raise HTTPException(status_code=409, detail="该文件正在对齐实体，等完成后再改抽取配置")
 
     known = {p.key for p in list_profiles()}
     doc_type = (req.doc_type or "").strip() or settings.kb_default_doc_type
