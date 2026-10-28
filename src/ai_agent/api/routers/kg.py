@@ -21,6 +21,7 @@ from ai_agent.api.dependencies import get_current_user, require_admin
 from ai_agent.api.schemas import KgBuildRequest
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.kb.community import detect_communities, summarize
 from ai_agent.kb.pipeline import kb_pipeline
 from ai_agent.memory.db import UserRecord
 from ai_agent.memory.embeddings import embed_query
@@ -81,7 +82,14 @@ def _shape(graph: dict, *, seeds: list | None = None) -> dict:
     node_ids = {n["id"] for n in nodes}
     edges = [_edge(e) for e in graph["edges"]]
     edges = [e for e in edges if e["source"] in node_ids and e["target"] in node_ids]
+    # 社区检测（簇视图）：结果随图一起给，前端不必自己算连通块。
+    # 放在这里而不是建图时落库——图只有几百个点，标签传播毫秒级，
+    # 而落库还得考虑"对齐后社区要重算"的失效问题
+    mapping = detect_communities(nodes, edges)
+    for item in nodes:
+        item["community"] = mapping.get(item["id"], 0)
     payload = {"nodes": nodes, "edges": edges}
+    payload["communities"] = summarize(nodes, mapping)
     if seeds is not None:
         payload["seeds"] = seeds
     return payload
@@ -278,3 +286,37 @@ def rebuild_graph(file_id: str, user: UserRecord = Depends(require_admin)):
     kb_pipeline.submit_graph(fid)
     logger.info("kg 重建提交 file_id=%s admin=%s", fid, user.username)
     return {"status": "building"}
+
+
+@router.post("/files/{file_id}/align")
+def align_entities(file_id: str, user: UserRecord = Depends(require_admin)):
+    """实体对齐（图谱质量 P2）：把同一实体的多种写法合并成一个点。
+
+    对齐要逐对裁决，几百个实体是几分钟的活，丢进图谱线程池后台跑，
+    接口立即返回；进度看 align_status，结果看 alias_count。
+    """
+    if not settings.kb_graph_enabled:
+        raise HTTPException(status_code=409, detail="图谱功能已关闭（KB_GRAPH_ENABLED=false）")
+    fid = _parse_uuid(file_id, "文件")
+    record = store.get_kb_file(fid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    status = store.get_file_graph_status(fid)
+    if status["graph_status"] != "ready" or not status["entity_count"]:
+        raise HTTPException(status_code=409, detail="该文件还没有可对齐的图谱")
+    if store.get_align_status(fid)["align_status"] == "aligning":
+        raise HTTPException(status_code=409, detail="该文件正在对齐中")
+    store.set_align_status(fid, "aligning")
+    kb_pipeline.submit_align(fid)
+    logger.info("kg 实体对齐提交 file_id=%s admin=%s", fid, user.username)
+    return {"status": "aligning"}
+
+
+@router.get("/files/{file_id}/aliases")
+def list_aliases(file_id: str, _user: UserRecord = Depends(get_current_user)):
+    """该文件里被合并掉的写法：前端在实体详情里展示「也叫 …」。"""
+    fid = _parse_uuid(file_id, "文件")
+    return {
+        "aliases": store.list_aliases(fid),
+        **store.get_align_status(fid),
+    }

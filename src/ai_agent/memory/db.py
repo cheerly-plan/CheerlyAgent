@@ -469,11 +469,47 @@ class Database:
                 ON agent_kg_mention (file_id)
                 """
             )
+            # 实体对齐（图谱质量 P2）：被合并掉的写法留档，便于回溯
+            # "为什么这两个实体变成一个了"，也供前端展示别名
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kg_alias (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    entity_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    alias_name TEXT NOT NULL,
+                    alias_norm TEXT NOT NULL,
+                    method TEXT NOT NULL DEFAULT 'llm',
+                    score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (file_id, alias_norm)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_alias_file_idx
+                ON agent_kg_alias (file_id)
+                """
+            )
             # 文件表的图谱进度：'' 未构建 / building 构建中 / ready / stale 切片修订后待重建 / failed
             conn.execute(
                 """
                 ALTER TABLE agent_kb_file
                 ADD COLUMN IF NOT EXISTS graph_status TEXT NOT NULL DEFAULT ''
+                """
+            )
+            # 实体对齐进度（P2）：'' 未跑 / aligning / ready / failed
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS align_status TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS alias_count INT NOT NULL DEFAULT 0
                 """
             )
             conn.execute(

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.kb.align import align_file_graph
 from ai_agent.kb.chunking import Chunk, chunk_segments, embedding_input
 from ai_agent.kb.graph import build_file_graph
 from ai_agent.kb.parsing import parse_segments
@@ -53,6 +54,14 @@ class KbPipeline:
     def submit_graph(self, file_id: uuid.UUID) -> None:
         """只重建图谱（切片已在库里，不重复解析源文件）。"""
         self._graph_pool.submit(self._rebuild_graph, file_id)
+
+    def submit_align(self, file_id: uuid.UUID) -> None:
+        """实体对齐（P2）：图谱建成后把同一实体的多种写法合并。
+
+        与建图共用图谱池：两者都读写同一份图谱，串行才不会出现
+        "对齐正在搬关系，建图把实体整份删了重建"的竞态。
+        """
+        self._graph_pool.submit(self._align, file_id)
 
     def submit_reembed(self, file_id: uuid.UUID) -> None:
         """改名后按新文件名重嵌全部切片（后台）。"""
@@ -163,6 +172,30 @@ class KbPipeline:
         except Exception:
             logger.exception("kb 图谱重建失败 file_id=%s", file_id)
             store.update_graph_status(file_id, "failed")
+
+    def _align(self, file_id: uuid.UUID) -> None:
+        """实体对齐：合并同一实体的多种写法，进度写 align_status。
+
+        失败只把 align_status 标 failed——图谱本身还是可用的，只是多几个重复点，
+        不该因此把 graph_status 也打成失败让用户以为图没了。
+        """
+        try:
+            store.set_align_status(file_id, "aligning")
+            counts = align_file_graph(
+                file_id,
+                progress=lambda c: store.set_align_status(
+                    file_id, "aligning", alias_count=c["merged"]
+                ),
+            )
+            store.set_align_status(
+                file_id,
+                "ready",
+                alias_count=counts["merged"],
+                entity_count=counts["entities"] - counts["merged"],
+            )
+        except Exception:
+            logger.exception("kb 实体对齐失败 file_id=%s", file_id)
+            store.set_align_status(file_id, "failed")
 
     def _reembed(self, file_id: uuid.UUID) -> None:
         """改名重嵌：语境前缀《文件名》在嵌入时就烧进向量里（不落库），

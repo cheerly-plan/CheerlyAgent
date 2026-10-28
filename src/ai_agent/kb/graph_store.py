@@ -201,6 +201,218 @@ class KgStore:
                     )
             conn.commit()
 
+    # ——— 实体对齐（图谱质量 P2） ———
+
+    def list_file_entities(self, file_id: uuid.UUID) -> list[dict]:
+        """对齐用：把一个文件的实体连同名信息一起取出（不带向量，向量在库里算）。"""
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, norm_name, type, description, mention_count
+                FROM agent_kg_entity
+                WHERE file_id = %s
+                ORDER BY mention_count DESC
+                """,
+                (file_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def entity_similar_pairs(
+        self,
+        file_id: uuid.UUID,
+        *,
+        min_sim: float = 0.86,
+        neighbors: int = 4,
+    ) -> list[dict]:
+        """文件内实体的向量近邻对（pgvector 侧算，返回 [{src,dst,sim}]）。
+
+        每个实体只取最近的 neighbors 个：全量两两比较在 400 个实体时是 8 万对，
+        而真正可能是同一实体的对子一定在最近邻里。
+        """
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id AS src, n.id AS dst,
+                       1 - (a.embedding <=> n.embedding) AS sim
+                FROM agent_kg_entity a
+                CROSS JOIN LATERAL (
+                    SELECT b.id, b.embedding
+                    FROM agent_kg_entity b
+                    WHERE b.file_id = a.file_id
+                      AND b.id <> a.id
+                      AND b.embedding IS NOT NULL
+                    ORDER BY a.embedding <=> b.embedding
+                    LIMIT %(neighbors)s
+                ) n
+                WHERE a.file_id = %(file_id)s
+                  AND a.embedding IS NOT NULL
+                  AND 1 - (a.embedding <=> n.embedding) >= %(min_sim)s
+                """,
+                {"file_id": file_id, "neighbors": max(1, neighbors), "min_sim": min_sim},
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def apply_alignment(self, file_id: uuid.UUID, merges: list[dict]) -> dict:
+        """按 merge 列表把实体并成一份：提及/关系/描述并到代表实体上。
+
+        顺序有讲究：先把提及搬到代表实体（否则删源实体时级联删掉就丢了），
+        再把关系重新指向代表，最后才删源实体（它的关系/提及随级联清空）。
+        全程一个事务，中途失败不会留下"关系指向已删实体"的半成品。
+        """
+        if not merges:
+            return {"merged": 0, "relations": 0, "aliases": 0}
+
+        merged = 0
+        with self._get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                for merge in merges:
+                    src = uuid.UUID(str(merge["from_id"]))
+                    dst = uuid.UUID(str(merge["to_id"]))
+                    cur.execute(
+                        """
+                        INSERT INTO agent_kg_mention (entity_id, file_id, chunk_seq, hits)
+                        SELECT %s, file_id, chunk_seq, hits
+                        FROM agent_kg_mention WHERE entity_id = %s
+                        ON CONFLICT (entity_id, chunk_seq)
+                        DO UPDATE SET hits = agent_kg_mention.hits + EXCLUDED.hits
+                        """,
+                        (dst, src),
+                    )
+                    cur.execute(
+                        "UPDATE agent_kg_relation SET source_id = %s WHERE source_id = %s",
+                        (dst, src),
+                    )
+                    cur.execute(
+                        "UPDATE agent_kg_relation SET target_id = %s WHERE target_id = %s",
+                        (dst, src),
+                    )
+                    # 描述取更长的那个、提及数累加，再删源实体
+                    cur.execute(
+                        """
+                        UPDATE agent_kg_entity d
+                        SET mention_count = d.mention_count + COALESCE(s.mention_count, 0),
+                            description = CASE
+                                WHEN length(COALESCE(s.description, ''))
+                                     > length(COALESCE(d.description, ''))
+                                THEN s.description ELSE d.description END
+                        FROM agent_kg_entity s
+                        WHERE d.id = %s AND s.id = %s
+                        """,
+                        (dst, src),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO agent_kg_alias
+                            (id, file_id, entity_id, alias_name, alias_norm, method, score)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (file_id, alias_norm) DO NOTHING
+                        """,
+                        (
+                            uuid.uuid4(),
+                            file_id,
+                            dst,
+                            merge["alias_name"],
+                            merge["alias_norm"],
+                            "llm",
+                            float(merge.get("score") or 0),
+                        ),
+                    )
+                    cur.execute("DELETE FROM agent_kg_entity WHERE id = %s", (src,))
+                    merged += 1
+
+                # 合并后会出现自环（A→B 与 B→A 同时存在）和重复边，一并清掉
+                cur.execute(
+                    "DELETE FROM agent_kg_relation WHERE file_id = %s AND source_id = target_id",
+                    (file_id,),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM agent_kg_relation a
+                    USING agent_kg_relation b
+                    WHERE a.file_id = %s
+                      AND a.file_id = b.file_id
+                      AND a.source_id = b.source_id
+                      AND a.target_id = b.target_id
+                      AND a.relation = b.relation
+                      AND a.ctid > b.ctid
+                    """,
+                    (file_id,),
+                )
+                remaining = cur.execute(
+                    "SELECT count(*) FROM agent_kg_relation WHERE file_id = %s",
+                    (file_id,),
+                ).fetchone()[0]
+                total = cur.execute(
+                    "SELECT count(*) FROM agent_kg_entity WHERE file_id = %s",
+                    (file_id,),
+                ).fetchone()[0]
+                aliases = cur.execute(
+                    "SELECT count(*) FROM agent_kg_alias WHERE file_id = %s",
+                    (file_id,),
+                ).fetchone()[0]
+            conn.commit()
+        return {
+            "merged": merged,
+            "entities": int(total),
+            "relations": int(remaining),
+            "aliases": int(aliases),
+        }
+
+    def set_align_status(
+        self,
+        file_id: uuid.UUID,
+        status: str,
+        *,
+        alias_count: int | None = None,
+        entity_count: int | None = None,
+    ) -> None:
+        with self._get_pool().connection() as conn:
+            conn.execute(
+                """
+                UPDATE agent_kb_file
+                SET align_status = %s,
+                    alias_count = COALESCE(%s, alias_count),
+                    graph_entity_count = COALESCE(%s, graph_entity_count),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (status, alias_count, entity_count, file_id),
+            )
+            conn.commit()
+
+    def get_align_status(self, file_id: uuid.UUID) -> dict:
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT align_status, alias_count, graph_entity_count
+                FROM agent_kb_file WHERE id = %s
+                """,
+                (file_id,),
+            ).fetchone()
+        if row is None:
+            return {"align_status": "", "alias_count": 0, "entity_count": 0}
+        return {
+            "align_status": row["align_status"] or "",
+            "alias_count": int(row["alias_count"] or 0),
+            "entity_count": int(row["graph_entity_count"] or 0),
+        }
+
+    def list_aliases(self, file_id: uuid.UUID) -> list[dict]:
+        """某个文件里被合并掉的写法（前端用来解释"这两个怎么变一个了"）。"""
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.alias_name, a.alias_norm, a.method, a.score,
+                       e.id AS entity_id, e.name AS canonical_name, e.type
+                FROM agent_kg_alias a
+                JOIN agent_kg_entity e ON e.id = a.entity_id
+                WHERE a.file_id = %s
+                ORDER BY e.name, a.alias_name
+                """,
+                (file_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def update_graph_status(
         self, file_id: uuid.UUID, status: str, *, entity_count: int | None = None
     ) -> None:
