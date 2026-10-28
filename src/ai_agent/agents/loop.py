@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 from collections.abc import Iterator
@@ -26,7 +27,7 @@ from ai_agent.memory.short_term import (
 )
 from ai_agent.memory.store import store, user_scope
 from ai_agent.memory.summarize import summarize_session
-from ai_agent.tools.registry import execute_tool, tool_label, tool_schemas
+from ai_agent.tools.registry import TOOLS_MAP, execute_tool, tool_label, tool_schemas
 from ai_agent.tools.kb_search import _citations_of, _format_hit_with_context
 
 logger = get_logger(__name__)
@@ -73,6 +74,29 @@ def _system_prompt(user_id: str) -> str:
     if not block:
         return SYSTEM_PROMPT
     return f"{SYSTEM_PROMPT}\n\n{block}"
+
+
+def _canonical_args(name: str, arguments: dict) -> str:
+    """把工具参数按 args_model 补全默认值再序列化，用于「重复调用」判定。
+
+    模型会省略可省略的字段：`{"query": X}` 与 `{"query": X, "top_k": 5}`
+    语义完全一样，但 JSON 字面不同。只比字面的话，这种「换个写法再查一次」
+    会绕过去重——实测同一句问题下，模型靠 depth/top_k 的写法差异把同一个
+    kg_search 调了 9 次，把决策轮次烧光。
+    """
+    tool = TOOLS_MAP.get(name)
+    canon: object = arguments
+    if tool is not None:
+        try:
+            canon = tool.args_model.model_validate(arguments).model_dump(mode="json")
+        except Exception:
+            # 参数本身不合法（执行时也会报错），退回字面比较即可
+            canon = arguments
+    return json.dumps(canon, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _output_digest(output: str) -> str:
+    return hashlib.sha1(output.strip().encode("utf-8")).hexdigest()
 
 
 def _kb_prefetch(
@@ -522,6 +546,10 @@ def run_loop(
     # 调了 6 次，每次都返回同样的实体列表，把预算轮数烧光后没有轮次
     # 留给最终回答，用户只看到「我即将检索」就断了
     seen_calls: set[tuple[str, str]] = set()
+    # 本轮各工具的已返回结果摘要：参数不同但输出一字不差，说明这条路
+    # 已经走到头了（图谱永远返回同一个中心实体、向量库永远空结果）。
+    # 只在下次重复时追加一句系统提示，不阻断调用
+    seen_outputs: dict[tuple[str, str], int] = {}
     # 预检索注入：只在新一轮提问的入口做（最后一条是 user 且其后还没有
     # 注入块）。断点续跑中断在工具轮时，注入块已在 checkpoint 快照里，
     # 最后一条是 assistant/tool，不会重复注入。
@@ -613,10 +641,7 @@ def run_loop(
             yield done_event
             return
         for call in result["tool_calls"]:
-            dedupe_key = (
-                call["name"],
-                json.dumps(call["arguments"], sort_keys=True, ensure_ascii=False),
-            )
+            dedupe_key = (call["name"], _canonical_args(call["name"], call["arguments"]))
             if dedupe_key in seen_calls:
                 # 协议要求每个 tool_call 都有对应 tool 消息，用提示文本占位；
                 # 不发 tool_start/tool_end 事件——前端没开始过这次调用
@@ -654,6 +679,23 @@ def run_loop(
             finally:
                 reset_kb_scope(scope_token)
             turn_sources = merge_sources(turn_sources, cited)
+            # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
+            # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾
+            out_key = (call["name"], _output_digest(output))
+            if seen_outputs.get(out_key):
+                logger.info(
+                    "工具返回结果与之前完全相同 run_id=%s tool=%s 次数=%d",
+                    run_id,
+                    call["name"],
+                    seen_outputs[out_key] + 1,
+                )
+                output += (
+                    "\n\n（系统）该工具已经返回过完全相同的结果，换参数也查不到"
+                    "新内容。请改用更具体的检索词（例如直接搜材料名、指标名、"
+                    "表格标题，而不是公司名这类大词），或换用其他工具，"
+                    "或基于已有信息直接作答。"
+                )
+            seen_outputs[out_key] = seen_outputs.get(out_key, 0) + 1
             end_event: ChatEvent = {"type": "tool_end", "name": call["name"]}
             if turn_sources:
                 end_event["sources"] = turn_sources

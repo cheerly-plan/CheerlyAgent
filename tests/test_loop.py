@@ -1303,6 +1303,96 @@ def test_run_loop_dedupes_identical_tool_calls():
     assert done["type"] == "done"
 
 
+def test_run_loop_dedupes_call_with_default_args_omitted():
+    """省略默认值的参数与写全默认值的参数算同一次调用。
+
+    实测模型靠 {"query": X} / {"query": X, "top_k": 5} / {"depth": 2, ...}
+    这类写法差异把同一个 kg_search 调了 9 次，把决策轮次烧光。
+    """
+    from ai_agent.agents.budget import Budget
+
+    executed: list[dict] = []
+
+    def stream(messages, tools, **kwargs):
+        tool_rounds = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_rounds >= 2:
+            yield "text", "答"
+            yield ("result", {"content": "答", "tool_calls": []})
+        else:
+            # 第二轮补上 top_k=5（schema 默认值），语义与第一轮完全相同
+            args = {"query": "硝酸铵"} if tool_rounds == 0 else {
+                "query": "硝酸铵",
+                "top_k": 5,
+            }
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {"id": f"c{tool_rounds}", "name": "kg_search", "arguments": args}
+                    ],
+                },
+            )
+
+    def execute(name, arguments):
+        executed.append(arguments)
+        return "命中实体：湖南南岭"
+
+    messages: list = [{"role": "user", "content": "查"}]
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=execute),
+    ):
+        list(run_loop(messages, "u1", budget=Budget(max_steps=4)))
+
+    assert len(executed) == 1  # 补全默认值后判定为重复，第二次没执行
+    assert any(
+        m.get("role") == "tool" and "完全相同的参数" in str(m.get("content"))
+        for m in messages
+    )
+
+
+def test_run_loop_flags_repeated_tool_output():
+    """参数不同但结果一字不差时，追加提示把模型推向换词或收尾。"""
+    from ai_agent.agents.budget import Budget
+
+    def stream(messages, tools, **kwargs):
+        tool_rounds = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_rounds >= 2:
+            yield "text", "答"
+            yield ("result", {"content": "答", "tool_calls": []})
+        else:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{tool_rounds}",
+                            "name": "kg_search",
+                            "arguments": {"query": f"第{tool_rounds}种问法"},
+                        }
+                    ],
+                },
+            )
+
+    def execute(name, arguments):
+        # 图谱写死返回同一个中心实体：换检索词也是这份输出
+        return "命中实体：湖南南岭民用爆破器材股份有限公司"
+
+    messages: list = [{"role": "user", "content": "查"}]
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=execute),
+    ):
+        list(run_loop(messages, "u1", budget=Budget(max_steps=4)))
+
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+    assert "已调用过" not in str(tool_msgs[1].get("content"))  # 参数确实不同
+    assert "返回过完全相同的结果" in str(tool_msgs[1]["content"])
+
+
 def test_run_loop_budget_completion_defaults_to_settings():
     """不传 budget 时回落到 settings.max_turns，行为与旧版一致。"""
     from ai_agent.core.config import settings
