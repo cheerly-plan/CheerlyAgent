@@ -7,7 +7,8 @@ from ai_agent.agents.prompts import SYSTEM_PROMPT
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.citations import collect_citations, merge_sources
+from ai_agent.kb.citations import Citation, collect_citations, merge_sources
+from ai_agent.kb.retrieval import search_knowledge
 from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
@@ -25,6 +26,7 @@ from ai_agent.memory.short_term import (
 from ai_agent.memory.store import store, user_scope
 from ai_agent.memory.summarize import summarize_session
 from ai_agent.tools.registry import execute_tool, tool_label, tool_schemas
+from ai_agent.tools.kb_search import _citations_of, _format_hit_with_context
 
 logger = get_logger(__name__)
 
@@ -70,6 +72,61 @@ def _system_prompt(user_id: str) -> str:
     if not block:
         return SYSTEM_PROMPT
     return f"{SYSTEM_PROMPT}\n\n{block}"
+
+
+def _kb_prefetch(
+    user_input: str, user_id: str, kb_file_ids: tuple[str, ...]
+) -> tuple[ChatMessage | None, list[Citation]]:
+    """kb 开启时先替模型查一次库，命中注入成 system 消息（always-retrieve）。
+
+    为什么不等模型自己决定调不调 kb_search：本地模型对「这问题要不要查」
+    的判断不稳定，提示词再怎么放宽也有漏网——用户把库里的原文粘进对话框，
+    模型照样可能直接用通用知识作答（实测发生过）。检索是毫秒级的便宜操作，
+    主动查一次的代价可以忽略；命中与否交给向量距离：闲聊时没有语义接近的
+    片段，自然不会注入，不会把闲聊带偏。
+
+    命中同时作为引用交给上层（SSE sources 事件 + 落库），和模型主动调
+    kb_search 的命中在展示上完全一致。检索失败不阻断对话，只是这轮退回
+    「靠模型自己调工具」的旧模式。
+    """
+    query = user_input.strip()
+    if not query:
+        return None, []
+    scope_token = set_kb_scope(kb_file_ids)
+    try:
+        try:
+            with user_scope(user_id):
+                hits = search_knowledge(
+                    query, top_k=settings.kb_prefetch_top_k
+                )
+        except Exception:
+            logger.exception("kb 预检索失败，本轮退回工具检索模式")
+            return None, []
+    finally:
+        reset_kb_scope(scope_token)
+    hits = [
+        hit for hit in hits if hit.distance <= settings.kb_prefetch_max_distance
+    ]
+    if not hits:
+        return None, []
+    citations = _citations_of(hits)
+    blocks = [
+        f"【命中 {i + 1} · 与问题的向量距离 {hit.distance:.2f}】\n"
+        f"{_format_hit_with_context(hit)}"
+        for i, hit in enumerate(hits)
+    ]
+    content = (
+        "以下是系统针对用户最新问题预检索知识库得到的原文片段。回答前先读：\n"
+        "与问题相关时，以这些原文为依据作答，并自然说明出处（文件名、页码）；\n"
+        "片段与问题无关时忽略它们，按你自己的知识回答，不要生搬硬套。\n\n"
+        + "\n\n".join(blocks)
+    )
+    message: ChatMessage = {
+        "role": "system",
+        "content": content,
+        "meta": {"kb_prefetch": True},
+    }
+    return message, citations
 
 
 def _checkpoint_create(
@@ -459,6 +516,21 @@ def run_loop(
     # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
     # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库
     turn_sources: list[dict] = []
+    # 预检索注入：只在新一轮提问的入口做（最后一条是 user 且其后还没有
+    # 注入块）。断点续跑中断在工具轮时，注入块已在 checkpoint 快照里，
+    # 最后一条是 assistant/tool，不会重复注入。
+    if (
+        use_kb
+        and settings.kb_prefetch_enabled
+        and messages
+        and messages[-1].get("role") == "user"
+    ):
+        prefetch_msg, prefetch_cited = _kb_prefetch(
+            str(messages[-1].get("content") or ""), user_id, kb_file_ids
+        )
+        turn_sources = merge_sources(turn_sources, prefetch_cited)
+        if prefetch_msg is not None:
+            messages.append(prefetch_msg)
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""

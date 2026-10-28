@@ -145,6 +145,15 @@ class Settings(BaseSettings):
     # 也有 0.55~0.65 的基线距离，超过 0.72 基本只是话题沾边，宁缺毋滥；
     # 设 2.0 等于关闭这条门槛。
     kb_search_max_distance: float = 0.72
+    # 知识库预检索（always-retrieve）：kb 开关打开时，每轮回答前服务端先替
+    # 模型查一次库并把命中注入上下文，不依赖模型自觉调用 kb_search——
+    # 本地小模型对「要不要查」的主观判断不稳定，用户把原文粘进对话框
+    # 都可能不触发。检索是毫秒级操作，闲聊时没有语义接近的片段自然不注入
+    kb_prefetch_enabled: bool = True
+    kb_prefetch_top_k: int = 3
+    # 预检索比工具检索更严的距离门槛：注入内容是「被动给模型看的」，
+    # 弱相关片段会把闲聊回答带偏。0.45 在余弦距离下意味着语义相当接近
+    kb_prefetch_max_distance: float = 0.45
     # LLM 重排：多一次模型调用（约 1~2 秒），换来排序质量。关掉即退回向量顺序
     kb_rerank_enabled: bool = True
     # 空 = 跟随 MODEL（主模型）。重排是短文本判别，不需要大模型
