@@ -442,8 +442,6 @@ class _GraphAccumulator:
         if not result.entities:
             return
 
-        # 本批先建立「归一化名 → 实体」映射，供关系连边
-        batch_index: dict[str, dict] = {}
         for item in result.entities:
             norm = normalize_name(item.name)
             if not _usable_name(item.name, norm):
@@ -462,7 +460,6 @@ class _GraphAccumulator:
                     entity["description"] = item.description.strip()[:200]
                     # 描述变了，向量也得重算（它在 _vectors 里已经过期）
                     self._vectors.pop(norm, None)
-            batch_index[norm] = entity
             # 提及记录模型自己指认的片段（越界就夹回本批范围），
             # 这样 mention_count 才有区分度，实体→原文也能精确定位
             seq = start + min(max(item.chunk, 0), len(batch) - 1)
@@ -472,7 +469,10 @@ class _GraphAccumulator:
         for rel in result.relations:
             src = normalize_name(rel.source)
             dst = normalize_name(rel.target)
-            if src == dst or src not in batch_index or dst not in batch_index:
+            # 端点查全局实体表，不查「本批」：主体常在前一批被抽出，本批只是
+            # 顺带提到它（"公司向亚厦控股采购…"），只在本批内找的话这类关系
+            # 会被整条丢掉，最后表现为「实体都在图上却互不相连」的孤立点
+            if src == dst or src not in self.entities or dst not in self.entities:
                 continue
             rel_name = (rel.relation or "相关").strip()[:20] or "相关"
             key = (src, dst, rel_name)
