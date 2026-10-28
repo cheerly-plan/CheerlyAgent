@@ -89,6 +89,7 @@ class KbPipeline:
                         filename=filename,
                         page=chunk.page,
                         kind=chunk.kind,
+                        section=chunk.section,
                     )
                     for chunk in chunks
                 ],

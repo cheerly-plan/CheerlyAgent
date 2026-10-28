@@ -16,11 +16,12 @@ kind（正文 / 表格 / 图表）与页码，切片时按 kind 分别处理：
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
+from itertools import groupby
 from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb import vision
+from ai_agent.kb import sections, vision
 
 logger = get_logger(__name__)
 
@@ -35,6 +36,8 @@ class Segment:
     # 页码语义：PDF 是页码，Excel 是 sheet 序号，其余为 None
     page: int | None = None
     kind: str = TEXT
+    # 所属一级节（如「第十节 管理层讨论与分析」）；无法识别章节的文档为 None
+    section: str | None = None
 
 _SUPPORTED = {".pdf", ".docx", ".xlsx", ".xlsm", ".md", ".markdown", ".txt", ".csv"}
 
@@ -70,6 +73,96 @@ def parse_segments(path: Path) -> list[Segment]:
 
 
 def _parse_pdf(path: Path) -> list[Segment]:
+    segments, text_lens = _pdf_text(path)
+    if not segments:
+        # pymupdf 不可用 / 无文本层：退回整页抽取（无章节、无页眉剔除），
+        # 扫描件走这条路时仍是「抽不出字就报错」，不做假解析
+        segments, text_lens = _pdf_text_fallback(path)
+
+    # 图表单独走渲染 + 视觉识别（pypdf 不能把页转成图）
+    segments.extend(_pdf_figures(path, text_lens))
+
+    if not segments:
+        raise ParseError("PDF 中没有可提取的文本（可能是扫描件/图片版）")
+    return segments
+
+
+def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
+    """行级抽取：剔页眉页脚，按一级节分组后逐页产出 Segment。
+
+    返回 ([], []) 表示 pymupdf 不可用或文件打不开，由调用方降级——不用
+    异常是因为「降级」是正常路径（未装 pymupdf 的部署仍要能解析）。
+
+    这里只做「节 → 页」的拆分，节内跨页聚合留给 chunking：切片需要页码
+    溯源，Segment 保持页粒度就不会丢页码。
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        logger.warning("未安装 pymupdf，PDF 文本退回整页抽取（无章节识别）")
+        return [], []
+    try:
+        doc = pymupdf.open(str(path))
+    except Exception:
+        logger.warning("pymupdf 打开 PDF 失败，退回整页抽取", exc_info=True)
+        return [], []
+    try:
+        lines = sections.extract_lines(doc)
+    except Exception:
+        logger.warning("pymupdf 抽取文本行失败，退回整页抽取", exc_info=True)
+        return [], []
+    finally:
+        doc.close()
+    if not lines:
+        return [], []
+
+    # 图表页判定用的是原始文字量（含页眉），与历史行为保持一致
+    text_lens = _page_char_counts(lines)
+    body = sections.body_size(lines)
+    kept, stats = sections.strip_noise(lines, body)
+    if stats:
+        logger.info("PDF 噪声剔除 %s", stats)
+
+    if not settings.kb_section_chunking:
+        return _segments_by_page(kept), text_lens
+
+    groups = sections.group_by_section(kept, body)
+    if not any(sec.id for sec in groups):
+        # 无章节结构（扫描件/无字号）：按页输出，页眉页脚照样剔掉了
+        return _segments_by_page(kept), text_lens
+
+    out: list[Segment] = []
+    for sec in groups:
+        if not sec.id:
+            out.extend(_segments_by_page(sec.lines))
+        else:
+            out.extend(_segments_by_page(sec.lines, section=sec.path))
+    return out, text_lens
+
+
+def _segments_by_page(
+    lines: list[sections.Line], *, section: str | None = None
+) -> list[Segment]:
+    """连续的同类行按页聚成 Segment（行序即页序，可直接 groupby）。"""
+    out: list[Segment] = []
+    for page, page_lines in groupby(lines, key=lambda ln: ln.page):
+        text = "\n".join(ln.text for ln in page_lines).strip()
+        if text:
+            out.append(Segment(text, page, TEXT, section))
+    return out
+
+
+def _page_char_counts(lines: list[sections.Line]) -> list[int]:
+    """每页原始字符数（含页眉）：图表页的三道筛按整页文字量判定。"""
+    counts: dict[int, int] = {}
+    for ln in lines:
+        counts[ln.page] = counts.get(ln.page, 0) + len(ln.text)
+    if not counts:
+        return []
+    return [counts.get(page, 0) for page in range(1, max(counts) + 1)]
+
+
+def _pdf_text_fallback(path: Path) -> tuple[list[Segment], list[int]]:
     try:
         from pypdf import PdfReader
     except ImportError as e:
@@ -80,8 +173,6 @@ def _parse_pdf(path: Path) -> list[Segment]:
         raise ParseError(f"PDF 文件无法打开（{type(e).__name__}）") from e
 
     segments: list[Segment] = []
-    # 逐页文字长度留下来给图表页判定用：正文密集的页面不可能是整页图表，
-    # 渲染它纯属浪费视觉预算（这里已经抽过一遍，不必再花一次）
     text_lens: list[int] = []
     for i, page in enumerate(reader.pages):
         try:
@@ -91,13 +182,7 @@ def _parse_pdf(path: Path) -> list[Segment]:
         text_lens.append(len(text))
         if text:
             segments.append(Segment(text, i + 1, TEXT))
-
-    # 图表单独走渲染 + 视觉识别（pypdf 不能把页转成图）
-    segments.extend(_pdf_figures(path, text_lens))
-
-    if not segments:
-        raise ParseError("PDF 中没有可提取的文本（可能是扫描件/图片版）")
-    return segments
+    return segments, text_lens
 
 
 def _describe_parallel(jobs: list[tuple[bytes, str]]) -> list[str | None]:

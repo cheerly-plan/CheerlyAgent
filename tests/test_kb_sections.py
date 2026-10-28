@@ -1,0 +1,158 @@
+"""章节识别与节内切片的单测。
+
+都是纯函数级用例，用合成行数据构造「页眉与真标题文本一字不差」这种
+真实场景——正是原型阶段踩坑最狠的地方，必须回归住。
+"""
+
+from ai_agent.kb.chunking import Chunk, chunk_segments, chunk_text
+from ai_agent.kb.parsing import TEXT, Segment
+from ai_agent.kb.sections import (
+    Line,
+    body_size,
+    group_by_section,
+    is_l1_heading,
+    strip_noise,
+)
+
+BODY = 12.0
+
+
+def line(text: str, page: int = 1, size: float = BODY, y: float = 0.3) -> Line:
+    return Line(text, page, size, y)
+
+
+def test_body_size_picks_dominant_size():
+    lines = [line("正文" * 50)] + [line("标题", size=16.0) for _ in range(3)]
+    assert body_size(lines) == BODY
+
+
+def test_heading_requires_font_scale():
+    # 同样文本：页眉字号（10.5pt）不算标题，16pt 才算——这是识别成败的关键
+    assert not is_l1_heading(line("第十节 管理层讨论与分析", size=10.5), BODY)
+    assert is_l1_heading(line("第十节 管理层讨论与分析", size=16.0), BODY)
+
+
+def test_heading_ignores_body_text_mentioning_section():
+    # 正文里引用「见第十节」不应被当成标题（长度 + 字号双重约束）
+    assert not is_l1_heading(line("详见第十节管理层讨论与分析相关内容", size=16.0), BODY)
+
+
+def test_strip_noise_removes_repeated_top_header():
+    lines = []
+    for page in (1, 2, 3):
+        lines.append(line("湖南南岭民用爆破器材股份有限公司 招股意向书", page, 10.5, 0.05))
+        lines.append(line(f"第{page}页正文内容", page, BODY, 0.3))
+    kept, stats = strip_noise(lines, BODY)
+    assert len(kept) == 3
+    assert all("招股意向书" not in ln.text for ln in kept)
+    assert stats["页眉(贴顶小字号)"] == 3
+
+
+def test_strip_noise_keeps_table_column_headers():
+    # 财务表列头跨页重复，但在页面中部（y≈0.17）：不能当页眉删，否则表头没了
+    lines = []
+    for page in (1, 2, 3):
+        lines.append(line("2005 年", page, 10.5, 0.17))
+        lines.append(line("营业收入 1,234", page, BODY, 0.30))
+    kept, _ = strip_noise(lines, BODY)
+    assert sum(1 for ln in kept if ln.text == "2005 年") == 3
+
+
+def test_strip_noise_removes_misplaced_header_copy():
+    # 实测有个别页的页眉被排版挤到 y=0.117：纯位置规则会漏，靠「同文本」兜底
+    lines = [
+        line("第十二节 募股资金运用", 1, 10.5, 0.05),
+        line("正文一", 1, BODY, 0.3),
+        line("第十二节 募股资金运用", 2, 10.5, 0.117),
+        line("正文二", 2, BODY, 0.3),
+    ]
+    kept, _ = strip_noise(lines, BODY)
+    assert [ln.text for ln in kept] == ["正文一", "正文二"]
+
+
+def test_group_by_section_splits_at_headings():
+    lines = [
+        line("封面文字"),
+        line("第一节 释义", size=16.0, page=2),
+        line("释义正文", page=2),
+        line("第二节 概览", size=16.0, page=3),
+        line("概览正文", page=3),
+    ]
+    sections = group_by_section(lines, BODY)
+    assert [s.id for s in sections] == ["", "第一节", "第二节"]
+    assert sections[1].title == "释义"
+    assert sections[1].path == "第一节 释义"
+    assert sections[1].start_page == 2
+
+
+def test_group_by_section_keeps_scan_only_section():
+    # 扫描页章节只有标题行（正文是图片），不能让它从章节树里消失
+    lines = [
+        line("第十四节 附录", size=16.0, page=10),
+        line("附录正文", page=10),
+        line("第十五节 签字页", size=16.0, page=11),
+    ]
+    sections = group_by_section(lines, BODY)
+    assert [s.id for s in sections][-2:] == ["第十四节", "第十五节"]
+    assert sections[-1].lines == []
+
+
+def test_group_by_section_without_headings_returns_single_group():
+    lines = [line("扫描件文字", 1), line("第二页", 2)]
+    sections = group_by_section(lines, BODY)
+    assert len(sections) == 1 and sections[0].id == ""
+
+
+def test_chunk_segments_merges_pages_within_section():
+    segments = [
+        Segment("甲" * 300, 1, TEXT, "第一节 释义"),
+        Segment("乙" * 300, 2, TEXT, "第一节 释义"),
+    ]
+    chunks = chunk_segments(segments, max_chars=700, overlap=0)
+    assert len(chunks) == 1
+    assert chunks[0].page == 1 and chunks[0].page_end == 2
+    assert chunks[0].section == "第一节 释义"
+
+
+def test_chunk_segments_never_crosses_sections():
+    segments = [
+        Segment("甲" * 300, 1, TEXT, "第一节 释义"),
+        Segment("乙" * 300, 2, TEXT, "第二节 概览"),
+    ]
+    chunks = chunk_segments(segments, max_chars=700, overlap=0)
+    assert len(chunks) == 2
+    assert all("甲" not in c.text or "乙" not in c.text for c in chunks)
+    assert [c.section for c in chunks] == ["第一节 释义", "第二节 概览"]
+
+
+def test_chunk_segments_keeps_table_out_of_text_flow():
+    segments = [
+        Segment("甲" * 100, 1, TEXT, "第一节 释义"),
+        Segment("| 年 | 收入 |\n| --- | --- |\n| 2005 | 12 |", 1, "table", "第一节 释义"),
+        Segment("乙" * 100, 1, TEXT, "第一节 释义"),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=0)
+    assert [c.kind for c in chunks] == ["text", "table", "text"]
+
+
+def test_chunk_segments_without_section_keeps_page_isolation():
+    # 无章节信息：段与段不合并，页码语义不变（老行为）
+    segments = [Segment("甲" * 100, 1), Segment("乙" * 100, 2)]
+    chunks = chunk_segments(segments, max_chars=700, overlap=0)
+    assert len(chunks) == 2
+    assert all(c.section is None for c in chunks)
+
+
+def test_flow_chunk_respects_max_chars_with_newline():
+    # 换行符也占长度：50 段 10 字拼起来是 50*10+49 字符，不能刚好卡在 500
+    paras = "\n".join("字" * 10 for _ in range(60))
+    pieces = chunk_text(paras, max_chars=100, overlap=0)
+    assert all(len(p) <= 100 for p in pieces)
+
+
+def test_flow_chunk_splits_long_paragraph_by_sentence():
+    segments = [Segment("句子。" * 200, 1, TEXT, "第一节 释义")]
+    chunks = chunk_segments(segments, max_chars=100, overlap=0)
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 100 for c in chunks)
+    assert all(isinstance(c, Chunk) and c.section for c in chunks)

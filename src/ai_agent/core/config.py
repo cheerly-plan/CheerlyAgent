@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     kb_part_size_mb: int = 4
     kb_chunk_size: int = 500
     kb_chunk_overlap: int = 50
+    # 按章节切块：识别 PDF 的一级节标题（第X节/第X章），剔页眉页脚后
+    # 在单节内聚合切片，一片不跨节。关掉即回到「按页切 + 页眉原样保留」
+    kb_section_chunking: bool = True
     # 单批条数：DashScope 兼容接口限制单次 input 最多 10 条，超限整批报
     # InvalidParameter（表现为文件处理 failed），默认对齐上限
     kb_embedding_batch: int = 10
