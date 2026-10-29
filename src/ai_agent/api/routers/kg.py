@@ -143,6 +143,9 @@ def file_graph(file_id: str, _user: UserRecord = Depends(get_current_user)):
     graph = store.get_file_graph(fid, limit=settings.kb_graph_max_nodes)
     payload = _shape(graph)
     payload["filename"] = record["filename"]
+    # 概览统计（实体/关系/文件数）与全库视图同口径，页面标题后的统计标签用。
+    # 单文件视图的 files 最多是 1，前端据此决定要不要显示「文件」那颗标签
+    payload["stats"] = store.graph_stats(file_ids=[fid])
     # 文件表的图谱进度，前端据此显示「未构建 / 构建中 / 失败」并可触发重建
     payload.update(store.get_file_graph_status(fid))
     # 对齐进度与合并数（前端决定是否显示「也叫 …」与「对齐」按钮）
