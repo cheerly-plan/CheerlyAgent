@@ -89,6 +89,31 @@ def _safe_filename(name: str) -> str:
     return name or "file"
 
 
+def _strip_suffix(name: str) -> str:
+    """展示名剥掉扩展名：类型由 mime（后缀）单独保存，文件名就是纯名字。
+
+    只在能识别出受支持后缀时剥，避免把名字里的小数点误当后缀。
+    """
+    suffix = Path(name).suffix.lower()
+    if not suffix or not supported(suffix):
+        return name
+    return name[: -len(suffix)]
+
+
+def _full_name(record: dict) -> str:
+    """文件名 + mime 拼回完整名（磁盘落盘 / 下载 / 重命名都用它）。
+
+    mime 存的是带点的后缀（如 .pdf）；旧数据若 filename 已带后缀则不再重复拼。
+    """
+    name = record["filename"]
+    mime = record.get("mime") or ""
+    if not mime:
+        return name
+    if name.lower().endswith(mime.lower()):
+        return name
+    return name + mime
+
+
 def _get_file(file_id: str) -> dict:
     record = store.get_kb_file(_parse_file_id(file_id))
     if record is None:
@@ -121,7 +146,7 @@ def init_upload(
         )
     file_id = store.create_kb_file(
         user.user_id,
-        _safe_filename(req.filename),
+        _strip_suffix(_safe_filename(req.filename)),
         req.size_bytes,
         suffix,
         tags=_clean_tags(req.tags),
@@ -174,7 +199,7 @@ def complete_upload(
 
     final_dir = _upload_dir(file_id)
     final_dir.mkdir(parents=True, exist_ok=True)
-    final_path = final_dir / record["filename"]
+    final_path = final_dir / _full_name(record)
     with final_path.open("wb") as out:
         for part in parts:
             with part.open("rb") as src:
@@ -261,21 +286,16 @@ def rename_file(
         raise HTTPException(status_code=409, detail="文件处理完成后才能改名")
 
     old_name = record["filename"]
-    new_name = _safe_filename(req.filename)
-    old_suffix = Path(old_name).suffix.lower()
-    if Path(new_name).suffix.lower() != old_suffix:
-        raise HTTPException(
-            status_code=400,
-            detail=f"扩展名需保持 {old_suffix} 不变（解析器与下载类型都按它识别）",
-        )
+    # 新名是纯文件名（不含后缀）；用户若误带后缀也一并剥掉，类型由 mime 定
+    new_name = _strip_suffix(_safe_filename(req.filename))
     if new_name == old_name:
         return {"ok": True, "filename": old_name, "reembedding": False}
 
-    stem_changed = Path(new_name).stem != Path(old_name).stem
+    stem_changed = True  # 展示名变了即视为 stem 变化，触发重嵌
     store.rename_kb_file(fid, new_name)
-    old_path = _upload_dir(file_id) / old_name
+    old_path = _upload_dir(file_id) / _full_name(record)
     if old_path.is_file():
-        old_path.rename(_upload_dir(file_id) / new_name)
+        old_path.rename(_upload_dir(file_id) / _full_name({**record, "filename": new_name}))
     if stem_changed:
         kb_pipeline.submit_reembed(fid)
     logger.info(
@@ -296,10 +316,10 @@ def download_file(file_id: str, _user: UserRecord = Depends(get_current_user)):
     if record["status"] == "uploaded":
         # 只有分片、还没合并出成品文件
         raise HTTPException(status_code=409, detail="文件尚未上传完成，暂不能下载")
-    path = _upload_dir(file_id) / record["filename"]
+    path = _upload_dir(file_id) / _full_name(record)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="文件本体不存在（可能已损坏）")
-    return FileResponse(path, filename=record["filename"])
+    return FileResponse(path, filename=_full_name(record))
 
 
 @router.get("/files/{file_id}/chunks")

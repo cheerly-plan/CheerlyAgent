@@ -173,18 +173,25 @@ class KbPipeline:
                     file_id, "building", entity_count=c["entities"]
                 ),
             )
+            # 实体对齐并进建图流程：建完即对齐好，前端不再有手动「对齐」入口。
+            # 对齐失败不把 ready 打回 failed（图仍可用，只是多几个重复点），
+            # entity_count 回退用抽取的原始数
+            aligned = self._align(file_id)
             store.update_graph_status(
-                file_id, "ready", entity_count=counts["entities"]
+                file_id,
+                "ready",
+                entity_count=aligned if aligned is not None else counts["entities"],
             )
         except Exception:
             logger.exception("kb 图谱重建失败 file_id=%s", file_id)
             store.update_graph_status(file_id, "failed")
 
-    def _align(self, file_id: uuid.UUID) -> None:
+    def _align(self, file_id: uuid.UUID) -> int | None:
         """实体对齐：合并同一实体的多种写法，进度写 align_status。
 
-        失败只把 align_status 标 failed——图谱本身还是可用的，只是多几个重复点，
-        不该因此把 graph_status 也打成失败让用户以为图没了。
+        返回对齐后的实体数（entities - merged）；失败返回 None——
+        图谱本身还是可用的，只是多几个重复点，不该因此把 graph_status
+        也打成失败让用户以为图没了。
         """
         try:
             store.set_align_status(file_id, "aligning")
@@ -200,9 +207,11 @@ class KbPipeline:
                 alias_count=counts["merged"],
                 entity_count=counts["entities"] - counts["merged"],
             )
+            return counts["entities"] - counts["merged"]
         except Exception:
             logger.exception("kb 实体对齐失败 file_id=%s", file_id)
             store.set_align_status(file_id, "failed")
+            return None
 
     def _reembed(self, file_id: uuid.UUID) -> None:
         """改名重嵌：语境前缀《文件名》在嵌入时就烧进向量里（不落库），

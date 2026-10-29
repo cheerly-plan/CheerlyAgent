@@ -143,6 +143,28 @@ def _stub_graph(monkeypatch, seeds, nodes, edges, chunks):
     monkeypatch.setattr(kg_search.store, "get_entity_chunks", lambda ids, per_entity=3: chunks)
 
 
+def test_format_neighborhood_lists_seeds_and_edges():
+    e1, e2 = _entity("长鑫存储"), _entity("DRAM")
+    e1["type"] = "org"
+    e2["type"] = "product"
+    lines = kg_search.format_neighborhood(
+        [e1],
+        {
+            "nodes": [e1, e2],
+            "edges": [
+                {
+                    "source_id": e1["id"],
+                    "target_id": e2["id"],
+                    "relation": "生产",
+                    "description": "存储原厂",
+                }
+            ],
+        },
+    )
+    assert lines[0] == "命中实体：长鑫存储(org)"
+    assert "长鑫存储 —生产→ DRAM：存储原厂" in lines[2]
+
+
 def test_kg_search_fuses_seed_neighbor_and_vector_evidence(monkeypatch):
     e1, e2 = _entity("长鑫存储"), _entity("DRAM")
     ev1 = _evidence(e1["id"], 0, "长鑫存储是存储原厂")

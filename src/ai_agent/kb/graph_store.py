@@ -81,6 +81,43 @@ def _literal_match(
     return min(KEYWORD_BOOST_MAX, KEYWORD_BOOST_MAX * ratio), "keyword", ratio
 
 
+# 查询包含别名时，别名太短容易误中（「国电」出现在很多公司名里）
+_ALIAS_IN_QUERY_MIN = 4
+
+
+def _score_candidate(
+    query_norm: str,
+    tokens: list[str],
+    row: dict,
+    alias_name: str = "",
+) -> dict:
+    """给一条实体候选打分。别名按名称口径匹配：对齐删掉的简称要能成为强命中。"""
+    vector = float(row.get("score") or 0)
+    boost, basis, ratio = _literal_match(
+        query_norm, tokens, row.get("name") or "", row.get("description") or ""
+    )
+    if alias_name:
+        a_boost, a_basis, a_ratio = _literal_match(
+            query_norm, tokens, alias_name, ""
+        )
+        if a_basis == "name" and basis != "name":
+            boost, basis, ratio = a_boost, "alias", a_ratio
+        elif basis != "name" and a_boost > boost:
+            boost, basis, ratio = (
+                a_boost,
+                "alias" if a_basis == "name" else a_basis,
+                a_ratio,
+            )
+    literal = basis in {"name", "alias"} or ratio >= KEYWORD_HIT_RATIO
+    return {
+        **row,
+        "score": min(1.0, vector + boost),
+        "vector": vector,
+        "literal": literal,
+        "matched": basis or "vector",
+    }
+
+
 def _rank_candidates(
     scored: list[dict], *, min_score: float, top_k: int
 ) -> list[dict]:
@@ -616,6 +653,9 @@ class KgStore:
         一条强命中都没有就整体返回空（这一问根本没问到库里的东西）。只要有一条，
         其余候选的分数线就放宽一档（`WEAK_SCORE_DROP`），避免把相关但描述里没写
         这个词的实体也切掉。
+
+        对齐会删掉「亚厦股份」只留全称，写法进 alias 表。名称 LIKE 对不上
+        「亚厦股份 ⊂ 浙江亚厦装饰…」这种非子串简称，所以第三路按别名召回。
         """
         emb = Vector(query_embedding)
         query_norm = _norm_text(query)
@@ -629,6 +669,7 @@ class KgStore:
                 FROM agent_kg_entity e
                 JOIN agent_kb_file f ON f.id = e.file_id
         """
+        alias_hit: dict[str, str] = {}
         with self._get_pool().connection() as conn:
             rows = list(
                 conn.execute(
@@ -647,6 +688,14 @@ class KgStore:
             # 被同话题的长描述挤掉），单独按名字捞一遍再合并，保证「搜名字就能搜到」
             if query_norm:
                 like = "%" + query_norm.replace("\\", "\\\\").replace("%", "\\%") + "%"
+                params = {
+                    "emb": emb,
+                    "like": like,
+                    "query_norm": query_norm,
+                    "file_ids": file_ids or None,
+                    "pool": pool,
+                    "alias_min": _ALIAS_IN_QUERY_MIN,
+                }
                 rows.extend(
                     conn.execute(
                         columns
@@ -657,36 +706,56 @@ class KgStore:
                 ORDER BY e.mention_count DESC
                 LIMIT %(pool)s
                         """,
-                        {
-                            "emb": emb,
-                            "like": like,
-                            "file_ids": file_ids or None,
-                            "pool": pool,
-                        },
+                        params,
                     ).fetchall()
                 )
+                # 别名召回：对齐后简称不在实体表里。两条互补——
+                # alias LIKE 查询（搜「亚厦股份」命中别名「亚厦股份」）；
+                # 查询包含别名（搜「亚厦股份的上下游」命中别名「亚厦股份」）。
+                alias_rows = conn.execute(
+                    """
+                SELECT e.id, e.name, e.norm_name, e.type, e.description, e.file_id,
+                       f.filename, e.mention_count,
+                       1 - (e.embedding <=> %(emb)s) AS score,
+                       a.alias_name
+                FROM agent_kg_entity e
+                JOIN agent_kb_file f ON f.id = e.file_id
+                JOIN agent_kg_alias a ON a.entity_id = e.id
+                WHERE (
+                        a.alias_norm LIKE %(like)s ESCAPE '\\'
+                        OR (
+                            length(a.alias_norm) >= %(alias_min)s
+                            AND strpos(%(query_norm)s, a.alias_norm) > 0
+                        )
+                      )
+                  AND (%(file_ids)s::uuid[] IS NULL
+                       OR e.file_id = ANY(%(file_ids)s::uuid[]))
+                ORDER BY e.mention_count DESC
+                LIMIT %(pool)s
+                    """,
+                    params,
+                ).fetchall()
+                rows.extend(alias_rows)
+                for row in alias_rows:
+                    rid = str(row["id"])
+                    alias_name = str(row.get("alias_name") or "")
+                    if not alias_name:
+                        continue
+                    prev = alias_hit.get(rid, "")
+                    if not prev or _norm_text(alias_name) == query_norm:
+                        alias_hit[rid] = alias_name
 
         # 两轮查询会有重叠，先按 id 去重
         unique: dict[str, dict] = {}
         for row in rows:
             unique.setdefault(str(row["id"]), dict(row))
 
-        scored: list[dict] = []
-        for row in unique.values():
-            vector = float(row["score"] or 0)
-            boost, basis, ratio = _literal_match(
-                query_norm, tokens, row["name"], row["description"] or ""
+        scored = [
+            _score_candidate(
+                query_norm, tokens, row, alias_hit.get(str(row["id"]), "")
             )
-            literal = basis == "name" or ratio >= KEYWORD_HIT_RATIO
-            scored.append(
-                {
-                    **row,
-                    "score": min(1.0, vector + boost),
-                    "vector": vector,
-                    "literal": literal,
-                    "matched": basis or "vector",
-                }
-            )
+            for row in unique.values()
+        ]
 
         # 先看这一问到底「像不像在问库里的事」，再决定留下哪些候选
         return _rank_candidates(scored, min_score=min_score, top_k=top_k)

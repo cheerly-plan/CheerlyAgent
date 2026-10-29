@@ -20,11 +20,11 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 
 from ai_agent.api.dependencies import get_current_user, require_admin
-from ai_agent.api.schemas import KgBuildRequest, KgDocTypeRequest
+from ai_agent.api.schemas import KgBuildRequest, KgRebuildRequest
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.community import detect_communities, summarize
-from ai_agent.kb.doc_profiles import list_profiles, normalize_level, resolve_profile
+from ai_agent.kb.doc_profiles import list_profiles
 from ai_agent.kb.pipeline import kb_pipeline
 from ai_agent.memory.db import UserRecord
 from ai_agent.memory.embeddings import embed_query
@@ -48,6 +48,22 @@ def _parse_uuid_list(raw: str, label: str) -> list[uuid.UUID] | None:
     if not parts:
         return None
     return [_parse_uuid(p, label) for p in parts]
+
+
+def _extract_config(doc_type: str, level: str) -> tuple[str, str]:
+    """校验并归一化一次建图/重建携带的抽取配置。
+
+    空串原样返回——「没选」本身是合法状态，落库存空、抽取时由 pipeline 回落
+    全局默认的通用配置；未知 key 直接 400，不静默回落（用户以为选上了、实际
+    跑的是另一套配置，比报错更糟）。level 空串也原样返回，抽取时归一。
+    """
+    doc_type = (doc_type or "").strip()
+    level = (level or "").strip()
+    known = {p.key for p in list_profiles()}
+    if doc_type and doc_type not in known:
+        raise HTTPException(status_code=400, detail=f"未知文档类型：{doc_type}")
+    return doc_type, level
+
 
 
 def _node(row: dict) -> dict:
@@ -252,13 +268,8 @@ def build_graphs(req: KgBuildRequest, user: UserRecord = Depends(require_admin))
     if not settings.kb_graph_enabled:
         raise HTTPException(status_code=409, detail="图谱功能已关闭（KB_GRAPH_ENABLED=false）")
 
-    # 批量建图可以顺手统一套一套配置（"这批都是年报"），落库后重建也沿用
-    doc_type = (req.doc_type or "").strip()
-    level = (req.level or "").strip()
-    if doc_type and doc_type not in {p.key for p in list_profiles()}:
-        raise HTTPException(status_code=400, detail=f"未知文档类型：{doc_type}")
-    if doc_type:
-        level = normalize_level(level or "full")
+    # 批量建图可以顺手统一套一套配置（"这批都是年报"），配置是这次构建的参数
+    doc_type, level = _extract_config(req.doc_type, req.level)
 
     results: list[dict] = []
     submitted = 0
@@ -271,8 +282,12 @@ def build_graphs(req: KgBuildRequest, user: UserRecord = Depends(require_admin))
         if record["status"] != "ready":
             results.append({"file_id": raw, "status": "not_ready"})
             continue
-        if doc_type:
-            store.set_kb_extract_config(fid, doc_type=doc_type, level=level)
+        # 建图中的文件跳过，不重复投递（图谱线程池串行，重复投只会排队空等）
+        if store.get_file_graph_status(fid)["graph_status"] == "building":
+            results.append({"file_id": raw, "status": "building"})
+            continue
+        # 配置为空也写库：清掉这份文件之前可能存过的旧配置，抽时回落全局默认
+        store.set_kb_extract_config(fid, doc_type=doc_type, level=level)
         store.update_graph_status(fid, "building")
         kb_pipeline.submit_graph(fid)
         submitted += 1
@@ -285,12 +300,20 @@ def build_graphs(req: KgBuildRequest, user: UserRecord = Depends(require_admin))
 
 
 @router.post("/files/{file_id}/rebuild")
-def rebuild_graph(file_id: str, user: UserRecord = Depends(require_admin)):
+def rebuild_graph(
+    file_id: str,
+    req: KgRebuildRequest | None = None,
+    user: UserRecord = Depends(require_admin),
+):
     """重建图谱：用库里已有的切片重新抽取（不重新解析源文件）。
 
     用于「切片修订后图谱过期（stale）」「升级前上传的老文件」
-    或「上次抽取失败」的情况；任务丢进图谱线程池，
-    接口立即返回，进度看 graph_status。
+    或「上次抽取失败」的情况；任务丢进图谱线程池，接口立即返回，
+    进度看 graph_status。
+
+    `req` 可选：
+    - 不带 body = 沿用该文件已保存的配置（脚本/过期刷新不该顺手改配置）；
+    - 带 body = 把配置作为这次构建的参数落库（含空值，清成通用）再重抽。
     """
     if not settings.kb_graph_enabled:
         raise HTTPException(status_code=409, detail="图谱功能已关闭（KB_GRAPH_ENABLED=false）")
@@ -300,6 +323,14 @@ def rebuild_graph(file_id: str, user: UserRecord = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="文件不存在")
     if record["status"] != "ready":
         raise HTTPException(status_code=409, detail="文件还没解析完成，无法建图")
+    # 已在建图中：直接返回，不重复投递
+    if store.get_file_graph_status(fid)["graph_status"] == "building":
+        return {"status": "building"}
+
+    if req is not None:
+        doc_type, level = _extract_config(req.doc_type, req.level)
+        store.set_kb_extract_config(fid, doc_type=doc_type, level=level)
+
     store.update_graph_status(fid, "building")
     kb_pipeline.submit_graph(fid)
     logger.info("kg 重建提交 file_id=%s admin=%s", fid, user.username)
@@ -308,7 +339,7 @@ def rebuild_graph(file_id: str, user: UserRecord = Depends(require_admin)):
 
 @router.get("/doc-types")
 def doc_types(_user: UserRecord = Depends(get_current_user)):
-    """可选抽取配置：前端建图前选文档类型，选中后写回文件再建图。
+    """可选抽取配置：前端建图前选文档类型，选中后作为本次构建的参数提交。
 
     只给摘要（label / 实体范围 / 谓词前几条），不把整段 prompt 丢给前端——
     prompt 是服务端实现细节，前端需要的是「选哪个更合适」的判断依据。
@@ -317,47 +348,6 @@ def doc_types(_user: UserRecord = Depends(get_current_user)):
         "types": [p.brief() for p in list_profiles()],
         "default": settings.kb_default_doc_type,
     }
-
-
-@router.post("/files/{file_id}/doc-type")
-def set_doc_type(
-    file_id: str, req: KgDocTypeRequest, user: UserRecord = Depends(require_admin)
-):
-    """保存该文件的抽取配置（文档类型 + 粒度）。
-
-    只改配置不触发重抽：一次重抽是几十分钟的模型算力，该由用户决定何时花。
-    已有图谱的标 stale —— 图确实基于旧配置，前端会提示「需重建生效」。
-    """
-    fid = _parse_uuid(file_id, "文件")
-    record = store.get_kb_file(fid)
-    if record is None:
-        raise HTTPException(status_code=404, detail="文件不存在")
-    # 建图/对齐进行中不许改配置：抽取按批读的是任务开始时的 prompt，
-    # 中途改会让「这张图用的哪套配置」说不清；对齐期间改则让合并结果错乱
-    if store.get_file_graph_status(fid)["graph_status"] == "building":
-        raise HTTPException(status_code=409, detail="该文件正在建图，等完成后再改抽取配置")
-    if store.get_align_status(fid)["align_status"] == "aligning":
-        raise HTTPException(status_code=409, detail="该文件正在对齐实体，等完成后再改抽取配置")
-
-    known = {p.key for p in list_profiles()}
-    doc_type = (req.doc_type or "").strip() or settings.kb_default_doc_type
-    if doc_type not in known:
-        # 不静默回落 general：用户以为选上了、实际跑的是另一套配置，比直接报错更糟
-        raise HTTPException(status_code=400, detail=f"未知文档类型：{doc_type}")
-    level = normalize_level(req.level)
-    store.set_kb_extract_config(fid, doc_type=doc_type, level=level)
-
-    status = store.get_file_graph_status(fid)
-    if status["graph_status"] in ("ready", "stale"):
-        store.update_graph_status(fid, "stale")
-    logger.info(
-        "kg 抽取配置更新 file_id=%s doc_type=%s level=%s admin=%s",
-        fid,
-        doc_type,
-        level,
-        user.username,
-    )
-    return {"doc_type": doc_type, "level": level, "graph_status": "stale"}
 
 
 @router.post("/files/{file_id}/align")

@@ -130,7 +130,7 @@ class KbStore:
         with self._get_pool().connection() as conn:
             return conn.execute(
                 """
-                SELECT id, filename, size_bytes, status, doc_type, extract_level
+                SELECT id, filename, size_bytes, mime, status, doc_type, extract_level
                 FROM agent_kb_file
                 WHERE id = %s
                 """,

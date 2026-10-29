@@ -32,6 +32,31 @@ logger = logging.getLogger(__name__)
 _MAX_NEIGHBOR_ENTITIES = 6
 # 单次返回的证据切片总数
 _MAX_EVIDENCE = 8
+# 注入给模型的关系条数：再多挤掉原文，对话预检索与工具共用这个上限
+_MAX_NEIGHBORHOOD_EDGES = 20
+
+
+def format_neighborhood(
+    seeds: list[dict],
+    graph: dict,
+    *,
+    max_edges: int = _MAX_NEIGHBORHOOD_EDGES,
+) -> list[str]:
+    """命中实体 + 关系路径。预检索只注入这一段，不带原文（切片预检索已经有了）。"""
+    name_by_id = {str(n["id"]): n["name"] for n in graph.get("nodes") or []}
+    lines = [
+        "命中实体："
+        + "、".join(f"{s['name']}({s.get('type') or ''})" for s in seeds)
+    ]
+    edges = graph.get("edges") or []
+    if edges:
+        lines.append("关联关系：")
+        for edge in edges[:max_edges]:
+            src = name_by_id.get(str(edge["source_id"]), "?")
+            dst = name_by_id.get(str(edge["target_id"]), "?")
+            detail = f"：{edge['description']}" if edge.get("description") else ""
+            lines.append(f"- {src} —{edge['relation']}→ {dst}{detail}")
+    return lines
 
 
 class KgSearchArgs(BaseModel):
@@ -103,18 +128,7 @@ def _kg_search(
         depth=depth,
         max_nodes=settings.kb_graph_max_nodes,
     )
-    name_by_id = {str(n["id"]): n["name"] for n in graph["nodes"]}
-    lines: list[str] = [
-        "命中实体：" + "、".join(f"{s['name']}({s['type']})" for s in seeds)
-    ]
-
-    if graph["edges"]:
-        lines.append("关联关系：")
-        for edge in graph["edges"][:20]:
-            src = name_by_id.get(str(edge["source_id"]), "?")
-            dst = name_by_id.get(str(edge["target_id"]), "?")
-            detail = f"：{edge['description']}" if edge.get("description") else ""
-            lines.append(f"- {src} —{edge['relation']}→ {dst}{detail}")
+    lines: list[str] = format_neighborhood(seeds, graph)
 
     evidence = _collect_evidence(query, embedding, seeds, graph, parsed_ids)
     if evidence:

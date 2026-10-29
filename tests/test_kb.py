@@ -346,8 +346,11 @@ def test_check_duplicate_passes_new_content(monkeypatch):
 # ---------- 改名 ----------
 
 
-def _rename_record(request, monkeypatch, status="ready", filename="旧报告.pdf"):
-    """rename_file 的公共桩：ready 记录 + 磁盘上放好旧名文件 + pipeline 打桩。"""
+def _rename_record(request, monkeypatch, status="ready", filename="旧报告", mime=".pdf"):
+    """rename_file 的公共桩：ready 记录 + 磁盘上放好旧名文件 + pipeline 打桩。
+
+    文件名是纯名（不含后缀），类型由 mime 单独存——这是当前数据模型。
+    """
     import shutil
     import uuid as _uuid
 
@@ -358,7 +361,13 @@ def _rename_record(request, monkeypatch, status="ready", filename="旧报告.pdf
         base.mkdir()
     upload_root = base / _uuid.uuid4().hex
     fid = _uuid.uuid4()
-    record = {"id": fid, "filename": filename, "size_bytes": 4, "status": status}
+    record = {
+        "id": fid,
+        "filename": filename,
+        "mime": mime,
+        "size_bytes": 4,
+        "status": status,
+    }
     monkeypatch.setattr(kb_router, "_parse_file_id", lambda _fid: fid)
     monkeypatch.setattr(kb_router, "_get_file", lambda _fid: record)
     monkeypatch.setattr(kb_router.settings, "kb_upload_dir", upload_root)
@@ -376,14 +385,15 @@ def _rename_record(request, monkeypatch, status="ready", filename="旧报告.pdf
     return kb_router, record, renamed, submitted
 
 
-def test_rename_rejects_suffix_change(request, monkeypatch):
+def test_rename_strips_suffix(request, monkeypatch):
+    """新名带后缀时剥掉：文件名存纯名，类型由 mime 单独管，后缀不再进 filename。"""
     from ai_agent.api.schemas import KbRenameRequest
 
     kb_router, record, renamed, submitted = _rename_record(request, monkeypatch)
-    with pytest.raises(HTTPException) as exc:
-        rename_file("x", KbRenameRequest(filename="新报告.docx"), _admin())
-    assert exc.value.status_code == 400
-    assert renamed == [] and submitted == []
+    result = rename_file("x", KbRenameRequest(filename="新报告.docx"), _admin())
+    assert result == {"ok": True, "filename": "新报告", "reembedding": True}
+    assert renamed == ["新报告"]
+    assert submitted == [record["id"]]
 
 
 def test_rename_requires_ready(request, monkeypatch):
@@ -399,7 +409,7 @@ def test_rename_requires_ready(request, monkeypatch):
 
 
 def test_rename_updates_db_disk_and_reembeds(request, monkeypatch):
-    """stem 变了：DB 改名 + 磁盘文件重命名 + 后台重嵌，三件事都发生。"""
+    """名变了：DB 存纯名 + 磁盘文件重命名（拼回后缀）+ 后台重嵌，三件事都发生。"""
     import uuid as _uuid
 
     from ai_agent.api.schemas import KbRenameRequest
@@ -407,29 +417,30 @@ def test_rename_updates_db_disk_and_reembeds(request, monkeypatch):
     kb_router, record, renamed, submitted = _rename_record(request, monkeypatch)
     upload_dir = kb_router.Path(kb_router.settings.kb_upload_dir) / str(record["id"])
     upload_dir.mkdir(parents=True)
-    (upload_dir / record["filename"]).write_bytes(b"ABCD")
+    (upload_dir / "旧报告.pdf").write_bytes(b"ABCD")
 
     result = rename_file(
         str(record["id"]), KbRenameRequest(filename="2026 新报告.pdf"), _admin()
     )
 
-    assert result == {"ok": True, "filename": "2026 新报告.pdf", "reembedding": True}
-    assert renamed == ["2026 新报告.pdf"]
+    assert result == {"ok": True, "filename": "2026 新报告", "reembedding": True}
+    assert renamed == ["2026 新报告"]
+    # 磁盘文件拼回 mime 后缀重命名
     assert (upload_dir / "2026 新报告.pdf").is_file()
-    assert not (upload_dir / record["filename"]).exists()
+    assert not (upload_dir / "旧报告.pdf").exists()
     assert submitted == [record["id"]]
 
 
-def test_rename_same_stem_skips_reembed(request, monkeypatch):
-    """仅扩展名大小写变化（stem 不变）：向量语境没变，不值得整份重嵌。"""
+def test_rename_same_name_skips_reembed(request, monkeypatch):
+    """新名剥后缀后与现名相同：名字没变，不值得整份重嵌。"""
     from ai_agent.api.schemas import KbRenameRequest
 
     kb_router, record, renamed, submitted = _rename_record(
-        request, monkeypatch, filename="报告.PDF"
+        request, monkeypatch, filename="报告", mime=".PDF"
     )
     result = rename_file("x", KbRenameRequest(filename="报告.pdf"), _admin())
     assert result["reembedding"] is False
-    assert renamed == ["报告.pdf"] and submitted == []
+    assert renamed == [] and submitted == []
 
 
 def _admin():

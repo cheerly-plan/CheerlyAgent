@@ -50,16 +50,17 @@ class KgBuildRequest(BaseModel):
     level: str = Field(default="", max_length=10)
 
 
-class KgDocTypeRequest(BaseModel):
-    """给单个文件选抽取配置（文档类型 + 粒度）。
+class KgRebuildRequest(BaseModel):
+    """重建单文件图谱时可选携带抽取配置（文档类型 + 粒度）。
 
     doc_type 是配置 key（prospectus / annual_report / legal_opinion /
     due_diligence / announcement / general，或 data/kb_doc_profiles.json
     里自定义的），不是中文名——后端按 key 找配置块。
+    空串 = 清成全局默认的通用配置。
     """
 
-    doc_type: str = Field(default="general", max_length=40)
-    level: str = Field(default="full", max_length=10)
+    doc_type: str = Field(default="", max_length=40)
+    level: str = Field(default="", max_length=10)
 
 
 class ChatRequest(BaseModel):

@@ -25,10 +25,12 @@ from ai_agent.memory.short_term import (
     take_summary,
     take_system,
 )
+from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store, user_scope
 from ai_agent.memory.summarize import summarize_session
 from ai_agent.tools.registry import TOOLS_MAP, execute_tool, tool_label, tool_schemas
 from ai_agent.tools.kb_search import _citations_of, _format_hit_with_context
+from ai_agent.tools.kg_search import format_neighborhood
 
 logger = get_logger(__name__)
 
@@ -152,6 +154,88 @@ def _kb_prefetch(
         "meta": {"kb_prefetch": True},
     }
     return message, citations
+
+
+def _parse_prefetch_file_ids(raw_ids: tuple[str, ...]) -> list[uuid.UUID] | None:
+    if not raw_ids:
+        return None
+    parsed: list[uuid.UUID] = []
+    for raw in raw_ids:
+        try:
+            parsed.append(uuid.UUID(raw))
+        except ValueError:
+            continue
+    return parsed or None
+
+
+def _kg_prefetch(
+    user_input: str, user_id: str, kb_file_ids: tuple[str, ...]
+) -> ChatMessage | None:
+    """kb 开启时附带注入实体邻域（只给关系路径，不重复原文切片）。
+
+    切片预检索解决「原文里有没有这段话」；关系题如果模型不调 kg_search，
+    图谱等于白建。实体检索是毫秒级的，有强命中才注入，闲聊不会被带偏。
+    """
+    query = user_input.strip()
+    if not query:
+        return None
+    file_ids = _parse_prefetch_file_ids(kb_file_ids)
+    try:
+        with user_scope(user_id):
+            stats = store.graph_stats(file_ids=file_ids)
+            if not stats.get("entities"):
+                return None
+            embedding = embed_query(query)
+            seeds = store.search_entities(
+                embedding,
+                query=query,
+                top_k=settings.kb_graph_top_k,
+                file_ids=file_ids,
+                min_score=settings.kb_graph_min_score,
+            )
+            if not seeds:
+                return None
+            graph = store.expand_subgraph(
+                [s["id"] for s in seeds],
+                depth=1,
+                max_nodes=settings.kb_graph_max_nodes,
+            )
+    except Exception:
+        logger.exception("图谱预检索失败，本轮跳过邻域注入")
+        return None
+
+    body = "\n".join(format_neighborhood(seeds, graph))
+    content = (
+        "以下是系统针对用户最新问题预检索知识图谱得到的实体邻域。"
+        "涉及「和谁有关、上下游、投资、产业链」时优先依据这些关系作答；"
+        "邻域不够再调用 kg_search（可把 depth 设为 2）；与问题无关则忽略。\n\n"
+        + body
+    )
+    return {
+        "role": "system",
+        "content": content,
+        "meta": {"kg_prefetch": True},
+    }
+
+
+def _prefetch_knowledge(
+    user_input: str, user_id: str, kb_file_ids: tuple[str, ...]
+) -> tuple[ChatMessage | None, list[Citation]]:
+    """切片预检索 + 图谱邻域，合并成一条 system，避免连注两条挤掉上下文。"""
+    kb_msg, cited = _kb_prefetch(user_input, user_id, kb_file_ids)
+    kg_msg = _kg_prefetch(user_input, user_id, kb_file_ids)
+    if kb_msg is None:
+        return kg_msg, cited
+    if kg_msg is None:
+        return kb_msg, cited
+    merged: ChatMessage = {
+        "role": "system",
+        "content": str(kb_msg.get("content") or "")
+        + "\n\n"
+        + str(kg_msg.get("content") or ""),
+        "meta": {"kb_prefetch": True, "kg_prefetch": True},
+    }
+    return merged, cited
 
 
 def _checkpoint_create(
@@ -559,7 +643,7 @@ def run_loop(
         and messages
         and messages[-1].get("role") == "user"
     ):
-        prefetch_msg, prefetch_cited = _kb_prefetch(
+        prefetch_msg, prefetch_cited = _prefetch_knowledge(
             str(messages[-1].get("content") or ""), user_id, kb_file_ids
         )
         turn_sources = merge_sources(turn_sources, prefetch_cited)

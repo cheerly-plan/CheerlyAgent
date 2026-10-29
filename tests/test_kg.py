@@ -162,6 +162,36 @@ def test_query_tokens_split_latin_and_cjk_bigram():
     assert "存储" in _query_tokens("存储芯片价格")
 
 
+def test_score_candidate_alias_is_literal_when_canonical_misses():
+    """对齐删掉的「发行人」对不上全称，必须靠别名才能成为强命中。"""
+    from ai_agent.kb.graph_store import _query_tokens, _score_candidate
+
+    row = {
+        "id": "e1",
+        "name": "浙江亚厦装饰股份有限公司",
+        "description": "",
+        "score": 0.41,
+    }
+    tokens = _query_tokens("发行人")
+    missed = _score_candidate("发行人", tokens, row)
+    assert missed["literal"] is False
+    assert missed["matched"] == "vector"
+
+    scored = _score_candidate("发行人", tokens, row, alias_name="发行人")
+    assert scored["literal"] is True
+    assert scored["matched"] == "alias"
+    assert scored["score"] > missed["score"]
+
+
+def test_score_candidate_keeps_canonical_name_over_alias():
+    from ai_agent.kb.graph_store import _query_tokens, _score_candidate
+
+    row = {"id": "e1", "name": "HBM", "description": "", "score": 0.7}
+    scored = _score_candidate("hbm", _query_tokens("HBM"), row, alias_name="HBM3E")
+    assert scored["matched"] == "name"
+    assert scored["literal"] is True
+
+
 def test_literal_match_boosts_name_hits():
     from ai_agent.kb.graph_store import _literal_match, _query_tokens
 
