@@ -6,7 +6,10 @@ from openai import APIStatusError, OpenAI
 
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
+from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage, ChatResult, ToolCall
+
+logger = get_logger(__name__)
 
 _client = OpenAI(
     base_url=settings.base_url,
@@ -23,6 +26,15 @@ _stream_client = _client.with_options(
 )
 
 StreamItem = tuple[Literal["text"], str] | tuple[Literal["result"], ChatResult]
+
+# 主对话也必须关思考链：Qwen3 等模型开着会把正文写进 reasoning，
+# delta.content 一直是空，前端就只剩「已调用 xx」没有回答。
+_THINKING_OFF = {
+    "enable_thinking": False,
+    "chat_template_kwargs": {"enable_thinking": False},
+    # Ollama / Qwen3 原生字段；vLLM 会忽略
+    "think": False,
+}
 
 
 def _status_of(exc: Exception) -> int | None:
@@ -68,21 +80,33 @@ def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[Stre
             tools=tools,
             tool_choice="auto",
             stream=True,
+            extra_body=_THINKING_OFF,
         )
     except Exception as e:
         raise LLMError(str(e), status_code=_status_of(e)) from e
 
     content_parts: list[str] = []
     tool_acc: dict[int, dict[str, str]] = {}
+    leftover = ""
+    reasoning_parts: list[str] = []
 
     for chunk in stream:
         if not chunk.choices:
             continue
-        delta = chunk.choices[0].delta
-        if delta.content:
+        choice = chunk.choices[0]
+        delta = choice.delta
+        if delta and delta.content:
             content_parts.append(delta.content)
             yield ("text", delta.content)
-        for call in delta.tool_calls or []:
+        # 部分网关把整段正文只放在最后一帧的 message 上，delta.content 为空
+        message = getattr(choice, "message", None)
+        piece = getattr(message, "content", None) if message is not None else None
+        if piece:
+            leftover = piece
+        reasoning = _delta_reasoning(delta)
+        if reasoning:
+            reasoning_parts.append(reasoning)
+        for call in (delta.tool_calls if delta else None) or []:
             index = call.index if call.index is not None else 0
             item = tool_acc.setdefault(index, {"id": "", "name": "", "arguments": ""})
             if call.id:
@@ -108,10 +132,38 @@ def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[Stre
                 "arguments": arguments,
             }
         )
+    text = "".join(content_parts)
+    if not text and leftover:
+        text = leftover
+        yield ("text", leftover)
+    if not text and reasoning_parts:
+        # 思考链没关干净时，至少把推理正文交给前端，避免气泡全空
+        text = "".join(reasoning_parts)
+        yield ("text", text)
+        logger.warning("stream_chat 正文为空，回退 reasoning 长度=%d", len(text))
+    if not text and not tool_calls:
+        logger.warning("stream_chat 空正文且无工具调用")
     yield (
         "result",
-        {"content": "".join(content_parts), "tool_calls": tool_calls},
+        {"content": text, "tool_calls": tool_calls},
     )
+
+
+def _delta_reasoning(delta: Any) -> str:
+    """取出思考链字段。Qwen3 / 部分网关不走 delta.content。"""
+    if delta is None:
+        return ""
+    for attr in ("reasoning_content", "reasoning"):
+        value = getattr(delta, attr, None)
+        if value:
+            return str(value)
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, dict):
+        for key in ("reasoning_content", "reasoning"):
+            value = extra.get(key)
+            if value:
+                return str(value)
+    return ""
 
 
 def complete_chat(

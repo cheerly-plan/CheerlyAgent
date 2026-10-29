@@ -285,6 +285,18 @@ def _checkpoint_finish(run_id: str, status: str) -> None:
         logger.exception("checkpoint 终态写入失败 run_id=%s status=%s", run_id, status)
 
 
+def _drop_empty_assistant(messages: list[ChatMessage]) -> None:
+    """空正文收尾前摘掉刚写入的空气泡，避免上下文里连续两条 assistant。"""
+    last = messages[-1] if messages else None
+    if (
+        last
+        and last.get("role") == "assistant"
+        and not last.get("tool_calls")
+        and not str(last.get("content") or "").strip()
+    ):
+        messages.pop()
+
+
 def _stash_partial_assistant(
     messages: list[ChatMessage],
     streamed: str,
@@ -714,11 +726,56 @@ def run_loop(
             step += 1
             _checkpoint_update(run_id, messages, step)
         if not result["tool_calls"]:
+            text = str(result.get("content") or streamed or "").strip()
+            if not text:
+                # 工具已经跑完但模型没吐正文（本地小模型 / 思考链吃掉 content
+                # 时会出现）。再逼一轮不带工具，避免前端只剩「已调用 xx」。
+                logger.warning("最终回答为空，追加一轮强制作答 run_id=%s", run_id)
+                _drop_empty_assistant(messages)
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "（系统提示）刚才没有给出文字回答。"
+                            "请立即基于以上已获取的信息，用简体中文给出完整回答；"
+                            "不要再调用任何工具。"
+                        ),
+                    }
+                )
+                streamed = ""
+                result = None
+                try:
+                    context = _fit_context(
+                        messages, settings.llm_context_char_budget
+                    )
+                    for kind, payload in stream_chat(context, []):
+                        if kind == "text":
+                            streamed += payload
+                            yield {"type": "text", "content": payload}
+                        else:
+                            result = payload
+                except LLMError as e:
+                    logger.error("空回答收尾失败: %s", e)
+                    yield {"type": "error", "message": _llm_error_message(e)}
+                    return
+                except GeneratorExit:
+                    _stash_partial_assistant(messages, streamed, run_id, step)
+                    raise
+                except Exception:
+                    logger.exception("空回答收尾异常 run_id=%s", run_id)
+                    yield {"type": "error", "message": "模型输出中断，请稍后重试"}
+                    return
+                retry_text = str((result or {}).get("content") or "") or streamed
+                messages.append({"role": "assistant", "content": retry_text})
+                if run_id:
+                    step += 1
+                    _checkpoint_update(run_id, messages, step)
             logger.info(
-                "run_loop 完成 run_id=%s steps=%d budget=%d",
+                "run_loop 完成 run_id=%s steps=%d budget=%d content_len=%d",
                 run_id,
                 turn + 1,
                 budget.max_steps,
+                len(str((messages[-1].get("content") if messages else "") or "")),
             )
             # 引用挂在最终回答上：它是这一轮"给出结论"的那条消息，
             # 挂在带 tool_calls 的中间消息上，前端历史里会被跳过

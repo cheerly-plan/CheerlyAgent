@@ -1248,6 +1248,56 @@ def test_run_loop_budget_exhaustion_forces_final_answer():
     )
 
 
+def test_run_loop_retries_when_final_answer_empty():
+    """工具跑完但第二轮正文为空：再逼一轮不带工具，把回答补出来。"""
+    calls = {"n": 0}
+    tool_args: list[list] = []
+
+    def stream(messages, tools, **kwargs):
+        calls["n"] += 1
+        tool_args.append(list(tools))
+        if calls["n"] == 1:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "name": "get_weather",
+                            "arguments": {"city": "杭州"},
+                        }
+                    ],
+                },
+            )
+            return
+        if tools:
+            yield ("result", {"content": "", "tool_calls": []})
+            return
+        yield ("text", "杭州今天晴。")
+        yield ("result", {"content": "杭州今天晴。", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", return_value="晴 20 度"),
+    ):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "杭州天气"}],
+                "u1",
+            )
+        )
+
+    assert [e for e in events if e["type"] == "error"] == []
+    assert events[-1]["type"] == "done"
+    assert tool_args[-1] == []
+    assert any(
+        e.get("type") == "text" and "杭州今天晴" in str(e.get("content"))
+        for e in events
+    )
+    assert calls["n"] == 3
+
+
 def test_run_loop_dedupes_identical_tool_calls():
     """完全相同的 (工具, 参数) 只执行一次，重复请求收到提示而非结果。
 
