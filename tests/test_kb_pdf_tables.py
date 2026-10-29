@@ -265,6 +265,84 @@ def test_clean_table_nanling_issue_fee_two_columns():
     assert _rows_to_markdown(rows).startswith("| 项目 | 费用金额（万元） |")
 
 
+def test_clean_cell_reattaches_wrapped_cjk_punct():
+    """华瑞第 59 页职能部门表：长职责被抽成「正文行 + 标点行」。
+
+    修之前会把「， ； ；」硌在句子中间，渲染成「经营计划,;; 负责市场调研」。
+    """
+    raw = (
+        "负责行业研究 收集与公司发展战略匹配的投资 合作机会 对企业投资\n"
+        "， 、 ， 、\n"
+        "资本运作等项目进行研究论证 提供决策支持 制订公司战略及经营计划\n"
+        "， ； ；\n"
+        "负责市场调研 分析市场数据为公司战略制定提供参考\n"
+        "， ；"
+    )
+    got = _clean_cell(raw)
+    assert "负责行业研究，收集与公司发展战略匹配的投资、合作机会，对企业投资、" in got
+    assert "进行研究论证，提供决策支持；制订公司战略及经营计划；" in got
+    assert "，；；" not in got
+    assert ",;" not in got
+
+
+def test_clean_cell_wrap_punct_joins_split_word():
+    # 行尾被切断的「新项 / 目」：标点填进空格后，剩下的空格由字距规则拼回
+    raw = (
+        "制定公司技术研发计划并有效实施 工装 模具 夹具设计及管理 新项\n"
+        "； 、 、 ；\n"
+        "目市场调研与可行性分析 提出并完成公司革新项目 建立公司技术开发\n"
+        "； ；\n"
+        "信息系统 公司技术管理制度的制定 负责重大质量事故处理\n"
+        "； ； 。"
+    )
+    assert _clean_cell(raw) == (
+        "制定公司技术研发计划并有效实施；工装、模具、夹具设计及管理；"
+        "新项目市场调研与可行性分析；提出并完成公司革新项目；"
+        "建立公司技术开发信息系统；公司技术管理制度的制定；"
+        "负责重大质量事故处理。"
+    )
+
+
+def test_clean_table_huarui_department_duties():
+    """华瑞第 59 页：6 列交错网格 + 长职责单元格。
+
+    表头应是「部门 | 职责」，不能把「证券部」并进表头再当成每一片的列名。
+    """
+    raw = [
+        ["", "部 门", "", "", "职 责", ""],
+        [
+            "证券部",
+            None,
+            None,
+            "负责行业研究 收集与公司发展战略匹配的投资 合作机会 对企业投资\n"
+            "， 、 ， 、\n"
+            "资本运作等项目进行研究论证 提供决策支持 制订公司战略及经营计划\n"
+            "， ； ；",
+            None,
+            None,
+        ],
+        [
+            "技术研发中心",
+            None,
+            None,
+            "制定公司技术研发计划并有效实施 工装 模具 夹具设计及管理 新项\n"
+            "； 、 、 ；\n"
+            "目市场调研与可行性分析 提出并完成公司革新项目\n"
+            "； ；",
+            None,
+            None,
+        ],
+    ]
+    rows = _clean_table(raw)[0]
+    assert rows[0] == ["部门", "职责"]
+    assert rows[1][0] == "证券部"
+    assert rows[1][1].startswith("负责行业研究，收集与公司发展战略匹配的投资、合作机会")
+    assert "，；；" not in rows[1][1]
+    assert rows[2][0] == "技术研发中心"
+    assert "工装、模具、夹具设计及管理；新项目市场调研" in rows[2][1]
+    assert _rows_to_markdown(rows).startswith("| 部门 | 职责 |")
+
+
 # ——— 无框释义表（"X 指 Y"）：国电电力第 6 页实录 ———
 
 def _w(x0, y0, x1, y1, text):
@@ -377,3 +455,56 @@ def test_split_repeated_header_still_needs_shared_label():
     parts = _split_repeated_header(rows)
     assert len(parts) == 2
     assert parts[1][0] == rows[3]
+
+
+# ——— 键值表补头 + 孤儿标点行（华瑞第 3/32 页「本次发行的基本情况」实录）———
+
+def test_clean_cell_restores_dots_from_orphan_line():
+    # 「3.65」的小数点被甩到两行之外，成了孤立的「.」行
+    assert _clean_cell(
+        "365元/股（按照2016年12月31日经审计的归属于母公\n."
+        "\n司所有者权益除以本次发行前总股本计算）"
+    ) == "3.65元/股（按照2016年12月31日经审计的归属于母公司所有者权益除以本次发行前总股本计算）"
+
+
+def test_clean_cell_restores_thousands_with_orphan_dot_row():
+    # 千分位逗号+小数点一起甩出：「2,000.00」「310.00」
+    assert (
+        _clean_cell("承销费用 200000万元\n, .\n保荐费用 31000万元\n.")
+        == "承销费用2,000.00万元保荐费用310.00万元"
+    )
+
+
+def test_clean_cell_drops_prose_punct_rows_keeps_final_period():
+    # 句读孤儿行（含中文标点）删掉，句末句号（末行）保留
+    assert (
+        _clean_cell(
+            "本次公开发行股份总数不超过 2500 万股 占发行后总股本\n, ，\n"
+            "比例不低于2500% 本次发行全部为新股发行 原股东不公\n. 。 ，\n开发售股份\n。"
+        )
+        == "本次公开发行股份总数不超过2500万股占发行后总股本比例不低于2500%"
+        "本次发行全部为新股发行原股东不公开发售股份。"
+    )
+
+
+def test_add_kv_header_prepends_for_label_value_table():
+    # 华瑞第 32 页发行概况：每行「短标签 + 长内容」，没有表头行；
+    # 净资产的「3.65」小数点甩成孤立行（实录原样）
+    rows = _clean_table(
+        [
+            ["股票类型", "人民币普通股（A股）"],
+            ["每股面值", "人民币100元\n."],
+            ["发行前每股净资产", "365元/股（按照2016年12月31日经审计）\n."],
+            ["承销方式", "余额包销"],
+        ]
+    )[0]
+    assert rows[0] == ["项目", "内容"]
+    assert rows[2] == ["每股面值", "人民币1.00元"]
+    assert rows[3][1].startswith("3.65元/股")
+
+
+def test_add_kv_header_skips_table_with_real_header():
+    # 首行本身就是表头（「指标 | 数值」/「词语 | 含义」）时不补
+    for header in (["指标", "数值"], ["词语", "含义"]):
+        rows = _clean_table([header, ["国电集团", "中国国电集团公司"]])[0]
+        assert rows[0] == header

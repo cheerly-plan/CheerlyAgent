@@ -258,6 +258,24 @@ _TRAIL_COMMA = re.compile(r"(?<=[）)%])\s*[，,]$")
 _CJK_COMMA = re.compile(f"(?<=[{_CJK}])\\s*,\\s*(?=[{_CJK}])")
 # 合计行常把标签写在表头列上（和「项目」同一列居中），不能当成「表头位出现了真数据」
 _TOTAL_LABEL = re.compile(r"合计|小计|总计")
+# 整行只剩标点的「孤儿行」：千分位逗号、句读被 PDF 排成独立块插在多行
+# 文本中间（", ，" / ". 。 ，"）。夹着英文点/逗号的是数字碎片，位置
+# 不可考，删掉；纯中文标点（「， 、 ；」）能插回上一行的空格缝。
+_PUNCT_ROW = re.compile(
+    r"^[\s.,;:!？?%\-—–…()（）【】\[\]《》「」、，。；：\"'“”‘’]+$"
+)
+# 职责表这类长单元格：正文一行、标点单独一行。只含中文标点才敢回填，
+# 英文逗号/点可能是千分位或小数点（见 _DOT_ROW / 发行概况表）。
+_WRAP_PUNCT = re.compile(r"^[\s]*[，。、；：！？][\s，。、；：！？]*$")
+_WRAP_PUNCT_MARK = re.compile(r"[，。、；：！？]")
+# 只有一个点的孤儿行（前面可带千分位逗号）：是数字被甩出的小数点
+_DOT_ROW = re.compile(r"^,?\s*\.$")
+# 被甩出小数点的数字串：多段连写（"3 672 71"、"114 376 427 06"——末段是
+# 小数，前面是整数部分），或单个整数（"365"、"200000"）。
+# 前后不能挨着数字、点、千分位逗号，排除已格式化的「2,000.00」
+_NUM_RUN = re.compile(r"(?<![\d.,])\d+(?:\s+\d{1,3})*(?![\d.,])")
+# 键值表补头：内容列里这些形状算「表头样」——短且无中文标点，或是纯数字
+_KV_PUNCT = re.compile(r"[（）【】《》「」、，。；：]")
 
 
 # ——— PDF 释义表 ———
@@ -448,8 +466,35 @@ def _clean_table(raw: list[list[str | None]]) -> list[list[list[str]]]:
         part = _merge_header(part)
         part = _split_interleaved(part)
         part = _align_header(part)
-        out.append(_drop_empty_cols(part))
+        out.append(_add_kv_header(_drop_empty_cols(part)))
     return out
+
+
+def _add_kv_header(rows: list[list[str]]) -> list[list[str]]:
+    """两列键值表（"股票类型 | 人民币普通股（A 股）"）没有表头行。
+
+    Markdown 表格首行必被渲染成表头（灰底），不补的话第一条发行概况就
+    被顶成了列名。判据：每行都是「短标签 + 内容」，且没有一行的内容列
+    长得像表头（短而无中文标点、或纯数字）——后者说明首行本来就是列名。
+    """
+    if len(rows) < 2 or any(len(r) != 2 for r in rows):
+        return rows
+    if not all(r[0] and r[1] and len(r[0]) <= 10 for r in rows):
+        return rows
+    if any(_kv_headerish(r[1]) for r in rows):
+        return rows
+    return [["项目", "内容"], *rows]
+
+
+def _kv_headerish(cell: str) -> bool:
+    """内容列是否长得像表头：「数值」「含义」这类一两个字，或纯数字。
+
+    刻意只认 ≤2 字——「余额包销」这种 4 字短内容是真数据；代价是
+    「解释说明」这类 4 字表头认不出来，但那比把数据行当表头少见得多。
+    """
+    return _NUM_ONLY.match(cell) is not None or (
+        len(cell) <= 2 and not _KV_PUNCT.search(cell)
+    )
 
 
 def _split_repeated_header(rows: list[list[str]]) -> list[list[list[str]]]:
@@ -500,8 +545,52 @@ def _mostly_numeric(body: list[list[str]]) -> bool:
     return hits * 2 >= len(body)
 
 
+def _fill_wrap_punct(text: str, marks: list[str]) -> str:
+    """把单独成行的中文标点填进上一行短语之间的空格，多出来的贴行尾。
+
+    「负责行业研究 收集…投资 合作机会」+「， 、 ，」→
+    「负责行业研究，收集…投资、合作机会」。空格比标点多时，剩下的
+    空格留给后面的 _CJK_SPACE 去拼（行尾被切断的「新项」「目」）。
+    """
+    if not marks:
+        return text
+    parts = re.split(r"(\s+)", text)
+    i = 0
+    for k, part in enumerate(parts):
+        if part.isspace() and i < len(marks):
+            parts[k] = marks[i]
+            i += 1
+    return "".join(parts) + "".join(marks[i:])
+
+
 def _clean_cell(value: str | None) -> str:
-    text = (value or "").replace("\n", " ")
+    text = value or ""
+    if "\n" in text:
+        # 多行单元格里的孤儿标点行分三类（都是 PDF 把标点排成独立块）：
+        # - 只有点的「. / , .」：是前面数字被甩出的小数点（可带千分位逗号），
+        #   按顺序补回数字里——「365元/股\n.\n…」是 3.65、「200000万元」
+        #   是 2,000.00；
+        # - 纯中文标点（「， 、 ；」）：插回上一行空格缝，职责表靠这个还原；
+        # - 中英文混杂（", ，" / ". 。 ，"）：数字碎片和句读搅在一起，
+        #   位置不可考，删掉。末行句号仍保留。
+        dots = 0
+        kept: list[str] = []
+        lines = text.split("\n")
+        for i, ln in enumerate(lines):
+            if _DOT_ROW.match(ln.strip()):
+                dots += 1
+            elif _WRAP_PUNCT.match(ln) and kept:
+                kept[-1] = _fill_wrap_punct(
+                    kept[-1], _WRAP_PUNCT_MARK.findall(ln)
+                )
+            elif _PUNCT_ROW.match(ln) and i < len(lines) - 1:
+                continue
+            else:
+                kept.append(ln)
+        text = "\n".join(kept)
+        if dots:
+            text = _restore_dots(text, dots)
+    text = text.replace("\n", " ")
     text = _CELL_WS.sub(" ", text).strip()
     # 先修连写的日期（"20090807 . ."），否则会被下面的数字重组当成
     # 「整数连写 + 甩到末尾的小数点」切坏
@@ -564,6 +653,33 @@ def _thousands(digits: str) -> str:
         digits = digits[:-3]
     out.insert(0, digits)
     return ",".join(out)
+
+
+def _restore_dots(text: str, count: int) -> str:
+    """把甩成孤儿行的小数点按出现顺序补回数字（招股书惯例：两位小数）。
+
+    「365元/股」→ 3.65 元/股、「200000万元」→ 2,000.00 万元；多段连写
+    （"5176 63"）末段是小数 → 5,176.63 同 _NUM_THOUSANDS 的拼法。只动前
+    count 处：日期（2016年12月31日）排在数字主体后面，不会误伤。
+    """
+    remaining = count
+
+    def sub(m: re.Match[str]) -> str:
+        nonlocal remaining
+        parts = m.group(0).split()
+        if len(parts) == 1 and len(parts[0]) < 2:
+            return m.group(0)  # 单个一位数字不可能是「整数+甩点」，不消耗
+        if remaining <= 0:
+            return m.group(0)
+        remaining -= 1
+        if len(parts) > 1:
+            return ",".join(parts[:-1]) + "." + parts[-1]
+        digits = parts[0]
+        if len(digits) > 2:
+            return f"{_thousands(digits[:-2])}.{digits[-2:]}"
+        return f"0.{digits}"
+
+    return _NUM_RUN.sub(sub, text)
 
 
 def _align_header(rows: list[list[str]]) -> list[list[str]]:
