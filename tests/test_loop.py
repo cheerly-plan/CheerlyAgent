@@ -1597,3 +1597,27 @@ def test_mid_stream_error_is_reported_instead_of_killing_the_stream():
     errors = [e for e in events if e.get("type") == "error"]
     assert len(errors) == 1
     assert "中断" in errors[0]["message"]
+
+
+def test_execute_tool_clamps_out_of_range_args():
+    """模型传 depth=3（schema 上限 2）时，夹回边界重试，而不是整次失败。"""
+    from ai_agent.tools.registry import _clamp_out_of_range_args
+    from ai_agent.tools.kg_search import KgSearchArgs
+
+    clamped = _clamp_out_of_range_args(
+        KgSearchArgs, {"query": "安克创新", "depth": 3, "top_k": 10}
+    )
+    assert clamped["depth"] == 2
+    assert clamped["top_k"] == 10  # 未越界，保持原值
+
+
+def test_clamp_only_touches_out_of_range_numeric_fields():
+    from ai_agent.tools.registry import _clamp_out_of_range_args
+    from ai_agent.tools.kg_search import KgSearchArgs
+
+    clamped = _clamp_out_of_range_args(
+        KgSearchArgs, {"query": "安克创新", "depth": 0, "top_k": 99}
+    )
+    assert clamped["depth"] == 1
+    assert clamped["top_k"] == 10
+    assert clamped["query"] == "安克创新"  # 非数值字段不动
