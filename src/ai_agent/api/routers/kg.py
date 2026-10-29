@@ -11,8 +11,9 @@
   GET  /v1/kg/entities/{entity_id}/chunks  实体的原文证据（所有登录用户）
   GET  /v1/kg/doc-types                    可选抽取配置（所有登录用户）
   POST /v1/kg/graph/build                  管理员选文件批量生成图谱（后台执行）
-  POST /v1/kg/files/{file_id}/rebuild      重建该文件图谱（后台执行，管理员）
-  POST /v1/kg/files/{file_id}/doc-type     保存该文件的抽取配置（管理员）
+  POST /v1/kg/files/{file_id}/rebuild      重建该文件图谱（后台执行，管理员；
+                                           body 里的 doc_type/level 可省略，
+                                           省略时沿用该文件上次的抽取配置）
 """
 
 import uuid
