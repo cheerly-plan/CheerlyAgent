@@ -128,6 +128,14 @@ def test_search_knowledge_survives_neighbor_failure(monkeypatch):
     assert hits[0].before == [] and hits[0].after == []
 
 
+def test_to_hit_keeps_missing_distance_as_none():
+    row = _row(0, "关键词独有")
+    row.pop("distance")
+    assert retrieval._to_hit(row).distance is None
+    row["distance"] = 0.0
+    assert retrieval._to_hit(row).distance == 0.0
+
+
 def test_format_hit_with_context_marks_neighbors_and_position():
     hit = retrieval.Hit(
         file_id=str(FILE_ID),

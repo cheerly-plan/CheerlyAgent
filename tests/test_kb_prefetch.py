@@ -12,7 +12,7 @@ from ai_agent.kb.retrieval import Hit
 FILE_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
 
-def _hit(distance: float = 0.2, seq: int = 2) -> Hit:
+def _hit(distance: float | None = 0.2, seq: int = 2) -> Hit:
     return Hit(
         file_id=str(FILE_ID),
         filename="招股意向书.PDF",
@@ -45,6 +45,37 @@ def test_prefetch_injects_hits_as_system_message(monkeypatch):
     assert "核心技术来源于" in message["content"]
     # 命中同时作为引用上报，前端展示与工具检索一致
     assert cited[0].payload()["key"] == f"{FILE_ID}#2"
+
+
+def test_prefetch_keeps_keyword_only_hits(monkeypatch):
+    """编号/专名常走关键词路，没有向量距离，不能当成弱匹配丢掉。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        loop_mod, "search_knowledge", lambda *a, **kw: [_hit(None)]
+    )
+
+    message, cited = loop_mod._kb_prefetch("BMS-001告警", "u1", ())
+
+    assert message is not None and cited
+    assert "关键词命中" in message["content"]
+
+
+def test_prefetch_does_not_let_keyword_hits_bypass_weak_vector_gate(monkeypatch):
+    """弱向量 + 关键词独有命中：关键词不能写成距离 0 把闲聊门控打穿。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        loop_mod,
+        "search_knowledge",
+        lambda *a, **kw: [_hit(0.9, seq=1), _hit(None, seq=2)],
+    )
+
+    message, cited = loop_mod._kb_prefetch("今天天气不错", "u1", ())
+
+    assert message is None and cited == []
 
 
 def test_prefetch_drops_weak_matches_by_distance(monkeypatch):

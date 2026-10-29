@@ -10,7 +10,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import Citation, collect_citations, merge_sources
-from ai_agent.kb.retrieval import search_knowledge
+from ai_agent.kb.retrieval import Hit, search_knowledge
 from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
@@ -136,14 +136,16 @@ def _kb_prefetch(
         reset_kb_scope(scope_token)
     if not hits:
         return None, []
-    # 闲聊门控：一条都不够近才整轮不注入。不要按条剔除——重排挑中的
-    # 「能回答问题」的片段距离常在 0.46~0.60（改写问法），按条砍会把
-    # 相关原文丢掉，只留下更近但答不上的句子。
-    if all(hit.distance > settings.kb_prefetch_max_distance for hit in hits):
+    # 闲聊门控：有向量距离的命中全部过远才整轮不注入。不要按条剔除——
+    # 重排挑中的「能回答问题」的片段距离常在 0.46~0.60（改写问法），
+    # 按条砍会把相关原文丢掉，只留下更近但答不上的句子。
+    # 关键词独有命中没有 distance，不能当成 0 去打穿这道门；
+    # 纯关键词召回（编号/专名）则整组放行。
+    if _prefetch_too_weak(hits):
         return None, []
     citations = _citations_of(hits)
     blocks = [
-        f"【命中 {i + 1} · 与问题的向量距离 {hit.distance:.2f}】\n"
+        f"【命中 {i + 1} · {_prefetch_distance_label(hit)}】\n"
         f"{_format_hit_with_context(hit)}"
         for i, hit in enumerate(hits)
     ]
@@ -159,6 +161,20 @@ def _kb_prefetch(
         "meta": {"kb_prefetch": True},
     }
     return message, citations
+
+
+def _prefetch_too_weak(hits: list[Hit]) -> bool:
+    """弱相关整轮丢弃。只看走过向量路的命中。"""
+    scored = [hit.distance for hit in hits if hit.distance is not None]
+    if not scored:
+        return False
+    return all(d > settings.kb_prefetch_max_distance for d in scored)
+
+
+def _prefetch_distance_label(hit: Hit) -> str:
+    if hit.distance is None:
+        return "关键词命中"
+    return f"与问题的向量距离 {hit.distance:.2f}"
 
 
 def _parse_prefetch_file_ids(raw_ids: tuple[str, ...]) -> list[uuid.UUID] | None:

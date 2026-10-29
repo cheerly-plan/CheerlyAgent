@@ -57,7 +57,9 @@ class Hit:
     page: int | None
     kind: str
     text: str
-    distance: float
+    # 向量余弦距离；关键词独有命中没有走过向量路，保持 None。
+    # 不能填 0：0 看起来像完美匹配，会把预检索闲聊门控打穿。
+    distance: float | None
     # 跨页切片的末页（同节内聚合会一片跨两页）；单页片等于 page
     page_end: int | None = None
     # 所属一级节，如「第十节 管理层讨论与分析」
@@ -217,8 +219,8 @@ def _fuse_with_keywords(
 def _rrf_merge(vector_rows: list[dict], keyword_rows: list[dict]) -> list[dict]:
     """两路召回按名次做 RRF 融合：score = Σ 1/(60+名次)，双路命中叠加。
 
-    关键词独有片段没有 distance（向量化这条路没走过），保持缺失即可，
-    _to_hit 会按 0 兜底；融合结果按分数降序返回。
+    关键词独有片段没有 distance（向量化这条路没走过），保持缺失；
+    _to_hit 写成 None，不能填 0。融合结果按分数降序返回。
     """
     scores: dict[tuple[str, int], float] = {}
     merged: dict[tuple[str, int], dict] = {}
@@ -261,10 +263,20 @@ def _to_hit(row: dict) -> Hit:
         page=row.get("page"),
         kind=row.get("kind") or "text",
         text=row.get("text") or "",
-        distance=float(row.get("distance") or 0.0),
+        distance=_vector_distance(row),
         page_end=row.get("page_end"),
         section=row.get("section"),
     )
+
+
+def _vector_distance(row: dict) -> float | None:
+    raw = row.get("distance")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _attach_neighbors(hits: list[Hit]) -> list[Hit]:

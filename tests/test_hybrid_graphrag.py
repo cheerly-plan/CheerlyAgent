@@ -65,7 +65,8 @@ def test_rrf_merge_keyword_only_rows_carry_no_distance():
     only_kw = _row(FILE_ID, 3, "关键词命中")
     only_kw.pop("distance")
     merged = retrieval._rrf_merge([], [only_kw])
-    assert float(merged[0].get("distance") or 0.0) == 0.0
+    assert merged[0].get("distance") is None
+    assert retrieval._to_hit(merged[0]).distance is None
 
 
 def test_fuse_disabled_returns_vector_rows_untouched(monkeypatch):
@@ -89,6 +90,7 @@ def test_search_knowledge_merges_both_recalls(monkeypatch):
     """向量路与关键词路结果合并后一起走去重/截断。"""
     vec = _row(FILE_ID, 0, "向量召回片段")
     kw = _row(OTHER_ID, 5, "关键词召回片段")
+    kw.pop("distance")
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
     monkeypatch.setattr(
         retrieval.store, "search_kb_chunks", lambda *a, **k: [vec]
@@ -104,6 +106,9 @@ def test_search_knowledge_merges_both_recalls(monkeypatch):
     hits = retrieval.search_knowledge("迟到处罚", top_k=3)
     texts = [hit.text for hit in hits]
     assert "向量召回片段" in texts and "关键词召回片段" in texts
+    by_text = {hit.text: hit for hit in hits}
+    assert by_text["向量召回片段"].distance == 0.3
+    assert by_text["关键词召回片段"].distance is None
 
     # 同一片段两路都命中时只保留一条
     monkeypatch.setattr(
