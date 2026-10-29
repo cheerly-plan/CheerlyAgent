@@ -16,6 +16,7 @@
                                            stem 变化触发后台整份重嵌
   GET    /v1/kb/files/{id}/download        下载原始文件（所有登录用户）
   GET    /v1/kb/files/{id}/chunks          切片明细（所有登录用户）
+  GET    /v1/kb/files/{id}/chunks/locate   按页码定位切片（所有登录用户）
   PATCH  /v1/kb/files/{id}/chunks/{seq}    修订切片正文，单片重嵌入（管理员）
   DELETE /v1/kb/files/{id}                 删除文件与切片（管理员）
 
@@ -336,7 +337,33 @@ def list_chunks(
     if store.get_kb_file(fid) is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     chunks, total = store.list_kb_chunks(fid, limit=limit, offset=offset)
-    return {"chunks": chunks, "total": total}
+    # 顺带给最大页码：前端「跳页」控件要显示「共 N 页」，否则得再发一次请求
+    return {"chunks": chunks, "total": total, "page_count": store.kb_chunk_page_count(fid)}
+
+
+@router.get("/files/{file_id}/chunks/locate")
+def locate_chunk(
+    file_id: str,
+    page: int,
+    _user: UserRecord = Depends(get_current_user),
+):
+    """按页码定位切片，返回它在切片序列里的位置（前端虚拟列表据此滚动）。
+
+    该页没有切片（图片页/空白页）时顺延到其后最近的一页，page 回传实际
+    命中的页，前端可以提示「第 12 页没有切片，已跳到第 13 页」。
+    """
+    fid = _parse_file_id(file_id)
+    if store.get_kb_file(fid) is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    page_count = store.kb_chunk_page_count(fid)
+    hit = store.locate_kb_chunk_page(fid, max(page, 1))
+    return {
+        "found": hit is not None,
+        "seq": hit["seq"] if hit else None,
+        "page": hit["page"] if hit else None,
+        "index": hit["index"] if hit else None,
+        "page_count": page_count,
+    }
 
 
 @router.patch("/files/{file_id}/chunks/{seq}")

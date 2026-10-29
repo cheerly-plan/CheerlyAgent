@@ -268,6 +268,58 @@ class KbStore:
             ).fetchone()
         return chunks, int(row["total"])
 
+    def locate_kb_chunk_page(
+        self, file_id: uuid.UUID, page: int
+    ) -> dict | None:
+        """按页码找切片位置：该页（或其后最近一页）第一条切片。
+
+        前端切片列表是虚拟滚动、按 seq 顺序累积加载的，所以「跳到第 N 页」
+        真正需要的是两个数：目标切片的 seq（用于高亮）和它在文件内的序号
+        index（用于算滚动位置）。没有切片命中的页（图片页/空白页）顺延到
+        后一页，page 字段回传实际命中的页，前端据此提示。
+
+        page 为 NULL 的切片（md/txt 这类不分页的文件）不参与定位。
+        """
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT seq, page
+                FROM agent_kb_chunk
+                WHERE file_id = %s AND page IS NOT NULL AND page >= %s
+                ORDER BY seq
+                LIMIT 1
+                """,
+                (file_id, page),
+            ).fetchone()
+            if row is None:
+                return None
+            counted = conn.execute(
+                """
+                SELECT count(*) AS n
+                FROM agent_kb_chunk
+                WHERE file_id = %s AND seq < %s
+                """,
+                (file_id, row["seq"]),
+            ).fetchone()
+        return {
+            "seq": int(row["seq"]),
+            "page": int(row["page"]),
+            "index": int(counted["n"]),
+        }
+
+    def kb_chunk_page_count(self, file_id: uuid.UUID) -> int:
+        """文件的最大页码（跨页切片取 page_end）。无页码的文件返回 0。"""
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT coalesce(max(coalesce(page_end, page)), 0) AS n
+                FROM agent_kb_chunk
+                WHERE file_id = %s
+                """,
+                (file_id,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
     def list_kb_chunk_inputs(self, file_id: uuid.UUID) -> list[dict]:
         """改名重嵌用：全量切片的 (id, text, page, kind, section)，按 seq 排序。
 
