@@ -248,11 +248,13 @@ _NUM_TRAIL_SIGNS = re.compile(r"^([\d.,]*\d)\s*(-)?\s*,?\s*$")
 _DATE_DASH = re.compile(r"(\d{4})\s+(\d{1,2})\s+(\d{1,2})\s*-\s*-")
 # 商标有效期："20090807 . ." 是 2009.08.07（小数点被画成独立块）
 _DATE_DOTS = re.compile(r"(\d{4})(\d{2})(\d{2})\s*\.\s*\.\s*")
+# 表头日期月份不补零："2020630 . ." 是 2020.6.30（8 位的走上面，避免 20191231 被切成 2019.1.231）
+_DATE_DOTS_MD = re.compile(r"(\d{4})(\d)(\d{2})\s*\.\s*\.\s*")
 # 标点后的空格："总股本 ， 比例"
 _SPACE_AFTER_PUNCT_2 = re.compile(r"([，。、；：？！%])\s+")
-# 单位括号/百分号后甩出来的孤立逗号："资产负债率（母公司%），"
-# （只认这两个前导字符——普通文字后的末尾逗号可能是正常标点）
-_TRAIL_COMMA = re.compile(r"(?<=[）)%])\s*[，,]$")
+# 单位括号/百分号/数字后甩出来的孤立逗号：
+# 「资产负债率（母公司%），」「1,031,675,913.97，」
+_TRAIL_COMMA = re.compile(r"(?<=[）)%\d])\s*[，,]$")
 # 千分位逗号被甩到后面，落在两个中文之间："换向器 , 项目"
 # （只认英文逗号，中文逗号多半是真标点）
 _CJK_COMMA = re.compile(f"(?<=[{_CJK}])\\s*,\\s*(?=[{_CJK}])")
@@ -426,16 +428,74 @@ def _overlap_ratio(
     return ox * oy / max((a[2] - a[0]) * (a[3] - a[1]), 1.0)
 
 
+def _header_has_cjk(raw: list[list[str | None]]) -> bool:
+    """表头行是否带中文列名。三线表被切掉「资产」列时，表头只剩日期数字。"""
+    if not raw:
+        return False
+    return any(_CJK_RE.search(cell or "") for cell in raw[0])
+
+
+def _replace_clipped_tables(found: list, alt: list) -> list:
+    """用 lines_strict 的结果替换表头没有中文的表（bbox 重叠的那张）。"""
+    used: set[int] = set()
+    out: list = []
+    for table in found:
+        raw = table.extract()
+        if _header_has_cjk(raw):
+            out.append(table)
+            continue
+        tb = tuple(table.bbox)
+        pick = None
+        for j, other in enumerate(alt):
+            if j in used:
+                continue
+            if _overlap_ratio(tb, tuple(other.bbox)) < 0.3:
+                continue
+            if not _header_has_cjk(other.extract()):
+                continue
+            pick = (j, other)
+            break
+        if pick is not None:
+            used.add(pick[0])
+            out.append(pick[1])
+        else:
+            out.append(table)
+    return out
+
+
+def _find_page_tables(page) -> list:
+    """默认按线条抽表；表头被切掉中文列名时改用 lines_strict。
+
+    招股书三线表只有横线和数字区的短竖线，默认策略会把「资产」列和
+    最右一列年份切到框外，抽成纯数字网格。lines_strict 认完整外框，
+    但不能当默认——合并单元格的表（股东名册、发行费用）列数会变少。
+    """
+    try:
+        found = list(page.find_tables().tables)
+    except Exception:
+        found = []
+    clipped = [t for t in found if not _header_has_cjk(t.extract())]
+    if not found or not clipped:
+        return found
+    try:
+        alt = list(page.find_tables(strategy="lines_strict").tables)
+    except Exception:
+        return found
+    if not alt:
+        return found
+    return _replace_clipped_tables(found, alt)
+
+
 def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
     """逐页找表格，返回 (页码, 顶部纵坐标, bbox, 清洗后的二维行)。"""
     out: list[tuple[int, float, tuple, list[list[str]]]] = []
     for pno in range(doc.page_count):
         try:
-            found = doc[pno].find_tables()
+            tables = _find_page_tables(doc[pno])
         except Exception:
             logger.warning("PDF 第 %d 页表格识别失败，跳过", pno + 1, exc_info=True)
             continue
-        for table in found.tables:
+        for table in tables:
             # 一张图里可能拆出多张表（见 _split_repeated_header）：共用同一
             # 个 bbox 即可，正文行照样整块剔掉
             bbox = tuple(table.bbox)
@@ -595,6 +655,7 @@ def _clean_cell(value: str | None) -> str:
     # 先修连写的日期（"20090807 . ."），否则会被下面的数字重组当成
     # 「整数连写 + 甩到末尾的小数点」切坏
     text = _DATE_DOTS.sub(r"\1.\2.\3", text)
+    text = _DATE_DOTS_MD.sub(r"\1.\2.\3", text)
     text = _regroup_tail(text)
     m = _NUM_THOUSANDS.match(text)
     if m:

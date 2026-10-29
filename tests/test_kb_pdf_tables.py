@@ -11,6 +11,8 @@ from ai_agent.kb.parsing import (
     _clean_table,
     _drop_empty_cols,
     _drop_table_lines,
+    _find_page_tables,
+    _header_has_cjk,
     _merge_header,
     _glossary_rows,
     _pdf_glossary_tables,
@@ -341,6 +343,73 @@ def test_clean_table_huarui_department_duties():
     assert rows[2][0] == "技术研发中心"
     assert "工装、模具、夹具设计及管理；新项目市场调研" in rows[2][1]
     assert _rows_to_markdown(rows).startswith("| 部门 | 职责 |")
+
+
+def test_clean_cell_restores_unpadded_month_date():
+    # 三线表表头：「2020.6.30」被抽成「2020630 . .」；8 位日期仍走原规则
+    assert _clean_cell("2020630\n. .") == "2020.6.30"
+    assert _clean_cell("20191231\n. .") == "2019.12.31"
+    assert _clean_cell("20171231 . .") == "2017.12.31"
+
+
+def test_clean_cell_strips_trailing_comma_after_money():
+    # 千分位逗号被甩到末尾，重组后还剩一个中文逗号
+    assert _clean_cell("103167591397\n, , , .") == "1,031,675,913.97"
+    assert _clean_cell("78632704\n, .") == "786,327.04"
+
+
+def test_header_has_cjk_detects_clipped_balance_sheet():
+    assert not _header_has_cjk([["2020630\n. .", "20191231\n. .", "20181231\n. ."]])
+    assert _header_has_cjk([["资产", "2020.6.30", "2019.12.31"]])
+    assert _header_has_cjk([["", "项目", "", "费用金额（万元）", ""]])
+
+
+def test_clean_table_quecheng_balance_sheet_keeps_labels():
+    """确成硅第 43 页三线表：lines_strict 抽到的 5 列（含「资产」和 2017）。"""
+    raw = [
+        ["资产", "2020630\n. .", "20191231\n. .", "20181231\n. .", "20171231\n. ."],
+        [
+            "流动资产",
+            "103167591397\n, , , .",
+            "111323056636\n, , , .",
+            "103241301002\n, , , .",
+            "109540283099\n, , , .",
+        ],
+        ["非流动资产", "95930810363\n, , .", "90003145273\n, , .", "75717845598\n, , .", "55157074381\n, , ."],
+        [
+            "归属于母公\n司所有者权\n益合计",
+            "168787665480\n, , , .",
+            "167511263744\n, , , .",
+            "147168025976\n, , , .",
+            "124701963902\n, , , .",
+        ],
+    ]
+    rows = _clean_table(raw)[0]
+    assert rows[0] == ["资产", "2020.6.30", "2019.12.31", "2018.12.31", "2017.12.31"]
+    assert rows[1][0] == "流动资产"
+    assert rows[1][1] == "1,031,675,913.97"
+    assert rows[1][4] == "1,095,402,830.99"
+    assert rows[3][0] == "归属于母公司所有者权益合计"
+
+
+def test_find_page_tables_recovers_quecheng_balance_sheet():
+    from pathlib import Path
+
+    path = Path(
+        "data/uploads/f927dca2-3ed0-49c3-8229-aa3f60dc5919/确成硅化学股份有限公司.pdf"
+    )
+    if not path.exists():
+        return
+    import pymupdf
+
+    doc = pymupdf.open(path)
+    tables = _find_page_tables(doc[42])
+    doc.close()
+    assert tables
+    rows = _clean_table(tables[0].extract())[0]
+    assert rows[0][0] == "资产"
+    assert len(rows[0]) == 5
+    assert rows[1][0] == "流动资产"
 
 
 # ——— 无框释义表（"X 指 Y"）：国电电力第 6 页实录 ———
