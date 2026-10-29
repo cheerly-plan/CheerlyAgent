@@ -503,7 +503,15 @@ class KgStore:
     def get_file_graph(
         self, file_id: uuid.UUID, *, limit: int = 200
     ) -> dict:
-        """单个文件的图谱：节点 + 边 + 实体总数。"""
+        """单个文件的图谱：节点 + 边。
+
+        候选抓取量放大到 max(limit*3, 400)：单文件也能抽出几百个实体，
+        前端力导向是 O(n²)，全量渲染会卡；显示集由枢纽分层 + 点击下钻裁。
+        这里如果按 limit 截断，被提及数挡在门外的实体连下钻都展开不出来。
+
+        边只取两端都在候选集里的，并给节点带上 degree，前端挑枢纽时不必再数一遍。
+        """
+        fetch = max(limit * 3, 400)
         with self._get_pool().connection() as conn:
             nodes = conn.execute(
                 """
@@ -511,23 +519,39 @@ class KgStore:
                        e.mention_count, e.file_id, f.filename
                 FROM agent_kg_entity e
                 JOIN agent_kb_file f ON f.id = e.file_id
-                WHERE e.file_id = %s
+                WHERE e.file_id = %(file_id)s
                 ORDER BY e.mention_count DESC, e.name
-                LIMIT %s
+                LIMIT %(limit)s
                 """,
-                (file_id, limit),
+                {"file_id": file_id, "limit": fetch},
             ).fetchall()
-            edges = conn.execute(
+            if not nodes:
+                return {"nodes": [], "edges": []}
+            edge_rows = conn.execute(
                 """
                 SELECT r.id, r.source_id, r.target_id, r.relation,
                        r.description, r.weight, r.chunk_seq
                 FROM agent_kg_relation r
-                WHERE r.file_id = %s
-                LIMIT %s
+                WHERE r.file_id = %(file_id)s
+                  AND r.source_id = ANY(%(ids)s::uuid[])
+                  AND r.target_id = ANY(%(ids)s::uuid[])
+                LIMIT %(lim)s
                 """,
-                (file_id, limit * 4),
+                {
+                    "file_id": file_id,
+                    "ids": [n["id"] for n in nodes],
+                    "lim": fetch * 4,
+                },
             ).fetchall()
-        return {"nodes": nodes, "edges": edges}
+        node_list = [dict(n) for n in nodes]
+        edge_list = [dict(e) for e in edge_rows]
+        degree: dict[uuid.UUID, int] = {}
+        for edge in edge_list:
+            degree[edge["source_id"]] = degree.get(edge["source_id"], 0) + 1
+            degree[edge["target_id"]] = degree.get(edge["target_id"], 0) + 1
+        for node in node_list:
+            node["degree"] = degree.get(node["id"], 0)
+        return {"nodes": node_list, "edges": edge_list}
 
     def get_global_graph(
         self, *, limit: int = 160, file_ids: list[uuid.UUID] | None = None
