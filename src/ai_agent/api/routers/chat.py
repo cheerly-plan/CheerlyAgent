@@ -173,6 +173,10 @@ def chat(
             raise AgentError("会话查询失败") from e
         if session is None:
             raise HTTPException(status_code=404, detail="会话不存在")
+        try:
+            store.touch_session(user.user_id, req.chat_session_id)
+        except Exception:
+            logger.exception("刷新会话活跃时间失败")
     _acquire_chat_slot()
     if req.regenerate:
         return _stream_regenerate(

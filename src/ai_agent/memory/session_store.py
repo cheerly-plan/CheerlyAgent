@@ -410,7 +410,8 @@ class SessionStore(Database):
                 INSERT INTO agent_session (id, user_id, title, idempotency_key)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (user_id, idempotency_key) DO UPDATE
-                    SET id = agent_session.id
+                    SET updated_at = now(),
+                        deleted_at = NULL
                 RETURNING
                     id::text AS id,
                     user_id,
@@ -461,6 +462,22 @@ class SessionStore(Database):
                 (user_id, page_size),
             ).fetchall()
         return [_session_from_row(row) for row in rows]
+
+    def touch_session(self, user_id: str, session_id: str) -> bool:
+        """把会话标成刚用过：空会话清理看 updated_at，聊天开始必须碰一下，
+        否则「创建后立刻开聊、历史还没落库」会被当成空会话删掉。"""
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE agent_session
+                SET updated_at = now()
+                WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
+                RETURNING id
+                """,
+                (user_id, session_id),
+            ).fetchone()
+            conn.commit()
+        return row is not None
 
     def update_session_title(
         self,
@@ -531,12 +548,19 @@ class SessionStore(Database):
                 DELETE FROM agent_session s
                 WHERE s.title = %s
                   AND s.deleted_at IS NULL
-                  AND s.created_at <= now() - (%s * interval '1 second')
+                  AND s.updated_at <= now() - (%s * interval '1 second')
                   AND NOT EXISTS (
                     SELECT 1
                     FROM agent_chat_history h
                     WHERE h.user_id = s.user_id
                       AND h.chat_session_id = s.id::text
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM agent_checkpoint c
+                    WHERE c.user_id = s.user_id
+                      AND c.chat_session_id = s.id::text
+                      AND c.status = 'running'
                   )
                 RETURNING s.id
                 """,

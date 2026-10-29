@@ -1,3 +1,4 @@
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -530,6 +531,48 @@ def test_cleanup_keeps_recent_empty_unnamed_sessions(mem_store):
     deleted = mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600)
     assert deleted == 0
     assert mem_store.get_session("a", session.id) is not None
+
+
+def _age_session(store: MemoryStore, session_id: str, seconds: int = 7200) -> None:
+    with store._get_pool().connection() as conn:
+        conn.execute(
+            """
+            UPDATE agent_session
+            SET created_at = now() - (%s * interval '1 second'),
+                updated_at = now() - (%s * interval '1 second')
+            WHERE id::text = %s
+            """,
+            (seconds, seconds, session_id),
+        )
+        conn.commit()
+
+
+def test_cleanup_skips_idle_session_after_touch(mem_store):
+    """聊天开始会刷新 updated_at：即使创建很久了，只要刚用过就不能当空会话删。"""
+    session = mem_store.create_session("a", "stale-then-chat")
+    _age_session(mem_store, session.id)
+    assert mem_store.touch_session("a", session.id) is True
+    assert mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600) == 0
+    assert mem_store.get_session("a", session.id) is not None
+
+
+def test_cleanup_skips_session_with_running_checkpoint(mem_store):
+    session = mem_store.create_session("a", "in-flight")
+    _age_session(mem_store, session.id)
+    assert mem_store.create_checkpoint(
+        str(uuid.uuid4()), "a", session.id, [{"role": "user", "content": "hi"}]
+    )
+    assert mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=0) == 0
+    assert mem_store.get_session("a", session.id) is not None
+
+
+def test_idempotent_create_revives_and_refreshes_idle_session(mem_store):
+    first = mem_store.create_session("a", "reuse-key")
+    _age_session(mem_store, first.id)
+    reused = mem_store.create_session("a", "reuse-key")
+    assert reused.id == first.id
+    assert mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600) == 0
+    assert mem_store.get_session("a", first.id) is not None
 
 
 def test_checkpoint_session_mutex_and_cleanup(mem_store):
