@@ -526,3 +526,87 @@ def test_run_loop_passes_previous_turn_to_rewrite(monkeypatch):
     # 当前这句「单季营收」（无主体）不能混进 prev_turn
     assert not any("单季营收" in s for s in seen["prev_turn"])
 
+
+def test_run_loop_rewrite_skips_tool_call_intermediate(monkeypatch):
+    """上一轮带工具调用时，取「最终回答」而非空 content 的 tool_calls 中间态。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable(monkeypatch)
+    _enable_rewrite(monkeypatch)
+    _stub_empty_graph(monkeypatch)
+    monkeypatch.setattr(loop_mod, "search_knowledge", lambda *a, **kw: [])
+
+    seen: dict = {}
+
+    def fake_rewrite(user_input, prev_turn):
+        seen["prev_turn"] = prev_turn
+        return user_input
+
+    monkeypatch.setattr(loop_mod, "_rewrite_query", fake_rewrite)
+
+    def fake_stream(messages, tools, **kwargs):
+        yield "text", "答"
+        yield "result", {"content": "答", "tool_calls": []}
+
+    monkeypatch.setattr(loop_mod, "stream_chat", fake_stream)
+
+    # 上一轮带工具：user -> assistant(tool_calls, content 空) -> tool -> assistant(最终回答)
+    messages: list = [
+        {"role": "user", "content": "安克创新归母净利润多少"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "kb_search", "arguments": {"query": "安克创新"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "kb_search", "content": "检索结果…"},
+        {"role": "assistant", "content": "安克创新科技股份有限公司归母净利润 5.59 亿元。"},
+        {"role": "user", "content": "单季营收呢"},
+    ]
+    list(loop_mod.run_loop(messages, user_id="u1"))
+
+    # 最终回答（含主体）被取进来，空 content 的中间态不出现
+    assert len(seen["prev_turn"]) == 2
+    assert any("安克创新" in s for s in seen["prev_turn"])
+    assert not any(s == "" for s in seen["prev_turn"])
+
+
+def test_run_loop_rewrite_collects_two_turns(monkeypatch):
+    """多轮：主体在最前一轮、中间隔一轮无主体追问，2 轮上下文能拿到主体。"""
+    from ai_agent.agents import loop as loop_mod
+    from ai_agent.core.config import settings
+
+    _enable(monkeypatch)
+    _enable_rewrite(monkeypatch)
+    _stub_empty_graph(monkeypatch)
+    monkeypatch.setattr(loop_mod, "search_knowledge", lambda *a, **kw: [])
+    monkeypatch.setattr(settings, "kb_rewrite_history_turns", 2)
+
+    seen: dict = {}
+
+    def fake_rewrite(user_input, prev_turn):
+        seen["prev_turn"] = prev_turn
+        return user_input
+
+    monkeypatch.setattr(loop_mod, "_rewrite_query", fake_rewrite)
+
+    def fake_stream(messages, tools, **kwargs):
+        yield "text", "答"
+        yield "result", {"content": "答", "tool_calls": []}
+
+    monkeypatch.setattr(loop_mod, "stream_chat", fake_stream)
+
+    # seq1 有主体，seq3 无主体（回答里也没带主体），seq5 无主体
+    messages: list = [
+        {"role": "user", "content": "安克创新2026第三季度营收情况"},
+        {"role": "assistant", "content": "安克创新科技股份有限公司单季营收 95.35 亿元，同比 +16.96%。"},
+        {"role": "user", "content": "归母净利润多少"},
+        {"role": "assistant", "content": "归母净利润 5.59 亿元，扣非 8.40 亿元。"},
+        {"role": "user", "content": "单季营收同比增速呢"},
+    ]
+    list(loop_mod.run_loop(messages, user_id="u1"))
+
+    # 两轮上下文里，最前一轮的「安克创新」被保留
+    assert any("安克创新" in s for s in seen["prev_turn"])
+    # 当前这句不能混进 prev_turn
+    assert not any("单季营收同比增速" in s for s in seen["prev_turn"])
+

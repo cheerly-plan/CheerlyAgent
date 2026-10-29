@@ -204,6 +204,9 @@ class Settings(BaseSettings):
     # 空 = 用 small_model（或回落主模型）。改写是短任务，不需要大模型
     kb_rewrite_model: str = ""
     kb_rewrite_timeout_seconds: float = 6.0
+    # 改写喂给模型的最近几轮「完整对话（user 问句 + assistant 最终回答）」：
+    # 主体（公司名）可能出现在更早那轮、中间隔了无主体的追问，取 2 轮更稳。
+    kb_rewrite_history_turns: int = 2
     # 命中切片前后各带几段一起给模型：跨段落的答案常常被切片边界切断
     kb_neighbor_expand: int = 1
     # 混合检索：关键词直查 + 向量召回做 RRF 融合。向量对制度编号、

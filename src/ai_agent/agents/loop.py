@@ -749,27 +749,38 @@ def run_loop(
         and messages[-1].get("role") == "user"
     ):
         current = str(messages[-1].get("content") or "").strip()
-        # 上一轮完整对话（用户问 + 助手答）：对话改写的上下文。助手上一轮的回答
-        # 通常已带出主体全称（即使上一轮用户只问「归母净利润」），据此能把
-        # 「本季度」这类指代补回正确的公司，比只取上一句用户原话更稳。
-        prev_turn: list[str] = []
-        # 从当前 user 的前一条（messages[-2]）开始往前找，定位上一轮的 user 问句；
-        # 不能从 messages[-1] 开始——那会把「当前这句」当成上一轮塞进去，
-        # 导致改写上下文里根本没有主体（公司名），追问就漂到别家公司。
-        # 顺序按时间正序组织：上一轮 user 问句在前、assistant 回答在后。
-        prev_user = ""
-        prev_answer = ""
+        # 最近几轮完整对话（用户问 + 助手最终答）：对话改写的上下文。助手最终回答
+        # 通常已带出主体全称（即使那轮用户只问「归母净利润」），据此能把「本季度」
+        # 这类指代补回正确的公司。
+        # 从当前 user 的前一条（messages[-2]）开始往前扫，收集最近 N 轮的
+        # （user 问句 → 最终 assistant 回答）。不能从 messages[-1] 开始——那会把
+        # 「当前这句」当成上一轮塞进去，导致改写上下文里没有主体（公司名）。
+        # 倒序扫描先遇到「回答」再遇到「问句」，所以每轮暂存成 (user, answer)，
+        # 最后按时间正序摊平：最早那轮在前。
+        turns: list[tuple[str, str]] = []  # (user 问句, 最终回答)，倒序收集
+        pending_answer = ""  # 已见到某轮的最终回答、尚未配到其 user 问句
         for i in range(len(messages) - 2, -1, -1):
-            if messages[i].get("role") == "user" and str(messages[i].get("content") or "").strip():
-                prev_user = str(messages[i].get("content") or "").strip()
-                # 紧跟着它的 assistant 回答（若存在）一起喂进去
-                if i + 1 < len(messages) and messages[i + 1].get("role") == "assistant":
-                    prev_answer = str(messages[i + 1].get("content") or "").strip()
+            msg = messages[i]
+            role = msg.get("role")
+            if role == "assistant":
+                if msg.get("tool_calls"):
+                    continue  # 中间态：模型要调工具，跳过
+                text = str(msg.get("content") or "").strip()
+                if text and not pending_answer:
+                    pending_answer = text
+            elif role == "user":
+                text = str(msg.get("content") or "").strip()
+                if text:
+                    turns.append((text, pending_answer))
+                    pending_answer = ""
+            if len(turns) >= settings.kb_rewrite_history_turns:
                 break
-        if prev_user:
-            prev_turn.append(prev_user)
-        if prev_answer:
-            prev_turn.append(prev_answer)
+        # 时间正序摊平：turns 是倒序收集的，反转轮顺序，每轮内部保持 user→answer
+        prev_turn: list[str] = []
+        for user_q, answer in reversed(turns):
+            prev_turn.append(user_q)
+            if answer:
+                prev_turn.append(answer)
         prefetch_query = _rewrite_query(current, prev_turn)
         prefetch_msg, prefetch_cited = _prefetch_knowledge(
             prefetch_query, user_id, kb_file_ids
