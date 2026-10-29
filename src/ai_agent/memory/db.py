@@ -552,6 +552,37 @@ class Database:
                 ON agent_kb_file (content_hash)
                 """
             )
+            # 向量化完成时记下文本/表格片数，列表标题后面直接展示，
+            # 不用再扫一遍切片表。存量文件从切片回填一次。
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS text_count INT NOT NULL DEFAULT 0
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS table_count INT NOT NULL DEFAULT 0
+                """
+            )
+            conn.execute(
+                """
+                UPDATE agent_kb_file f
+                SET text_count = s.text_n,
+                    table_count = s.table_n
+                FROM (
+                    SELECT file_id,
+                           count(*) FILTER (WHERE kind = 'text') AS text_n,
+                           count(*) FILTER (WHERE kind = 'table') AS table_n
+                    FROM agent_kb_chunk
+                    GROUP BY file_id
+                ) s
+                WHERE f.id = s.file_id
+                  AND f.text_count = 0 AND f.table_count = 0
+                  AND f.chunk_count > 0
+                """
+            )
             conn.commit()
 
     def close(self) -> None:

@@ -74,7 +74,9 @@ class KbPipeline:
     def _process(self, file_id: uuid.UUID, user_id: str, path: Path) -> None:
         try:
             stage = time.perf_counter()
-            store.update_kb_status(file_id, "parsing")
+            store.update_kb_status(
+                file_id, "parsing", chunk_count=0, text_count=0, table_count=0
+            )
             segments = parse_segments(path)
             parse_seconds = time.perf_counter() - stage
             chunks = chunk_segments(
@@ -117,12 +119,22 @@ class KbPipeline:
                     vectors[seq_start : seq_start + batch],
                     seq_start,
                 )
-            store.update_kb_status(file_id, "ready", chunk_count=done)
+            text_n = sum(1 for c in chunks if c.kind == "text")
+            table_n = sum(1 for c in chunks if c.kind == "table")
+            store.update_kb_status(
+                file_id,
+                "ready",
+                chunk_count=done,
+                text_count=text_n,
+                table_count=table_n,
+            )
             logger.info(
-                "kb 处理完成 file_id=%s chunks=%d bytes=%d "
+                "kb 处理完成 file_id=%s chunks=%d text=%d table=%d bytes=%d "
                 "parse=%.1fs embed=%.1fs db=%.1fs",
                 file_id,
                 done,
+                text_n,
+                table_n,
                 path.stat().st_size,
                 parse_seconds,
                 embed_seconds,

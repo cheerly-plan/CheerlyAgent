@@ -50,7 +50,8 @@ class KbStore:
                 -- 对外字段名统一叫 file_id（与 POST /v1/kb/files 的返回值一致），
                 -- 直接 SELECT id 会让前端拿到 undefined 拼出 /files/undefined
                 SELECT id AS file_id, filename, size_bytes, mime, status, error,
-                       chunk_count, graph_status, graph_entity_count, tags,
+                       chunk_count, text_count, table_count,
+                       graph_status, graph_entity_count, tags,
                        doc_type, extract_level, created_at
                 FROM agent_kb_file
                 WHERE (%(q)s::text = '' OR filename ILIKE %(q_like)s)
@@ -166,6 +167,8 @@ class KbStore:
         *,
         error: str = "",
         chunk_count: int | None = None,
+        text_count: int | None = None,
+        table_count: int | None = None,
     ) -> None:
         with self._get_pool().connection() as conn:
             conn.execute(
@@ -174,10 +177,12 @@ class KbStore:
                 SET status = %s,
                     error = %s,
                     chunk_count = COALESCE(%s, chunk_count),
+                    text_count = COALESCE(%s, text_count),
+                    table_count = COALESCE(%s, table_count),
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (status, error, chunk_count, file_id),
+                (status, error, chunk_count, text_count, table_count, file_id),
             )
             conn.commit()
 
