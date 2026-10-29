@@ -221,6 +221,7 @@ _NUM_RANGE = re.compile(r"(\d+)\s+(\d+月)\s*-\s*$")
 # 中文字之间的空格也是排版字距（"木粉 复合油 ，"），不是真空格
 _CJK = "\u4e00-\u9fff\u3040-\u30ff"
 _CJK_SPACE = re.compile(f"([{_CJK}])\\s+([{_CJK}])")
+_CJK_RE = re.compile(f"[{_CJK}]")
 # 标点被单独排版时前后会多出空格："复合油 ，" / "（ 注"
 _SPACE_BEFORE_PUNCT = re.compile(r"\s+([，。、；：？！）】》」』%])")
 _SPACE_AFTER_PUNCT = re.compile(r"([（【《「『])\s+")
@@ -228,6 +229,29 @@ _SPACE_AFTER_PUNCT = re.compile(r"([（【《「『])\s+")
 _MAX_HEADER_CELL = 6
 # 纯数字（允许千分位、百分比、负号）：表头碎片不会是这个形状
 _NUM_ONLY = re.compile(r"^[\d.,%+\-]+$")
+# 另一种断法：整数连写、小数点/逗号被画成独立块甩到单元格末尾
+# 「401825 , .」= 4,018.25、「5358 .」= 53.58、「人民币100元 .」= 人民币1.00元
+# （有小数点时末两位是小数，只有逗号时是纯千分位）
+_NUM_TAIL_BOTH = re.compile(r"^([^\d]{0,8})(\d{2,})([^\d]{0,8})\s*,\s*\.\s*$")
+_NUM_TAIL_DOT = re.compile(r"^([^\d]{0,8})(\d{2,})([^\d]{0,8})\s*\.\s*$")
+_NUM_TAIL_COMMA = re.compile(r"^([^\d]{0,8})(\d{4,})([^\d]{0,8})\s*,\s*$")
+# 逗号被单独排版时连成一片："总股本 ,， 比例" 只留一个中文逗号
+_MULTI_COMMA = re.compile(r"\s*[，,](\s*[，,])+")
+# 逗号、负号被画成独立块甩在数字后面（还常一起出现）：
+# "471,784,966.36 ," → 471,784,966.36；"30,360,622.17 - ," → -30,360,622.17
+_NUM_TRAIL_SIGNS = re.compile(r"^([\d.,]*\d)\s*(-)?\s*,?\s*$")
+# 日期的连字符被单独排版："2016 12 31 - -" 是 2016-12-31
+_DATE_DASH = re.compile(r"(\d{4})\s+(\d{1,2})\s+(\d{1,2})\s*-\s*-")
+# 商标有效期："20090807 . ." 是 2009.08.07（小数点被画成独立块）
+_DATE_DOTS = re.compile(r"(\d{4})(\d{2})(\d{2})\s*\.\s*\.\s*")
+# 标点后的空格："总股本 ， 比例"
+_SPACE_AFTER_PUNCT_2 = re.compile(r"([，。、；：？！%])\s+")
+# 单位括号/百分号后甩出来的孤立逗号："资产负债率（母公司%），"
+# （只认这两个前导字符——普通文字后的末尾逗号可能是正常标点）
+_TRAIL_COMMA = re.compile(r"(?<=[）)%])\s*[，,]$")
+# 千分位逗号被甩到后面，落在两个中文之间："换向器 , 项目"
+# （只认英文逗号，中文逗号多半是真标点）
+_CJK_COMMA = re.compile(f"(?<=[{_CJK}])\\s*,\\s*(?=[{_CJK}])")
 
 
 def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
@@ -240,30 +264,70 @@ def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
             logger.warning("PDF 第 %d 页表格识别失败，跳过", pno + 1, exc_info=True)
             continue
         for table in found.tables:
-            rows = _clean_table(table.extract())
-            if len(rows) < 2 or max(len(r) for r in rows) < 2:
-                continue
+            # 一张图里可能拆出多张表（见 _split_repeated_header）：共用同一
+            # 个 bbox 即可，正文行照样整块剔掉
             bbox = tuple(table.bbox)
-            out.append((pno + 1, float(bbox[1]), bbox, rows))
+            for rows in _clean_table(table.extract()):
+                if len(rows) < 2 or max(len(r) for r in rows) < 2:
+                    continue
+                out.append((pno + 1, float(bbox[1]), bbox, rows))
     return out
 
 
-def _clean_table(raw: list[list[str | None]]) -> list[list[str]]:
-    """单元格清洗 → 跨行表头合并 → 删掉合并单元格留下的空列。"""
+def _clean_table(raw: list[list[str | None]]) -> list[list[list[str]]]:
+    """单元格清洗 → 拆开拼在一起的表 → 表头归位 → 删空列。
+
+    返回的是「一张图里可能拆出的多张表」：pymupdf 常把上下排的两个表
+    识成一个（第二段的表头变成数据行），导致表头和数据对不上列。
+    """
     rows = [[_clean_cell(cell) for cell in row] for row in raw]
     rows = [row for row in rows if any(row)]
     if not rows:
         return []
     width = max(len(row) for row in rows)
     rows = [row + [""] * (width - len(row)) for row in rows]
-    rows = _merge_header(rows)
-    rows = _align_header(rows)
-    return _drop_empty_cols(rows)
+    out: list[list[list[str]]] = []
+    for part in _split_repeated_header(rows):
+        part = _merge_header(part)
+        part = _split_interleaved(part)
+        part = _align_header(part)
+        out.append(_drop_empty_cols(part))
+    return out
+
+
+def _split_repeated_header(rows: list[list[str]]) -> list[list[list[str]]]:
+    """body 里又出现与首行结构相同的表头行 → 从那里断成两张表。
+
+    判据：非空列与首行完全一致（合并单元格切出来的网格位置都一样），
+    且这些单元格都不是纯数字——否则就是普通数据行。
+    """
+    if len(rows) < 3:
+        return [rows]
+    head_cols = {i for i, cell in enumerate(rows[0]) if cell}
+    parts: list[list[list[str]]] = []
+    cur: list[list[str]] = [rows[0]]
+    for row in rows[1:]:
+        cols = {i for i, cell in enumerate(row) if cell}
+        if (
+            cols == head_cols
+            and len(cur) > 1
+            and not any(cell and _NUM_ONLY.match(cell) for cell in row)
+        ):
+            parts.append(cur)
+            cur = [row]
+        else:
+            cur.append(row)
+    parts.append(cur)
+    return parts
 
 
 def _clean_cell(value: str | None) -> str:
     text = (value or "").replace("\n", " ")
     text = _CELL_WS.sub(" ", text).strip()
+    # 先修连写的日期（"20090807 . ."），否则会被下面的数字重组当成
+    # 「整数连写 + 甩到末尾的小数点」切坏
+    text = _DATE_DOTS.sub(r"\1.\2.\3", text)
+    text = _regroup_tail(text)
     m = _NUM_THOUSANDS.match(text)
     if m:
         groups = m.group(1).split()
@@ -279,7 +343,48 @@ def _clean_cell(value: str | None) -> str:
     text = re.sub(rf"(\d)\s+([{_CJK}])", r"\1\2", text)
     text = _SPACE_BEFORE_PUNCT.sub(r"\1", text)
     text = _SPACE_AFTER_PUNCT.sub(r"\1", text)
+    text = _MULTI_COMMA.sub("，", text)
+    text = _DATE_DASH.sub(r"\1-\2-\3", text)
+    # 日期区间里的空格："2009.08.07- 2019.08.06"
+    text = re.sub(r"(\d)\s*-\s+(\d)", r"\1-\2", text)
+    m = _NUM_TRAIL_SIGNS.match(text)
+    if m:
+        text = ("-" if m.group(2) else "") + m.group(1)
+    text = _SPACE_AFTER_PUNCT_2.sub(r"\1", text)
+    text = _TRAIL_COMMA.sub("", text)
+    text = _CJK_COMMA.sub("", text)
     return _escape_cell(text)
+
+
+def _regroup_tail(text: str) -> str:
+    """把甩到单元格末尾的小数点/逗号拼回数字里。"""
+    for pattern, decimal in (
+        (_NUM_TAIL_BOTH, True),
+        (_NUM_TAIL_DOT, True),
+        (_NUM_TAIL_COMMA, False),
+    ):
+        m = pattern.match(text)
+        if not m:
+            continue
+        prefix, digits, suffix = m.group(1), m.group(2), m.group(3)
+        if decimal:
+            if len(digits) > 2:
+                return f"{prefix}{_thousands(digits[:-2])}.{digits[-2:]}{suffix}"
+            return f"{prefix}0.{digits}{suffix}"
+        return f"{prefix}{_thousands(digits)}{suffix}"
+    return text
+
+
+def _thousands(digits: str) -> str:
+    """4018 → 4,018（三位一组，从右往左）"""
+    if len(digits) <= 3:
+        return digits
+    out: list[str] = []
+    while len(digits) > 3:
+        out.insert(0, digits[-3:])
+        digits = digits[:-3]
+    out.insert(0, digits)
+    return ",".join(out)
 
 
 def _align_header(rows: list[list[str]]) -> list[list[str]]:
@@ -332,6 +437,12 @@ def _merge_header(rows: list[list[str]]) -> list[list[str]]:
                 break
         elif s_cols & f_cols:
             break
+        elif _alternating(f_cols, s_cols):
+            # 两行的非空列均匀交替（表头在 1/4/7 列、数据在 0/3/6 列）不是
+            # 分两行写的表头，而是合并单元格把表头和数据挤进了同一套网格。
+            # 合并起来就成了「1 | 序号 | 孙瑞良 | 股东名称」这种串味的行，
+            # 交给后面的 _align_header 按数据列归位
+            break
         merged = list(first)
         for i, cell in enumerate(second):
             if not cell:
@@ -340,6 +451,55 @@ def _merge_header(rows: list[list[str]]) -> list[list[str]]:
             merged[i] = merged[i] + cell if merged[i] else cell
         rows = [merged] + rows[2:]
     return rows
+
+
+def _split_interleaved(rows: list[list[str]]) -> list[list[str]]:
+    """表头被并进数据行：拆回「一行表头 + 纯数据行」。
+
+    跨页续表、合并单元格常抽成交错列 [数据1, 表头1, 数据2, 表头2 …]：
+    表头只在首行出现、后续行对应位置留空，直接渲染就是「1 | 序号 | 孙瑞良
+    | 股东名称」这种串味的行。
+
+    判据刻意很严，宁可不动也不能把真的宽表拆坏：列数成对；表头位有中文
+    且不是纯数字；其余行在表头位要么空、要么与首行一致（不一致说明那是
+    真数据列）。
+    """
+    if len(rows) < 2:
+        return rows
+    width = len(rows[0])
+    if width < 4 or width % 2:
+        return rows
+    for start in (1, 0):
+        head = rows[0][start::2]
+        if sum(1 for cell in head if cell) < 2:
+            continue
+        if not any(_CJK_RE.search(cell) for cell in head):
+            continue
+        if any(cell and _NUM_ONLY.match(cell) for cell in head):
+            continue
+        # 其余行在表头位有不一样的内容 → 那不是表头，是数据列
+        if any(
+            cell and cell != h
+            for row in rows[1:]
+            for cell, h in zip(row[start::2], head)
+        ):
+            continue
+        body = [row[1 - start::2] for row in rows]
+        if not any(any(row) for row in body):
+            continue
+        return _drop_empty_cols([head] + body)
+    return rows
+
+
+def _alternating(cols_a: set[int], cols_b: set[int]) -> bool:
+    """两组列号是否均匀交替（a 在 1/4/7，b 在 0/3/6）。"""
+    if len(cols_a) < 3 or len(cols_b) < 3:
+        return False
+    seq = sorted(cols_a | cols_b)
+    if len(seq) != len(cols_a) + len(cols_b):
+        return False
+    flags = [i in cols_a for i in seq]
+    return all(x != y for x, y in zip(flags, flags[1:]))
 
 
 def _drop_empty_cols(rows: list[list[str]]) -> list[list[str]]:
