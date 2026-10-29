@@ -26,7 +26,6 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 
 from pydantic import BaseModel, Field
@@ -34,7 +33,7 @@ from pydantic import BaseModel, Field
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.graph import normalize_name
+from ai_agent.kb.graph import is_metric_like, normalize_name
 from ai_agent.llm.client import complete_chat
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.parse import load_llm_json
@@ -82,27 +81,15 @@ def _pair_key(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a <= b else (b, a)
 
 
-# 纯数字/日期型名字：抽取器会把"2005年""2005 年8 月"这类时间点、以及指标数值
-# 都抽成实体。它们互相之间向量很近、名字也互为前缀，但只要不是一字不差就
-# 绝不是同一个东西——2005年 和 2005年8月 是两个不同的时间点。
-# 名字里数字占比过半就当数值/日期型：覆盖 "2005 年8 月"、"1,017,077.00 元"、
-# "12.5%" 这些抽取器很爱当实体的东西。字符类里没有逗号/元/万，靠占比兜住
-_METRIC_CHARS = re.compile(r"[\d\s,，.．·、+\-/%元年万亿千百十]")
+# 数值/日期型名字（「2005年」「62,200万千瓦」）入库时就会丢掉；
+# 旧图里若还留着，互相对齐时仍然不能合并——2005年 和 2005年8月 不是同一个点。
+# 判定见 graph.is_metric_like。
 
 # 法人的通用尾巴：简称补上这些词就是全称，中间没有加任何限定词
 _GENERIC_TAIL = (
     "发展", "股份", "有限", "责任", "公司", "集团", "控股", "投资",
     "（", "）", "(", ")",
 )
-
-
-def is_metric_like(name: str) -> bool:
-    """整条名字基本由数字和计量单位构成（时间点、金额、比例、指标值）。"""
-    text = name.strip()
-    if not text:
-        return False
-    hit = len(_METRIC_CHARS.findall(text))
-    return hit / len(text) >= 0.6 and any(ch.isdigit() for ch in text)
 
 
 # 母公司名 + 这些尾巴 = 下属单位，绝不是同一个实体

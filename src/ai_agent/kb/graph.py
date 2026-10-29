@@ -99,6 +99,10 @@ _DISPLAY_TRIM = re.compile(
     r"[\s\"'“”‘’《》〈〉<>,.;:!?\-—–_/\\|\[\]【】{}·]+$"
 )
 _PUNCT_ONLY = re.compile(r"^[\W_]+$", re.UNICODE)
+# 数字、空白、常见标点、时间词和计量用字。占比 ≥0.6 且含数字 → 数值/日期型名字。
+# 「2004年」「62,200万千瓦」「1,017,077.00 元」会命中；
+# 「2017年重大资产重组」「HBM3E」数字占比不够，当正常实体。
+_METRIC_CHARS = re.compile(r"[\d\s,，.．·、+\-/%年月日度万亿千百十瓦时吨元]")
 
 class _Entity(BaseModel):
     name: str
@@ -237,13 +241,25 @@ def _clean_type(raw: str) -> str:
     return value if value in ENTITY_TYPES else "other"
 
 
+def is_metric_like(name: str) -> bool:
+    """整条名字基本由数字和计量单位构成（时间点、金额、比例、指标值）。"""
+    text = (name or "").strip()
+    if not text:
+        return False
+    hit = len(_METRIC_CHARS.findall(text))
+    return hit / len(text) >= 0.6 and any(ch.isdigit() for ch in text)
+
+
 def _usable_name(name: str, norm: str) -> bool:
     if not norm or norm in _STOP_NAMES:
         return False
     if len(norm) > 40 or _PUNCT_ONLY.match(norm):
         return False
-    # 纯数字（含千分位、百分号）不当实体
-    return not re.fullmatch(r"[\d.,%+-]+", norm)
+    # 纯数字、时间点（「2004年」）、带单位的数值（「62,200万千瓦」）
+    # 是取值或限定语，不是实体。指向它们的关系会因端点缺失被丢掉。
+    if is_metric_like(name) or is_metric_like(norm):
+        return False
+    return True
 
 
 def _build_prompt(chunks: list[Chunk], start_seq: int) -> str:
@@ -626,8 +642,8 @@ def build_file_graph(
     未知或为空时走通用配置；level 是同一配置下的轻重粒度（完整/轻量）。
     两者都只影响 prompt，抽取与合并逻辑一份代码通吃。
 
-    progress 在每次阶段落库后回调（带当前累计计数），上层拿它更新
-    graph_status 的 entity_count，前端就能看到"建到一半"的进度。
+    progress 每完成一批回调一次（带累计实体数和 已完成批/总批），
+    上层拿它更新 graph_status，前端就能看到百分比。
     """
     profile = resolve_profile(doc_type)
     system_prompt = build_system_prompt(profile.key, level)
@@ -650,11 +666,24 @@ def build_file_graph(
     total_batches = len(_batch_bounds(kept, batch_size))
     accumulator = _GraphAccumulator(file_id)
     started = time.perf_counter()
-    state = {"batches": 0}
+
+    def report(done: int) -> None:
+        if progress is None:
+            return
+        progress(
+            {
+                "entities": len(accumulator.entities),
+                "relations": len(accumulator.relations),
+                "batches": done,
+                "total_batches": total_batches,
+            }
+        )
+
+    report(0)
 
     def sink(index: int, start: int, batch: list[Chunk], result: _Extraction) -> None:
         accumulator.add(start, batch, result)
-        state["batches"] = index + 1
+        report(index + 1)
         if (index + 1) % flush_every == 0 and index + 1 < total_batches:
             counts = accumulator.flush()
             logger.info(
@@ -666,8 +695,6 @@ def build_file_graph(
                 counts["relations"],
                 time.perf_counter() - started,
             )
-            if progress is not None:
-                progress(counts)
 
     _extract_all(kept, batch_size, system_prompt, sink=sink)
     counts = accumulator.flush()
@@ -685,5 +712,12 @@ def build_file_graph(
         time.perf_counter() - started,
     )
     if progress is not None:
-        progress(counts)
+        progress(
+            {
+                "entities": counts["entities"],
+                "relations": counts["relations"],
+                "batches": total_batches,
+                "total_batches": total_batches,
+            }
+        )
     return counts

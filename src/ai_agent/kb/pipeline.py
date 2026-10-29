@@ -157,7 +157,9 @@ class KbPipeline:
         mention 指向错的原文比没有 mention 更糟。
         """
         try:
-            store.update_graph_status(file_id, "building")
+            store.update_graph_status(
+                file_id, "building", entity_count=0, batch_done=0, batch_total=0
+            )
             rows = store.list_kb_chunk_inputs(file_id)
             chunks = [
                 Chunk(
@@ -182,7 +184,11 @@ class KbPipeline:
                 doc_type=doc_type,
                 level=level,
                 progress=lambda c: store.update_graph_status(
-                    file_id, "building", entity_count=c["entities"]
+                    file_id,
+                    "building",
+                    entity_count=c["entities"],
+                    batch_done=c.get("batches"),
+                    batch_total=c.get("total_batches"),
                 ),
             )
             # 实体对齐并进建图流程：建完即对齐好，前端不再有手动「对齐」入口。

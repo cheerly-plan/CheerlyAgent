@@ -452,7 +452,13 @@ class KgStore:
         return [dict(r) for r in rows]
 
     def update_graph_status(
-        self, file_id: uuid.UUID, status: str, *, entity_count: int | None = None
+        self,
+        file_id: uuid.UUID,
+        status: str,
+        *,
+        entity_count: int | None = None,
+        batch_done: int | None = None,
+        batch_total: int | None = None,
     ) -> None:
         with self._get_pool().connection() as conn:
             conn.execute(
@@ -460,10 +466,12 @@ class KgStore:
                 UPDATE agent_kb_file
                 SET graph_status = %s,
                     graph_entity_count = COALESCE(%s, graph_entity_count),
+                    graph_batch_done = COALESCE(%s, graph_batch_done),
+                    graph_batch_total = COALESCE(%s, graph_batch_total),
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (status, entity_count, file_id),
+                (status, entity_count, batch_done, batch_total, file_id),
             )
             conn.commit()
 
@@ -486,17 +494,27 @@ class KgStore:
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 """
-                SELECT graph_status, graph_entity_count
+                SELECT graph_status, graph_entity_count,
+                       graph_batch_done, graph_batch_total, align_status
                 FROM agent_kb_file
                 WHERE id = %s
                 """,
                 (file_id,),
             ).fetchone()
         if row is None:
-            return {"graph_status": "", "entity_count": 0}
+            return {
+                "graph_status": "",
+                "entity_count": 0,
+                "batch_done": 0,
+                "batch_total": 0,
+                "align_status": "",
+            }
         return {
             "graph_status": row["graph_status"] or "",
             "entity_count": int(row["graph_entity_count"] or 0),
+            "batch_done": int(row["graph_batch_done"] or 0),
+            "batch_total": int(row["graph_batch_total"] or 0),
+            "align_status": row["align_status"] or "",
         }
 
 

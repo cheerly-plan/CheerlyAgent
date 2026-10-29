@@ -74,6 +74,62 @@ def test_build_file_graph_merges_and_links(monkeypatch):
     assert "动态随机存储器" in dram["description"]
 
 
+def test_usable_name_drops_years_and_quantities():
+    # 截图里的「2004年」、装机容量取值、金额都是限定语，不是点
+    drops = (
+        "2004年",
+        "2017年",
+        "2017年12月31日",
+        "62,200万千瓦",
+        "1,017,077.00 元",
+        "12.5%",
+        "62200",
+    )
+    for name in drops:
+        assert not graph._usable_name(name, graph.normalize_name(name)), name
+    # 指标名、带年份的事件名、产品型号要留
+    keeps = ("装机容量", "营业收入", "2017年重大资产重组", "HBM3E", "5G", "国电电力")
+    for name in keeps:
+        assert graph._usable_name(name, graph.normalize_name(name)), name
+
+
+def test_build_file_graph_drops_year_nodes_and_their_edges(monkeypatch):
+    payload = """
+    {"entities":[
+      {"name":"发行人","type":"org","description":"国电电力","chunk":0},
+      {"name":"大渡河公司","type":"org","description":"水电子公司","chunk":0},
+      {"name":"2004年","type":"metric","description":"年度","chunk":0},
+      {"name":"装机容量","type":"metric","description":"控股装机","chunk":0}
+    ],
+    "relations":[
+      {"source":"发行人","target":"2004年","relation":"控股装机容量","chunk":0},
+      {"source":"大渡河公司","target":"2004年","relation":"生产","chunk":0},
+      {"source":"发行人","target":"装机容量","relation":"拥有","description":"2004年末","chunk":0}
+    ]}
+    """
+    monkeypatch.setattr(graph, "complete_chat", lambda *a, **k: payload)
+    monkeypatch.setattr(
+        graph, "embed_texts_parallel", lambda texts, **k: [[0.01, 0.02] for _ in texts]
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        graph.store,
+        "replace_file_graph",
+        lambda fid, e, r, m: captured.update(entities=e, relations=r, mentions=m),
+    )
+    body = (
+        "发行人2004年控股装机容量增长，大渡河公司当年投产，"
+        "装机容量达到数万千瓦，电源结构持续优化。"
+    )
+    counts = graph.build_file_graph(uuid.uuid4(), [Chunk(body)])
+    names = {e["name"] for e in captured["entities"]}
+    assert names == {"发行人", "大渡河公司", "装机容量"}
+    assert counts["entities"] == 3
+    # 连到「2004年」的边随节点一起丢掉；连到指标名的边保留
+    assert counts["relations"] == 1
+    assert captured["relations"][0]["relation"] == "拥有"
+
+
 def test_build_file_graph_skips_non_json(monkeypatch):
     monkeypatch.setattr(graph, "complete_chat", lambda *a, **k: "抱歉，我无法处理")
     called = {"replace": False}
@@ -367,17 +423,20 @@ def test_graph_flushes_progressively(monkeypatch):
         "replace_file_graph",
         lambda fid, e, r, m: writes.append(len(e)),
     )
-    progress: list[int] = []
+    progress: list[dict] = []
 
     graph.build_file_graph(
         uuid.uuid4(),
         [Chunk(_long_text(f"第{i}段")) for i in range(3)],
-        progress=lambda c: progress.append(c["entities"]),
+        progress=lambda c: progress.append(c),
     )
 
     # 3 批各落一次（含最后一次收尾），实体数一路增长
     assert writes == [1, 2, 3]
-    assert progress == [1, 2, 3]
+    # 开工报 0/3，每完成一批报一次，收尾再报一次 3/3
+    assert [p["batches"] for p in progress] == [0, 1, 2, 3, 3]
+    assert [p["total_batches"] for p in progress] == [3, 3, 3, 3, 3]
+    assert [p["entities"] for p in progress] == [0, 1, 2, 3, 3]
 
 
 def test_relation_links_across_batches(monkeypatch):

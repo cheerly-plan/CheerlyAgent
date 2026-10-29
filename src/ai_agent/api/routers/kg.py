@@ -292,7 +292,9 @@ def build_graphs(req: KgBuildRequest, user: UserRecord = Depends(require_admin))
             continue
         # 配置为空也写库：清掉这份文件之前可能存过的旧配置，抽时回落全局默认
         store.set_kb_extract_config(fid, doc_type=doc_type, level=level)
-        store.update_graph_status(fid, "building")
+        store.update_graph_status(
+            fid, "building", entity_count=0, batch_done=0, batch_total=0
+        )
         kb_pipeline.submit_graph(fid)
         submitted += 1
         results.append({"file_id": raw, "status": "building"})
@@ -335,7 +337,9 @@ def rebuild_graph(
         doc_type, level = _extract_config(req.doc_type, req.level)
         store.set_kb_extract_config(fid, doc_type=doc_type, level=level)
 
-    store.update_graph_status(fid, "building")
+    store.update_graph_status(
+        fid, "building", entity_count=0, batch_done=0, batch_total=0
+    )
     kb_pipeline.submit_graph(fid)
     logger.info("kg 重建提交 file_id=%s admin=%s", fid, user.username)
     return {"status": "building"}

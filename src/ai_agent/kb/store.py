@@ -51,7 +51,8 @@ class KbStore:
                 -- 直接 SELECT id 会让前端拿到 undefined 拼出 /files/undefined
                 SELECT id AS file_id, filename, size_bytes, mime, status, error,
                        chunk_count, text_count, table_count,
-                       graph_status, graph_entity_count, tags,
+                       graph_status, graph_entity_count,
+                       graph_batch_done, graph_batch_total, align_status, tags,
                        doc_type, extract_level, created_at
                 FROM agent_kb_file
                 WHERE (%(q)s::text = '' OR filename ILIKE %(q_like)s)

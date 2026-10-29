@@ -518,6 +518,20 @@ class Database:
                 ADD COLUMN IF NOT EXISTS graph_entity_count INT NOT NULL DEFAULT 0
                 """
             )
+            # 建图进度：已完成批 / 总批。前端轮询文件列表就能画出百分比，
+            # 不必另开一条进度接口。
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_batch_done INT NOT NULL DEFAULT 0
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_batch_total INT NOT NULL DEFAULT 0
+                """
+            )
             # 抽取配置：文档类型（决定注入哪套配置块）与粒度（完整/轻量）。
             # 存在文件上而不是每次建图现传：重建时不用再问一次，也让
             # 「这张图是按什么 prompt 抽的」有据可查。空串 = 用全局默认（general）

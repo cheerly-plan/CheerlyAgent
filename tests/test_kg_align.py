@@ -210,7 +210,10 @@ def test_metric_like_pairs_are_never_merged():
     sim_pairs = [{"src": a["id"], "dst": b["id"], "sim": 0.97}]
     assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
     assert align.is_metric_like("2005年") and align.is_metric_like("12.5%")
+    assert align.is_metric_like("2004年") and align.is_metric_like("62,200万千瓦")
     assert not align.is_metric_like("国电电力")
+    assert not align.is_metric_like("2017年重大资产重组")
+    assert not align.is_metric_like("装机容量")
 
 
 def test_subunit_pairs_never_become_candidates():

@@ -55,6 +55,8 @@ def test_suffix_prompt_keeps_base_contract_intact():
         # 底座里的关键约束一条都不能少（少了模型就会改输出形状）
         assert "只输出一行 JSON" in prompt
         assert "片段序号从 0 开始" in prompt
+        assert "纯时间点" in prompt
+        assert "带单位的数值" in prompt
         assert "person / org / product / technology / metric / event / location / concept / other" in prompt
         assert f"文档类型：{profile.doc_name}" in prompt
 

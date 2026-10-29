@@ -64,7 +64,9 @@ def _pick_files(name: str | None, file_id: str | None, all_files: bool) -> list[
             ).fetchall()
         else:
             return []
-    return [r for r in rows if r["status"] == "ready"]
+    # 跳过正在解析/向量化的，避免两路同时写同一份文件。
+    # 失败态要收：reparse 可能先清了切片再写 status 失败，文件停在 failed。
+    return [r for r in rows if r["status"] not in ("parsing", "embedding")]
 
 
 def _upload_path(rec: dict) -> Path | None:
@@ -109,7 +111,9 @@ def _reparse(rec: dict, dry_run: bool) -> None:
         conn.execute("DELETE FROM agent_kg_relation WHERE file_id = %s", (fid,))
         conn.execute("DELETE FROM agent_kg_entity WHERE file_id = %s", (fid,))
         conn.execute("DELETE FROM agent_kg_mention WHERE file_id = %s", (fid,))
-    store.update_graph_status(fid, "none", entity_count=0)
+    store.update_graph_status(
+        fid, "none", entity_count=0, batch_done=0, batch_total=0
+    )
     print("  旧切片与图谱已清除，开始重新解析（含重新嵌入，需要几分钟）…")
 
     # 直接跑处理流程（不入线程池）：脚本本身就是一次性的批处理，
@@ -150,9 +154,12 @@ def main() -> int:
 
     if not (args.file or args.name or args.all):
         parser.error("需要 --file / --name / --all 之一")
+    # 脚本不走 FastAPI lifespan，增量列（如 text_count）不会自动补；
+    # 先跑 schema，否则 update_kb_status 会 UndefinedColumn，切片却已经删了。
+    store.ensure_schema()
     files = _pick_files(args.name, args.file, args.all)
     if not files:
-        print("没有匹配到 ready 状态的文件")
+        print("没有匹配到可重解析的文件（正在解析/向量化的会跳过）")
         return 1
     print(f"将处理 {len(files)} 个文件：")
     for rec in files:
