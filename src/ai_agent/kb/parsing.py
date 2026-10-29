@@ -116,17 +116,21 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
         logger.warning("pymupdf 抽取文本行失败，退回整页抽取", exc_info=True)
         return [], []
     # 表格识别只是「多产出几段」，失败不该拖累正文解析
-    try:
-        tables = (
-            _pdf_tables(doc)
-            if settings.kb_pdf_table_extraction
-            else []
-        )
-    except Exception:
-        logger.warning("PDF 表格识别失败，本次只出正文切片", exc_info=True)
-        tables = []
-    finally:
-        doc.close()
+    tables: list[tuple[int, float, tuple, list[list[str]]]] = []
+    if settings.kb_pdf_table_extraction:
+        try:
+            tables = _pdf_tables(doc)
+        except Exception:
+            logger.warning("PDF 表格识别失败，本次只出正文切片", exc_info=True)
+        try:
+            # 无框释义表（"X 指 Y"）find_tables 按线条识别不到，单独补一轮；
+            # 传已有表格框做排除，页上残留框线的部分不会被出两份
+            tables += _pdf_glossary_tables(
+                doc, [(page, bbox) for page, _y, bbox, _rows in tables]
+            )
+        except Exception:
+            logger.warning("PDF 释义表识别失败，跳过", exc_info=True)
+    doc.close()
     if not lines:
         return [], []
 
@@ -252,6 +256,156 @@ _TRAIL_COMMA = re.compile(r"(?<=[）)%])\s*[，,]$")
 # 千分位逗号被甩到后面，落在两个中文之间："换向器 , 项目"
 # （只认英文逗号，中文逗号多半是真标点）
 _CJK_COMMA = re.compile(f"(?<=[{_CJK}])\\s*,\\s*(?=[{_CJK}])")
+# 合计行常把标签写在表头列上（和「项目」同一列居中），不能当成「表头位出现了真数据」
+_TOTAL_LABEL = re.compile(r"合计|小计|总计")
+
+
+# ——— PDF 释义表 ———
+# 招股书开头的「词语 …… 指 …… 含义」表没有框线，find_tables 靠线条
+# 反推单元格，这种表整页漏掉。好在它的版式极其固定：孤立的「指」作为
+# 连接词竖着对成一列，左边是词条、右边是释义——拿「指」当锚点，按左右
+# 两列拼行就能还原，不需要猜任何表格线。
+
+# 连接词：锚点必须是整个词（「本指导」里的指不算）
+_GLOSS_ANCHORS = {"指", "系指", "是指"}
+# 一页至少这么多行才当释义表——正文里偶尔也有孤立的「指」，数量撑不起来
+_GLOSS_MIN_ROWS = 3
+# 锚点列的对齐容差：同一列的「指」x0 相差不会超过这个数
+_GLOSS_X_TOL = 18.0
+
+
+def _pdf_glossary_tables(
+    doc, exclude: list[tuple[int, tuple[float, float, float, float]]]
+) -> list[tuple[int, float, tuple, list[list[str]]]]:
+    """识别无框释义表，返回值结构与 _pdf_tables 相同（可直接合并归并）。"""
+    out: list[tuple[int, float, tuple, list[list[str]]]] = []
+    for pno in range(doc.page_count):
+        try:
+            words = doc[pno].get_text("words")
+        except Exception:
+            continue
+        rows, bbox = _glossary_rows(_word_lines(words))
+        if len(rows) < _GLOSS_MIN_ROWS or bbox is None:
+            continue
+        area = max((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), 1.0)
+        if any(
+            pno + 1 == page and _overlap_ratio(bbox, box) > 0.3
+            for page, box in exclude
+        ):
+            # 这片区域 find_tables 已经抽到了（页上还残留些框线），
+            # 再出一份就是重复切片
+            continue
+        out.append(
+            (
+                pno + 1,
+                float(bbox[1]),
+                bbox,
+                # Markdown 表格首行即表头（前端渲染成灰底），补一列语义
+                # 表头，别把第一条释义顶上去当列名
+                [["词语", "含义"], *rows],
+            )
+        )
+    return out
+
+
+def _word_lines(
+    words: list[tuple[float, float, float, float, str, int, int, int]],
+) -> list[list[tuple[float, float, float, float, str]]]:
+    """pymupdf 的 words → 视觉行（按 y0 聚类，行内按 x 排序）。"""
+    out: list[list[tuple[float, float, float, float, str]]] = []
+    for w in sorted(words, key=lambda w: (w[1], w[0])):
+        item = (w[0], w[1], w[2], w[3], w[4])
+        if out and item[1] - out[-1][0][1] <= 4:
+            out[-1].append(item)
+        else:
+            out.append([item])
+    for line in out:
+        line.sort(key=lambda w: w[0])
+    return out
+
+
+def _glossary_rows(
+    lines: list[list[tuple[float, float, float, float, str]]],
+) -> tuple[list[list[str]], tuple | None]:
+    """视觉行 → [词条, 释义] 二维行。
+
+    每条释义由锚点行开头，随后的行只要没有字压在锚点列上（词条换行 /
+    释义换行，或两边同时换行）都算这条的延续；一旦某行的字横跨锚点列，
+    说明表格结束了、回到正文。
+    """
+    anchors: list[tuple[int, tuple[float, float, float, float, str]]] = []
+    for i, line in enumerate(lines):
+        for w in line:
+            if w[4] in _GLOSS_ANCHORS:
+                anchors.append((i, w))
+                break
+    if len(anchors) < _GLOSS_MIN_ROWS:
+        return [], None
+    xs = sorted(a[1][0] for a in anchors)
+    if xs[-1] - xs[0] > _GLOSS_X_TOL:
+        return [], None
+
+    def cell_text(span: list[tuple]) -> str:
+        """一列里的若干词拼回文字：同视觉行的按间距拼，跨行直接连。"""
+        parts: list[str] = []
+        for line in span:
+            text = ""
+            prev = None
+            for w in line:
+                if prev is not None and w[0] - prev[2] > 2.5:
+                    # 中文之间的小间隙是排版字距（"集团公司 有"），直连；
+                    # 西文之间留真空格
+                    gap_cjk = _CJK_RE.search(prev[4][-1]) or _CJK_RE.match(w[4])
+                    text += "" if gap_cjk else " "
+                text += w[4]
+                prev = w
+            if text:
+                parts.append(text)
+        return "".join(parts)
+
+    rows: list[list[str]] = []
+    box: list[float] | None = None
+    for k, (i, anchor) in enumerate(anchors):
+        ax0, ay0, ax1, _ay1, _t = anchor
+        stop = anchors[k + 1][0] if k + 1 < len(anchors) else len(lines)
+        term_span: list[list[tuple]] = []
+        def_span: list[list[tuple]] = []
+        ended = True
+        for line in lines[i:stop]:
+            # 锚点行上锚点自己的字就在锚点列，不算「压线」
+            if all(w is anchor or w[2] < ax0 - 2 or w[0] > ax1 + 2 for w in line):
+                left = [w for w in line if w[2] < ax0 - 2 and w is not anchor]
+                right = [w for w in line if w[0] > ax1 + 2 and w is not anchor]
+                if left:
+                    term_span.append(left)
+                if right:
+                    def_span.append(right)
+                for w in line:
+                    box = box if box is not None else list(w[:4])
+                    box[0] = min(box[0], w[0])
+                    box[1] = min(box[1], w[1])
+                    box[2] = max(box[2], w[2])
+                    box[3] = max(box[3], w[3])
+            else:
+                # 字压在锚点列上 → 表格结束、回到正文。这条本身在压线行
+                # 之前已经收完，照常保留；后面的锚点（正文里恰好孤立的
+                # 「指」）不能再收割
+                ended = False
+                break
+        term, definition = cell_text(term_span), cell_text(def_span)
+        if term and definition:
+            rows.append([term, definition])
+        if not ended:
+            break
+    return rows, tuple(box) if box else None
+
+
+def _overlap_ratio(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> float:
+    ox = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    oy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    return ox * oy / max((a[2] - a[0]) * (a[3] - a[1]), 1.0)
 
 
 def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
@@ -288,6 +442,9 @@ def _clean_table(raw: list[list[str | None]]) -> list[list[list[str]]]:
     rows = [row + [""] * (width - len(row)) for row in rows]
     out: list[list[list[str]]] = []
     for part in _split_repeated_header(rows):
+        # 先删空列：合并单元格常切出 6 列网格，表头在 1/4、数据在 0/3，
+        # 去空后才变成 split_interleaved 认得的隔列交错
+        part = _drop_empty_cols(part)
         part = _merge_header(part)
         part = _split_interleaved(part)
         part = _align_header(part)
@@ -300,6 +457,12 @@ def _split_repeated_header(rows: list[list[str]]) -> list[list[list[str]]]:
 
     判据：非空列与首行完全一致（合并单元格切出来的网格位置都一样），
     且这些单元格都不是纯数字——否则就是普通数据行。
+
+    释义表（"X 指 Y"）每条的行形状都一样，只靠上面两条会被逐条切开，
+    一张表碎成十几张两行小表。所以还要求：
+    - 重复行与首行有 ≥2 字同名的列名（真表头重印列名；释义表各行词条
+      不同，能对上的只有「指」这种一两字的连接词）；
+    - 前面那段表体多数行带数字（数据表才有；释义是整句）。
     """
     if len(rows) < 3:
         return [rows]
@@ -312,6 +475,8 @@ def _split_repeated_header(rows: list[list[str]]) -> list[list[list[str]]]:
             cols == head_cols
             and len(cur) > 1
             and not any(cell and _NUM_ONLY.match(cell) for cell in row)
+            and _same_head_label(rows[0], row)
+            and _mostly_numeric(cur[1:])
         ):
             parts.append(cur)
             cur = [row]
@@ -319,6 +484,20 @@ def _split_repeated_header(rows: list[list[str]]) -> list[list[list[str]]]:
             cur.append(row)
     parts.append(cur)
     return parts
+
+
+def _same_head_label(head: list[str], row: list[str]) -> bool:
+    """重复出现的表头得跟首行有共同列名（≥2 字，排掉「指」这类连接词）。"""
+    pairs = zip(head, row)
+    return any(len(a) >= 2 and a == b for a, b in pairs)
+
+
+def _mostly_numeric(body: list[list[str]]) -> bool:
+    """表体多数行带数字才像数据表——用来把数据表和整句的释义区分开。"""
+    if not body:
+        return False
+    hits = sum(1 for row in body if any(re.search(r"\d", cell) for cell in row))
+    return hits * 2 >= len(body)
 
 
 def _clean_cell(value: str | None) -> str:
@@ -462,7 +641,7 @@ def _split_interleaved(rows: list[list[str]]) -> list[list[str]]:
 
     判据刻意很严，宁可不动也不能把真的宽表拆坏：列数成对；表头位有中文
     且不是纯数字；其余行在表头位要么空、要么与首行一致（不一致说明那是
-    真数据列）。
+    真数据列）。合计行例外：标签常写在表头列上，不能因此放弃拆分。
     """
     if len(rows) < 2:
         return rows
@@ -477,23 +656,37 @@ def _split_interleaved(rows: list[list[str]]) -> list[list[str]]:
             continue
         if any(cell and _NUM_ONLY.match(cell) for cell in head):
             continue
-        # 其余行在表头位有不一样的内容 → 那不是表头，是数据列
         if any(
-            cell and cell != h
-            for row in rows[1:]
-            for cell, h in zip(row[start::2], head)
+            not _header_slot_ok(row[start::2], head) for row in rows[1:]
         ):
             continue
-        body = [row[1 - start::2] for row in rows]
+        data_start = 1 - start
+        body = [_data_slots(row, data_start, start) for row in rows[1:]]
         if not any(any(row) for row in body):
             continue
-        return _drop_empty_cols([head] + body)
+        return _drop_empty_cols([list(head)] + body)
     return rows
+
+
+def _header_slot_ok(slots: list[str], head: list[str]) -> bool:
+    """表头位要么空/与首行相同，要么是合计行把标签写在了表头列。"""
+    if _TOTAL_LABEL.search("".join(slots)):
+        return True
+    return all(not cell or cell == h for cell, h in zip(slots, head))
+
+
+def _data_slots(row: list[str], data_start: int, head_start: int) -> list[str]:
+    data = list(row[data_start::2])
+    if any(data):
+        return data
+    heads = list(row[head_start::2])
+    return heads if any(heads) else data
 
 
 def _alternating(cols_a: set[int], cols_b: set[int]) -> bool:
     """两组列号是否均匀交替（a 在 1/4/7，b 在 0/3/6）。"""
-    if len(cols_a) < 3 or len(cols_b) < 3:
+    # 两列表被切成 4 列交错时各只有 2 个非空列，3 会漏掉（南岭发行费用表）
+    if len(cols_a) < 2 or len(cols_b) < 2:
         return False
     seq = sorted(cols_a | cols_b)
     if len(seq) != len(cols_a) + len(cols_b):

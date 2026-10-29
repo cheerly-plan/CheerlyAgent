@@ -12,8 +12,11 @@ from ai_agent.kb.parsing import (
     _drop_empty_cols,
     _drop_table_lines,
     _merge_header,
+    _glossary_rows,
+    _pdf_glossary_tables,
     _rows_to_markdown,
     _split_repeated_header,
+    _word_lines,
 )
 from ai_agent.kb.sections import Line
 
@@ -238,3 +241,139 @@ def test_clean_table_returns_one_part_for_plain_table():
 def test_clean_cell_restores_dotted_date():
     # 商标有效期："20090807 . ." 是 2009.08.07
     assert _clean_cell("20090807 . . - 20190806 . .") == "2009.08.07-2019.08.06"
+
+
+def test_clean_table_nanling_issue_fee_two_columns():
+    """南岭第 17 页发行费用表：有框两列，pymupdf 切成 6 列交错，合计写在表头列。
+
+    修之前会把首行数据并进表头，渲染成「保荐和承销费用 | 项目 | 860 | 费用金额」。
+    """
+    raw = [
+        ["", "项目", "", "", "费用金额（万元）", ""],
+        ["保荐和承销费用", None, None, "860", None, None],
+        ["审计费用", None, None, "148", None, None],
+        ["律师费用", None, None, "80", None, None],
+        ["发行手续费", None, None, "185", None, None],
+        ["登记托管费", None, None, "6", None, None],
+        ["", "合计", "", "", "1279", ""],
+    ]
+    rows = _clean_table(raw)[0]
+    assert rows[0] == ["项目", "费用金额（万元）"]
+    assert rows[1] == ["保荐和承销费用", "860"]
+    assert rows[2] == ["审计费用", "148"]
+    assert rows[-1] == ["合计", "1279"]
+    assert _rows_to_markdown(rows).startswith("| 项目 | 费用金额（万元） |")
+
+
+# ——— 无框释义表（"X 指 Y"）：国电电力第 6 页实录 ———
+
+def _w(x0, y0, x1, y1, text):
+    return (x0, y0, x1, y1, text)
+
+
+def _glossary_lines() -> list[list[tuple]]:
+    """模拟国电第 6 页的版式：词条 @x≈90、指 @x≈271、释义 @x≈316，
+    词条和释义都带一次换行。"""
+    return [
+        [_w(400, 44, 520, 56, "招股意向书")],                # 页眉
+        [_w(240, 80, 300, 96, "第一节"), _w(310, 80, 350, 96, "释义")],
+        [_w(110, 139, 480, 152, "在本招股意向书中，除非另有说明")],
+        [_w(90, 190, 260, 204, "国电电力、发行人、本公司、"),   # 锚点行
+         _w(271, 190, 285, 204, "指"),
+         _w(321, 190, 500, 204, "国电电力发展股份有限公司")],
+        [_w(90, 209, 130, 222, "公司")],                     # 词条续行
+        [_w(90, 236, 180, 250, "国电集团"),
+         _w(271, 236, 285, 250, "指"),
+         _w(321, 236, 460, 250, "中国国电集团公司")],
+        [_w(90, 264, 180, 278, "龙源集团"),
+         _w(271, 264, 285, 278, "指"),
+         _w(316, 264, 420, 278, "龙源电力集团公司"),
+         _w(430, 264, 470, 278, "有")],                      # 释义行内两个词
+        # 正文回来了：字横跨锚点列，释义表到此为止
+        [_w(90, 320, 500, 336, "本招股意向书中，除非文义另有所指，下列词语具有如下含义")],
+        [_w(90, 350, 200, 366, "普通股"), _w(271, 350, 285, 366, "指"),
+         _w(300, 350, 400, 366, "每股面值一元的股份")],
+    ]
+
+
+def test_glossary_rows_extracts_term_and_definition():
+    rows, bbox = _glossary_rows(_glossary_lines())
+    assert len(rows) == 3
+    assert rows[0] == ["国电电力、发行人、本公司、公司", "国电电力发展股份有限公司"]
+    assert rows[1] == ["国电集团", "中国国电集团公司"]
+    assert rows[2] == ["龙源集团", "龙源电力集团公司有"]
+
+
+def test_glossary_rows_returns_bbox_of_table_area():
+    _rows, bbox = _glossary_rows(_glossary_lines())
+    assert bbox is not None
+    x0, y0, x1, y1 = bbox
+    # 覆盖锚点行到最后一行，页眉和表后正文不在里面
+    assert 185 <= y0 <= 195
+    assert 270 <= y1 <= 280
+    assert x0 <= 90 and x1 >= 460
+
+
+def test_glossary_rows_ignores_pages_without_anchor_column():
+    # 孤立的「指」只有一两个、不成列：不是释义表
+    lines = [
+        [_w(90, 100, 200, 114, "除非文义另有所指")],
+        [_w(90, 140, 285, 154, "词语"), _w(300, 140, 314, 154, "指"),
+         _w(330, 140, 430, 154, "含义如下")],
+    ]
+    rows, bbox = _glossary_rows(lines)
+    assert rows == [] and bbox is None
+
+
+def test_pdf_glossary_tables_wraps_rows_with_markdown_shape():
+    class FakePage:
+        def get_text(self, _kind):
+            return [
+                (90, 190, 260, 204, "国电集团", 0, 0, 0),
+                (271, 190, 285, 204, "指", 0, 0, 0),
+                (321, 190, 500, 204, "国电电力发展股份有限公司", 0, 0, 0),
+                (90, 236, 180, 250, "龙源集团", 0, 0, 0),
+                (271, 236, 285, 250, "指", 0, 0, 0),
+                (316, 236, 460, 250, "龙源电力集团公司", 0, 0, 0),
+                (90, 264, 180, 278, "中国证监会", 0, 0, 0),
+                (271, 264, 285, 278, "指", 0, 0, 0),
+                (316, 264, 480, 278, "中国证券监督管理委员会", 0, 0, 0),
+            ]
+
+    class FakeDoc:
+        page_count = 1
+
+        def __getitem__(self, _i):
+            return FakePage()
+
+    out = _pdf_glossary_tables(FakeDoc(), [])
+    assert len(out) == 1
+    page, y0, bbox, rows = out[0]
+    assert page == 1 and y0 == 190
+    assert rows[0] == ["词语", "含义"]
+    assert rows[1] == ["国电集团", "国电电力发展股份有限公司"]
+
+
+def test_split_repeated_header_keeps_glossary_in_one_table():
+    """释义表每条形状都一样、但列名各不相同（只有「指」重复），不该逐条切开。"""
+    rows = [
+        ["词语", "指", "含义"],
+        ["国电电力", "指", "国电电力发展股份有限公司"],
+        ["国电集团", "指", "中国国电集团公司"],
+        ["龙源集团", "指", "龙源电力集团公司"],
+    ]
+    assert _split_repeated_header(rows) == [rows]
+
+
+def test_split_repeated_header_still_needs_shared_label():
+    """共用列名才拆：第二条表的表头跟首行有相同的「项目」。"""
+    rows = [
+        ["项目", "2016-12-31", "2015-12-31"],
+        ["资产负债率", "59.07", "60.12"],
+        ["流动比率", "0.96", "0.88"],
+        ["项目", "2016年度", "2015年度"],
+        ["应收账款周转率", "3.88", "4.02"],
+    ]
+    parts = _split_repeated_header(rows)
+    assert len(parts) == 2
+    assert parts[1][0] == rows[3]
