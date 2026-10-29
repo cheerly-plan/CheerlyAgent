@@ -196,6 +196,14 @@ class Settings(BaseSettings):
     # 空 = 跟随 MODEL（主模型）。重排是短文本判别，不需要大模型
     kb_rerank_model: str = ""
     kb_rerank_timeout_seconds: float = 30.0
+    # 对话改写：多轮对话里，当前这句省略了主体/语境（上轮在问「中国能源
+    # 建设」、这轮问「股东持股情况」），预检索前用小模型结合上一轮对话把
+    # 这句改写/扩写成自包含的检索词，避免「股东持股情况」这种全库都有的表
+    # 命中别家公司的文件。补全与扩写都允许；第一问无上文时跳过；失败/超时退回原话。
+    kb_rewrite_enabled: bool = True
+    # 空 = 用 small_model（或回落主模型）。改写是短任务，不需要大模型
+    kb_rewrite_model: str = ""
+    kb_rewrite_timeout_seconds: float = 6.0
     # 命中切片前后各带几段一起给模型：跨段落的答案常常被切片边界切断
     kb_neighbor_expand: int = 1
     # 混合检索：关键词直查 + 向量召回做 RRF 融合。向量对制度编号、

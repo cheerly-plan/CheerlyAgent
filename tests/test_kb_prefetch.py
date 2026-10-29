@@ -349,3 +349,180 @@ def test_run_loop_injects_graph_neighborhood_when_chunks_miss(monkeypatch):
 
     assert seen["messages"][-1]["meta"]["kg_prefetch"] is True
     assert "长鑫存储" in seen["messages"][-1]["content"]
+
+
+# ——— 对话改写（补全 + 扩写）——
+
+
+def _enable_rewrite(monkeypatch):
+    from ai_agent.core.config import settings
+
+    monkeypatch.setattr(settings, "kb_rewrite_enabled", True)
+
+
+def test_rewrite_skips_without_previous_turn(monkeypatch):
+    """第一问无上文：不调模型、原样返回。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable_rewrite(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(loop_mod, "complete_chat", lambda *a, **kw: calls.append(1) or "")
+
+    assert loop_mod._rewrite_query("股东持股情况", []) == "股东持股情况"
+    assert loop_mod._rewrite_query("中国能源建设股份有限公司", ["   "]) == "中国能源建设股份有限公司"
+    assert calls == []  # 无上文根本不该发模型调用
+
+
+def test_rewrite_skips_when_disabled(monkeypatch):
+    from ai_agent.agents import loop as loop_mod
+    from ai_agent.core.config import settings
+
+    monkeypatch.setattr(settings, "kb_rewrite_enabled", False)
+    calls: list = []
+    monkeypatch.setattr(loop_mod, "complete_chat", lambda *a, **kw: calls.append(1) or "")
+
+    assert loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司"]) == "股东持股情况"
+    assert calls == []
+
+
+def test_rewrite_fills_in_elided_subject(monkeypatch):
+    """有上文时把省略的主体补回 query。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable_rewrite(monkeypatch)
+    monkeypatch.setattr(
+        loop_mod,
+        "complete_chat",
+        lambda messages, **kw: "中国能源建设股份有限公司 股东持股情况",
+    )
+
+    out = loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司的股东"])
+    assert out == "中国能源建设股份有限公司 股东持股情况"
+
+
+def test_rewrite_sees_subject_from_previous_turn(monkeypatch):
+    """主体藏在上一轮助手的回答里：改写应从上一轮 user+assistant 里拿到主体。
+
+    对应线上 bug：seq1 问「安克创新…」，seq3 问「归母净利润」（无主体），
+    助手回答里带出「安克创新」；seq9 问「本季度毛利率」（无主体）——只喂上一句
+    用户原话时改写模型看不到「安克创新」，把「本季度」补成了别家公司。
+    这里验证：喂上一轮 user+assistant 时，模型能拿到主体。
+    """
+    from ai_agent.agents import loop as loop_mod
+
+    _enable_rewrite(monkeypatch)
+    seen: dict = {}
+
+    def fake(messages, **kw):
+        seen["user_content"] = messages[-1]["content"]
+        return "安克创新 2026年第三季度 毛利率变动原因"
+
+    monkeypatch.setattr(loop_mod, "complete_chat", fake)
+
+    # 上一轮：用户问「归母净利润」（无主体），助手答（含主体「安克创新」）
+    prev_turn = [
+        "归母净利润、扣非净利润分别是多少",
+        "安克创新科技股份有限公司 2026 年第三季度归母净利润为 5.59 亿元…",
+    ]
+    out = loop_mod._rewrite_query("本季度毛利率变动的原因", prev_turn)
+
+    assert out == "安克创新 2026年第三季度 毛利率变动原因"
+    # 喂给模型的上下文里必须包含助手回答里的主体「安克创新」
+    assert "安克创新" in seen["user_content"]
+
+
+def test_rewrite_allows_expansion(monkeypatch):
+    """允许扩写：模型补充同义词/相关要点也算合法改写。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable_rewrite(monkeypatch)
+    monkeypatch.setattr(
+        loop_mod,
+        "complete_chat",
+        lambda messages, **kw: "中国能源建设股份有限公司 前十大股东 持股比例 股本结构",
+    )
+
+    out = loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司"])
+    assert out == "中国能源建设股份有限公司 前十大股东 持股比例 股本结构"
+
+
+def test_rewrite_returns_original_when_identical(monkeypatch):
+    """模型返回和原句一样（含引导符）：剥掉后一致，退回原话。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable_rewrite(monkeypatch)
+    monkeypatch.setattr(loop_mod, "complete_chat", lambda *a, **kw: '"股东持股情况"')
+
+    assert loop_mod._rewrite_query("股东持股情况", ["上一轮问别的"]) == "股东持股情况"
+
+
+def test_rewrite_falls_back_on_llm_error(monkeypatch):
+    """小模型失败：退回原话，不抛异常、不挡回答。"""
+    from ai_agent.agents import loop as loop_mod
+    from ai_agent.core.exceptions import LLMError
+
+    _enable_rewrite(monkeypatch)
+
+    def boom(*a, **kw):
+        raise LLMError("timeout")
+
+    monkeypatch.setattr(loop_mod, "complete_chat", boom)
+
+    assert loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司"]) == "股东持股情况"
+
+
+def test_rewrite_falls_back_on_unexpected_error(monkeypatch):
+    from ai_agent.agents import loop as loop_mod
+
+    _enable_rewrite(monkeypatch)
+
+    def boom(*a, **kw):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(loop_mod, "complete_chat", boom)
+
+    assert loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司"]) == "股东持股情况"
+
+
+def test_run_loop_passes_previous_turn_to_rewrite(monkeypatch):
+    """回归：调用点提取「上一轮 user+assistant」必须跳过当前 user。
+
+    对应线上 bug：seq1 问「安克创新…」、seq2 助手答（含主体）、seq3 问
+    「单季营收」（无主体）。旧实现从 messages[-1] 开始找上一轮 user，
+    把「单季营收」这句当前问题当成了 prev_turn，改写上下文里没有「安克创新」，
+    追问漂到中国能源建设。这里验证：喂给 _rewrite_query 的 prev_turn 含主体。
+    """
+    from ai_agent.agents import loop as loop_mod
+
+    _enable(monkeypatch)
+    _enable_rewrite(monkeypatch)
+    _stub_empty_graph(monkeypatch)
+    monkeypatch.setattr(loop_mod, "search_knowledge", lambda *a, **kw: [])
+
+    seen: dict = {}
+
+    def fake_rewrite(user_input, prev_turn):
+        seen["prev_turn"] = prev_turn
+        return user_input  # 改写结果不影响断言，关键是 prev_turn 内容
+
+    monkeypatch.setattr(loop_mod, "_rewrite_query", fake_rewrite)
+
+    def fake_stream(messages, tools, **kwargs):
+        yield "text", "答"
+        yield "result", {"content": "答", "tool_calls": []}
+
+    monkeypatch.setattr(loop_mod, "stream_chat", fake_stream)
+
+    messages: list = [
+        {"role": "user", "content": "安克创新2026第三季度 归母净利润、扣非净利润分别是多少"},
+        {"role": "assistant", "content": "根据安克创新科技股份有限公司2026年第三季度报告：归母净利润 558,794,649.36 元…"},
+        {"role": "user", "content": "单季营收、同比增速是多少"},
+    ]
+    list(loop_mod.run_loop(messages, user_id="u1"))
+
+    # 上一轮 user 问句 + assistant 回答都喂进去了，且都含主体「安克创新」
+    assert len(seen["prev_turn"]) == 2
+    assert any("安克创新" in s for s in seen["prev_turn"])
+    # 当前这句「单季营收」（无主体）不能混进 prev_turn
+    assert not any("单季营收" in s for s in seen["prev_turn"])
+

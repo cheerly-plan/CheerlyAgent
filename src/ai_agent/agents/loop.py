@@ -12,7 +12,7 @@ from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import Citation, collect_citations, merge_sources
 from ai_agent.kb.retrieval import Hit, search_knowledge
 from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
-from ai_agent.llm.client import stream_chat
+from ai_agent.llm.client import complete_chat, stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
 from ai_agent.memory.facets import format_profile_block
 from ai_agent.memory.long_term import capture_long_term
@@ -237,6 +237,78 @@ def _kg_prefetch(
         "content": content,
         "meta": {"kg_prefetch": True},
     }
+
+
+_REWRITE_SYSTEM = (
+    "你是检索词改写助手。用户在多轮对话里追问时，常常省略上一轮已经说过的"
+    "主体或语境（例如上一轮在问「中国能源建设股份有限公司」，这一轮只说"
+    "「股东持股情况」）。你的任务：结合上一轮对话，把当前这句改写/扩写成"
+    "一条自包含、能独立完成检索的查询词。\n"
+    "要求：\n"
+    "1. 必须结合上一轮对话的语境，把省略的主体、指代补全，必要时可适当扩写"
+    "补充同义词、相关要点，让检索更充分；\n"
+    "2. 补全的主体应来自上一轮对话里出现过的事实，不要凭空编造与上下文"
+    "无关的专有名词；\n"
+    "3. 如果当前这句本身已经自包含、无需改写，原样输出当前这句即可；\n"
+    "4. 只输出改写后的那一条查询词，不要任何解释、标点引导或换行。"
+)
+
+
+def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
+    """对话改写（补全 + 扩写）：结合上一轮完整对话，把当前追问改写成自包含的检索词。
+
+    既允许补全省略的主体（指代消解），也允许扩写同义词/相关要点——检索词
+    不追求还原用户原话，而是追求「能独立完成检索」。唯一保留的约束是：补全
+    的主体要来自上一轮对话，不凭空编造无关专有名词。
+
+    关键点：喂上一轮「用户问 + 助手答」两段，而不是只喂上一句用户原话——
+    主体（公司名）常出现在最早那一问里，中间隔了若干句不带主体的追问；而
+    助手上一轮的回答里通常已经带出主体全称，据此能更稳地把「本季度」这类
+    指代补回正确的公司。
+
+    失败/超时/无上文一律退回原话：检索增强是非阻塞、可降级的，不能让一次
+    小模型调用挡住回答。改写后结果等于原句也退回，省掉无效变更。
+    """
+    if not settings.kb_rewrite_enabled:
+        return user_input
+    prev = [s.strip() for s in prev_turn if s and s.strip()]
+    if not prev:
+        return user_input
+    model = settings.kb_rewrite_model or settings.resolve_llm()
+    context = "\n".join(f"- {s}" for s in prev)
+    try:
+        out = complete_chat(
+            [
+                {"role": "system", "content": _REWRITE_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"上一轮对话：\n{context}\n\n"
+                        f"当前问题：{user_input}\n"
+                        "请结合上一轮对话，输出改写后的检索词。"
+                    ),
+                },
+            ],
+            model=model,
+            timeout=settings.kb_rewrite_timeout_seconds,
+            max_retries=0,
+            max_tokens=256,
+            extra_body={
+                "enable_thinking": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
+    except LLMError as e:
+        logger.warning("kb 对话改写失败，退回原话：%s", e)
+        return user_input
+    except Exception:
+        logger.exception("kb 对话改写异常，退回原话")
+        return user_input
+    rewritten = (out or "").strip().strip("\"'“”‘’")
+    if not rewritten or rewritten == user_input.strip():
+        return user_input
+    logger.info("kb 对话改写：%r -> %r", user_input, rewritten)
+    return rewritten
 
 
 def _prefetch_knowledge(
@@ -676,8 +748,31 @@ def run_loop(
         and messages
         and messages[-1].get("role") == "user"
     ):
+        current = str(messages[-1].get("content") or "").strip()
+        # 上一轮完整对话（用户问 + 助手答）：对话改写的上下文。助手上一轮的回答
+        # 通常已带出主体全称（即使上一轮用户只问「归母净利润」），据此能把
+        # 「本季度」这类指代补回正确的公司，比只取上一句用户原话更稳。
+        prev_turn: list[str] = []
+        # 从当前 user 的前一条（messages[-2]）开始往前找，定位上一轮的 user 问句；
+        # 不能从 messages[-1] 开始——那会把「当前这句」当成上一轮塞进去，
+        # 导致改写上下文里根本没有主体（公司名），追问就漂到别家公司。
+        # 顺序按时间正序组织：上一轮 user 问句在前、assistant 回答在后。
+        prev_user = ""
+        prev_answer = ""
+        for i in range(len(messages) - 2, -1, -1):
+            if messages[i].get("role") == "user" and str(messages[i].get("content") or "").strip():
+                prev_user = str(messages[i].get("content") or "").strip()
+                # 紧跟着它的 assistant 回答（若存在）一起喂进去
+                if i + 1 < len(messages) and messages[i + 1].get("role") == "assistant":
+                    prev_answer = str(messages[i + 1].get("content") or "").strip()
+                break
+        if prev_user:
+            prev_turn.append(prev_user)
+        if prev_answer:
+            prev_turn.append(prev_answer)
+        prefetch_query = _rewrite_query(current, prev_turn)
         prefetch_msg, prefetch_cited = _prefetch_knowledge(
-            str(messages[-1].get("content") or ""), user_id, kb_file_ids
+            prefetch_query, user_id, kb_file_ids
         )
         turn_sources = merge_sources(turn_sources, prefetch_cited)
         if prefetch_msg is not None:
