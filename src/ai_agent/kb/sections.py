@@ -49,6 +49,9 @@ class Line:
     page: int
     size: float
     y_ratio: float  # 行顶相对页面高度（0=顶，1=底）
+    # 页面坐标 (x0, y0, x1, y1)：表格抽取后靠它剔除被表格占用的行，
+    # 否则同一份内容会在正文切片和表格切片里各存一份
+    bbox: tuple[float, float, float, float] | None = None
 
     @property
     def norm(self) -> str:
@@ -82,7 +85,10 @@ def extract_lines(doc) -> list[Line]:
                 if not text:
                     continue
                 size = round(max(span["size"] for span in line["spans"]), 1)
-                out.append(Line(text, pno + 1, size, line["bbox"][1] / height))
+                bbox = line["bbox"]
+                out.append(
+                    Line(text, pno + 1, size, bbox[1] / height, tuple(bbox))
+                )
     return out
 
 

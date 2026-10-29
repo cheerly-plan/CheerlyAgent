@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     # 这类「每句证据必须绑单页」的场景才打开。
     # 关闭时（默认）允许同节内跨页聚合，引用按「第134–135页」展示。
     kb_chunk_within_page: bool = False
+    # PDF 表格识别：把表格抽成独立的 table 切片（整表成片、前端渲染成真
+    # 表格），并把表格占用的文本行从正文里剔除，避免同一份内容存两份。
+    # 关掉即回到「表格按文本行切成单列」的老行为。
+    kb_pdf_table_extraction: bool = True
     # 单批条数：DashScope 兼容接口限制单次 input 最多 10 条，超限整批报
     # InvalidParameter（表现为文件处理 failed），默认对齐上限
     kb_embedding_batch: int = 10

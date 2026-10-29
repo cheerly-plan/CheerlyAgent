@@ -13,6 +13,7 @@ kind（正文 / 表格 / 图表）与页码，切片时按 kind 分别处理：
 解析失败统一抛 ParseError（带可读原因），由管道记入 file.error。
 """
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
@@ -88,13 +89,16 @@ def _parse_pdf(path: Path) -> list[Segment]:
 
 
 def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
-    """行级抽取：剔页眉页脚，按一级节分组后逐页产出 Segment。
+    """行级抽取：剔页眉页脚，按一级节分组后逐页产出 Segment；表格单独成段。
 
     返回 ([], []) 表示 pymupdf 不可用或文件打不开，由调用方降级——不用
     异常是因为「降级」是正常路径（未装 pymupdf 的部署仍要能解析）。
 
     这里只做「节 → 页」的拆分，节内跨页聚合留给 chunking：切片需要页码
     溯源，Segment 保持页粒度就不会丢页码。
+
+    表格与正文混排时按 (页, 纵向位置) 排回原顺序——表格的位置决定它
+    在哪一节、挨着哪段正文，统统挪到文末会让引用张冠李戴。
     """
     try:
         import pymupdf
@@ -111,33 +115,82 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
     except Exception:
         logger.warning("pymupdf 抽取文本行失败，退回整页抽取", exc_info=True)
         return [], []
+    # 表格识别只是「多产出几段」，失败不该拖累正文解析
+    try:
+        tables = (
+            _pdf_tables(doc)
+            if settings.kb_pdf_table_extraction
+            else []
+        )
+    except Exception:
+        logger.warning("PDF 表格识别失败，本次只出正文切片", exc_info=True)
+        tables = []
     finally:
         doc.close()
     if not lines:
         return [], []
 
-    # 图表页判定用的是原始文字量（含页眉），与历史行为保持一致
+    # 图表页判定用的是原始文字量（含页眉、含表格），与历史行为保持一致
     text_lens = _page_char_counts(lines)
-    body = sections.body_size(lines)
-    kept, stats = sections.strip_noise(lines, body)
+    # 表格里的数字字号常小于正文且字符量极大，算正文字号（按量加权取众数）
+    # 会把它拉偏，导致真标题被判成页眉——所以先剔掉表格行再定字号
+    rest = _drop_table_lines(lines, tables)
+    body = sections.body_size(rest)
+    kept, stats = sections.strip_noise(rest, body)
+    if tables:
+        stats["表格"] = len(tables)
     if stats:
-        logger.info("PDF 噪声剔除 %s", stats)
+        logger.info("PDF 噪声剔除与表格 %s", stats)
 
     if not settings.kb_section_chunking:
-        return _segments_by_page(kept), text_lens
+        page_section: dict[int, str | None] = {}
+    else:
+        groups = sections.group_by_section(kept, body)
+        page_section = _page_section_map(groups)
+        kept_by_sec: list[sections.Line] = []
+        for sec in groups:
+            kept_by_sec.extend(sec.lines)
+        kept = kept_by_sec
 
-    groups = sections.group_by_section(kept, body)
-    if not any(sec.id for sec in groups):
-        # 无章节结构（扫描件/无字号）：按页输出，页眉页脚照样剔掉了
-        return _segments_by_page(kept), text_lens
+    # (页, 纵向位置, 段)：文本段与表格段按原版面顺序归并
+    items: list[tuple[int, float, Segment]] = []
+    for y, seg in _page_segments(kept, page_section):
+        items.append((seg.page or 0, y, seg))
+    for page, y0, _bbox, rows in tables:
+        markdown = _rows_to_markdown(rows)
+        if not markdown:
+            continue
+        items.append(
+            (page, y0, Segment(markdown, page, TABLE, page_section.get(page)))
+        )
+    items.sort(key=lambda it: (it[0], it[1]))
+    return [seg for _page, _y, seg in items], text_lens
 
-    out: list[Segment] = []
+
+def _page_section_map(groups: list[sections.Section]) -> dict[int, str | None]:
+    """页 → 所属一级节：表格不在正文行里，只能靠同页的正文行推断归属。"""
+    mapping: dict[int, str | None] = {}
     for sec in groups:
-        if not sec.id:
-            out.extend(_segments_by_page(sec.lines))
-        else:
-            out.extend(_segments_by_page(sec.lines, section=sec.path))
-    return out, text_lens
+        label = sec.path if sec.id else None
+        for ln in sec.lines:
+            mapping.setdefault(ln.page, label)
+    return mapping
+
+
+def _page_segments(
+    lines: list[sections.Line], page_section: dict[int, str | None]
+) -> list[tuple[float, Segment]]:
+    """按页聚成 Segment，同时带回该页首行的纵坐标（与表格排序混排用）。"""
+    out: list[tuple[float, Segment]] = []
+    for page, page_lines in groupby(lines, key=lambda ln: ln.page):
+        group = list(page_lines)
+        text = "\n".join(ln.text for ln in group).strip()
+        if not text:
+            continue
+        first = group[0]
+        y = first.bbox[1] if first.bbox else first.y_ratio * 1000
+        out.append((y, Segment(text, page, TEXT, page_section.get(page))))
+    return out
 
 
 def _segments_by_page(
@@ -150,6 +203,182 @@ def _segments_by_page(
         if text:
             out.append(Segment(text, page, TEXT, section))
     return out
+
+
+# ——— PDF 表格 ———
+# PDF 里没有「表格」这个对象，只有画出来的线和摆好的字。pymupdf 的
+# find_tables 靠线条（无框表格靠文字对齐）反推单元格，抽出来的是二维
+# 字符串数组，转成 Markdown 表格交给切片层（整表成片、超长重复表头）。
+
+_CELL_WS = re.compile(r"\s+")
+# 单元格内的换行是排版断行：数字常被拆成 "5176 63\n."（小数点另起一行）
+_NUM_DECIMAL = re.compile(r"(\d[\d,]*)\s+(\d+)\s*\.\s*(\d*)")
+# 千分位也逃不过断行："114 376 427 06 , , ." 是 114,376,427.06
+# （PDF 把逗号和小数点排到单元格末尾，前面只剩一串数字碎片）
+_NUM_THOUSANDS = re.compile(r"^(\d+(?:\s+\d+)+)\s*(?:[,]\s*)*\.\s*(\d*)$")
+# "2006年 1 6月 -" 是 2006年1-6月：连字符被甩到单元格最后
+_NUM_RANGE = re.compile(r"(\d+)\s+(\d+月)\s*-\s*$")
+# 中文字之间的空格也是排版字距（"木粉 复合油 ，"），不是真空格
+_CJK = "\u4e00-\u9fff\u3040-\u30ff"
+_CJK_SPACE = re.compile(f"([{_CJK}])\\s+([{_CJK}])")
+# 标点被单独排版时前后会多出空格："复合油 ，" / "（ 注"
+_SPACE_BEFORE_PUNCT = re.compile(r"\s+([，。、；：？！）】》」』%])")
+_SPACE_AFTER_PUNCT = re.compile(r"([（【《「『])\s+")
+# 表头续行（"元）"、"（%"）都很短，超过这个长度基本是数据行不是续行
+_MAX_HEADER_CELL = 6
+# 纯数字（允许千分位、百分比、负号）：表头碎片不会是这个形状
+_NUM_ONLY = re.compile(r"^[\d.,%+\-]+$")
+
+
+def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
+    """逐页找表格，返回 (页码, 顶部纵坐标, bbox, 清洗后的二维行)。"""
+    out: list[tuple[int, float, tuple, list[list[str]]]] = []
+    for pno in range(doc.page_count):
+        try:
+            found = doc[pno].find_tables()
+        except Exception:
+            logger.warning("PDF 第 %d 页表格识别失败，跳过", pno + 1, exc_info=True)
+            continue
+        for table in found.tables:
+            rows = _clean_table(table.extract())
+            if len(rows) < 2 or max(len(r) for r in rows) < 2:
+                continue
+            bbox = tuple(table.bbox)
+            out.append((pno + 1, float(bbox[1]), bbox, rows))
+    return out
+
+
+def _clean_table(raw: list[list[str | None]]) -> list[list[str]]:
+    """单元格清洗 → 跨行表头合并 → 删掉合并单元格留下的空列。"""
+    rows = [[_clean_cell(cell) for cell in row] for row in raw]
+    rows = [row for row in rows if any(row)]
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    rows = [row + [""] * (width - len(row)) for row in rows]
+    rows = _merge_header(rows)
+    rows = _align_header(rows)
+    return _drop_empty_cols(rows)
+
+
+def _clean_cell(value: str | None) -> str:
+    text = (value or "").replace("\n", " ")
+    text = _CELL_WS.sub(" ", text).strip()
+    m = _NUM_THOUSANDS.match(text)
+    if m:
+        groups = m.group(1).split()
+        text = ",".join(groups[:-1]) + "." + groups[-1] + m.group(2)
+    else:
+        text = _NUM_DECIMAL.sub(
+            lambda m: f"{m.group(1)}.{m.group(2)}{m.group(3)}", text
+        )
+        text = _NUM_RANGE.sub(r"\1-\2", text)
+    text = _CJK_SPACE.sub(r"\1\2", text)
+    # 数字与中文之间也是排版间距："2005年12月31 日" → "2005年12月31日"
+    text = re.sub(rf"([{_CJK}])\s+(\d)", r"\1\2", text)
+    text = re.sub(rf"(\d)\s+([{_CJK}])", r"\1\2", text)
+    text = _SPACE_BEFORE_PUNCT.sub(r"\1", text)
+    text = _SPACE_AFTER_PUNCT.sub(r"\1", text)
+    return _escape_cell(text)
+
+
+def _align_header(rows: list[list[str]]) -> list[list[str]]:
+    """表头归位：合并单元格常把表头挤到右边一列，和数据对不上。
+
+    「销量（吨）」的格子横跨两列时，网格切出来的表头落在 col1，而数值
+    落在 col1/col2 —— 直接渲染的话每列都串了位。这里按「有数据的列」
+    依次安放表头文字：数量对得上才动，对不上说明不是这种表，不猜。
+    """
+    if len(rows) < 2:
+        return rows
+    header, body = rows[0], rows[1:]
+    data_cols = [i for i in range(len(header)) if any(row[i] for row in body)]
+    fills = [cell for cell in header if cell]
+    if not fills or len(fills) != len(data_cols):
+        return rows
+    aligned = [""] * len(header)
+    for col, cell in zip(data_cols, fills):
+        aligned[col] = cell
+    return [aligned] + body
+
+
+def _merge_header(rows: list[list[str]]) -> list[list[str]]:
+    """表头占了多行时拼回一行，最多吃三行（表头再复杂就认命）。
+
+    两种形态，判据是「第二行的非空列和第一行重不重叠」：
+
+    - **续行**：第二行的列是第一行的子集，且都是短碎片——"销售收入（万"
+      + "元）"、"占总收入比例" + "（%"）。长内容说明那是数据行，不动；
+    - **分散**：两行的非空列完全不重叠——招股书常见的斜线表头把「年份」
+      放第 0 列、「2006年1-6月」放第 1~4 列，分了两三行才写完。
+
+    部分重叠（既像续行又像数据）说不清，一律不动——宁可留着多行表头，
+    也不能把两行数据粘成一行。
+    """
+    for _ in range(3):
+        if len(rows) < 2:
+            break
+        first, second = rows[0], rows[1]
+        f_cols = {i for i, cell in enumerate(first) if cell}
+        s_cols = {i for i, cell in enumerate(second) if cell}
+        if not f_cols or not s_cols:
+            break
+        if s_cols <= f_cols:
+            cells = [second[i] for i in s_cols]
+            if any(len(cell) > _MAX_HEADER_CELL for cell in cells):
+                break
+            # 纯数字的一律是数据行（"100"、"200"），拼进表头就串味了
+            if any(_NUM_ONLY.match(cell) for cell in cells):
+                break
+        elif s_cols & f_cols:
+            break
+        merged = list(first)
+        for i, cell in enumerate(second):
+            if not cell:
+                continue
+            # 第一行该列为空时直接落下来，别把表头碎片丢了
+            merged[i] = merged[i] + cell if merged[i] else cell
+        rows = [merged] + rows[2:]
+    return rows
+
+
+def _drop_empty_cols(rows: list[list[str]]) -> list[list[str]]:
+    """删掉整列为空的列：跨列合并的单元格会留下一串空列。"""
+    width = max(len(row) for row in rows)
+    keep = [i for i in range(width) if any(row[i] for row in rows)]
+    return [[row[i] for i in keep] for row in rows]
+
+
+def _drop_table_lines(
+    lines: list[sections.Line],
+    tables: list[tuple[int, float, tuple, list[list[str]]]],
+) -> list[sections.Line]:
+    """剔掉落在表格框内的文本行：表格已单独成段，正文里不该再有一份。"""
+    if not tables:
+        return lines
+    boxes = [(page, bbox) for page, _y, bbox, _rows in tables]
+    kept: list[sections.Line] = []
+    for ln in lines:
+        if ln.bbox and _hit_any_box(ln, boxes):
+            continue
+        kept.append(ln)
+    return kept
+
+
+def _hit_any_box(
+    ln: sections.Line, boxes: list[tuple[int, tuple[float, float, float, float]]]
+) -> bool:
+    """行框与表格框的重叠面积占行面积一半以上，就算这行属于表格。"""
+    x0, y0, x1, y1 = ln.bbox
+    area = max((x1 - x0) * (y1 - y0), 1.0)
+    for page, (bx0, by0, bx1, by1) in boxes:
+        if page != ln.page:
+            continue
+        ox = max(0.0, min(x1, bx1) - max(x0, bx0))
+        oy = max(0.0, min(y1, by1) - max(y0, by0))
+        if ox * oy / area >= 0.5:
+            return True
+    return False
 
 
 def _page_char_counts(lines: list[sections.Line]) -> list[int]:
@@ -346,12 +575,8 @@ def _parse_docx(path: Path) -> list[Segment]:
     return segments
 
 
-def _table_to_markdown(table) -> str:
-    rows: list[list[str]] = []
-    for row in table.rows:
-        cells = [_escape_cell(cell.text) for cell in row.cells]
-        if any(cells):
-            rows.append(cells)
+def _rows_to_markdown(rows: list[list[str]]) -> str:
+    """二维单元格 → Markdown 表格。PDF/DOCX/Excel 三路共用同一份输出格式。"""
     if not rows:
         return ""
     width = max(len(row) for row in rows)
@@ -359,6 +584,15 @@ def _table_to_markdown(table) -> str:
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * width]
     lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
     return "\n".join(lines)
+
+
+def _table_to_markdown(table) -> str:
+    rows: list[list[str]] = []
+    for row in table.rows:
+        cells = [_escape_cell(cell.text) for cell in row.cells]
+        if any(cells):
+            rows.append(cells)
+    return _rows_to_markdown(rows)
 
 
 def _docx_figures(doc) -> list[Segment]:
@@ -456,10 +690,9 @@ def _sheet_to_markdown(sheet) -> str:
         return ""
     width = max(len(row) for row in rows)
     rows = [row + [""] * (width - len(row)) for row in rows]
-    header = [cell or f"列{i + 1}" for i, cell in enumerate(rows[0])]
-    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * width]
-    lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
-    return "\n".join(lines)
+    # 空表头补列名：Markdown 表格没有列名就无法读懂每列是什么
+    rows[0] = [cell or f"列{i + 1}" for i, cell in enumerate(rows[0])]
+    return _rows_to_markdown(rows)
 
 
 def _cell_text(value) -> str:
