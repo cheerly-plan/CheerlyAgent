@@ -60,6 +60,42 @@ def test_prefetch_drops_weak_matches_by_distance(monkeypatch):
     assert message is None and cited == []
 
 
+def test_prefetch_keeps_reranked_hits_when_query_is_close(monkeypatch):
+    """有一条足够近，就保留整组 top_k：重排挑中的相关原文距离可能略高于门槛。"""
+    from ai_agent.agents import loop as loop_mod
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        loop_mod,
+        "search_knowledge",
+        lambda *a, **kw: [_hit(0.20, seq=1), _hit(0.52, seq=2)],
+    )
+
+    message, cited = loop_mod._kb_prefetch("核心技术的来源", "u1", ())
+
+    assert message is not None
+    assert [c.seq for c in cited] == [1, 2]
+    assert "命中 1" in message["content"] and "命中 2" in message["content"]
+
+
+def test_prefetch_forwards_selected_file_ids(monkeypatch):
+    from ai_agent.agents import loop as loop_mod
+
+    _enable(monkeypatch)
+    seen: dict = {}
+
+    def fake_search(query, *, file_ids=None, top_k=3):
+        seen["file_ids"] = file_ids
+        seen["top_k"] = top_k
+        return [_hit()]
+
+    monkeypatch.setattr(loop_mod, "search_knowledge", fake_search)
+
+    loop_mod._kb_prefetch("核心技术的来源", "u1", (str(FILE_ID),))
+
+    assert seen["file_ids"] == [FILE_ID]
+
+
 def test_prefetch_survives_retrieval_failure(monkeypatch):
     from ai_agent.agents import loop as loop_mod
 

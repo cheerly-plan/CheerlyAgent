@@ -199,6 +199,34 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
     assert seen["file_ids"] is None
 
 
+def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
+    """图谱检索也要跟输入框的文件范围，否则圈定文件后仍会搜到库里别的实体。"""
+    from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
+    from ai_agent.tools import kg_search as kg_tool
+
+    seen: dict = {}
+
+    monkeypatch.setattr(kg_tool.store, "graph_stats", lambda **k: {"entities": 3})
+    monkeypatch.setattr(kg_tool, "embed_query", lambda q: [0.1])
+
+    def fake_entities(embedding, *, query="", top_k=5, file_ids=None, min_score=0.0):
+        seen["file_ids"] = file_ids
+        return []
+
+    monkeypatch.setattr(kg_tool.store, "search_entities", fake_entities)
+
+    token = set_kb_scope([str(FILE_ID)])
+    try:
+        kg_tool._kg_search("问题和谁有关")
+    finally:
+        reset_kb_scope(token)
+
+    assert seen["file_ids"] == [FILE_ID]
+
+    kg_tool._kg_search("问题和谁有关")
+    assert seen["file_ids"] is None
+
+
 def test_kb_scope_is_isolated_and_resettable():
     from ai_agent.kb.scope import kb_scope, reset_kb_scope, set_kb_scope
 

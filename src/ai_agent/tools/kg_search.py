@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
 from ai_agent.kb.citations import Citation, add_citations
+from ai_agent.kb.scope import kb_scope
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
 from ai_agent.tools.base import Tool
@@ -99,10 +100,12 @@ def _kg_search(
     if stats["entities"] == 0:
         return "知识图谱还没有数据（可能文件都在建图中或已关闭抽取），可以先改用 kb_search。"
 
+    # 模型没显式指定文件时，跟随用户在输入框里选的会话范围（与 kb_search 同口径）
+    raw_ids = file_ids if file_ids else list(kb_scope())
     parsed_ids: list | None = None
-    if file_ids:
+    if raw_ids:
         parsed_ids = []
-        for raw in file_ids:
+        for raw in raw_ids:
             try:
                 parsed_ids.append(uuid.UUID(raw))
             except ValueError:

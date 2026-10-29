@@ -119,22 +119,27 @@ def _kb_prefetch(
     query = user_input.strip()
     if not query:
         return None, []
+    file_ids = _parse_prefetch_file_ids(kb_file_ids)
     scope_token = set_kb_scope(kb_file_ids)
     try:
         try:
             with user_scope(user_id):
                 hits = search_knowledge(
-                    query, top_k=settings.kb_prefetch_top_k
+                    query,
+                    file_ids=file_ids,
+                    top_k=settings.kb_prefetch_top_k,
                 )
         except Exception:
             logger.exception("kb 预检索失败，本轮退回工具检索模式")
             return None, []
     finally:
         reset_kb_scope(scope_token)
-    hits = [
-        hit for hit in hits if hit.distance <= settings.kb_prefetch_max_distance
-    ]
     if not hits:
+        return None, []
+    # 闲聊门控：一条都不够近才整轮不注入。不要按条剔除——重排挑中的
+    # 「能回答问题」的片段距离常在 0.46~0.60（改写问法），按条砍会把
+    # 相关原文丢掉，只留下更近但答不上的句子。
+    if all(hit.distance > settings.kb_prefetch_max_distance for hit in hits):
         return None, []
     citations = _citations_of(hits)
     blocks = [
