@@ -28,6 +28,10 @@ from pathlib import Path
 
 from ai_agent.kb.parsing import FIGURE, TABLE, TEXT, Segment
 
+# Excel 的 page 是 sheet 序号；PDF/Word 的 page 是页码。文档里的「表格16」
+# 是作者自己编的表号，解析层不会去数，引用只能落到页。
+_SHEET_EXTS = {".xlsx", ".xlsm", ".xls", ".csv"}
+
 # 段落边界：空行或单个换行都算；PDF 抽出来的文本换行很密，宽松处理
 _PARA_SPLIT = re.compile(r"\n+")
 # 视觉模型对「值得送审但实际没图」的页面常常照格式编一句结论，这些描述
@@ -276,8 +280,14 @@ def context_prefix(
     模型引用时有据可依。存储的正文保持干净——前缀只在嵌入时拼。
     """
     stem = Path(filename).stem if filename else "文档"
+    suffix = Path(filename or "").suffix.lower()
     if kind == TABLE:
-        where = f"表{page}" if page is not None else "表格"
+        if page is None:
+            where = "表格"
+        elif suffix in _SHEET_EXTS:
+            where = f"表{page}"
+        else:
+            where = f"第{page}页"
     elif kind == FIGURE:
         where = f"第{page}页图表" if page is not None else "图表"
     else:

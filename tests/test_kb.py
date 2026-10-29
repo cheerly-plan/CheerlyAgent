@@ -247,7 +247,11 @@ def test_chunk_long_table_repeats_header():
 def test_format_hit_labels_content_kind():
     base = {"filename": "报告.pdf", "seq": 0, "text": "内容"}
     assert _format_hit({**base, "kind": "text", "page": 3}) == "[报告.pdf · 第3页]\n内容"
-    assert _format_hit({**base, "kind": "table", "page": 2}) == "[报告.pdf · 表2]\n内容"
+    assert _format_hit({**base, "kind": "table", "page": 2}) == "[报告.pdf · 第2页]\n内容"
+    assert (
+        _format_hit({**base, "filename": "财务.xlsx", "kind": "table", "page": 2})
+        == "[财务.xlsx · 表2]\n内容"
+    )
     figure = _format_hit({**base, "kind": "figure", "page": 5})
     assert "第5页图表" in figure
     assert "图像识别" in figure

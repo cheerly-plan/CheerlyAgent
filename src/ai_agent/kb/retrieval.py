@@ -18,6 +18,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
@@ -45,6 +46,43 @@ _STOPWORDS = {
 }
 
 _JSON_ARRAY = re.compile(r"\[[^\[\]]*\]")
+# Excel 的 page 是工作表序号；PDF/Word 的 page 是页码。展示名不能混用「表N」。
+_SHEET_EXTS = {".xlsx", ".xlsm", ".xls", ".csv"}
+
+
+def is_sheet_file(filename: str = "", mime: str = "") -> bool:
+    suffix = Path(filename or "").suffix.lower()
+    ext = (mime or "").lower()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    return suffix in _SHEET_EXTS or ext in _SHEET_EXTS
+
+
+def format_where(
+    *,
+    kind: str,
+    page: int | None,
+    page_end: int | None = None,
+    seq: int = 0,
+    filename: str = "",
+    mime: str = "",
+) -> str:
+    """人读的引用位置：PDF 表格落在页上，只有电子表才叫「表N」。"""
+    if kind == FIGURE:
+        return f"第{page}页图表" if page is not None else "图表"
+    if kind == TABLE:
+        if page is None:
+            return "表格"
+        if is_sheet_file(filename, mime):
+            return f"表{page}"
+        if page_end is not None and page_end != page:
+            return f"第{page}–{page_end}页"
+        return f"第{page}页"
+    if page is None:
+        return f"第{seq + 1}段"
+    if page_end is not None and page_end != page:
+        return f"第{page}–{page_end}页"
+    return f"第{page}页"
 
 
 @dataclass
@@ -69,16 +107,14 @@ class Hit:
 
     @property
     def where(self) -> str:
-        """引用位置：表格用表号、图表标图像识别、纯文本用页码/页码区间/段号。"""
-        if self.kind == TABLE:
-            return f"表{self.page}" if self.page is not None else "表格"
-        if self.kind == FIGURE:
-            return f"第{self.page}页图表" if self.page is not None else "图表"
-        if self.page is None:
-            return f"第{self.seq + 1}段"
-        if self.page_end is not None and self.page_end != self.page:
-            return f"第{self.page}–{self.page_end}页"
-        return f"第{self.page}页"
+        """引用位置：图表标图像识别，表格按文件类型区分页码/表号。"""
+        return format_where(
+            kind=self.kind,
+            page=self.page,
+            page_end=self.page_end,
+            seq=self.seq,
+            filename=self.filename,
+        )
 
     @property
     def label(self) -> str:
@@ -369,13 +405,14 @@ def _parse_order(answer: str, size: int) -> list[int]:
 
 
 def _where(row: dict) -> str:
-    kind = row.get("kind") or "text"
-    page = row.get("page")
-    if kind == TABLE:
-        return f"表{page}" if page is not None else "表格"
-    if kind == FIGURE:
-        return f"第{page}页图表" if page is not None else "图表"
-    return f"第{page}页" if page is not None else f"第{int(row.get('seq') or 0) + 1}段"
+    return format_where(
+        kind=row.get("kind") or "text",
+        page=row.get("page"),
+        page_end=row.get("page_end"),
+        seq=int(row.get("seq") or 0),
+        filename=row.get("filename") or "",
+        mime=row.get("mime") or "",
+    )
 
 
 def _clip(text: str) -> str:

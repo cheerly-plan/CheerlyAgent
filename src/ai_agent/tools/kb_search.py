@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import Citation, add_citations
-from ai_agent.kb.retrieval import Hit, search_knowledge, tag_file_scope
+from ai_agent.kb.retrieval import Hit, format_where, search_knowledge, tag_file_scope
 from ai_agent.kb.scope import kb_scope
 from ai_agent.memory.store import store
 from ai_agent.tools.base import Tool
@@ -117,27 +117,24 @@ def _citations_of(hits: list[Hit]) -> list[Citation]:
 def _format_hit(row: dict) -> str:
     """按内容类型给出引用位置：
     - text：PDF 有页码（跨页切片给区间），无页文档退化为段号
-    - table：Excel 用 sheet 序号（表N），Word 表格用「表格」
+    - table：PDF/Word 用页码，Excel 用 sheet 序号（表N）
     - figure：读图结果必须标注「图像识别」，避免模型当成原文数据引用
 
     有章节时追加「· 第十节 管理层讨论与分析」：模型回答时能直接说清
     「哪一节里的哪一页」，用户核对时不用再靠页码猜章节。
     """
     kind = row.get("kind") or "text"
-    page = row.get("page")
-    page_end = row.get("page_end")
-    section = row.get("section")
+    where = format_where(
+        kind=kind,
+        page=row.get("page"),
+        page_end=row.get("page_end"),
+        seq=int(row.get("seq") or 0),
+        filename=row.get("filename") or "",
+        mime=row.get("mime") or "",
+    )
     if kind == "figure":
-        where = f"第{page}页图表" if page is not None else "图表"
         return f"[{row['filename']} · {where}（图像识别，可能有误差）]\n{row['text']}"
-    if kind == "table":
-        where = f"表{page}" if page is not None else "表格"
-    elif page is None:
-        where = f"第{row['seq'] + 1}段"
-    elif page_end is not None and page_end != page:
-        where = f"第{page}–{page_end}页"
-    else:
-        where = f"第{page}页"
+    section = row.get("section")
     if section:
         where = f"{where} · {section}"
     return f"[{row['filename']} · {where}]\n{row['text']}"

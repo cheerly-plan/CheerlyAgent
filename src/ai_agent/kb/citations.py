@@ -20,6 +20,9 @@ from dataclasses import dataclass
 # 单条引用保留的正文长度：切片本体约 500 字，留点余量基本能整段存下，
 # 前端点开就能看到原文，不必再回查接口
 _EXCERPT_CLIP = 600
+# 表格按行切过，整表才渲染得出来；600 字会切到半行，竖线对不上列。
+# 上限放宽，超了也按完整行截，避免 Markdown 表格残缺。
+_TABLE_EXCERPT_CLIP = 2500
 
 # 一条回答最多记这么多条引用：工具循环可能被反复调用，超过这个数量
 # 说明检索在发散，前端列表也放不下
@@ -28,6 +31,21 @@ MAX_SOURCES = 12
 _COLLECTOR: ContextVar[list[Citation] | None] = ContextVar(
     "kb_citations", default=None
 )
+
+
+def _clip_excerpt(text: str, *, kind: str) -> str:
+    body = (text or "").strip()
+    limit = _TABLE_EXCERPT_CLIP if kind == "table" else _EXCERPT_CLIP
+    if len(body) <= limit:
+        return body
+    if kind == "table":
+        # 半行竖线会把表格渲染拆烂，退到上一个换行
+        cut = body[:limit]
+        nl = cut.rfind("\n")
+        if nl >= 8:
+            cut = cut[:nl]
+        return f"{cut}\n…"
+    return f"{body[:limit]}…"
 
 
 @dataclass
@@ -53,8 +71,7 @@ class Citation:
         return f"{self.file_id}#{self.seq}"
 
     def payload(self) -> dict:
-        text = self.text.strip()
-        excerpt = text if len(text) <= _EXCERPT_CLIP else f"{text[:_EXCERPT_CLIP]}…"
+        excerpt = _clip_excerpt(self.text, kind=self.kind)
         return {
             "key": self.key,
             "file_id": self.file_id,

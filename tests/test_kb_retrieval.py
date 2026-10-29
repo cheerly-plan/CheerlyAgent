@@ -27,6 +27,7 @@ def _row(seq: int, text: str, *, distance: float = 0.3) -> dict:
 
 def test_context_prefix_carries_document_and_position():
     assert context_prefix("半导体报告.pdf", page=3, kind="text") == "《半导体报告》第3页"
+    assert context_prefix("年报.pdf", page=16, kind="table") == "《年报》第16页"
     assert context_prefix("财务表.xlsx", page=2, kind="table") == "《财务表》表2"
     assert context_prefix("年报.pdf", page=5, kind="figure") == "《年报》第5页图表"
     # 无页概念的文档（Word）只带文档名，不硬编段号

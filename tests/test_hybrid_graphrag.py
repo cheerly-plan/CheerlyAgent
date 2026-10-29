@@ -245,7 +245,12 @@ def test_kg_search_evidence_cap_and_order(monkeypatch):
 
 
 def test_kg_search_evidence_where_matches_kb_conventions():
-    assert kg_search._evidence_where({"kind": "table", "page": 2, "chunk_seq": 0}) == "表2"
+    assert kg_search._evidence_where(
+        {"kind": "table", "page": 2, "chunk_seq": 0, "filename": "招股书.pdf"}
+    ) == "第2页"
+    assert kg_search._evidence_where(
+        {"kind": "table", "page": 2, "chunk_seq": 0, "filename": "财务.xlsx"}
+    ) == "表2"
     assert (
         kg_search._evidence_where({"kind": "figure", "page": 3, "chunk_seq": 0})
         == "第3页图表"

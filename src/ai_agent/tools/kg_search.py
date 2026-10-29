@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
 from ai_agent.kb.citations import Citation, add_citations
+from ai_agent.kb.retrieval import format_where
 from ai_agent.kb.scope import kb_scope
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
@@ -73,20 +74,15 @@ class KgSearchArgs(BaseModel):
 
 def _evidence_where(item: dict) -> str:
     """证据切片的引用位置（与 kb_search 的口径一致，含跨页区间与章节）。"""
-    kind = item.get("kind") or "text"
-    page = item.get("page")
-    page_end = item.get("page_end")
+    where = format_where(
+        kind=item.get("kind") or "text",
+        page=item.get("page"),
+        page_end=item.get("page_end"),
+        seq=int(item.get("chunk_seq") or item.get("seq") or 0),
+        filename=item.get("filename") or "",
+        mime=item.get("mime") or "",
+    )
     section = item.get("section")
-    if kind == "figure":
-        where = f"第{page}页图表" if page is not None else "图表"
-    elif kind == "table":
-        where = f"表{page}" if page is not None else "表格"
-    elif page is None:
-        where = f"第{int(item['chunk_seq']) + 1}段"
-    elif page_end is not None and page_end != page:
-        where = f"第{page}–{page_end}页"
-    else:
-        where = f"第{page}页"
     return f"{where} · {section}" if section else where
 
 

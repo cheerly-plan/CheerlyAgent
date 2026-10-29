@@ -76,6 +76,42 @@ def test_citation_excerpt_is_clipped_for_very_long_chunks():
     assert len(excerpt) == 601 and excerpt.endswith("…")
 
 
+def test_table_citation_keeps_whole_markdown_table():
+    header = "| 资产 | 2020.6.30 | 2019.12.31 |"
+    sep = "|---|---|---|"
+    row = "| 流动资产 | 1,031,675,913.97 | 1,113,230,566.36 |"
+    text = "\n".join([header, sep, row])
+    excerpt = Citation(
+        file_id=str(FILE_ID),
+        filename="确成硅.pdf",
+        seq=0,
+        page=43,
+        kind="table",
+        where="第43页",
+        text=text,
+    ).payload()["excerpt"]
+    assert excerpt == text
+    assert excerpt.startswith("| 资产 |")
+
+
+def test_table_citation_clips_on_complete_rows():
+    header = "| 资产 | 金额 |"
+    rows = "\n".join(f"| 科目{i} | {i * 1000} |" for i in range(400))
+    text = f"{header}\n|---|---|\n{rows}"
+    excerpt = Citation(
+        file_id=str(FILE_ID),
+        filename="确成硅.pdf",
+        seq=0,
+        page=43,
+        kind="table",
+        where="第43页",
+        text=text,
+    ).payload()["excerpt"]
+    assert excerpt.endswith("\n…")
+    assert len(excerpt) <= 2502
+    assert excerpt.splitlines()[-2].startswith("| 科目")
+
+
 def test_citations_without_collector_are_silently_dropped(monkeypatch):
     """单测/脚本直接调工具时没有收集器，不能因为没人接就抛异常。"""
     from ai_agent.tools import kb_search as kb_tool
@@ -211,6 +247,30 @@ def test_hit_where_renders_page_range_for_cross_page_chunk():
     )
     assert hit.where == "第134–135页"
     assert hit.label == "第134–135页 · 第十节 管理层讨论与分析"
+
+
+def test_hit_where_pdf_table_uses_page_not_sheet_number():
+    pdf = Hit(
+        file_id=str(FILE_ID),
+        filename="招股书.pdf",
+        seq=0,
+        page=43,
+        page_end=43,
+        kind="table",
+        text="| 资产 | 金额 |",
+        distance=0.1,
+    )
+    assert pdf.where == "第43页"
+    xlsx = Hit(
+        file_id=str(FILE_ID),
+        filename="财务.xlsx",
+        seq=0,
+        page=2,
+        kind="table",
+        text="| 科目 | 金额 |",
+        distance=0.1,
+    )
+    assert xlsx.where == "表2"
 
 
 def test_hit_where_collapses_single_page_chunk():
