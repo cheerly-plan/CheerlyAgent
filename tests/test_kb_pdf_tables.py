@@ -5,7 +5,8 @@ PDF 里没有「表格」对象，pymupdf 反推出来的单元格带着一堆�
 全部取自招股书实录（南岭民爆第 4/14 页），改坏了要能立刻发现。
 """
 
-from ai_agent.kb.parsing import (
+from ai_agent.kb.parsing import _rows_to_markdown
+from ai_agent.kb.tables import (
     _align_header,
     _attach_captions,
     _caption_above,
@@ -21,7 +22,6 @@ from ai_agent.kb.parsing import (
     _merge_header,
     _glossary_rows,
     _pdf_glossary_tables,
-    _rows_to_markdown,
     _split_repeated_header,
     _table_content_bbox,
     _table_meta_above,

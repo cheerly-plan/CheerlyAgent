@@ -596,17 +596,17 @@ def test_embed_texts_parallel_failure_propagates(monkeypatch):
 
 def test_describe_parallel_keeps_order(monkeypatch):
     """视觉并行：结果顺序与输入一致（页码归属不能乱）。"""
-    from ai_agent.kb import parsing
+    from ai_agent.kb import figures
 
     def fake_describe(blob, mime):
         return f"desc-{blob.decode()}"
 
-    monkeypatch.setattr(parsing.vision, "describe_image", fake_describe)
+    monkeypatch.setattr(figures.vision, "describe_image", fake_describe)
     jobs = [(b"1", "image/png"), (b"2", "image/png"), (b"3", "image/png")]
-    assert parsing._describe_parallel(jobs) == ["desc-1", "desc-2", "desc-3"]
+    assert figures._describe_parallel(jobs) == ["desc-1", "desc-2", "desc-3"]
 
-    monkeypatch.setattr(parsing.settings, "kb_vision_concurrency", 1)
-    assert parsing._describe_parallel(jobs) == ["desc-1", "desc-2", "desc-3"]
+    monkeypatch.setattr(figures.settings, "kb_vision_concurrency", 1)
+    assert figures._describe_parallel(jobs) == ["desc-1", "desc-2", "desc-3"]
 
 
 # ——— 图表页筛选：别把表格页当图表送视觉模型 ———
@@ -638,41 +638,41 @@ def test_chart_page_skips_dense_text_page():
     实测 331 页招股书按「路径数 ≥ 150」误判 124 页，20 页预算全烧在
     目录和财务报表上，每页还要等一次视觉调用。
     """
-    from ai_agent.kb import parsing
+    from ai_agent.kb import figures
 
     page = _FakePage(drawings=215, images=[(80, 60)])
-    assert parsing._page_has_chart(page, text_len=1085) is False
+    assert figures._page_has_chart(page, text_len=1085) is False
 
 
 def test_chart_page_accepts_large_image_with_little_text():
-    from ai_agent.kb import parsing
+    from ai_agent.kb import figures
 
     page = _FakePage(images=[(500, 600)])  # 占页面大半
-    assert parsing._page_has_chart(page, text_len=180) is True
+    assert figures._page_has_chart(page, text_len=180) is True
 
 
 def test_chart_page_ignores_logo_sized_image():
     """页眉 logo / 装饰线不算图表：面积占比够不上阈值。"""
-    from ai_agent.kb import parsing
+    from ai_agent.kb import figures
 
     page = _FakePage(images=[(60, 40)], drawings=3)
-    assert parsing._page_has_chart(page, text_len=200) is False
+    assert figures._page_has_chart(page, text_len=200) is False
 
 
 def test_chart_page_accepts_vector_only_chart():
     """ECharts 走 SVG 导出时没有位图，靠路径数识别（但要求文字少）。"""
-    from ai_agent.kb import parsing
+    from ai_agent.kb import figures
 
     page = _FakePage(drawings=200)
-    assert parsing._page_has_chart(page, text_len=120) is True
+    assert figures._page_has_chart(page, text_len=120) is True
 
 
 def test_chart_page_survives_broken_page():
     """单页取图信息报错不能把整份解析带崩。"""
-    from ai_agent.kb import parsing
+    from ai_agent.kb import figures
 
     page = _FakePage(drawings="boom")
-    assert parsing._page_has_chart(page, text_len=100) is False
+    assert figures._page_has_chart(page, text_len=100) is False
 
 
 def test_rebuild_graph_reads_chunks_from_db(monkeypatch):

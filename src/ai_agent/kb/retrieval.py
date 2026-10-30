@@ -23,7 +23,8 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.parsing import FIGURE, SCOPE_CONSOLIDATED, SCOPE_PARENT, TABLE
+from ai_agent.kb.parsing import FIGURE, TABLE
+from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
 
