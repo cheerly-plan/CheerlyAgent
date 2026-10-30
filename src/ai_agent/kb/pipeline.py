@@ -168,6 +168,8 @@ class KbPipeline:
                     kind=r["kind"],
                     page_end=r.get("page_end"),
                     section=r.get("section"),
+                    # seq 必须带：建图会过滤低信息切片，下标不再等于库里的序号
+                    seq=r.get("seq"),
                 )
                 for r in rows
             ]

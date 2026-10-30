@@ -87,6 +87,23 @@ _PREDICATE_NAMES = {
     "包括",
     "进行",
     "完成",
+    # 季报里常见的动宾被拆开：原文「对接阿联酋」「建设氢能平台」，
+    # 模型把动词单独建成 other 点，边还叫同一个词
+    "对接",
+    "建设",
+    "签约",
+    "布局",
+    "拓展",
+    "开展",
+    "推进",
+    "加快",
+    "加强",
+    "提升",
+    "优化",
+    "合作",
+    "产生",
+    "上升",
+    "互动",
 }
 
 # 出现在几乎每篇文档里、对区分内容毫无帮助的词，抽到也只会污染图谱
@@ -108,24 +125,10 @@ _STOP_NAMES = {
     "技术",
 }
 
-# 补桩实体（见 _GraphAccumulator.finalize）时的额外拦截名单。
-# 这些是文档内的泛指自称，模型常在关系里写「本公司持有……」，但补成
-# 图上节点后每一段正文都会指向同一个泛称，等于给所有实体加了一个
-# 万能中转点，检索时反而把无关子图连成一片
-_ENDPOINT_NOISE = _STOP_NAMES | {
-    "本公司",
-    "该公司",
-    "本集团",
-    "该集团",
-    "发行人",
-    "上市公司",
-    "本行",
-    "本基金",
-    "本单位",
-    "本企业",
-    "上述公司",
-    "股东",
-}
+# 泛称自称（「本公司」「本基金」「股东」…）不单独拦字典：模型把它写在
+# 关系端点上时由 _resolve 改写成本文档主体全称，写在实体里时按 _usable_name
+# 的通用判据处理。曾经这里维护过一份端点噪声名单，但它只服务于补桩
+# （已移除，见 finalize），留着就是一份没人看的字典。
 
 # 文档自指名。模型在关系里大量写「本公司持股…」「公司实现营业收入…」：
 # 这些**既不能建实体**（一个泛称会把所有子图连成一片），**也不能直接丢**
@@ -298,6 +301,8 @@ def _as_int(value: object) -> int:
 
 # 纯数字/标点切片（页码行、目录点线、"……"）：抽不出实体，白付一次调用
 _DIGITISH = re.compile(r"^[\d\s.,%+\-—–~至/、:：()（）\[\]【】]+$")
+# 勾选结果（parsing 归一化后的写法）：「……是否经过审计：☑（已勾选）否」
+_SELECTED = re.compile(r"[☑☐]（[已未]勾选）")
 
 
 def _worth_extracting(text: str) -> bool:
@@ -306,8 +311,14 @@ def _worth_extracting(text: str) -> bool:
     招股书/年报里目录行、页码、"（此页无正文）"这类碎片不少，
     它们既抽不出实体，又会占用批里的位置（批大小受上下文限制，
     塞几个碎片就等于少抽一段真内容）。
+
+    但「短」不等于「没信息」：勾选行天生就在一句话以内（实测 27~36 字），
+    却是全文最确定的结论——是否经过审计、是否需要追溯调整、某节是否适用。
+    按长度把它们当碎片扫掉，图谱里就永远问不到这些是否题。
     """
     body = (text or "").strip()
+    if _SELECTED.search(body):
+        return True
     if len(body) < max(1, settings.kb_graph_min_chunk_chars):
         return False
     return not _DIGITISH.match(body)
@@ -327,6 +338,35 @@ def normalize_name(name: str) -> str:
 def display_name(name: str) -> str:
     """展示名：只去掉首尾的引号、书名号、空白，圆括号原样保留。"""
     return _DISPLAY_TRIM.sub("", (name or "").strip()).strip()
+
+
+def _claimed_offset(claimed: int, start: int, count: int) -> int:
+    """把模型报的片段编号换算成批内下标。
+
+    它可能报批内下标，也可能报 prompt 里写的绝对段号（批起点不为 0 时
+    两者不等），两种都接住；都不像就夹到批内。
+    """
+    if count <= 0:
+        return 0
+    if start <= claimed <= start + count - 1:
+        return claimed - start
+    return min(max(claimed, 0), count - 1)
+
+
+def _locate_chunk(name: str, haystack: list[str], fallback: int) -> int:
+    """这个实体/关系出现在本批的第几片。
+
+    优先按名字做包含匹配：名字是我们手上的确定信息，比模型自报的位置
+    可靠得多——实测 821 条提及里只有 5% 指对了片子，其余几乎全落在批首
+    那一片。匹配不到（模型改写了名字、原文只有简称或别名）才退回它报的
+    位置，至少还落在同一批里。
+    """
+    norm = normalize_name(name)
+    if norm:
+        for i, text in enumerate(haystack):
+            if norm in text:
+                return i
+    return fallback
 
 
 def _clean_type(raw: str) -> str:
@@ -388,7 +428,10 @@ def _build_prompt(chunks: list[Chunk], start_seq: int, doc_name: str | None = No
             # 章节名单独标出来：模型靠它判断「这段在讲哪块业务」，比页码有用得多
             # （「（二）非经常性损益项目和金额」里的数字，绝不会被当成主营收入）
             tag += f" · 章节：{chunk.section}"
-        parts.append(f"[{i}] （{tag}）\n{chunk.text}")
+        # 标号必须是**绝对**段号：写批内下标 [0] 时，模型引用只能靠数位置，
+        # 而开头又写着「第 28–35 段」，两套编号并存，它报回来的数字两边都不像
+        seq = chunk.seq if chunk.seq is not None else start_seq + i
+        parts.append(f"[{seq}] （{tag}）\n{chunk.text}")
     # 整批同属一节时，把节名提到开头：模型据此判断"这些片段是同一个业务
     # 主题的连续论述"，关系更容易连上；跨节的批不写，免得它硬凑跨节关系
     sections = {c.section for c in chunks}
@@ -470,11 +513,12 @@ def _extract_batch(
             len(chunks),
             len(raw or ""),
         )
+        # 后半批的段号取它自己首片的真实 seq：过滤过的批里 seq 不连续，
+        # start_seq + mid 只是下标偏移，写进段号会和标号对不上
+        mid_seq = chunks[mid].seq if chunks[mid].seq is not None else start_seq + mid
         return _merge_extractions(
             _extract_batch(chunks[:mid], start_seq, system_prompt, _depth + 1, False, doc_name),
-            _extract_batch(
-                chunks[mid:], start_seq + mid, system_prompt, _depth + 1, False, doc_name
-            ),
+            _extract_batch(chunks[mid:], mid_seq, system_prompt, _depth + 1, False, doc_name),
             offset=mid,
         )
     logger.warning(
@@ -543,7 +587,10 @@ def _batch_bounds(
             current = (start, end)
     if current:
         bounds.append(current)
-    return [(start, chunks[start:end]) for start, end in bounds]
+    return [
+        (chunks[start].seq if chunks[start].seq is not None else start, chunks[start:end])
+        for start, end in bounds
+    ]
 
 
 def _extract_all(
@@ -679,6 +726,13 @@ class _GraphAccumulator:
         if not result.entities and not result.relations:
             return
 
+        # 真实段号：建图前会过滤掉低信息切片，批内下标和库里的 seq 不是一回事，
+        # 拿下标当 seq 写 mention，实体详情里的「原文片段」就会指到同批别的片上
+        seqs = [c.seq if c.seq is not None else start + i for i, c in enumerate(batch)]
+        count = len(batch)
+        # 每批只归一化一次，供「这个名字出现在哪一片」的定位复用
+        haystack = [normalize_name(c.text) for c in batch]
+
         for item in result.entities:
             norm = normalize_name(item.name)
             # 自指名不是实体：它指的就是主体，留着只会生成一个把整张图
@@ -701,68 +755,69 @@ class _GraphAccumulator:
                     entity["description"] = item.description.strip()[:200]
                     # 描述变了，向量也得重算（它在 _vectors 里已经过期）
                     self._vectors.pop(norm, None)
-            # 提及记录模型自己指认的片段（越界就夹回本批范围），
-            # 这样 mention_count 才有区分度，实体→原文也能精确定位
-            seq = start + min(max(item.chunk, 0), len(batch) - 1)
-            key = (norm, seq)
+            # 提及记录该实体真正落在哪一片：先按名字在本批里找，找不到才信
+            # 模型自报的位置（越界就夹回本批范围）
+            offset = _locate_chunk(
+                item.name, haystack, _claimed_offset(item.chunk, start, count)
+            )
+            key = (norm, seqs[offset])
             self.mentions[key] = self.mentions.get(key, 0) + 1
 
         for rel in result.relations:
-            if not self._add_relation(rel, start, len(batch)):
+            # 关系同样按端点名定位：用它报的位置，引用会指到无关的片上去
+            rel.chunk = _locate_chunk(
+                rel.source, haystack, _claimed_offset(rel.chunk, start, count)
+            )
+            if not self._add_relation(rel, seqs):
                 # 端点还没出现：先挂起，等后面某一批把它抽出来再补上。
                 # 直接丢会让「关系指向后文才出现的实体」整条消失——这正
                 # 是「实体都在图上却互不相连」的另一个来源
-                self._pending.append((rel, start, len(batch)))
+                self._pending.append((rel, seqs))
         if self._pending:
-            still_pending: list[tuple[_Relation, int, int]] = []
+            still_pending: list[tuple[_Relation, list[int]]] = []
             for item in self._pending:
                 if not self._add_relation(*item):
                     still_pending.append(item)
             self._pending = still_pending
 
-    def finalize(self) -> int:
-        """收尾：把仍挂起的关系全部落地，返回补出的桩实体数。
+    def finalize(self) -> None:
+        """收尾：把仍挂起的关系再整体试一次，端点仍不是实体的直接丢边。
 
         挂起队列在每批 add() 里重试，但**最后一批之后没有 add 了**——指向
         "整份文档都没抽成实体、只在关系里露过名字"的那些关系，到收尾时
         还躺在 _pending 里，flush() 不会碰它，随进程一起消失。表现是
-        "关系数总比实体关系对不上"，且很难从日志里看出原因。
+        "关系数总比实体关系对不上"，且很难从日志里看出原因。所以收尾要
+        再整体重试一次：最后几批可能刚把端点补出来。
 
-        收尾做两件事：
-        1. 再整体重试一次（最后几批可能刚补上端点）；
-        2. 仍缺端点的，给缺失端点补一个桩实体，让关系落地。桩实体只在
-           关系里出现过，描述里写明来源——比丢掉整条关系更有信息量：
-           检索时它至少能把"某实体与某名字之间存在某关系"暴露出来。
-        桩实体要过 _usable_name：纯数值、时间点这类端点补进来只是噪声，
-           对应的关系照旧丢弃。
+        重试完仍然缺端点的，**丢弃整条关系，不给它补桩**。这里原来会给
+        缺失端点补一个 type=other 的桩节点（描述写"仅作为关系端点出现"），
+        实测三份季报补出 145 个这样的点，代价大于收益：
+        - 桩没有正文依据，也没有 mention，前端点开是一片空白，检索命中后
+          引用不出任何原文；
+        - 名字来自模型在关系里随手写的一串字，模型笔误（截断、带标点、
+          抄 prompt 示例）会被固化成图上节点，且永远不会被修正；
+        - 它们撑起来的边是不可验证的——"某实体与某个查不到出处的名字之间
+          存在某关系"，问一句"依据在哪"就答不上来。
+        缺一条没有实体支撑的边，比留一个凭空捏出来的点更容易判断图的可信度。
+
+        收尾是终态：连不上的就到此为止，别留在队列里假装"下次还能补"。
         """
-        still: list[tuple[_Relation, int, int]] = []
+        dropped: list[tuple[_Relation, list[int]]] = []
         for item in self._pending:
             if not self._add_relation(*item):
-                still.append(item)
-
-        stubbed = 0
-        remaining: list[tuple[_Relation, int, int]] = []
-        for rel, start, batch_len in still:
-            for raw in (rel.source, rel.target):
-                if self._ensure_stub(raw):
-                    stubbed += 1
-            if not self._add_relation(rel, start, batch_len):
-                remaining.append((rel, start, batch_len))
-
+                dropped.append(item)
         # 收尾是终态：连不上的就到此为止，别留在队列里假装"下次还能补"
         self._pending = []
-        if still or self.self_ref_hits:
+        if dropped or self.self_ref_hits:
+            names = sorted({n for rel, _ in dropped for n in (rel.source, rel.target)})
             logger.info(
-                "kb 图谱收尾：挂起关系 %d 条，补桩实体 %d 个，放弃 %d 条（端点不可用），"
-                "自指名端点改写 %d 个（主体=%s）",
-                len(still),
-                stubbed,
-                len(remaining),
+                "kb 图谱收尾：%d 条关系因端点未抽成实体被丢弃，自指名端点改写 %d 个"
+                "（主体=%s）；缺失端点样例：%s",
+                len(dropped),
                 self.self_ref_hits,
                 self.subject_name or "未识别",
+                "、".join(names[:8]) or "无",
             )
-        return stubbed
 
     def _resolve(self, raw: str) -> str:
         """把自指名端点换成主体全称；换不了就原样返回（后面照常挡掉）。"""
@@ -788,22 +843,7 @@ class _GraphAccumulator:
             "description": "本文档主体",
         }
 
-    def _ensure_stub(self, raw: str) -> bool:
-        """给只出现在关系端点的名字补一个桩实体。返回是否新建。"""
-        norm = self._resolve(raw)
-        if norm in self.entities:
-            return False
-        if norm in _ENDPOINT_NOISE or not _usable_name(raw, norm):
-            return False
-        self.entities[norm] = {
-            "name": self.subject_name if norm == self.subject_norm else display_name(raw),
-            "norm": norm,
-            "type": "other",
-            "description": "仅作为关系端点出现，正文中未单独抽为实体",
-        }
-        return True
-
-    def _add_relation(self, rel: _Relation, start: int, batch_len: int) -> bool:
+    def _add_relation(self, rel: _Relation, seqs: list[int]) -> bool:
         """写入一条关系。端点缺失返回 False（调用方决定挂起还是丢弃）。"""
         src = self._resolve(rel.source)
         dst = self._resolve(rel.target)
@@ -826,7 +866,7 @@ class _GraphAccumulator:
             "target": dst,
             "relation": rel_name,
             "description": (rel.description or "").strip()[:200],
-            "chunk_seq": start + min(max(rel.chunk, 0), batch_len - 1),
+            "chunk_seq": seqs[min(max(rel.chunk, 0), len(seqs) - 1)],
         }
         if resolved:
             self.self_ref_hits += 1

@@ -63,16 +63,13 @@ def test_build_file_graph_merges_and_links(monkeypatch):
     )
     counts = build_file_graph(uuid.uuid4(), [Chunk(body), Chunk(body)])
 
-    # DRAM 两条合并成一个；「报告」被停用词表过滤
-    names = {e["name"] for e in captured["entities"]}
-    assert names == {"长鑫存储", "DRAM", "不存在的实体"}
-    # 「不存在的实体」只在关系里出现过：收尾时补成桩实体，让这条关系落地，
-    # 而不是连同关系一起消失（见 _GraphAccumulator.finalize）
-    stub = next(e for e in captured["entities"] if e["name"] == "不存在的实体")
-    assert stub["type"] == "other"
-    # 重复关系去重（同一 source/target/relation 只留一条）
-    assert counts["relations"] == 2
-    assert {r["relation"] for r in captured["relations"]} == {"生产", "投资"}
+    # DRAM 两条合并成一个；「报告」被停用词表过滤；指向「不存在的实体」的
+    # 那条关系连同悬空端点一起丢掉——端点不是实体就不造点（见 finalize）
+    assert {e["name"] for e in captured["entities"]} == {"长鑫存储", "DRAM"}
+    assert not any("仅作为关系端点" in e["description"] for e in captured["entities"])
+    # 重复关系去重（同一 source/target/relation 只留一条）；「投资」已随悬空边丢弃
+    assert counts["relations"] == 1
+    assert {r["relation"] for r in captured["relations"]} == {"生产"}
     # 合并后描述取更长的那个
     dram = next(e for e in captured["entities"] if e["name"] == "DRAM")
     assert "动态随机存储器" in dram["description"]
@@ -791,29 +788,72 @@ def test_relation_to_entity_in_later_batch_is_recovered():
     assert acc._pending == []  # 挂起队列已清空
 
 
-def test_pending_relation_lands_with_stub_entity_on_finalize():
-    """端点始终没被抽成实体的关系，收尾时补桩落地而不是消失。
+def test_pending_relation_without_endpoint_entity_is_dropped_on_finalize():
+    """端点始终没被抽成实体的关系，收尾时连同关系一起丢，不给它补桩。
 
-    挂起队列只在 add() 里重试，最后一批之后没有 add 了：这些关系原本
-    随进程一起消失，表现为"关系数总比预期少一截"。
+    挂起队列只在 add() 里重试，最后一批之后没有 add 了。过去这里会给缺失
+    端点补一个 type=other 的桩节点把关系保下来：三份季报因此多出 145 个
+    没有正文依据、点开一片空白、检索也引用不出原文的点，而它们撑起来的
+    边同样无法追问依据。现在一律丢弃——图上每条边的两端都必须是抽出来的
+    实体，不能是我们替模型补出来的点。
     """
     acc = _acc()
     acc.add(0, [Chunk("甲公司投资某公司。")], _ext(entities=["甲公司"], relations=[("甲公司", "某公司", "投资")]))
     assert acc.relations == {}  # 收尾前仍然只是挂起，不提前落地
     assert len(acc._pending) == 1
 
-    assert acc.finalize() == 1  # 给「某公司」补了一个桩实体
-    assert acc._pending == []
-    assert [(r["source"], r["target"], r["relation"]) for r in acc.relations.values()] == [
-        ("甲公司", "某公司", "投资")
-    ]
-    stub = acc.entities["某公司"]
-    assert stub["type"] == "other"
-    assert "仅作为关系端点" in stub["description"]
+    acc.finalize()
+    assert acc._pending == []  # 收尾是终态，不留尾巴
+    assert acc.relations == {}
+    assert "某公司" not in acc.entities  # 没有被补成桩
+    assert set(acc.entities) == {"甲公司"}  # 甲公司是抽出来的实体，留着
 
 
-def test_finalize_retries_pending_before_stubbing():
-    """收尾先整体重试一次：最后补上的端点不该被当成缺失端点再补一个桩。"""
+def test_no_stub_entity_reaches_the_graph(monkeypatch):
+    """端到端：关系端点不是实体就丢边，不能靠造点把边保下来。
+
+    这条盯着 finalize 的出口——上面那条只验证了 accumulator 内部状态，
+    而落到库里的实体才是前端、检索、图谱问答看到的全部内容。
+    """
+    monkeypatch.setattr(
+        graph,
+        "complete_chat",
+        lambda *a, **k: """
+        {"entities":[{"name":"长鑫存储","type":"org","description":"国产 DRAM 厂商","chunk":0}],
+         "relations":[{"source":"长鑫存储","target":"某未抽出的公司","relation":"投资","chunk":0},
+                      {"source":"长鑫存储","target":"DRAM","relation":"生产","chunk":0},
+                      {"source":"长鑫存储","target":"DRAM","relation":"生产","chunk":0}]}
+        """,
+    )
+    monkeypatch.setattr(
+        graph, "embed_texts_parallel", lambda texts, **k: [[0.01, 0.02] for _ in texts]
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        graph.store,
+        "replace_file_graph",
+        lambda fid, e, r, m: captured.update(entities=e, relations=r, mentions=m),
+    )
+    body = (
+        "长鑫存储是国内 DRAM 厂商，报告期内 DRAM 产能持续爬坡，"
+        "产品覆盖 DDR4 与 DDR5 颗粒，客户以模组厂为主。"
+    )
+    counts = build_file_graph(uuid.uuid4(), [Chunk(body)])
+
+    # DRAM 只在关系里出现过，同样是端点不是实体 → 那条「生产」也被丢掉，
+    # 图上一个没有依据的点都不留
+    assert {e["name"] for e in captured["entities"]} == {"长鑫存储"}
+    assert counts == {"entities": 1, "relations": 0}
+    assert captured["relations"] == []
+    assert "仅作为关系端点" not in " ".join(e["description"] for e in captured["entities"])
+
+
+def test_finalize_retries_pending_once():
+    """收尾先整体重试一次：最后补上的端点不该被当成缺失端点。
+
+    挂起队列只在 add() 里重试，而重试发生在写入实体之前——最后一批抽出的
+    端点赶不上这一次重试，得靠收尾再整体试一遍。
+    """
     acc = _acc()
     acc.add(0, [Chunk("甲公司控股丙公司。")], _ext(entities=["甲公司"], relations=[("甲公司", "丙公司", "控股")]))
     # 模拟「最后一批补出了端点，但 add() 的重试发生在写入之前」的时序：
@@ -824,19 +864,20 @@ def test_finalize_retries_pending_before_stubbing():
         "type": "org",
         "description": "",
     }
-    assert acc.finalize() == 0  # 没有补桩
+    acc.finalize()
     assert acc._pending == []
     assert [(r["source"], r["target"]) for r in acc.relations.values()] == [("甲公司", "丙公司")]
+    assert set(acc.entities) == {"甲公司", "丙公司"}  # 没有第三个点被造出来
 
 
-def test_pending_relation_with_metric_endpoint_is_dropped_on_finalize():
-    """桩不是无脑补：纯数值/时间点端点补进来只是噪声，关系照旧丢掉。"""
+def test_relation_with_metric_endpoint_is_dropped_on_finalize():
+    """纯数值/时间点端点不是实体：关系丢掉，也不会被当成缺失端点处理。"""
     acc = _acc()
     acc.add(0, [Chunk("甲公司2026年前三季度营收增长。")], _ext(
         entities=["甲公司"],
         relations=[("甲公司", "2026年前三季度", "报告期")],
     ))
-    assert acc.finalize() == 0
+    acc.finalize()
     assert acc.relations == {}
     assert acc._pending == []
     assert "2026年前三季度" not in acc.entities
@@ -853,9 +894,9 @@ def test_subject_from_filename_takes_full_name():
 
 def test_predicate_names_are_not_entities_but_compounds_are():
     """动词不能当实体，但同词根的复合名词必须留着。"""
-    for verb in ("搭载", "发布", "任职", "支持", "持股"):
+    for verb in ("搭载", "发布", "任职", "支持", "持股", "对接", "建设", "签约"):
         assert not graph._usable_name(verb, normalize_name(verb))
-    for noun in ("持股比例", "研发投入", "发布渠道"):
+    for noun in ("持股比例", "研发投入", "发布渠道", "基础设施建设"):
         assert graph._usable_name(noun, normalize_name(noun))
 
 
@@ -885,8 +926,9 @@ def test_self_reference_without_subject_is_dropped():
         [Chunk("本公司持有长鑫存储 30% 股权。")],
         _ext(entities=["长鑫存储"], relations=[("本公司", "长鑫存储", "持股")]),
     )
-    assert acc.finalize() == 0
+    acc.finalize()
     assert acc.relations == {}
+    assert set(acc.entities) == {"长鑫存储"}  # 泛称不会被猜成一个点
 
 
 def test_placeholder_names_from_prompt_example_are_rejected():
@@ -921,3 +963,98 @@ def test_build_file_graph_passes_doc_name_to_prompt(monkeypatch):
         doc_name="安克创新科技股份有限公司2026 年第三季度报告",
     )
     assert "《安克创新科技股份有限公司2026 年第三季度报告》" in seen["user"]
+
+
+# ---------- 溯源：mention 必须指向真正含该实体的那一页 ----------
+
+
+def _ext_at(entities=(), relations=(), chunk=0):
+    return graph._Extraction(
+        entities=[
+            graph._Entity(name=n, type="org", chunk=chunk) for n in entities
+        ],
+        relations=[
+            graph._Relation(source=s, target=t, relation=r, chunk=chunk)
+            for s, t, r in relations
+        ],
+    )
+
+
+def test_mention_uses_real_seq_not_filtered_index():
+    """批内下标 ≠ 库里的 seq 时，mention 要写真实 seq。
+
+    建图前会过滤掉低信息切片（短于阈值的、纯数字的），过滤后的列表下标
+    整体左移。拿它当 seq 写 mention，实体详情里的「原文片段」就会指到同批
+    别的片上——实测 821 条提及只有 5% 指对，「充电储能」的证据是一张限售股
+    表格就是这么来的。
+    """
+    acc = _acc()
+    batch = [
+        Chunk("| 股东名称 | 期初限售股数 |", seq=28),
+        Chunk("公司充电储能类产品涵盖移动充电设备及配件。", seq=33),
+    ]
+    acc.add(28, batch, _ext_at(entities=["充电储能"]))
+    assert list(acc.mentions) == [("充电储能", 33)]
+
+
+def test_mention_accepts_absolute_segment_number_from_prompt():
+    """prompt 里给的是绝对段号，模型可能直接抄回来，不能当成下标用。"""
+    acc = _acc()
+    batch = [
+        Chunk("公司充电储能类产品涵盖移动充电设备。", seq=33),
+        Chunk("报告期内储能业务收入增长。", seq=34),
+    ]
+    # 模型报 34（绝对段号）= 批内第 1 片
+    acc.add(33, batch, _ext_at(entities=["储能业务"], chunk=34))
+    assert list(acc.mentions) == [("储能业务", 34)]
+
+
+def test_mention_falls_back_to_model_position_when_name_absent():
+    """名字在批内一个字都对不上（模型改写/别名）时，退回它报的位置。"""
+    acc = _acc()
+    batch = [Chunk("甲", seq=5), Chunk("乙", seq=6)]
+    acc.add(5, batch, _ext_at(entities=["安克创新"], chunk=1))
+    assert list(acc.mentions) == [("安克创新", 6)]
+
+
+def test_relation_chunk_points_at_source_chunk():
+    """关系的位置也按端点名定位，否则图谱里「关系出处」同样是错的。"""
+    acc = _acc()
+    batch = [
+        Chunk("公司充电储能类产品涵盖移动充电设备。", seq=33),
+        Chunk("安克创新科技股份有限公司持有深圳市玮顺企业管理有限公司 30% 股权。", seq=40),
+    ]
+    acc.add(
+        33,
+        batch,
+        _ext_at(
+            entities=["安克创新科技股份有限公司", "深圳市玮顺企业管理有限公司"],
+            relations=[
+                ("安克创新科技股份有限公司", "深圳市玮顺企业管理有限公司", "持股")
+            ],
+        ),
+    )
+    assert list(acc.relations.values())[0]["chunk_seq"] == 40
+
+
+def test_prompt_labels_chunks_with_absolute_seq():
+    """片段标号必须是绝对段号：批内下标 [0] 和开头的「第 33–34 段」互相矛盾。"""
+    chunks = [Chunk("甲段正文够长可以抽", seq=33), Chunk("乙段正文够长可以抽", seq=34)]
+    prompt = graph._build_prompt(chunks, 33, "某公司季报")
+    assert "[33] （text" in prompt
+    assert "[34] （text" in prompt
+    assert "[0]" not in prompt
+
+
+def test_short_selection_chunk_is_not_filtered_out():
+    """「……是否经过审计：☑（已勾选）否」这类短句不能被当碎片跳过。
+
+    kb_graph_min_chunk_chars 是给页码行、目录点线用的，勾选行天生就在
+    一句话以内（实测 27~36 字），但它是全文最确定的结论。三份季报里
+    有 5 片因此没进图谱，问「是否经过审计」图上没有任何依据。
+    """
+    assert graph._worth_extracting("（一）审计意见类型：☐（未勾选）适用 ☑（已勾选）不适用")
+    assert graph._worth_extracting("四、其他重要事项：☑（已勾选）适用 ☐（未勾选）不适用")
+    # 没勾选记号的短碎片照样跳过
+    assert not graph._worth_extracting("单位：元")
+    assert not graph._worth_extracting("2026 10 29")
