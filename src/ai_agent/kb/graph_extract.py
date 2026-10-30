@@ -1,14 +1,14 @@
-"""知识图谱抽取：切片 → LLM 抽取 → 实体/关系结构体，以及命名规范化。
+"""知识图谱抽取的批组织与调用：切片 → 分批 → LLM → 结构化结果。
 
-从 graph.py 拆出(S5)。包含三层：
-1. 输出结构与容错解析：模型在上下文吃紧时会悄悄换个 schema，直接丢弃等于
-   静默丢一批人，所以这里做了紧凑数组(e/r)与完整结构的双向兼容；
-2. 命名规范化：normalize_name / display_name / is_metric_like 等，把模型
-   吐出的各种写法收敛成统一的实体名；
-3. 批量抽取：批大小受**模型上下文**限制而不是算术(见 _extract_all)，
-   失败时把批拆半重试一次。
+从 graph.py 拆出(S5)，命名规范化与可用性判据在 graph_names.py，输出结构与
+容错解析在 graph_schema.py，本模块只管「怎么把切片喂给模型」：
 
-这是全链路最慢的一环(700 多个切片 ≈ 94 次调用)，成本控制的关键点都在
+1. 进批前过滤不值得调用的碎片（_worth_extracting）；
+2. 按章节组批（_batch_bounds）：一节不被批边界切开，关系才不容易抽漏；
+3. 单批容错（_extract_batch）：原样重问一次 → 拆半重试，坏一批不静默丢人；
+4. 并发编排（_extract_all）：批间独立，回调严格按批序，可边抽边合并。
+
+这是全链路最慢的一环（700 多个切片 ≈ 94 次调用），成本控制的关键点都在
 _extract_all 与 _extract_batch 的注释里。
 """
 
@@ -19,239 +19,17 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
-from pydantic import BaseModel, Field
-
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import Chunk
+from ai_agent.kb.graph_names import _doc_title
+from ai_agent.kb.graph_schema import _Extraction, _parse_extraction
 from ai_agent.llm.client import complete_chat, graph_client, graph_model
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.parse import load_llm_json
 
 logger = get_logger(__name__)
-
-
-# 与前端图例一一对应；模型返回值不在集合内的一律归为 other
-ENTITY_TYPES = (
-    "person",
-    "org",
-    "product",
-    "technology",
-    "metric",
-    "event",
-    "location",
-    "concept",
-    "other",
-)
-
-# 谓词误抽成实体。prompt 第一句已经要求「实体必须是名词或名词短语」，模型
-# 仍会在个别片段把「搭载/发布/任职」写成点（三份季报各 1–2 个）。这里只拦
-# **完全等同**于常见谓词的短名字：按后缀猜词性会误伤「持股比例」「研发投入」
-# 这类真名词，而名单里的词本身没有一个是可检索的实体
-_PREDICATE_NAMES = {
-    "搭载",
-    "发布",
-    "任职",
-    "支持",
-    "持股",
-    "研发",
-    "提供",
-    "实现",
-    "采用",
-    "推出",
-    "生产",
-    "销售",
-    "增长",
-    "下降",
-    "包括",
-    "进行",
-    "完成",
-    # 季报里常见的动宾被拆开：原文「对接阿联酋」「建设氢能平台」，
-    # 模型把动词单独建成 other 点，边还叫同一个词
-    "对接",
-    "建设",
-    "签约",
-    "布局",
-    "拓展",
-    "开展",
-    "推进",
-    "加快",
-    "加强",
-    "提升",
-    "优化",
-    "合作",
-    "产生",
-    "上升",
-    "互动",
-}
-
-# 出现在几乎每篇文档里、对区分内容毫无帮助的词，抽到也只会污染图谱
-_STOP_NAMES = {
-    "文档",
-    "本文",
-    "报告",
-    "研究",
-    "分析",
-    "数据",
-    "内容",
-    "章节",
-    "表格",
-    "图表",
-    "公司",
-    "行业",
-    "市场",
-    "产品",
-    "技术",
-}
-# 文件名 → 主体全称：「安克创新科技股份有限公司2026 年第三季度报告」→
-# 「安克创新科技股份有限公司」。招股书文件名常带城市前缀，取第一个公司
-# 后缀更稳：宁可退回 None（不做兜底），也不猜错主体
-_SUBJECT_RE = re.compile(
-    r"^(.{2,30}?(?:股份有限公司|有限责任公司|有限公司|集团公司|集团|银行|研究院|学院|医院|大学))"
-)
-
-# 首尾需要剥掉的包裹符号。刻意不含圆括号：括号常是名字的一部分
-# （「长鑫存储（合肥）」剥成「长鑫存储（合肥」就毁名了）
-_EDGE_CHARS = r"\s\"'“”‘’《》〈〉<>,.;:!?\-—–_/\\|\[\]【】{}·"
-# 归一化键用：全角括号/引号统一成半角，避免「（合肥）」与「(合肥)」匹配不上
-_FULLWIDTH = str.maketrans(
-    {"（": "(", "）": ")", "【": "[", "】": "]", "《": "<", "》": ">",
-     "“": '"', "”": '"', "‘": "'", "’": "'"}
-)
-_KEY_TRIM = re.compile(rf"^[{_EDGE_CHARS}]+|[{_EDGE_CHARS}]+$")
-# 展示名只去首尾引号/书名号，圆括号按原样保留（中文里全角括号更自然）
-_DISPLAY_TRIM = re.compile(
-    r"^[\s\"'“”‘’《》〈〉<>,.;:!?\-—–_/\\|\[\]【】{}·]+|"
-    r"[\s\"'“”‘’《》〈〉<>,.;:!?\-—–_/\\|\[\]【】{}·]+$"
-)
-_PUNCT_ONLY = re.compile(r"^[\W_]+$", re.UNICODE)
-# 数字、空白、常见标点、时间词和计量用字。占比 ≥0.6 且含数字 → 数值/日期型名字。
-# 「2004年」「62,200万千瓦」「1,017,077.00 元」会命中；
-# 「2017年重大资产重组」「HBM3E」数字占比不够，当正常实体。
-_METRIC_CHARS = re.compile(r"[\d\s,，.．·、+\-/%年月日度万亿千百十瓦时吨元]")
-
-class _Entity(BaseModel):
-    name: str
-    type: str = "other"
-    description: str = ""
-    chunk: int = 0
-
-
-class _Relation(BaseModel):
-    source: str
-    target: str
-    relation: str = "相关"
-    description: str = ""
-    chunk: int = 0
-
-
-class _Extraction(BaseModel):
-    entities: list[_Entity] = Field(default_factory=list)
-    relations: list[_Relation] = Field(default_factory=list)
-
-
-def _parse_extraction(data: object) -> _Extraction | None:
-    """把模型返回的 dict 解成 _Extraction，认不出结构返回 None。
-
-    紧凑格式（e / r 数组）是主线：同样的内容，省掉逐项重复的
-    name/type/description/chunk 键，输出 token 直接砍一半，而生成 token
-    就是这类任务的全部耗时。冗长格式仍然认——模型偶尔会自己换回去，
-    老版本输出、别家模型也未必听话，多认一种不亏。
-    """
-    if not isinstance(data, dict):
-        return None
-    if isinstance(data.get("e"), list) or isinstance(data.get("r"), list):
-        return _from_compact(data)
-    if isinstance(data.get("entities"), list) or isinstance(data.get("relations"), list):
-        try:
-            return _Extraction.model_validate(data)
-        except Exception:
-            return None
-    return None
-
-
-def _from_compact(data: dict) -> _Extraction:
-    out = _Extraction()
-    for item in data.get("e") or []:
-        row = _compact_row(item, 4, ("name", "type", "description", "chunk"))
-        if row is None:
-            continue
-        name = str(row[0] or "").strip()
-        if not name:
-            continue
-        out.entities.append(
-            _Entity(
-                name=name,
-                type=str(row[1] or "other"),
-                description=str(row[2] or ""),
-                chunk=_as_int(row[3]),
-            )
-        )
-    for item in data.get("r") or []:
-        row = _compact_row(
-            item, 5, ("source", "target", "relation", "description", "chunk")
-        )
-        if row is None:
-            continue
-        row = _fix_short_relation(item, row)
-        if row is None:
-            continue
-        source = str(row[0] or "").strip()
-        target = str(row[1] or "").strip()
-        if not source or not target:
-            continue
-        out.relations.append(
-            _Relation(
-                source=source,
-                target=target,
-                relation=str(row[2] or "相关"),
-                description=str(row[3] or ""),
-                chunk=_as_int(row[4]),
-            )
-        )
-    return out
-
-
-_NUMERIC_ROW = re.compile(r"^[-\d,.\s%]+$")
-
-
-def _fix_short_relation(item: object, row: list) -> list | None:
-    """只有 4 项的 r 行：分清是「漏了说明」还是「漏了客体」。
-
-    `_compact_row` 会把短行补到 5 项，补出来的位置全错。实测本地模型对
-    「持股」这类关系常写成 [主体, 关系, 空或数值, 序号]——客体被吞掉，
-    硬补就变成「公司 --相关--> 持有股份」这种假边，还会把谓语当成实体。
-    两种形态靠第 3 项区分：是空/纯数值 = 漏了客体（整条丢掉，不猜）；
-    是文字 = [主体, 客体, 关系, 序号]（照常用，说明补空）。
-    """
-    if not isinstance(item, (list, tuple)) or len(item) != 4:
-        return row
-    third = item[2]
-    text = "" if third is None else str(third).strip()
-    if not text or _NUMERIC_ROW.match(text):
-        return None
-    return [item[0], item[1], item[2], "", item[3]]
-
-
-def _compact_row(item: object, size: int, keys: tuple[str, ...]) -> list | None:
-    """把一行数组/对象规整成定长 list；模型混着给也接。"""
-    if isinstance(item, (list, tuple)):
-        row = list(item)
-    elif isinstance(item, dict):
-        row = [item.get(k) for k in keys]
-    else:
-        return None
-    if len(row) < 2:
-        return None
-    return (row + [None] * size)[:size]
-
-
-def _as_int(value: object) -> int:
-    try:
-        return max(0, int(value))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
 
 
 # 纯数字/标点切片（页码行、目录点线、"……"）：抽不出实体，白付一次调用
@@ -277,99 +55,6 @@ def _worth_extracting(text: str) -> bool:
     if len(body) < max(1, settings.kb_graph_min_chunk_chars):
         return False
     return not _DIGITISH.match(body)
-
-
-def normalize_name(name: str) -> str:
-    """用于去重与关系连边的归一化键。
-
-    全角括号/引号先转半角，再去首尾包裹符号、压缩空白、转小写，
-    这样「长鑫存储（合肥）」和「长鑫存储(合肥)」会落到同一个键上。
-    """
-    text = (name or "").translate(_FULLWIDTH).strip()
-    cleaned = _KEY_TRIM.sub("", text).strip()
-    return re.sub(r"\s+", "", cleaned).lower()
-
-
-def display_name(name: str) -> str:
-    """展示名：只去掉首尾的引号、书名号、空白，圆括号原样保留。"""
-    return _DISPLAY_TRIM.sub("", (name or "").strip()).strip()
-
-
-def _claimed_offset(claimed: int, start: int, count: int) -> int:
-    """把模型报的片段编号换算成批内下标。
-
-    它可能报批内下标，也可能报 prompt 里写的绝对段号（批起点不为 0 时
-    两者不等），两种都接住；都不像就夹到批内。
-    """
-    if count <= 0:
-        return 0
-    if start <= claimed <= start + count - 1:
-        return claimed - start
-    return min(max(claimed, 0), count - 1)
-
-
-def _locate_chunk(name: str, haystack: list[str], fallback: int) -> int:
-    """这个实体/关系出现在本批的第几片。
-
-    优先按名字做包含匹配：名字是我们手上的确定信息，比模型自报的位置
-    可靠得多——实测 821 条提及里只有 5% 指对了片子，其余几乎全落在批首
-    那一片。匹配不到（模型改写了名字、原文只有简称或别名）才退回它报的
-    位置，至少还落在同一批里。
-    """
-    norm = normalize_name(name)
-    if norm:
-        for i, text in enumerate(haystack):
-            if norm in text:
-                return i
-    return fallback
-
-
-def _clean_type(raw: str) -> str:
-    value = (raw or "").strip().lower()
-    return value if value in ENTITY_TYPES else "other"
-
-
-def is_metric_like(name: str) -> bool:
-    """整条名字基本由数字和计量单位构成（时间点、金额、比例、指标值）。"""
-    text = (name or "").strip()
-    if not text:
-        return False
-    hit = len(_METRIC_CHARS.findall(text))
-    return hit / len(text) >= 0.6 and any(ch.isdigit() for ch in text)
-
-
-# prompt 示例里的占位词。示例一旦用真实公司名（曾经写成「深圳明德控股」
-# 「顺丰控股」），模型在片段缺主语时会把它当模板抄进结果——安克文件的图里
-# 长出过一个挂着 14 条关系的「顺丰控股」，就是这么来的。示例改成占位词后
-# 再加这道过滤：万一模型仍然照抄，也进不了图谱
-# 只拦「某某」式占位词，不拦「某公司」——原文匿名化时真的会这么写，
-# 拿它当过滤条件会把正常实体一并丢掉
-_PLACEHOLDER_RE = re.compile(r"某某|××|X{2,}")
-
-
-def _usable_name(name: str, norm: str) -> bool:
-    if not norm or norm in _STOP_NAMES or norm in _PREDICATE_NAMES:
-        return False
-    if len(norm) > 40 or _PUNCT_ONLY.match(norm):
-        return False
-    if _PLACEHOLDER_RE.search(norm):
-        return False
-    # 纯数字、时间点（「2004年」）、带单位的数值（「62,200万千瓦」）
-    # 是取值或限定语，不是实体。指向它们的关系会因端点缺失被丢掉。
-    if is_metric_like(name) or is_metric_like(norm):
-        return False
-    return True
-
-
-def _doc_title(name: str | None) -> str:
-    """文件名去掉扩展名，用作「这段文字属于哪份文档」的标识。"""
-    return re.sub(r"\.[A-Za-z0-9]{1,5}$", "", (name or "").strip())
-
-
-def _subject_from_filename(name: str | None) -> str | None:
-    """从文件名推断文档主体全称，推断不出返回 None（不猜）。"""
-    m = _SUBJECT_RE.match(_doc_title(name))
-    return m.group(1) if m else None
 
 
 def _build_prompt(chunks: list[Chunk], start_seq: int, doc_name: str | None = None) -> str:

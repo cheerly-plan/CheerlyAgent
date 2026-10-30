@@ -12,7 +12,8 @@ from ai_agent.core.config import settings
 from ai_agent.kb import graph, graph_extract
 from ai_agent.kb.chunking import Chunk
 from ai_agent.kb.graph import build_file_graph
-from ai_agent.kb.graph_extract import normalize_name
+from ai_agent.kb.graph_names import normalize_name
+from ai_agent.kb.graph_schema import _Entity, _Extraction, _parse_extraction
 from ai_agent.kb.graph_store import KgStore
 from ai_agent.memory import parse
 from ai_agent.tools.registry import TOOLS_MAP
@@ -402,7 +403,7 @@ def _long_text(seed: str) -> str:
 
 def test_parse_extraction_accepts_compact_arrays():
     """紧凑格式（e/r 数组）是主线：省掉逐项重复的键，输出 token 少一半。"""
-    from ai_agent.kb.graph_extract import _parse_extraction
+    from ai_agent.kb.graph_schema import _parse_extraction
 
     parsed = _parse_extraction(
         {
@@ -417,7 +418,7 @@ def test_parse_extraction_accepts_compact_arrays():
 
 
 def test_parse_extraction_still_accepts_verbose_objects():
-    from ai_agent.kb.graph_extract import _parse_extraction
+    from ai_agent.kb.graph_schema import _parse_extraction
 
     parsed = _parse_extraction(
         {"entities": [{"name": "HBM", "type": "product"}], "relations": []}
@@ -426,7 +427,7 @@ def test_parse_extraction_still_accepts_verbose_objects():
 
 
 def test_parse_extraction_rejects_unknown_shape():
-    from ai_agent.kb.graph_extract import _parse_extraction
+    from ai_agent.kb.graph_schema import _parse_extraction
 
     assert _parse_extraction({"公司": ["发行人"]}) is None
     assert _parse_extraction("不是 dict") is None
@@ -464,7 +465,7 @@ def test_low_value_chunks_are_filtered_before_llm(monkeypatch):
 
     def fake_extract(batch, start_seq, _depth=0, **_kw):
         seen.extend(c.text for c in batch)
-        from ai_agent.kb.graph_extract import _Extraction
+        from ai_agent.kb.graph_schema import _Entity
 
         return _Extraction()
 
@@ -492,7 +493,7 @@ def test_graph_flushes_progressively(monkeypatch):
             "ai_agent.kb.graph", fromlist=["_Extraction"]
         )._Extraction(
             entities=[
-                __import__("ai_agent.kb.graph_extract", fromlist=["_Entity"])._Entity(
+                __import__("ai_agent.kb.graph_schema", fromlist=["_Entity"])._Entity(
                     name=f"实体{start_seq}", type="org", chunk=0
                 )
             ]
@@ -529,7 +530,7 @@ def test_relation_links_across_batches(monkeypatch):
     一条关系都没挂上）。
     """
     from ai_agent.kb.graph import _GraphAccumulator
-    from ai_agent.kb.graph_extract import _Extraction
+    from ai_agent.kb.graph_schema import _Entity
 
     monkeypatch.setattr(
         graph, "embed_texts_parallel", lambda texts, **k: [[0.01] for _ in texts]
@@ -544,11 +545,11 @@ def test_relation_links_across_batches(monkeypatch):
     acc = _GraphAccumulator(uuid.uuid4())
     # 第一批只抽到主体
     acc.add(0, [Chunk("第一段正文，发行人主营建筑装饰工程。")], _Extraction(
-        entities=[graph_extract._Entity(name="亚厦股份", type="org", chunk=0)],
+        entities=[_Entity(name="亚厦股份", type="org", chunk=0)],
     ))
     # 第二批的关系提到主体，但主体本身没被当实体抽出来（只在句子里被顺带提及）
     acc.add(8, [Chunk("第二段正文，亚厦股份向亚厦控股采购幕墙材料。")], _Extraction(
-        entities=[graph_extract._Entity(name="亚厦控股", type="org", chunk=0)],
+        entities=[_Entity(name="亚厦控股", type="org", chunk=0)],
         relations=[
             graph._Relation(source="亚厦股份", target="亚厦控股", relation="采购", chunk=0)
         ],
@@ -714,13 +715,13 @@ def test_compact_relation_missing_target_is_dropped():
             ["深圳明德控股", "通过子公司持股", 121436506, 1],
         ]
     }
-    parsed = graph_extract._parse_extraction(meta)
+    parsed = _parse_extraction(meta)
     assert parsed.relations == []
 
 
 def test_compact_relation_four_items_with_target_is_kept():
     """第 3 项是文字时是 [主体, 客体, 关系, 序号]，照常用。"""
-    parsed = graph_extract._parse_extraction({"r": [["甲公司", "乙公司", "控股", 0]]})
+    parsed = _parse_extraction({"r": [["甲公司", "乙公司", "控股", 0]]})
     assert len(parsed.relations) == 1
     rel = parsed.relations[0]
     assert (rel.source, rel.target, rel.relation, rel.description, rel.chunk) == (
@@ -733,7 +734,7 @@ def test_compact_relation_four_items_with_target_is_kept():
 
 
 def test_compact_relation_five_items_unchanged():
-    parsed = graph_extract._parse_extraction(
+    parsed = _parse_extraction(
         {"r": [["甲公司", "乙公司", "控股", "持股 51%", 2]]}
     )
     rel = parsed.relations[0]
@@ -756,7 +757,7 @@ def _acc():
 
 def _ext(entities=(), relations=()):
     return graph._Extraction(
-        entities=[graph_extract._Entity(name=n, type="org") for n in entities],
+        entities=[_Entity(name=n, type="org") for n in entities],
         relations=[
             graph._Relation(source=s, target=t, relation=r) for s, t, r in relations
         ],
@@ -973,7 +974,7 @@ def test_build_file_graph_passes_doc_name_to_prompt(monkeypatch):
 def _ext_at(entities=(), relations=(), chunk=0):
     return graph._Extraction(
         entities=[
-            graph_extract._Entity(name=n, type="org", chunk=chunk) for n in entities
+            _Entity(name=n, type="org", chunk=chunk) for n in entities
         ],
         relations=[
             graph._Relation(source=s, target=t, relation=r, chunk=chunk)

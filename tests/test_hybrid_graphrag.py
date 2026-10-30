@@ -602,7 +602,7 @@ def _chunk(seq):
 
 def _extract_with_marker(chunks, start_seq, _system=None, **_kw):
     """让结果携带 start_seq，验证批序与分批正确性。"""
-    from ai_agent.kb.graph_extract import _Entity, _Extraction
+    from ai_agent.kb.graph_schema import _Entity, _Extraction
 
     return _Extraction(
         entities=[_Entity(name=f"e{start_seq}", chunk=0)],

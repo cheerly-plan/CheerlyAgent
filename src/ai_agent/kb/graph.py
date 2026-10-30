@@ -1,7 +1,8 @@
 """知识图谱构建入口：把抽取结果累加成图并落库。
 
-从原 graph.py 拆出(S5)。实体/关系的抽取、输出解析与命名规范化在
-graph_extract.py；本模块只负责两件事：
+从原 graph.py 拆出(S5)。切片分批与 LLM 调用在 graph_extract.py，实体名的
+归一化/可用性判据在 graph_names.py，输出结构与容错解析在 graph_schema.py；
+本模块只负责两件事：
 - _GraphAccumulator：把各批次结果归并成实体表、关系表、提及表，
   跨批的同名实体合并、关系去重；
 - build_file_graph：编排批次划分、并发调用、分批落库与进度上报。
@@ -26,19 +27,20 @@ from ai_agent.kb.doc_profiles import (
     resolve_profile,
 )
 from ai_agent.kb.graph_extract import (
-    _Extraction,
-    _Relation,
     _batch_bounds,
+    _extract_all,
+    _worth_extracting,
+)
+from ai_agent.kb.graph_names import (
     _claimed_offset,
     _clean_type,
-    _extract_all,
     _locate_chunk,
     _subject_from_filename,
     _usable_name,
-    _worth_extracting,
     display_name,
     normalize_name,
 )
+from ai_agent.kb.graph_schema import _Extraction, _Relation
 from ai_agent.memory.embeddings import embed_texts_parallel
 from ai_agent.memory.store import store
 

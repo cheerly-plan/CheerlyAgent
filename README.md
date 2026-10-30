@@ -118,7 +118,10 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 | `office.py` | DOCX / XLSX 解析，含内嵌图片与内嵌表格 |
 | `chunking.py` | 按章节/页切块，表格整表成片 |
 | `retrieval.py` | 查询改写 → 标签预过滤 → 混合检索（关键词 + 向量 RRF）→ LLM 重排 |
-| `graph.py` / `graph_extract.py` | 图谱构建：`graph_extract` 负责 LLM 抽取与命名规范化，`graph` 负责跨批合并与落库编排 |
+| `graph.py` | 图谱构建入口：跨批合并（实体/关系/提及）与分批落库编排 |
+| `graph_extract.py` | 抽取调用：进批过滤 → 按章节组批 → 单批容错（重问/拆半）→ 并发编排 |
+| `graph_names.py` | 实体名归一化与可用性判据（停用词/谓词/数值/占位词），以及按名字在批内定位 |
+| `graph_schema.py` | 抽取输出结构（实体/关系）与模型输出形状的容错解析（紧凑数组 ↔ 完整结构） |
 | `graph_store.py` / `graph_write.py` / `kg_match.py` | 图谱存取：查询侧 mixin / 写入侧 mixin / 检索候选打分（均为 MemoryStore 的 mixin） |
 | `align.py` / `community.py` | 实体对齐、社区发现 |
 

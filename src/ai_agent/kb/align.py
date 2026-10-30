@@ -5,7 +5,7 @@
 - 抽取是逐批做的，模型每批独立起名——同一家公司在 A 批写「亚厦股份」、
   在 B 批写「浙江亚厦装饰股份有限公司」，两批之间没有任何共享上下文；
 - 招股书/年报本来就大量使用"全称 + 简称 + 曾用名"混写；
-- 归一化（graph_extract.normalize_name）只能消除括号/空格/大小写这类**字符层面**
+- 归一化（graph_names.normalize_name）只能消除括号/空格/大小写这类**字符层面**
   的差异，消不掉"简称 vs 全称"这种**语义层面**的差异。
 
 后果不只是"图不好看"：被拆成三份的实体各挂三分之一的关系，度数都低，
@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.graph_extract import is_metric_like, normalize_name
+from ai_agent.kb.graph_names import is_metric_like, normalize_name
 from ai_agent.llm.client import complete_chat, graph_client, graph_model
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.parse import load_llm_json
@@ -119,7 +119,7 @@ def _pair_key(a: str, b: str) -> tuple[str, str]:
 
 # 数值/日期型名字（「2005年」「62,200万千瓦」）入库时就会丢掉；
 # 旧图里若还留着，互相对齐时仍然不能合并——2005年 和 2005年8月 不是同一个点。
-# 判定见 graph_extract.is_metric_like。
+# 判定见 graph_names.is_metric_like。
 
 # 法人的通用尾巴：简称补上这些词就是全称，中间没有加任何限定词
 _GENERIC_TAIL = (
