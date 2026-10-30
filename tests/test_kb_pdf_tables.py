@@ -6,27 +6,29 @@ PDF 里没有「表格」对象，pymupdf 反推出来的单元格带着一堆�
 """
 
 from ai_agent.kb.parsing import _rows_to_markdown
-from ai_agent.kb.tables import (
+from ai_agent.kb.table_cells import (
     _align_header,
+    _clean_cell,
+    _clean_table,
+    _drop_empty_cols,
+    _fill_header_corner,
+    _merge_header,
+    _split_repeated_header,
+    _tidy_header,
+)
+from ai_agent.kb.tables import (
     _attach_captions,
     _caption_above,
     _carry_page_headers,
     _merge_continued_tables,
-    _clean_cell,
-    _clean_table,
-    _drop_empty_cols,
     _drop_table_lines,
-    _fill_header_corner,
     _find_page_tables,
     _header_has_cjk,
-    _merge_header,
     _glossary_rows,
     _pdf_glossary_tables,
-    _split_repeated_header,
     _table_content_bbox,
     _table_meta_above,
     _table_prefix,
-    _tidy_header,
     _word_lines,
 )
 from ai_agent.kb.sections import Line
