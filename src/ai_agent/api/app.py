@@ -18,6 +18,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import AgentError
 from ai_agent.core.logging import setup_logging
 from ai_agent.kb.pipeline import kb_pipeline
+from ai_agent.memory.db import run_migrations
 from ai_agent.memory.short_term import short_term_memory
 from ai_agent.memory.store import store
 from ai_agent.tasks.cleanup import maintenance_cleaner
@@ -26,7 +27,8 @@ from ai_agent.tasks.title import shutdown_title_jobs
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    store.ensure_schema()
+    # schema 迁移走 Alembic（版本化、可回滚）；ensure_schema 保留作回滚锚点
+    run_migrations()
     # 上次进程异常退出时卡在 parsing/embedding 的知识库文件标 failed
     kb_pipeline.recover_stuck()
     short_term_memory.start_cleanup()

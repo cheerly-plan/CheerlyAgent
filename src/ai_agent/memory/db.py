@@ -5,6 +5,7 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.llm.types import ChatMessage
@@ -12,6 +13,8 @@ from pgvector.psycopg import register_vector
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _current_user_id: ContextVar[str] = ContextVar("current_user_id", default="default")
 DEFAULT_SESSION_TITLE = "新会话"
@@ -614,3 +617,22 @@ class Database:
         if self._pool is not None:
             self._pool.close()
             self._pool = None
+
+
+def run_migrations() -> None:
+    """通过 Alembic 执行 schema 迁移到最新版本。
+
+    替代 ensure_schema()：schema 变更走版本化迁移，可追溯、可回滚。
+    连接串由 env.py 从 settings.database_url 读取（与运行时同源）。
+    现有库若已由 ensure_schema 建好，alembic 会自动建 alembic_version
+    表并跑 baseline（IF NOT EXISTS 幂等，不会破坏既有数据）；也可预先
+    手动 `alembic stamp head` 标记后跳过 baseline。
+
+    ensure_schema() 保留作回滚锚点：万一迁移出问题，把 lifespan 改回
+    调 store.ensure_schema() 即可恢复旧行为。
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    command.upgrade(cfg, "head")
