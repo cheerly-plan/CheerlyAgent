@@ -50,6 +50,22 @@ def test_complete_chat_sends_temperature_when_given(monkeypatch):
     assert sink[0]["temperature"] == 0.0
 
 
+def test_graph_client_uses_dedicated_endpoint(monkeypatch):
+    monkeypatch.setattr(settings, "kb_graph_base_url", "https://graph.example/v1")
+    monkeypatch.setattr(settings, "kb_graph_api_key", "graph-key")
+    monkeypatch.setattr(settings, "kb_graph_model", "online-extract")
+    other = client.graph_client()
+    assert other is not client._client
+    assert "graph.example" in str(other.base_url)
+    assert client.graph_model() == "online-extract"
+
+
+def test_graph_client_falls_back_to_main(monkeypatch):
+    monkeypatch.setattr(settings, "kb_graph_base_url", "")
+    monkeypatch.setattr(settings, "kb_graph_api_key", "")
+    assert client.graph_client() is client._client
+
+
 def test_complete_chat_omits_temperature_by_default(monkeypatch):
     """不传就不下发：主对话/摘要这类需要一点发散的任务仍走服务端默认。"""
     sink: list[dict] = []
@@ -77,6 +93,7 @@ def test_graph_extraction_forwards_temperature(monkeypatch):
     monkeypatch.setattr(settings, "kb_graph_temperature", 0.3)
     graph._extract_batch([Chunk("甲公司本期营业收入同比增长百分之十。")], 0, "system")
     assert seen["temperature"] == 0.3
+    assert "client" in seen
 
 
 def test_align_verdict_forwards_temperature(monkeypatch):

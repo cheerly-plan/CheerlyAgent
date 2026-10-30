@@ -35,7 +35,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.graph import is_metric_like, normalize_name
-from ai_agent.llm.client import complete_chat
+from ai_agent.llm.client import complete_chat, graph_client, graph_model
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.parse import load_llm_json
 from ai_agent.memory.store import store
@@ -418,7 +418,8 @@ def judge_pairs(pairs: list[dict]) -> list[bool]:
                         "请输出 JSON。",
                     ),
                 ],
-                model=settings.kb_graph_model or settings.model,
+                model=graph_model(),
+                client=graph_client(),
                 # 裁决的提示词只有几百字、输出不到 100 字，正常几秒就回；
                 # 等 180 秒只会在服务卡死时把整轮对齐拖垮
                 timeout=settings.kg_align_timeout_seconds,

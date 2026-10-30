@@ -125,9 +125,13 @@ class Settings(BaseSettings):
     # 默认开启；关闭后新上传的文件不再生成图谱，已有图谱保留、仍可检索。
     # 抽取失败只影响图谱（graph_status=failed），文件本身仍是 ready、照常检索。
     kb_graph_enabled: bool = True
-    # 空 = 跟随 MODEL（主模型）。不用 SMALL_MODEL：抽取是长 JSON 结构化任务，
-    # 小模型漏关系严重，而且部署方的 SMALL_MODEL 不一定真的开通了
+    # 空 = 跟随 MODEL。对话/嵌入走本地时，这里填线上模型名，并配
+    # kb_graph_base_url，实体抽取才不会打到 Ollama 上 404。
     kb_graph_model: str = ""
+    # 抽取专用网关。空 = 跟 BASE_URL。对话用 Ollama、抽实体用线上时填这个。
+    kb_graph_base_url: str = ""
+    # 抽取专用 key。空 = 跟 API_KEY。
+    kb_graph_api_key: str = ""
     # 抽取温度：结构化输出必须取 0。不传时走服务端默认（OpenAI 系 1.0），
     # 实测同一批切片两次跑出的实体数能差 ±20，JSON 偶发坏输出（裸词没引号、
     # 括号没闭合），实体对齐的裁决结论也会翻。实体对齐裁决共用这个值

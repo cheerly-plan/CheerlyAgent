@@ -20,7 +20,9 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
             dimensions=settings.embedding_dim,
         )
     except Exception as e:
-        raise LLMError(f"Embed text failed: {e}") from e
+        raise LLMError(
+            f"Embed text failed ({settings.embedding_model} @ {settings.base_url}): {e}"
+        ) from e
     items = sorted(resp.data, key=lambda x: x.index)
     vectors = [item.embedding for item in items]
     dim = settings.embedding_dim

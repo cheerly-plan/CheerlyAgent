@@ -16,6 +16,20 @@ _client = OpenAI(
     api_key=settings.api_key,
 )
 
+
+def graph_model() -> str:
+    """实体抽取/对齐用的模型：KB_GRAPH_MODEL，空则跟 MODEL。"""
+    return (settings.kb_graph_model or "").strip() or settings.model
+
+
+def graph_client() -> OpenAI:
+    """实体抽取/对齐用的网关。未配 KB_GRAPH_BASE_URL 时就是主客户端。"""
+    url = (settings.kb_graph_base_url or "").strip() or settings.base_url
+    key = (settings.kb_graph_api_key or "").strip() or settings.api_key
+    if url == settings.base_url and key == settings.api_key:
+        return _client
+    return OpenAI(base_url=url, api_key=key)
+
 # 流式对话专用客户端：显式超时 + 关闭自动重试。
 # 默认客户端 timeout=600s：LLM 挂死时一个并发槽 + SSE 线程被占最长 10 分钟，
 # 并发槽全满后聊天接口整体 429。流式重试还会从断点重复 yield 已发内容，
@@ -174,6 +188,7 @@ def complete_chat(
     max_tokens: int | None = None,
     extra_body: dict[str, Any] | None = None,
     temperature: float | None = None,
+    client: OpenAI | None = None,
 ) -> str:
     """非流式补全。温度默认不传 → 服务端默认（OpenAI 系为 1.0）。
 
@@ -186,7 +201,8 @@ def complete_chat(
         options["timeout"] = timeout
     if max_retries is not None:
         options["max_retries"] = max_retries
-    client = _client.with_options(**options) if options else _client
+    base = client or _client
+    client = base.with_options(**options) if options else base
     payload: dict[str, Any] = {
         "model": model or settings.model,
         "messages": _to_openai_messages(messages),

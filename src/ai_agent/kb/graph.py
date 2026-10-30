@@ -44,7 +44,7 @@ from ai_agent.kb.doc_profiles import (
     normalize_level,
     resolve_profile,
 )
-from ai_agent.llm.client import complete_chat
+from ai_agent.llm.client import complete_chat, graph_client, graph_model
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.embeddings import embed_texts_parallel
 from ai_agent.memory.parse import load_llm_json
@@ -472,9 +472,8 @@ def _extract_batch(
             ChatMessage(role="system", content=system_prompt),
             ChatMessage(role="user", content=_build_prompt(chunks, start_seq, doc_name)),
         ],
-        # 默认用主模型而不是 small_model：抽取是长 JSON 结构化任务，
-        # 小模型容易漏关系、把 JSON 写坏（部署方的 SMALL_MODEL 也可能并未开通）
-        model=settings.kb_graph_model or settings.model,
+        model=graph_model(),
+        client=graph_client(),
         timeout=settings.kb_graph_timeout_seconds,
         max_retries=1,
         # 一批 8 个切片、几十个实体时 2k token 会截断，截断的 JSON 直接解析失败
