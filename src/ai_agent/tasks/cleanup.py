@@ -57,6 +57,12 @@ class MaintenanceCleaner:
                     logger.info("清理过期 checkpoint %s 个", expired)
             except Exception:
                 logger.exception("清理过期 checkpoint 失败")
+            try:
+                forgotten = store.cleanup_expired_episodes()
+                if forgotten:
+                    logger.info("清理过期情景记忆 %s 条", forgotten)
+            except Exception:
+                logger.exception("清理过期情景记忆失败")
 
 
 maintenance_cleaner = MaintenanceCleaner()

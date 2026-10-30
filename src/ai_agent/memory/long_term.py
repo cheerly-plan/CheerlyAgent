@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -21,17 +22,24 @@ from ai_agent.memory.store import store
 logger = get_logger(__name__)
 
 EXTRACT_SYSTEM = f"""
-你是用户长期记忆抽取器。根据本轮对话，判断是否需要写入跨会话记忆。
+你是用户长期记忆抽取器。只记「关于用户本人、且下一场对话还用得上」的事实。
 只输出 JSON，不要解释。格式：
 {{"memories":[{{"kind":"episode","content":"..."}},{{"kind":"profile","op":"add"|"update"|"delete","facet":"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}}]}}
-没有可记内容时输出 {{"memories":[]}}
+没有可记内容时必须输出 {{"memories":[]}}。拿不准就空数组。
 
 kind:
-- profile: 长期成立的姓名、职业、身份、语言、偏好、约束
-- episode: 当前阶段的任务快照
+- profile: 用户用第一人称说清的姓名、职业、居住地、语言、长期偏好、约束
+- episode: 用户自己正在做、会跨会话延续的任务（项目、已确认的技术方案、明确要求记住的进展）
 
-episode 的 content 必须是可检索的完整近况（约 40～120 字），尽量包含：正在做什么、技术栈或约束、目标、本轮已确认的进展。不要写成「最近在学 X」这种标签。
+严禁写入：
+- 本轮问答摘要（「用户询问了…」「讨论了某公司…」「助手建议…」）
+- 查知识库/招股书/年报/公告得到的公司事实、股东、财务数字
+- 把用户问过的公司写成用户的职业或身份（问董事长 ≠ 用户是董事长）
+- 一次性查询：天气、股价、某家公司概况、某页表格
+- 助手建议、工具调用过程
+- 已有相同事实、只是换种说法、闲聊
 
+episode 的 content 约 40～120 字，写用户本人近况，不要写成对话纪要。
 profile 必须带 op 和 facet。name / occupation / locale / language 同一侧面只输出一条：
 - add: 新的侧面
 - update: 同一侧面事实变化或更完整，content 写成该侧面的完整当前描述
@@ -39,12 +47,11 @@ profile 必须带 op 和 facet。name / occupation / locale / language 同一侧
 preference / constraint 是累积型：每条独立事实单独输出一个 add，可多条并存，不要 update 合并已有条目；否定某一条时 delete 并在 content 写该条原文。
 {FACET_WRITE_RULES}
 若已有 other 把姓名/职业混在一起，要拆开写入正确 facet，并 delete other。
-已有相同事实、只是换种说法、闲聊、助手单方面建议：不要输出该条。
 
 规则：
-1. 只记用户明确说的，或双方已经确认的技术选择
+1. 只记用户明确陈述的自身事实，或双方已确认、属于用户本人的技术选择
 2. 身份和近况拆开
-3. 最多 4 条
+3. 最多 2 条
 """
 
 
@@ -138,9 +145,10 @@ def _write_extracted(user_id: str, item: ExtractedMemory) -> None:
 
 GATE_INSTRUCTIONS = (
     "这段对话是否包含值得写入跨会话长期记忆的信息？"
-    "值得记忆：用户明确陈述的姓名、职业、身份、语言、长期偏好或约束，"
-    "双方确认的技术选型，当前阶段任务的实质性进展。"
-    "不值得记忆：日常问答、闲聊、编写代码的过程本身、助手单方面的建议。"
+    "值得记忆：用户用第一人称明确陈述的姓名、职业、身份、居住地、语言、"
+    "长期偏好或约束；用户自己正在做且会跨会话延续的任务或技术方案。"
+    "不值得记忆：查文档或问某家公司、天气、新闻、一次性事实查询、"
+    "本轮问答摘要、助手建议、把检索结果当成用户身份。"
 )
 
 
@@ -235,6 +243,41 @@ def _line(msg: ChatMessage) -> str:
     return ""
 
 
+# 抽取模型常把本轮问答写成记忆。这些开头几乎一定是对话纪要，不是用户近况。
+_RECAP_HEAD = re.compile(
+    r"^(用户(询问|问了|问的是|讨论|要求|请求|查询|查了|了解到|分析|"
+    r"正在分析|正在查询|确认了|提到|被[告知]|希望获取)"
+    r"|助手(建议|回答|决定|通过|告知)"
+    r"|讨论了|近期讨论)"
+)
+_COMPANY_MARK = re.compile(r"股份有限公司|有限责任公司")
+_DOC_QA = ("kb_search", "kg_search", "招股", "年报披露", "助手")
+_TOPIC_PREF = ("关注公司", "财务数据", "股东信息", "重大工程")
+
+
+def _keep_extracted(item: ExtractedMemory) -> bool:
+    """小模型常把招股书问答写成记忆，这里挡一层确定性噪声。"""
+    text = item.content.strip()
+    if item.kind == "episode":
+        if _RECAP_HEAD.match(text):
+            return False
+        if any(mark in text for mark in _DOC_QA):
+            return False
+        return True
+    if item.op == "delete":
+        return True
+    if _RECAP_HEAD.match(text):
+        return False
+    if item.facet in {"preference", "other", "constraint"}:
+        if any(mark in text for mark in _TOPIC_PREF):
+            return False
+        if any(mark in text for mark in ("招股", "kb_search", "kg_search")):
+            return False
+    if item.facet == "occupation" and len(_COMPANY_MARK.findall(text)) >= 2:
+        return False
+    return True
+
+
 def _parse_memories(raw: str) -> list[ExtractedMemory]:
     data = load_llm_json(raw)
     if data is None:
@@ -247,9 +290,17 @@ def _parse_memories(raw: str) -> list[ExtractedMemory]:
     if not isinstance(rows, list):
         return []
     items: list[ExtractedMemory] = []
-    for row in rows[:4]:
+    for row in rows[:2]:
         item = _memory_from_row(row)
         if item is None:
+            continue
+        if not _keep_extracted(item):
+            logger.info(
+                "丢弃非跨会话记忆 kind=%s facet=%s text=%s",
+                item.kind,
+                item.facet,
+                item.content[:80],
+            )
             continue
         items.append(item)
     return _coalesce_memories(items)

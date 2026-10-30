@@ -148,6 +148,7 @@ class EpisodeStore(Database):
         k: int,
         threshold: float,
     ) -> list[MemoryItem]:
+        ttl = settings.memory_episode_ttl_seconds
         rows = conn.execute(
             """
             SELECT
@@ -158,11 +159,12 @@ class EpisodeStore(Database):
                 1 - (embedding <=> %s) AS score
             FROM agent_episode
             WHERE user_id = %s
+              AND (%s <= 0 OR created_at >= now() - (%s * interval '1 second'))
               AND 1 - (embedding <=> %s) >= %s
             ORDER BY embedding <=> %s
             LIMIT %s
             """,
-            (vector, user_id, vector, threshold, vector, k),
+            (vector, user_id, ttl, ttl, vector, threshold, vector, k),
         ).fetchall()
         return [
             MemoryItem(
@@ -174,6 +176,28 @@ class EpisodeStore(Database):
             )
             for row in rows
         ]
+
+    def cleanup_expired_episodes(
+        self, ttl_seconds: int | None = None, user_id: str | None = None
+    ) -> int:
+        """删掉超过 TTL 的情景记忆。0 / 负数 = 关闭，不删。"""
+        ttl = (
+            settings.memory_episode_ttl_seconds if ttl_seconds is None else ttl_seconds
+        )
+        if ttl <= 0:
+            return 0
+        where = "created_at < now() - (%s * interval '1 second')"
+        params: list[object] = [ttl]
+        if user_id:
+            where += " AND user_id = %s"
+            params.append(user_id)
+        with self._get_pool().connection() as conn:
+            result = conn.execute(
+                f"DELETE FROM agent_episode WHERE {where}",
+                params,
+            )
+            conn.commit()
+            return result.rowcount or 0
 
     def _upsert_episode(
         self, conn: Connection, item: MemoryItem, vector: Vector

@@ -240,15 +240,19 @@ class Settings(BaseSettings):
     memory_merge_threshold: float = 0.7
     memory_merge_timeout_seconds: float = 8
     memory_model: str = ""
+    # 情景记忆存活时间（秒）。episode 是「当前阶段近况」，不是画像：过期后
+    # 检索/合并都看不见，后台再物理删除。招股书、天气、游戏点子混在一个
+    # 向量空间里，旧近况不淘汰就会把新问题带到别的公司。0 = 永不过期。
+    memory_episode_ttl_seconds: int = 7 * 24 * 3600
 
     # Jev 门控（System One 决策模型）：长期记忆抽取的前置判断——Noul 概率
     # 低于 memory_gate_threshold 时跳过本轮抽取，省掉一次小模型调用。
     # 未配 key 时门控关闭，行为退化为每轮直接抽取；门控任何失败都
-    # fail-open 放行，不影响记忆链路
+    # fail-open 放行，不影响记忆链路。阈值偏高：错记一轮问答比漏记更糟。
     jev_api_key: str = ""
     jev_base_url: str = "https://api.typesafe.ai"
     jev_model: str = "jev-latest"
-    memory_gate_threshold: float = 0.4
+    memory_gate_threshold: float = 0.65
     jev_timeout_seconds: float = 4
 
     def resolve_llm(self, business_model: str = "") -> str:

@@ -128,6 +128,12 @@ class Database:
             )
             conn.execute(
                 """
+                CREATE INDEX IF NOT EXISTS agent_episode_created_at_idx
+                ON agent_episode (created_at)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS agent_user_profile (
                     id UUID PRIMARY KEY,
                     user_id TEXT NOT NULL,

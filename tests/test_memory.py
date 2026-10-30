@@ -157,6 +157,63 @@ def test_write_episode_keeps_unrelated(mem_store):
     assert len(_episode_texts(mem_store, "a")) == 2
 
 
+def _age_episodes(store: MemoryStore, user_id: str, hours: float = 2) -> None:
+    with store._get_pool().connection() as conn:
+        conn.execute(
+            """
+            UPDATE agent_episode
+            SET created_at = now() - (%s * interval '1 hour')
+            WHERE user_id = %s
+            """,
+            (hours, user_id),
+        )
+        conn.commit()
+
+
+def test_search_episode_hides_expired(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    mem_store.write_episode("上周用 pytest 修过登录", user_id="a")
+    assert mem_store.search_episode("pytest", user_id="a")
+    _age_episodes(mem_store, "a")
+    assert mem_store.search_episode("pytest", user_id="a") == []
+
+
+def test_write_episode_does_not_merge_expired(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    _age_episodes(mem_store, "a")
+    second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")
+    assert second.id != first.id
+    assert len(_episode_texts(mem_store, "a")) == 2
+
+
+def test_write_episode_refresh_keeps_active_topic_alive(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    _age_episodes(mem_store, "a", hours=0.5)
+    second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")
+    assert second.id == first.id
+    _age_episodes(mem_store, "a", hours=0.9)
+    assert mem_store.search_episode("nodejs bff", user_id="a")
+
+
+def test_cleanup_expired_episodes(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    mem_store.write_episode("old pytest notes", user_id="a")
+    _age_episodes(mem_store, "a")
+    mem_store.write_episode("fresh piano practice", user_id="a")
+    assert mem_store.cleanup_expired_episodes(user_id="a") == 1
+    assert _episode_texts(mem_store, "a") == ["fresh piano practice"]
+
+
+def test_cleanup_expired_episodes_skips_when_ttl_disabled(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 0)
+    mem_store.write_episode("old pytest notes", user_id="a")
+    _age_episodes(mem_store, "a", hours=100)
+    assert mem_store.cleanup_expired_episodes(user_id="a") == 0
+    assert _episode_texts(mem_store, "a") == ["old pytest notes"]
+
+
 def test_profile_is_listed_without_embedding(mem_store):
     mem_store.write_profile("喜欢 pytest", user_id="a")
     mem_store.write_episode("上周用 pytest 修过登录", user_id="a")
