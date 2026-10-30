@@ -190,9 +190,11 @@ class Settings(BaseSettings):
     # 也有 0.55~0.65 的基线距离，超过 0.72 基本只是话题沾边，宁缺毋滥；
     # 设 2.0 等于关闭这条门槛。
     kb_search_max_distance: float = 0.72
-    # 知识库文件目录：kb 开关打开时，把就绪文件的文件名/标签/类型注入上下文，
+    # 知识库文件目录：默认关闭。开启时把就绪文件的文件名/标签/类型注入上下文，
     # 由模型自己决定要不要调 kb_search、files 填哪些文件名。不注入 UUID。
-    kb_catalog_enabled: bool = True
+    # 注意：首轮强制检索(force_search)依赖「目录注入成功」，关闭本项会连带让
+    # force_search 失效（不再自动代调 kb_search），模型仅在主动决定时才查库。
+    kb_catalog_enabled: bool = False
     kb_catalog_max_files: int = 80
     # 本地模型经常「觉得自己知道」而不调 kb_search。知识库开着且有就绪文件时，
     # 首轮强制走检索：先要求调用 kb_search，模型仍不调则服务端代调一次。
