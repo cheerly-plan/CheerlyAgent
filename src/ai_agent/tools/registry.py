@@ -1,6 +1,7 @@
 from pydantic import ValidationError
 
 from ai_agent.core.logging import get_logger
+from ai_agent.tools.kb_list import kb_list_files_tool
 from ai_agent.tools.kb_search import kb_search_tool
 from ai_agent.tools.kg_search import kg_search_tool
 from ai_agent.tools.memory import memory_search_tool, memory_write_tool
@@ -14,6 +15,7 @@ TOOLS = [
     web_search_tool,
     memory_search_tool,
     memory_write_tool,
+    kb_list_files_tool,
     kb_search_tool,
     kg_search_tool,
 ]

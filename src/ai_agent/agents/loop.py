@@ -41,14 +41,7 @@ from ai_agent.agents.messages import (
     _previous_turns,
     _stash_partial_assistant,
 )
-from ai_agent.agents.rewrite import (
-    _drop_old_kb_catalog,
-    _forced_kb_search_call,
-    _has_retrieval_call,
-    _kb_catalog_message,
-    _rewrite_query,
-    _skip_forced_kb_search,
-)
+from ai_agent.agents.rewrite import _rewrite_query
 from ai_agent.agents.turn import (
     _capture_turn,
     _checkpoint_create,
@@ -186,12 +179,9 @@ def run_stream(
             replacing = True
             user_input = str(recent[-1].get("content") or "")
             messages = assemble(_system_prompt(user_id, use_kb=use_kb), summary, recent)
-            # 先清旧目录再记落库边界，避免下标被删目录带偏
-            _drop_old_kb_catalog(messages)
             persisted = len(messages)
         else:
             messages = assemble(_system_prompt(user_id, use_kb=use_kb), summary, recent)
-            _drop_old_kb_catalog(messages)
             persisted = len(messages)
             turn_anchor = {"role": "user", "content": user_input}
             messages.append(turn_anchor)
@@ -314,40 +304,15 @@ def run_loop(
     # 不会重复注入。改写词留给后面工具执行时替换「原话 query」。
     original_query = ""
     rewritten_query = ""
-    catalog_has_files = False
     if use_kb and messages and messages[-1].get("role") == "user":
         original_query = str(messages[-1].get("content") or "").strip()
         rewritten_query = _rewrite_query(
             original_query, _previous_turns(messages)
         )
-        if settings.kb_catalog_enabled:
-            catalog_msg = _kb_catalog_message(original_query, rewritten_query)
-            if catalog_msg is not None:
-                _drop_old_kb_catalog(messages)
-                messages.append(catalog_msg)
-                catalog_has_files = bool(
-                    (catalog_msg.get("meta") or {}).get("kb_ready_files")
-                )
-    # 知识库开着且有文件时，首轮倾向检索（本地模型常直接作答）。
-    # 天气/闲聊除外：强行检索会把「深圳带伞」检索成「深圳市顺丰投资」。
-    force_search = bool(
-        use_kb
-        and settings.kb_force_search
-        and catalog_has_files
-        and original_query
-        and not _skip_forced_kb_search(original_query)
-        and any(s["function"]["name"] == "kb_search" for s in tools)
-    )
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
-        held_text: list[str] = []
         tool_choice: str | dict = "auto"
-        if force_search:
-            tool_choice = {
-                "type": "function",
-                "function": {"name": "kb_search"},
-            }
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
             context = _fit_context(messages, settings.llm_context_char_budget)
@@ -356,10 +321,7 @@ def run_loop(
             ):
                 if kind == "text":
                     streamed += payload
-                    if force_search:
-                        held_text.append(payload)
-                    else:
-                        yield {"type": "text", "content": payload}
+                    yield {"type": "text", "content": payload}
                 else:
                     result = payload
         except LLMError as e:
@@ -384,19 +346,6 @@ def run_loop(
             _stash_partial_assistant(messages, streamed, run_id, step)
             yield {"type": "error", "message": "模型没有返回结果"}
             return
-        if force_search:
-            if _has_retrieval_call(result):
-                for chunk in held_text:
-                    yield {"type": "text", "content": chunk}
-            else:
-                query = rewritten_query or original_query
-                logger.info("kb 模型未检索，强制 kb_search query=%r", query[:80])
-                result = {
-                    "content": "",
-                    "tool_calls": [_forced_kb_search_call(query)],
-                }
-                streamed = ""
-            force_search = False
         assistant: ChatMessage = {"role": "assistant", "content": result["content"]}
         if result["tool_calls"]:
             assistant["tool_calls"] = result["tool_calls"]

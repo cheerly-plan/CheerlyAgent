@@ -132,7 +132,6 @@ def test_kb_layers_dropped_when_kb_disabled():
         kb.build_rerank_user("问题", "候选", 3),
         kb.build_align_user(2, "1. a / b"),
         kb.build_graph_head("招股书", "第 1–5 段", "（二）损益"),
-        kb.build_catalog_rewrite_line("检索词"),
         tasks.build_rewrite_user("- 上一句", "本季度呢"),
         tools.build_web_search_max_results_desc(5),
         tools.build_kb_no_hit_scoped(3),

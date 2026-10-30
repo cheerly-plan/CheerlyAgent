@@ -112,21 +112,6 @@ VISION_PROMPT = """这是一份文档里的图表或图片。请用中文输出�
 要求：只写图上确实存在的信息；看不清的数值写「无法精确读取」，不要推测、
 不要补全缺失数据。总长度不超过 300 字。"""
 
-# ——— 知识库文件目录注入（每轮以 system 消息注入） ———
-
-CATALOG_RULES = (
-    "本轮知识库已就绪的文件如下。回答其中的公司、产品、财报、数字、日期、"
-    "条款等事实之前，必须先调用 kb_search，不要凭训练知识直接作答。\n"
-    "天气、出行、闲聊等与这些文件无关的问题不要查知识库，改用其他工具或直接回答。\n"
-    "涉及「和谁有关、上下游、投资、产业链」时用 kg_search。\n"
-    "限定范围时 files 填文件名（可简称、可多份），不要填文件 id；"
-    "不填则按问题自动匹配或查全库。"
-)
-CATALOG_REWRITE_LINE = "建议检索词：{{QUERY}}"
-CATALOG_REWRITE_HINT = "调用 kb_search / kg_search 时优先用这条检索词；换角度再改 query。"
-CATALOG_EMPTY = "当前没有已处理完成的文件，不要调用 kb_search / kg_search。"
-CATALOG_HEADER = "文件目录："
-
 # ——— 文档配置块的渲染文案（render_config 用） ———
 #
 # 写成自然语言而不是 JSON：模型对「文档类型：IPO 招股意向书 / 重点实体范围：…」
@@ -169,7 +154,3 @@ def build_graph_head(title: str, span: str, section: str = "") -> str:
     if section:
         head += render(GRAPH_SECTION_SUFFIX, SECTION=section)
     return head + GRAPH_HEAD_TAIL
-
-
-def build_catalog_rewrite_line(query: str) -> str:
-    return render(CATALOG_REWRITE_LINE, QUERY=query)

@@ -97,7 +97,7 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 | 目录 | 职责 |
 |---|---|
 | `api/` | FastAPI 应用、中间件（request_id / 鉴权 / 限流）、路由、请求响应模型 |
-| `agents/` | Agent 主循环与周边：`loop.py` 主流程、`rewrite.py` 查询改写与目录注入、`messages.py` 上下文裁剪与断点缝合、`turn.py` 持久化与收尾、`prompts.py`、`budget.py` |
+| `agents/` | Agent 主循环与周边：`loop.py` 主流程、`rewrite.py` 查询改写、`messages.py` 上下文裁剪与断点缝合、`turn.py` 持久化与收尾、`prompts.py`、`budget.py` |
 | `llm/` | OpenAI 兼容客户端，流式输出与超时控制 |
 | `tools/` | 工具定义与注册：`kb_search`、`kg_search`、`memory_search`、`memory_write`、`web_search`、`weather` |
 | `kb/` | 知识库：解析、切片、嵌入、检索、图谱、引用溯源、视觉识别 |
@@ -139,7 +139,7 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 1. **鉴权**：`AUTH_TOKEN` 非空时校验 `X-API-Key` / Bearer；否则校验用户 token
 2. **装配上下文**：短期记忆（会话窗口）+ 长期记忆（向量召回 TopK）+ 情景记忆 + 画像
 3. **循环**（上限 `MAX_TURNS`）：LLM 决定直接回答还是调工具 → 执行工具 → 结果拼回上下文
-4. **检索**（走 `kb_search` 时）：标签预过滤 → 混合召回 → 重排 → 带引用片段（目录注入默认关闭，见 `kb_catalog_enabled`）
+4. **检索**（走 `kb_search` 时）：标签预过滤 → 混合召回 → 重排 → 带引用片段（文件清单由模型按需调 `kb_list_files` 获取，不再预先注入目录；也不再做首轮强制检索，由模型主动调用）
 5. **输出**：增量 token 流式下发，同时写入消息、更新摘要
 6. **记忆落库**：本轮抽取的事实写入长期记忆（相似条目合并），情景与画像增量更新
 7. **中断恢复**：连接断开后凭 `run_id` 调 `POST /v1/chat/resume` 续跑（`checkpoint_store`）

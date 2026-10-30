@@ -231,25 +231,9 @@ def test_run_stream_appends_new_messages_only():
     assert appended[1] == ["user", "assistant"]
 
 
-def test_run_stream_followup_persists_user_after_catalog_swap(monkeypatch):
-    """开启知识库目录后，追问会删掉上一轮注入的目录。落库必须以本轮
-    user 问句为起点，否则刷新会话会丢记录。"""
-    from ai_agent.core.config import settings
-
-    monkeypatch.setattr(settings, "kb_catalog_enabled", True)
+def test_run_stream_followup_persists_user(monkeypatch):
+    """追问落库必须以本轮 user 问句为起点，刷新会话不会丢记录。"""
     monkeypatch.setattr("ai_agent.agents.loop._rewrite_query", lambda q, prev: q)
-    monkeypatch.setattr(
-        "ai_agent.agents.loop.store.list_kb_files",
-        lambda **k: [
-            {
-                "file_id": "11111111-2222-3333-4444-555555555555",
-                "filename": "demo.pdf",
-                "status": "ready",
-                "tags": [],
-                "doc_type": "",
-            }
-        ],
-    )
     appended: list[list[dict]] = []
 
     def fake_append(user_id, chat_session_id, messages):
@@ -259,8 +243,8 @@ def test_run_stream_followup_persists_user_after_catalog_swap(monkeypatch):
         patch("ai_agent.agents.loop.store.append_chat", side_effect=fake_append),
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
     ):
-        run("上一问", user_id="u1", chat_session_id="s-catalog")
-        run("这一问", user_id="u1", chat_session_id="s-catalog")
+        run("上一问", user_id="u1", chat_session_id="s-followup")
+        run("这一问", user_id="u1", chat_session_id="s-followup")
 
     assert len(appended) == 2
     assert any(m.get("role") == "user" and m.get("content") == "上一问" for m in appended[0])

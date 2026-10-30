@@ -53,7 +53,7 @@ class KbStore:
                        chunk_count, text_count, table_count,
                        graph_status, graph_entity_count,
                        graph_batch_done, graph_batch_total, align_status, tags,
-                       doc_type, extract_level, created_at
+                       doc_type, extract_level, description, created_at
                 FROM agent_kb_file
                 WHERE (%(q)s::text = '' OR filename ILIKE %(q_like)s)
                   AND (%(tag)s::text = '' OR %(tag)s = ANY(tags))

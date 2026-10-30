@@ -594,6 +594,14 @@ class Database:
                 ADD COLUMN IF NOT EXISTS table_count INT NOT NULL DEFAULT 0
                 """
             )
+            # 文件内容描述：让模型通过 kb_list_files 工具判断要查哪几份文件，
+            # 替代原先「目录注入」把文件名塞进对话上下文的做法
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''
+                """
+            )
             conn.execute(
                 """
                 UPDATE agent_kb_file f
