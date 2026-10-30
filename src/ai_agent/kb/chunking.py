@@ -58,6 +58,10 @@ class Chunk:
     section: str | None = None  # 所属一级节，如「第十节 管理层讨论与分析」
     # 报表口径：consolidated / parent / None（非报表或无表题）
     scope: str | None = None
+    # 入库后的切片序号。从库里读出来建图时必须带上：建图会先过滤掉低信息
+    # 切片，过滤后的列表下标和库里的 seq 不再相等，用下标当 seq 写 mention
+    # 会让"原文证据"整体错位（实测只有 5% 指对了片子）
+    seq: int | None = None
 
 
 def chunk_segments(
@@ -91,7 +95,7 @@ def chunk_segments(
                     text=piece,
                     page=seg.page,
                     kind=seg.kind,
-                    page_end=seg.page,
+                    page_end=seg.page_end if seg.page_end is not None else seg.page,
                     section=seg.section,
                     scope=seg.scope,
                 )

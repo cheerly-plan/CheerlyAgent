@@ -264,6 +264,16 @@ def test_chunk_short_table_with_caption_stays_one_piece():
     assert chunks[0].text.startswith("母公司利润表")
 
 
+def test_chunk_merged_table_keeps_page_span():
+    text = "| 项目 | 本期 |\n|---|---|\n| 营业收入 | 1 |\n| 营业成本 | 2 |"
+    chunks = chunk_segments(
+        [Segment(text, 7, "table", page_end=8)], max_chars=500
+    )
+    assert len(chunks) == 1
+    assert chunks[0].page == 7
+    assert chunks[0].page_end == 8
+
+
 def test_format_hit_labels_content_kind():
     base = {"filename": "报告.pdf", "seq": 0, "text": "内容"}
     assert _format_hit({**base, "kind": "text", "page": 3}) == "[报告.pdf · 第3页]\n内容"

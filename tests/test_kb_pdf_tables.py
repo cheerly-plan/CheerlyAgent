@@ -10,6 +10,7 @@ from ai_agent.kb.parsing import (
     _attach_captions,
     _caption_above,
     _carry_page_headers,
+    _merge_continued_tables,
     _clean_cell,
     _clean_table,
     _drop_empty_cols,
@@ -314,6 +315,71 @@ def test_carry_page_headers_skips_table_starting_midpage():
     cont = (1, 500.0, (0.0, 500.0, 500.0, 700.0), [["b", "3", "4"]])
     out = _carry_page_headers([prev, cont], {1: 842.0})
     assert out[1][3] == [["b", "3", "4"]]
+
+
+def test_merge_continued_tables_joins_cross_page_body():
+    header = ["项目", "本报告期", "年初至报告期末"]
+    first = (
+        1,
+        577.0,
+        (0.0, 577.0, 500.0, 800.0),
+        [header, ["营业收入", "100", "309"]],
+        "合并利润表",
+    )
+    cont = (
+        2,
+        72.0,
+        (0.0, 72.0, 500.0, 300.0),
+        [header, ["基本每股收益", "0.01", "0.06"]],
+        "合并利润表",
+    )
+    out = _merge_continued_tables([first, cont], {1: 842.0, 2: 842.0})
+    assert len(out) == 1
+    page, _y, _bbox, rows, caption, page_end = out[0]
+    assert (page, page_end, caption) == (1, 2, "合并利润表")
+    assert rows == [
+        header,
+        ["营业收入", "100", "309"],
+        ["基本每股收益", "0.01", "0.06"],
+    ]
+
+
+def test_merge_continued_tables_joins_same_page_split():
+    header = ["项目", "期末"]
+    upper = (1, 120.0, (40.0, 120.0, 500.0, 400.0), [header, ["资产", "1"]], None)
+    lower = (1, 430.0, (40.0, 430.0, 500.0, 700.0), [["负债", "2"]], None)
+    out = _merge_continued_tables([upper, lower], {1: 842.0})
+    assert len(out) == 1
+    assert out[0][3] == [header, ["资产", "1"], ["负债", "2"]]
+    assert out[0][5] == 1
+
+
+def test_merge_continued_tables_skips_side_by_side():
+    header = ["项目", "期末"]
+    left = (1, 120.0, (40.0, 120.0, 250.0, 400.0), [header, ["资产", "1"]], None)
+    right = (1, 130.0, (280.0, 130.0, 500.0, 400.0), [header, ["负债", "2"]], None)
+    out = _merge_continued_tables([left, right], {1: 842.0})
+    assert len(out) == 2
+
+
+def test_merge_continued_tables_skips_different_captions():
+    header = ["项目", "期末"]
+    first = (
+        1,
+        577.0,
+        (0.0, 577.0, 500.0, 800.0),
+        [header, ["营业收入", "1"]],
+        "合并利润表",
+    )
+    cont = (
+        2,
+        72.0,
+        (0.0, 72.0, 500.0, 300.0),
+        [header, ["营业成本", "2"]],
+        "母公司利润表",
+    )
+    out = _merge_continued_tables([first, cont], {1: 842.0, 2: 842.0})
+    assert len(out) == 2
 
 
 def test_carry_page_headers_never_borrows_a_data_row():

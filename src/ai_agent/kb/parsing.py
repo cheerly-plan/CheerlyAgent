@@ -15,7 +15,7 @@ kind（正文 / 表格 / 图表）与页码，切片时按 kind 分别处理：
 
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from itertools import groupby
 from pathlib import Path
@@ -41,6 +41,8 @@ class Segment:
     section: str | None = None
     # 报表口径（consolidated / parent），只对表格段有意义，见 _table_scope
     scope: str | None = None
+    # 跨页/拆开后合并的表：起始页在 page，结束页在这里；单页表为 None
+    page_end: int | None = None
 
 _SUPPORTED = {".pdf", ".docx", ".xlsx", ".xlsm", ".md", ".markdown", ".txt", ".csv"}
 
@@ -117,11 +119,15 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
     except Exception:
         logger.warning("pymupdf 抽取文本行失败，退回整页抽取", exc_info=True)
         return [], []
+    # 勾选框符号归一化要在任何按文本的比较（页眉去重、标题识别、表格剔除）
+    # 之前做，否则同一符号在两处长得不一样，去重去不干净
+    lines = normalize_choice_lines(lines)
     # 表格识别只是「多产出几段」，失败不该拖累正文解析
     tables: list[tuple[int, float, tuple, list[list[str]]]] = []
+    page_heights: dict[int, float] = {}
     if settings.kb_pdf_table_extraction:
         try:
-            tables = _pdf_tables(doc)
+            tables, page_heights = _pdf_tables(doc)
         except Exception:
             logger.warning("PDF 表格识别失败，本次只出正文切片", exc_info=True)
         try:
@@ -163,7 +169,9 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
         items.append((seg.page or 0, y, seg))
     # 表题接在表格正文前面（一行）：切成多片时每片都会带上它，
     # 「母公司利润表 + 营业收入 + 数值」因此能落在同一个切片里
-    for page, y0, _bbox, rows, caption in _attach_captions(tables, kept):
+    for page, y0, _bbox, rows, caption, page_end in _merge_continued_tables(
+        _attach_captions(tables, kept), page_heights
+    ):
         markdown = _rows_to_markdown(rows)
         if not markdown:
             continue
@@ -178,6 +186,7 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
                     TABLE,
                     _label_at(markers, page, y0),
                     scope=_table_scope(caption),
+                    page_end=page_end if page_end != page else None,
                 ),
             )
         )
@@ -231,7 +240,13 @@ def _page_segments(
             group = list(page_lines)
             # 版面折行接回段落：PDF 每行一个 line，直接按行拼接会把
             # 「占总营」「收94.84%」切成两段，切片边界和引用都断在词中间
-            text = "\n".join(_merge_wrapped(group)).strip()
+            paras = _merge_wrapped(group)
+            # 勾选行正好落在小节开头时没有前置问题可接（「（二）非经常性
+            # 损益项目和金额」自己成了新小节的首行），把小节标题当问题补上，
+            # 否则模型读到的是一句没有提问对象的「☑（已勾选）适用」
+            if label and paras and _is_choice_line(paras[0]):
+                paras[0] = _attach_choice(label.split(" · ")[-1], paras[0])
+            text = "\n".join(paras).strip()
             if not text:
                 continue
             first = group[0]
@@ -250,6 +265,81 @@ def _segments_by_page(
         if text:
             out.append(Segment(text, page, TEXT, section))
     return out
+
+
+# 勾选框（单选/多选 selections）。PDF 里的方框和对勾常取自 Wingdings 一类的
+# 符号字体：抽出来是**私用区字符**（实测 \uf052 = 已勾、\uf0a3 = 空框），或者
+# 是写法各异的符号（√ ✓ ■ □ ☐ ○）。后果是选择题全部失读——模型看到的
+# 「\uf052适用□不适用」跟噪声没区别，□ 和私用区字符它分不出哪个代表已勾，
+# 于是「单选题选了哪项」从来没被正确读出来（季报里这类问法有十几处：
+# 是否需追溯调整、是否经过审计、是否存在xxx情况）。
+# 做法：先统一成标准 Unicode，再把状态写成中文——只换成 ☑/☐ 还不够，这两个
+# 符号在别的语料里也被混用作纯装饰，写死中文标签最稳。
+_CHECKED_CHARS = "\uf052✓✔√■●"
+_UNCHECKED_CHARS = "\uf0a3□☐○"
+_MARK_CHECKED = "☑"
+_MARK_UNCHECKED = "☐"
+_HAS_MARK = re.compile(f"[{re.escape(_CHECKED_CHARS + _UNCHECKED_CHARS)}]")
+
+# 勾选行：整行只有若干「符号+选项」，没有别的（「☑（已勾选）适用 ☐（未勾选）
+# 不适用」「□是 ☑否」）。判据必须要求「以勾选符开头」——只看长度的话，
+# 「公司是否需追溯调整…会计数据：☐（未勾选）是 ☑（已勾选）否」这种已经带上
+# 提问的行有 38 个字，会被误判成纯选项行，再被补一个小节标题当提问主体。
+_MAX_CHOICE_LEN = 60
+
+
+def normalize_choices(text: str) -> str:
+    """把勾选符号归一化并标注选中状态。
+
+    「\\uf052适用□不适用」→「☑（已勾选）适用 ☐（未勾选）不适用」。
+    没有勾选符号的文本原样返回（不加任何标记），绝大多数行的开销为零。
+    """
+    if not text or not _HAS_MARK.search(text):
+        return text
+    table = {ord(c): _MARK_CHECKED for c in _CHECKED_CHARS}
+    table.update({ord(c): _MARK_UNCHECKED for c in _UNCHECKED_CHARS})
+    out = text.translate(table)
+    out = out.replace(_MARK_CHECKED, f"{_MARK_CHECKED}（已勾选）")
+    out = out.replace(_MARK_UNCHECKED, f"{_MARK_UNCHECKED}（未勾选）")
+    # 原文本里两个选项紧挨着（「□适用√不适用」），留个空格免得读成一串
+    return re.sub(r"(?<=\S)([☑☐])", r" \1", out)
+    return out
+
+
+def normalize_choice_lines(
+    lines: list[sections.Line],
+) -> list[sections.Line]:
+    """逐行做勾选归一化。Line 是 frozen dataclass，只能整体 replace。"""
+    out: list[sections.Line] = []
+    for ln in lines:
+        new = normalize_choices(ln.text)
+        out.append(replace(ln, text=new) if new != ln.text else ln)
+    return out
+
+
+def _is_choice_line(text: str) -> bool:
+    """是否是「整行只有选项、没有提问对象」的勾选行。"""
+    if not text.startswith((_MARK_CHECKED, _MARK_UNCHECKED)):
+        return False
+    marks = sum(1 for ch in text if ch in (_MARK_CHECKED, _MARK_UNCHECKED))
+    return (
+        bool(marks) and marks <= 6 and len(text) <= _MAX_CHOICE_LEN and not _SENT_END.search(text)
+    )
+
+
+def _attach_choice(head: str, choice: str) -> str:
+    """把勾选结果接到它的问题后面。
+
+    季报里这些行一律紧跟提问（「持股5%以上股东…出借股份情况」+「☑不适用」），
+    合并后模型才知道「不适用」回答的是什么。几何坐标不能当判据：同一问法的
+    行有的排到了右边界被当前的折行规则接上，有的没排满就成了两行，结果同一
+    份文档里一半合并一半分离，反而更难开除统一处。
+    """
+    if not head:
+        return choice
+    if head.endswith(("：", ":", "（", "(", "、", "，")) or _SENT_END.search(head):
+        return head + choice
+    return f"{head}：{choice}"
 
 
 # 版面折行：上一行排到右边界、下一行从左边距起，且上一行没有句末标点，
@@ -287,8 +377,14 @@ def _merge_wrapped(lines: list[sections.Line]) -> list[str]:
         text = ln.text.strip()
         if not text:
             continue
-        if prev is not None and _wraps(prev, ln, left, right, slack):
-            paras[-1] += text
+        if prev is not None and paras:
+            if _is_choice_line(text):
+                # 勾选行一律并入上一行，不靠几何判据（见 _attach_choice）
+                paras[-1] = _attach_choice(paras[-1], text)
+            elif _wraps(prev, ln, left, right, slack):
+                paras[-1] += text
+            else:
+                paras.append(text)
         else:
             paras.append(text)
         prev = ln
@@ -371,6 +467,8 @@ _CAPTION_SENTENCE = re.compile(r"[。：；，、]$")
 _CAPTION_MAX_CHARS = 40
 # 上一页最后一张表的底边离页底不足这么远，说明它是被页面切断的、不是自己结束的
 _PAGE_BOTTOM_SLACK = 90.0
+# 同页被识别器拆成两截时，两框之间允许的最大空隙。再大更像上下两张独立表
+_SAME_PAGE_GAP = 72.0
 # 列名单元格的字数上限：超过基本都是解释性长句
 _HEADER_CELL_MAX = 20
 # 带这些标点的是句子，不是列名。刻意不含「、」「，」——「质押、标记或冻结
@@ -629,8 +727,10 @@ def _find_page_tables(page) -> list:
     return _replace_clipped_tables(found, alt)
 
 
-def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
-    """逐页找表格，返回 (页码, 顶部纵坐标, bbox, 清洗后的二维行)。"""
+def _pdf_tables(
+    doc,
+) -> tuple[list[tuple[int, float, tuple, list[list[str]]]], dict[int, float]]:
+    """逐页找表格，返回 (表列表, 页高)。表是 (页码, 顶部纵坐标, bbox, 清洗后的二维行)。"""
     out: list[tuple[int, float, tuple, list[list[str]]]] = []
     heights: dict[int, float] = {}
     for pno in range(doc.page_count):
@@ -651,7 +751,7 @@ def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
                 if len(rows) < 2 or max(len(r) for r in rows) < 2:
                     continue
                 out.append((pno + 1, float(bbox[1]), bbox, rows))
-    return _carry_page_headers(out, heights)
+    return _carry_page_headers(out, heights), heights
 
 
 def _carry_page_headers(
@@ -699,6 +799,78 @@ def _reached_page_bottom(bottom: float | None, height: float | None) -> bool:
     if not bottom or not height:
         return False
     return bottom >= height - _PAGE_BOTTOM_SLACK
+
+
+def _merge_continued_tables(
+    tables: list[tuple[int, float, tuple, list[list[str]], str | None]],
+    page_heights: dict[int, float],
+) -> list[tuple[int, float, tuple, list[list[str]], str | None, int]]:
+    """把续表拼回一张。
+
+    断开的常见原因有两种，判据分开写：
+    - 跨页：上一张排到页底、下一张从页顶接着（列名可能重印，也可能只剩数据）；
+    - 同页：识别器在缺线、注释处把一张表切成上下两框，框距很近、列数相同。
+
+    左右并排的表 y 接近但 x 几乎不重叠，不能并。表题不同也不能并。
+    """
+    if not tables:
+        return []
+    ordered = sorted(tables, key=lambda item: (item[0], item[1]))
+    out: list[tuple[int, float, tuple, list[list[str]], str | None, int]] = []
+    for page, y, bbox, rows, caption in ordered:
+        if out and _is_table_continuation(
+            out[-1], (page, y, bbox, rows, caption), page_heights
+        ):
+            p0, y0, b0, r0, c0, _end = out[-1]
+            out[-1] = (p0, y0, b0, _concat_table_rows(r0, rows), c0 or caption, page)
+        else:
+            out.append((page, y, bbox, rows, caption, page))
+    return out
+
+
+def _concat_table_rows(
+    head: list[list[str]], tail: list[list[str]]
+) -> list[list[str]]:
+    if tail and head and tail[0] == head[0]:
+        return [*head, *tail[1:]]
+    return [*head, *tail]
+
+
+def _is_table_continuation(
+    prev: tuple[int, float, tuple, list[list[str]], str | None, int],
+    cur: tuple[int, float, tuple, list[list[str]], str | None],
+    page_heights: dict[int, float],
+) -> bool:
+    p_page, _py, p_bbox, p_rows, p_cap, _pend = prev
+    c_page, c_y, c_bbox, c_rows, c_cap = cur
+    if not p_rows or not c_rows:
+        return False
+    if max(len(r) for r in p_rows) != max(len(r) for r in c_rows):
+        return False
+    if p_cap and c_cap and p_cap != c_cap:
+        return False
+    # 续表要么重印同一行表头，要么第一行已经是数据
+    if p_rows[0] != c_rows[0] and not _is_data_row(c_rows[0]):
+        return False
+    if not _boxes_vertically_stacked(p_bbox, c_bbox):
+        return False
+    if c_page == p_page + 1:
+        return c_y <= _HEAD_CARRY_Y and _reached_page_bottom(
+            float(p_bbox[3]), page_heights.get(p_page)
+        )
+    if c_page == p_page:
+        gap = c_y - float(p_bbox[3])
+        return -8.0 <= gap <= _SAME_PAGE_GAP
+    return False
+
+
+def _boxes_vertically_stacked(prev_bbox: tuple, cur_bbox: tuple) -> bool:
+    """左右并排的表 x 几乎不重叠，不能当成上下续表。"""
+    px0, _py0, px1, _py1 = (float(v) for v in prev_bbox)
+    cx0, _cy0, cx1, _cy1 = (float(v) for v in cur_bbox)
+    overlap = min(px1, cx1) - max(px0, cx0)
+    width = min(px1 - px0, cx1 - cx0)
+    return width > 0 and overlap >= width * 0.5
 
 
 def _tidy_header(row: list[str]) -> list[str]:
@@ -1016,7 +1188,8 @@ def _clean_cell(value: str | None) -> str:
     text = _SPACE_AFTER_PUNCT_2.sub(r"\1", text)
     text = _TRAIL_COMMA.sub("", text)
     text = _CJK_COMMA.sub("", text)
-    return _escape_cell(text)
+    # 表格里也有勾选（「是否 √是 □否」），和正文同一个符号字体问题
+    return _escape_cell(normalize_choices(text))
 
 
 def _regroup_tail(text: str) -> str:
@@ -1274,7 +1447,7 @@ def _pdf_text_fallback(path: Path) -> tuple[list[Segment], list[int]]:
             text = ""
         text_lens.append(len(text))
         if text:
-            segments.append(Segment(text, i + 1, TEXT))
+            segments.append(Segment(normalize_choices(text), i + 1, TEXT))
     return segments, text_lens
 
 

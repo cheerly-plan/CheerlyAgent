@@ -5,7 +5,16 @@
 """
 
 from ai_agent.kb.chunking import Chunk, chunk_segments, chunk_text
-from ai_agent.kb.parsing import FIGURE, TEXT, Segment, _label_at, _merge_wrapped
+from ai_agent.kb.parsing import (
+    FIGURE,
+    TEXT,
+    Segment,
+    _attach_choice,
+    _is_choice_line,
+    _label_at,
+    _merge_wrapped,
+    normalize_choices,
+)
 from ai_agent.kb.sections import (
     Line,
     Section,
@@ -306,3 +315,66 @@ def test_toc_residue_chunk_is_dropped():
     ]
     chunks = chunk_segments(segments, max_chars=500, overlap=0)
     assert [c.text for c in chunks] == ["目录结构说明：本文档分为八节。"]
+
+
+# ---------- 勾选框（单选/多选） ----------
+
+
+def box(text: str, x0: float = 56.0, x1: float = 300.0, page: int = 1, y: float = 0.3) -> Line:
+    return Line(text, page, BODY, y, (x0, 100.0, x1, 112.0))
+
+
+def test_private_use_checkbox_is_normalized():
+    """私用区字符必须落到标准 Unicode 且带状态标注。
+
+    季报里的方框来自符号字体，抽出来是 \uf052 / \uf0a3：模型分不出它和
+    □ 谁代表已勾，选择题因此全部失读。
+    """
+    assert normalize_choices("\uf052适用□不适用") == (
+        "☑（已勾选）适用 ☐（未勾选）不适用"
+    )
+    assert normalize_choices("\uf0a3适用\uf052不适用") == (
+        "☐（未勾选）适用 ☑（已勾选）不适用"
+    )
+    # 写法各异的标准字符（√/✓/■）同样归一
+    assert "（已勾选）" in normalize_choices("√适用□不适用")
+    assert normalize_choices("2026 年第三季度") == "2026 年第三季度"
+
+
+def test_choice_line_attaches_to_its_question():
+    """勾选行一律并到上一个段落：单拎出来就是没有提问对象的「☑适用」。"""
+    lines = [
+        box("持股5%以上股东参与转融通业务出借股份情况", x1=412.0),
+        box("☑（已勾选）适用 ☐（未勾选）不适用", x1=120.0),
+    ]
+    paras = _merge_wrapped(lines)
+    assert paras == [
+        "持股5%以上股东参与转融通业务出借股份情况：☑（已勾选）适用 ☐（未勾选）不适用"
+    ]
+
+
+def test_choice_line_ignores_geometry():
+    """上一行没排到右边界（坐标接不上）也要合并：否则同文档时合时不合。"""
+    lines = [
+        box("第三季度报告是否经过审计", x1=200.0),
+        box("☐（未勾选）是 ☑（已勾选）否", x1=100.0),
+    ]
+    assert _merge_wrapped(lines) == [
+        "第三季度报告是否经过审计：☐（未勾选）是 ☑（已勾选）否"
+    ]
+
+
+def test_question_already_merged_is_not_re_attached():
+    """已经带上提问的长行不能再被当成纯选项行补一节标题当主语。"""
+    merged = "公司是否需追溯调整或重述以前年度会计数据：☐（未勾选）是 ☑（已勾选）否"
+    assert not _is_choice_line(merged)
+    assert _is_choice_line("☑（已勾选）适用 ☐（未勾选）不适用")
+    assert not _is_choice_line("公司今天我们国家对该项：☐（未勾选）是 ☑（已勾选）否")
+
+
+def test_attach_choice_keeps_punctuation():
+    """上一行已有冒号/句号就不再叠：避免「…情况：：☑适用」。"""
+    assert _attach_choice("出借股份情况：", "☑（已勾选）适用") == (
+        "出借股份情况：☑（已勾选）适用"
+    )
+    assert _attach_choice("", "☑（已勾选）适用") == "☑（已勾选）适用"
