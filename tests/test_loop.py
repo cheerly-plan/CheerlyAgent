@@ -1,3 +1,4 @@
+from ai_agent.agents import turn as turn_module
 import contextvars
 from unittest.mock import patch
 
@@ -28,8 +29,8 @@ def _isolate_loop_memory():
         patch("ai_agent.agents.loop.store.update_checkpoint"),
         patch("ai_agent.agents.loop.store.mark_checkpoint"),
         patch("ai_agent.agents.loop.store.delete_checkpoint"),
-        patch("ai_agent.agents.loop.summarize_session", side_effect=_fake_summarize),
-        patch("ai_agent.agents.loop.capture_long_term"),
+        patch("ai_agent.agents.turn.summarize_session", side_effect=_fake_summarize),
+        patch("ai_agent.agents.turn.capture_long_term"),
     ):
         yield
     short_term_memory.clear()
@@ -374,7 +375,7 @@ def test_run_stream_skips_db_load_when_short_term_exists():
 def test_run_stream_captures_long_term_after_reply():
     with (
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
-        patch("ai_agent.agents.loop.capture_long_term") as capture,
+        patch("ai_agent.agents.turn.capture_long_term") as capture,
     ):
         run("我想用 Koa 做 BFF", user_id="u1", chat_session_id="s-extract")
     capture.assert_called_once()
@@ -518,7 +519,7 @@ def test_regenerate_failure_keeps_old_answer(failing):
             "ai_agent.agents.loop.store.append_chat",
             side_effect=lambda *_a, **_k: appended.append(_a[2]),
         ),
-        patch("ai_agent.agents.loop.capture_long_term") as capture,
+        patch("ai_agent.agents.turn.capture_long_term") as capture,
         patch("ai_agent.agents.loop.stream_chat", side_effect=failing),
     ):
         events = list(
@@ -1501,7 +1502,7 @@ def test_interrupted_turn_skips_long_term_capture():
 
     with (
         patch("ai_agent.agents.loop.stream_chat", side_effect=failing),
-        patch("ai_agent.agents.loop.capture_long_term") as capture,
+        patch("ai_agent.agents.turn.capture_long_term") as capture,
     ):
         events = list(
             run_stream("问题", user_id="u1", chat_session_id="s-interrupt")

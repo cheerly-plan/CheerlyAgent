@@ -20,7 +20,7 @@ def _ready_file(**overrides) -> dict:
 
 
 def _enable_catalog(monkeypatch, files=None):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     monkeypatch.setattr(settings, "kb_catalog_enabled", True)
     monkeypatch.setattr(
@@ -31,9 +31,9 @@ def _enable_catalog(monkeypatch, files=None):
 
 
 def test_format_catalog_is_markdown_list_without_ids():
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
-    text = loop_mod._format_kb_catalog(
+    text = rewrite_mod._format_kb_catalog(
         [_ready_file()],
         original="股东持股情况",
         rewritten="中国能建 股东持股情况",
@@ -48,15 +48,15 @@ def test_format_catalog_is_markdown_list_without_ids():
 
 
 def test_format_catalog_empty_ready_files():
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
-    text = loop_mod._format_kb_catalog([], original="hi", rewritten="hi")
+    text = rewrite_mod._format_kb_catalog([], original="hi", rewritten="hi")
     assert "没有已处理完成的文件" in text
     assert "不要调用 kb_search" in text
 
 
 def test_run_loop_injects_catalog_before_first_llm_call(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_catalog(monkeypatch)
     seen: dict = {}
@@ -79,7 +79,7 @@ def test_run_loop_injects_catalog_before_first_llm_call(monkeypatch):
 
 
 def test_run_loop_skips_catalog_when_kb_disabled(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_catalog(monkeypatch)
     calls: list = []
@@ -101,7 +101,7 @@ def test_run_loop_skips_catalog_when_kb_disabled(monkeypatch):
 
 def test_run_loop_does_not_reinject_after_tool_round(monkeypatch):
     """断点续跑/工具轮：最后一条不是 user，目录已在快照里，不重复。"""
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_catalog(monkeypatch)
     seen: dict = {}
@@ -144,7 +144,7 @@ def test_run_loop_does_not_reinject_after_tool_round(monkeypatch):
 
 
 def test_run_loop_replaces_stale_catalog_on_new_turn(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_catalog(monkeypatch)
     monkeypatch.setattr(loop_mod, "_rewrite_query", lambda q, prev: q)
@@ -173,7 +173,7 @@ def test_run_loop_replaces_stale_catalog_on_new_turn(monkeypatch):
 
 def test_run_loop_forces_kb_search_when_model_skips(monkeypatch):
     """知识库开着时模型直接作答：丢掉这段正文，服务端代调 kb_search。"""
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_catalog(monkeypatch)
     monkeypatch.setattr(settings, "kb_force_search", True)
@@ -216,12 +216,12 @@ def test_run_loop_forces_kb_search_when_model_skips(monkeypatch):
 
 def test_run_loop_does_not_force_kb_search_for_weather(monkeypatch):
     """出行/天气不能强行检索：关键词会把「深圳」撞上「深圳市顺丰投资」。"""
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_catalog(monkeypatch)
     monkeypatch.setattr(settings, "kb_force_search", True)
     monkeypatch.setattr(loop_mod, "_rewrite_query", lambda q, prev: q)
-    monkeypatch.setattr(loop_mod, "query_looks_on_topic", lambda q, **k: False)
+    monkeypatch.setattr(rewrite_mod, "query_looks_on_topic", lambda q, **k: False)
     executed: list = []
 
     def fake_stream(messages, tools, **kwargs):
@@ -244,19 +244,19 @@ def test_run_loop_does_not_force_kb_search_for_weather(monkeypatch):
 
 
 def test_skip_forced_search_weather_and_chitchat(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
-    monkeypatch.setattr(loop_mod, "query_looks_on_topic", lambda q, **k: False)
+    monkeypatch.setattr(rewrite_mod, "query_looks_on_topic", lambda q, **k: False)
     assert loop_mod._skip_forced_kb_search("深圳宝安明天出门需要带伞吗") is True
     assert loop_mod._skip_forced_kb_search("你好") is True
     assert loop_mod._skip_forced_kb_search("安心充什么时候开售") is False
 
-    monkeypatch.setattr(loop_mod, "query_looks_on_topic", lambda q, **k: True)
+    monkeypatch.setattr(rewrite_mod, "query_looks_on_topic", lambda q, **k: True)
     assert loop_mod._skip_forced_kb_search("顺丰在深圳遇上台风对物流有何影响") is False
 
 
 def test_catalog_survives_list_failure(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_catalog(monkeypatch)
 
@@ -284,7 +284,7 @@ def test_catalog_survives_list_failure(monkeypatch):
 
 
 def test_run_loop_passes_rewrite_hint_into_tool(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
     from ai_agent.kb.scope import effective_kb_query
 
     _enable_catalog(monkeypatch)
@@ -335,11 +335,11 @@ def _enable_rewrite(monkeypatch):
 
 def test_rewrite_skips_without_previous_turn(monkeypatch):
     """第一问无上文：不调模型、原样返回。"""
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     calls: list = []
-    monkeypatch.setattr(loop_mod, "complete_chat", lambda *a, **kw: calls.append(1) or "")
+    monkeypatch.setattr(rewrite_mod, "complete_chat", lambda *a, **kw: calls.append(1) or "")
 
     assert loop_mod._rewrite_query("股东持股情况", []) == "股东持股情况"
     assert loop_mod._rewrite_query("中国能源建设股份有限公司", ["   "]) == "中国能源建设股份有限公司"
@@ -347,22 +347,22 @@ def test_rewrite_skips_without_previous_turn(monkeypatch):
 
 
 def test_rewrite_skips_when_disabled(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     monkeypatch.setattr(settings, "kb_rewrite_enabled", False)
     calls: list = []
-    monkeypatch.setattr(loop_mod, "complete_chat", lambda *a, **kw: calls.append(1) or "")
+    monkeypatch.setattr(rewrite_mod, "complete_chat", lambda *a, **kw: calls.append(1) or "")
 
     assert loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司"]) == "股东持股情况"
     assert calls == []
 
 
 def test_rewrite_fills_in_elided_subject(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     monkeypatch.setattr(
-        loop_mod,
+        rewrite_mod,
         "complete_chat",
         lambda messages, **kw: "中国能源建设股份有限公司 股东持股情况",
     )
@@ -372,7 +372,7 @@ def test_rewrite_fills_in_elided_subject(monkeypatch):
 
 
 def test_rewrite_sees_subject_from_previous_turn(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     seen: dict = {}
@@ -381,7 +381,7 @@ def test_rewrite_sees_subject_from_previous_turn(monkeypatch):
         seen["user_content"] = messages[-1]["content"]
         return "安克创新 2026年第三季度 毛利率变动原因"
 
-    monkeypatch.setattr(loop_mod, "complete_chat", fake)
+    monkeypatch.setattr(rewrite_mod, "complete_chat", fake)
 
     prev_turn = [
         "归母净利润、扣非净利润分别是多少",
@@ -394,11 +394,11 @@ def test_rewrite_sees_subject_from_previous_turn(monkeypatch):
 
 
 def test_rewrite_allows_expansion(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     monkeypatch.setattr(
-        loop_mod,
+        rewrite_mod,
         "complete_chat",
         lambda messages, **kw: "中国能源建设股份有限公司 前十大股东 持股比例 股本结构",
     )
@@ -408,20 +408,20 @@ def test_rewrite_allows_expansion(monkeypatch):
 
 
 def test_rewrite_returns_original_when_identical(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
-    monkeypatch.setattr(loop_mod, "complete_chat", lambda *a, **kw: '"股东持股情况"')
+    monkeypatch.setattr(rewrite_mod, "complete_chat", lambda *a, **kw: '"股东持股情况"')
 
     assert loop_mod._rewrite_query("股东持股情况", ["上一轮问别的"]) == "股东持股情况"
 
 
 def test_rewrite_rejects_answer_like_output(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     monkeypatch.setattr(
-        loop_mod,
+        rewrite_mod,
         "complete_chat",
         lambda *a, **kw: (
             "根据知识库中的信息，开售时间未明确提及，建议访问安克创新官方网站。"
@@ -432,7 +432,7 @@ def test_rewrite_rejects_answer_like_output(monkeypatch):
 
 
 def test_rewrite_falls_back_on_llm_error(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
     from ai_agent.core.exceptions import LLMError
 
     _enable_rewrite(monkeypatch)
@@ -440,26 +440,26 @@ def test_rewrite_falls_back_on_llm_error(monkeypatch):
     def boom(*a, **kw):
         raise LLMError("timeout")
 
-    monkeypatch.setattr(loop_mod, "complete_chat", boom)
+    monkeypatch.setattr(rewrite_mod, "complete_chat", boom)
 
     assert loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司"]) == "股东持股情况"
 
 
 def test_rewrite_falls_back_on_unexpected_error(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
 
     def boom(*a, **kw):
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr(loop_mod, "complete_chat", boom)
+    monkeypatch.setattr(rewrite_mod, "complete_chat", boom)
 
     assert loop_mod._rewrite_query("股东持股情况", ["中国能源建设股份有限公司"]) == "股东持股情况"
 
 
 def test_run_loop_passes_previous_turn_to_rewrite(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     seen: dict = {}
@@ -489,7 +489,7 @@ def test_run_loop_passes_previous_turn_to_rewrite(monkeypatch):
 
 
 def test_run_loop_rewrite_skips_tool_call_intermediate(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     seen: dict = {}
@@ -525,7 +525,7 @@ def test_run_loop_rewrite_skips_tool_call_intermediate(monkeypatch):
 
 
 def test_run_loop_rewrite_collects_two_turns(monkeypatch):
-    from ai_agent.agents import loop as loop_mod
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 
     _enable_rewrite(monkeypatch)
     monkeypatch.setattr(settings, "kb_rewrite_history_turns", 2)

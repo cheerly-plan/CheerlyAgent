@@ -14,7 +14,7 @@
 import json
 from types import SimpleNamespace
 
-from ai_agent.agents import loop
+from ai_agent.agents import loop, rewrite
 from ai_agent.core.config import settings
 from ai_agent.kb import align, graph, graph_extract, retrieval
 from ai_agent.kb.chunking import Chunk
@@ -134,7 +134,7 @@ def test_rewrite_forwards_temperature(monkeypatch):
         seen.update(kwargs)
         return "中国能建 2026 年三季度营业收入"
 
-    monkeypatch.setattr(loop, "complete_chat", fake)
+    monkeypatch.setattr(rewrite, "complete_chat", fake)
     monkeypatch.setattr(settings, "kb_rewrite_temperature", 0.2)
     loop._rewrite_query("它的营业收入呢", ["中国能建三季报怎么样"])
     assert seen["temperature"] == 0.2

@@ -1,6 +1,3 @@
-import hashlib
-import json
-import re
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -11,36 +8,57 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import collect_citations, merge_sources
-from ai_agent.kb.doc_profiles import resolve_profile
-from ai_agent.kb.retrieval import query_looks_on_topic
 from ai_agent.kb.scope import (
     reset_kb_query_hint,
     reset_kb_scope,
     set_kb_query_hint,
     set_kb_scope,
 )
-from ai_agent.llm.client import complete_chat, stream_chat
-from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult, ToolCall
+from ai_agent.llm.client import stream_chat
+from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
 from ai_agent.memory.facets import format_profile_block
-from ai_agent.memory.long_term import capture_long_term
 from ai_agent.memory.short_term import (
     assemble,
-    compress,
-    flatten,
-    iter_turns,
     short_term_memory,
-    take_summary,
-    take_system,
 )
 from ai_agent.memory.store import store, user_scope
-from ai_agent.memory.summarize import summarize_session
-from ai_agent.tools.registry import TOOLS_MAP, execute_tool, tool_label, tool_schemas
+from ai_agent.tools.registry import execute_tool, tool_label, tool_schemas
+
+from ai_agent.agents.messages import (
+    _canonical_args,
+    _dedupe_seam,
+    _drop_empty_assistant,
+    _fit_context,
+    _keep_prefill_tail,
+    _output_digest,
+    _pop_incomplete_assistant,
+    _previous_turns,
+    _stash_partial_assistant,
+)
+from ai_agent.agents.rewrite import (
+    _drop_old_kb_catalog,
+    _forced_kb_search_call,
+    _has_retrieval_call,
+    _kb_catalog_message,
+    _rewrite_query,
+    _skip_forced_kb_search,
+)
+from ai_agent.agents.turn import (
+    _capture_turn,
+    _checkpoint_create,
+    _checkpoint_finish,
+    _checkpoint_update,
+    _compress_and_cache,
+    _persist_turn,
+    _replace_last_turn,
+    _session_state,
+)
 
 logger = get_logger(__name__)
 
-# 接缝去重的最小重叠长度：模型续写偶尔会复述最后一句，通常整句 ≥3 字；
-# 更短的重叠大概率是巧合（如"的"+"的话"），不能误删
-_SEAM_MIN_OVERLAP = 3
+
+
+logger = get_logger(__name__)
 
 # 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
 # 不再阻塞 SSE 尾部延迟；进程退出时由 lifespan 调 shutdown_turn_finalizer 等待。
@@ -80,497 +98,6 @@ def _system_prompt(user_id: str) -> str:
     if not block:
         return SYSTEM_PROMPT
     return f"{SYSTEM_PROMPT}\n\n{block}"
-
-
-def _canonical_args(name: str, arguments: dict) -> str:
-    """把工具参数按 args_model 补全默认值再序列化，用于「重复调用」判定。
-
-    模型会省略可省略的字段：`{"query": X}` 与 `{"query": X, "top_k": 5}`
-    语义完全一样，但 JSON 字面不同。只比字面的话，这种「换个写法再查一次」
-    会绕过去重——实测同一句问题下，模型靠 depth/top_k 的写法差异把同一个
-    kg_search 调了 9 次，把决策轮次烧光。
-    """
-    tool = TOOLS_MAP.get(name)
-    canon: object = arguments
-    if tool is not None:
-        try:
-            canon = tool.args_model.model_validate(arguments).model_dump(mode="json")
-        except Exception:
-            # 参数本身不合法（执行时也会报错），退回字面比较即可
-            canon = arguments
-    return json.dumps(canon, sort_keys=True, ensure_ascii=False, default=str)
-
-
-def _output_digest(output: str) -> str:
-    return hashlib.sha1(output.strip().encode("utf-8")).hexdigest()
-
-
-def _previous_turns(messages: list[ChatMessage]) -> list[str]:
-    """当前 user 之前最近 N 轮的「问句 + 最终回答」，时间正序。
-
-    从当前 user 的前一条开始往前扫。不能从 messages[-1] 开始——那会把
-    「当前这句」当成上一轮塞进去，改写上下文里就没有主体（公司名）。
-    倒序扫描先遇到「回答」再遇到「问句」，所以每轮暂存成 (user, answer)，
-    最后按时间正序摊平。
-    """
-    turns: list[tuple[str, str]] = []
-    pending_answer = ""
-    last = len(messages) - 1
-    end = last - 1 if last >= 0 and messages[last].get("role") == "user" else last
-    for i in range(end, -1, -1):
-        msg = messages[i]
-        role = msg.get("role")
-        if role == "assistant":
-            if msg.get("tool_calls"):
-                continue
-            text = str(msg.get("content") or "").strip()
-            if text and not pending_answer:
-                pending_answer = text
-        elif role == "user":
-            text = str(msg.get("content") or "").strip()
-            if text:
-                turns.append((text, pending_answer))
-                pending_answer = ""
-        if len(turns) >= settings.kb_rewrite_history_turns:
-            break
-    prev_turn: list[str] = []
-    for user_q, answer in reversed(turns):
-        prev_turn.append(user_q)
-        if answer:
-            prev_turn.append(answer)
-    return prev_turn
-
-
-def _is_kb_catalog(msg: ChatMessage) -> bool:
-    meta = msg.get("meta")
-    return isinstance(meta, dict) and bool(meta.get("kb_catalog"))
-
-
-def _drop_old_kb_catalog(messages: list[ChatMessage]) -> None:
-    """只保留本轮目录，避免多轮对话里叠多份文件列表。
-
-    目录夹在历史中间。若已经记下落库起点 `persisted` 再删，后面的下标会
-    前移，`messages[persisted:]` 会把本轮 user 问句切掉，刷新后会话记录丢失。
-    """
-    kept = [msg for msg in messages if not _is_kb_catalog(msg)]
-    if len(kept) != len(messages):
-        messages[:] = kept
-
-
-def _format_kb_catalog(
-    files: list[dict], *, original: str, rewritten: str
-) -> str:
-    lines = [
-        "本轮知识库已就绪的文件如下。回答其中的公司、产品、财报、数字、日期、"
-        "条款等事实之前，必须先调用 kb_search，不要凭训练知识直接作答。",
-        "天气、出行、闲聊等与这些文件无关的问题不要查知识库，改用其他工具或直接回答。",
-        "涉及「和谁有关、上下游、投资、产业链」时用 kg_search。",
-        "限定范围时 files 填文件名（可简称、可多份），不要填文件 id；"
-        "不填则按问题自动匹配或查全库。",
-        "",
-    ]
-    if rewritten and original and rewritten.strip() != original.strip():
-        lines.append(f"建议检索词：{rewritten.strip()}")
-        lines.append("调用 kb_search / kg_search 时优先用这条检索词；换角度再改 query。")
-        lines.append("")
-    if not files:
-        lines.append("当前没有已处理完成的文件，不要调用 kb_search / kg_search。")
-        return "\n".join(lines)
-    lines.append("文件目录：")
-    for item in files:
-        name = str(item.get("filename") or "").strip() or "(未命名)"
-        tags = [
-            str(tag).strip()
-            for tag in (item.get("tags") or [])
-            if str(tag).strip()
-        ]
-        extras: list[str] = []
-        if tags:
-            extras.append("标签：" + "、".join(tags))
-        doc_type = str(item.get("doc_type") or "").strip()
-        if doc_type:
-            label = resolve_profile(doc_type).label
-            if label:
-                extras.append("类型：" + label)
-        suffix = ("｜" + "｜".join(extras)) if extras else ""
-        lines.append(f"- {name}{suffix}")
-    return "\n".join(lines)
-
-
-def _kb_catalog_message(original: str, rewritten: str) -> ChatMessage | None:
-    """use_kb 时把就绪文件目录注入成一条 system，供模型决定查哪些文件。"""
-    try:
-        rows = store.list_kb_files()
-    except Exception:
-        logger.exception("kb 文件目录读取失败，本轮不注入目录")
-        return None
-    ready = [row for row in rows if row.get("status") == "ready"]
-    ready = ready[: settings.kb_catalog_max_files]
-    return {
-        "role": "system",
-        "content": _format_kb_catalog(ready, original=original, rewritten=rewritten),
-        "meta": {"kb_catalog": True, "kb_ready_files": len(ready)},
-    }
-
-
-_REWRITE_SYSTEM = (
-    "你是检索词改写助手。用户在多轮对话里追问时，常常省略上一轮已经说过的"
-    "主体或语境（例如上一轮在问「中国能源建设股份有限公司」，这一轮只说"
-    "「股东持股情况」）。你的任务：结合上一轮对话，把当前这句改写/扩写成"
-    "一条自包含、能独立完成检索的查询词。\n"
-    "要求：\n"
-    "1. 必须结合上一轮对话的语境，把省略的主体、指代补全，必要时可适当扩写"
-    "补充同义词、相关要点，让检索更充分；\n"
-    "2. 补全的主体应来自上一轮对话里出现过的事实，不要凭空编造与上下文"
-    "无关的专有名词；\n"
-    "3. 如果当前这句本身已经自包含、无需改写，原样输出当前这句即可；\n"
-    "4. 只输出改写后的那一条查询词，不要回答问题，不要解释，不要换行。"
-)
-
-
-def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
-    """对话改写（补全 + 扩写）：结合上一轮完整对话，把当前追问改写成自包含的检索词。
-
-    既允许补全省略的主体（指代消解），也允许扩写同义词/相关要点——检索词
-    不追求还原用户原话，而是追求「能独立完成检索」。唯一保留的约束是：补全
-    的主体要来自上一轮对话，不凭空编造无关专有名词。
-
-    关键点：喂上一轮「用户问 + 助手答」两段，而不是只喂上一句用户原话——
-    主体（公司名）常出现在最早那一问里，中间隔了若干句不带主体的追问；而
-    助手上一轮的回答里通常已经带出主体全称，据此能更稳地把「本季度」这类
-    指代补回正确的公司。
-
-    失败/超时/无上文一律退回原话：检索增强是非阻塞、可降级的，不能让一次
-    小模型调用挡住回答。改写后结果等于原句也退回，省掉无效变更。
-    """
-    if not settings.kb_rewrite_enabled:
-        return user_input
-    prev = [s.strip() for s in prev_turn if s and s.strip()]
-    if not prev:
-        return user_input
-    model = settings.kb_rewrite_model or settings.resolve_llm()
-    context = "\n".join(f"- {s}" for s in prev)
-    try:
-        out = complete_chat(
-            [
-                {"role": "system", "content": _REWRITE_SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"上一轮对话：\n{context}\n\n"
-                        f"当前问题：{user_input}\n"
-                        "请结合上一轮对话，输出改写后的检索词。"
-                    ),
-                },
-            ],
-            model=model,
-            timeout=settings.kb_rewrite_timeout_seconds,
-            max_retries=0,
-            max_tokens=256,
-            temperature=settings.kb_rewrite_temperature,
-            extra_body={
-                "enable_thinking": False,
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-        )
-    except LLMError as e:
-        logger.warning("kb 对话改写失败，退回原话：%s", e)
-        return user_input
-    except Exception:
-        logger.exception("kb 对话改写异常，退回原话")
-        return user_input
-    rewritten = (out or "").strip().strip("\"'“”‘’")
-    if not _usable_rewrite(user_input, rewritten):
-        if rewritten and rewritten != user_input.strip():
-            logger.info("kb 对话改写结果不可用，退回原话：%r", rewritten[:80])
-        return user_input
-    logger.info("kb 对话改写：%r -> %r", user_input, rewritten)
-    return rewritten
-
-
-_REWRITE_ANSWER_MARKERS = (
-    "根据知识库",
-    "根据文档",
-    "未明确提及",
-    "建议访问",
-    "请稍后",
-    "作为AI",
-    "我无法",
-)
-
-
-_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
-
-
-def _has_retrieval_call(result: ChatResult | None) -> bool:
-    if not result:
-        return False
-    return any(call.get("name") in _RETRIEVAL_TOOLS for call in result.get("tool_calls") or [])
-
-
-def _forced_kb_search_call(query: str) -> ToolCall:
-    return {
-        "id": f"kb_force_{uuid.uuid4().hex[:12]}",
-        "name": "kb_search",
-        "arguments": {"query": query},
-    }
-
-
-_KB_OFFTOPIC = re.compile(
-    r"天气|气象|气温|下雨|落雨|下雪|台风|暴雨|"
-    r"带伞|雨伞|口罩|穿什么|穿啥|多少度|几度|冷不冷|热不热"
-)
-_KB_CHITCHAT = re.compile(
-    r"^(你好|嗨|哈喽|在吗|早上好|中午好|晚上好|谢谢|再见)[！!。.?？\s]*$"
-)
-
-
-def _skip_forced_kb_search(query: str) -> bool:
-    """天气/闲聊不要强行检索：关键词会误撞「深圳市顺丰投资」这类公司名。"""
-    text = (query or "").strip()
-    if not text:
-        return True
-    if _KB_CHITCHAT.match(text):
-        return True
-    if _KB_OFFTOPIC.search(text) and not query_looks_on_topic(text):
-        return True
-    return False
-
-
-def _usable_rewrite(original: str, rewritten: str) -> bool:
-    """改写模型偶发直接作答，那种段落不能当检索词。"""
-    text = (rewritten or "").strip()
-    orig = (original or "").strip()
-    if not text or text == orig:
-        return False
-    if len(text) > 160:
-        return False
-    if text.count("。") >= 2:
-        return False
-    return not any(marker in text for marker in _REWRITE_ANSWER_MARKERS)
-
-
-def _checkpoint_create(
-    run_id: str,
-    user_id: str,
-    chat_session_id: str,
-    messages: list[ChatMessage],
-    use_web_search: bool = True,
-    use_kb: bool = True,
-) -> bool:
-    """返回 False 表示 DB 级互斥冲突（同会话已有进行中的 run）；
-    其他异常不阻断对话，只失去断点续跑能力。"""
-    try:
-        # 旧测试桩可能返回 None（无返回值），视为写入成功
-        return (
-            store.create_checkpoint(
-                run_id, user_id, chat_session_id, messages, use_web_search, use_kb
-            )
-            is not False
-        )
-    except Exception:
-        logger.exception("checkpoint C0 写入失败 run_id=%s", run_id)
-        return True
-
-
-def _checkpoint_update(run_id: str, messages: list[ChatMessage], step: int) -> None:
-    try:
-        store.update_checkpoint(run_id, messages, step)
-    except Exception:
-        logger.exception("checkpoint 更新失败 run_id=%s step=%s", run_id, step)
-
-
-def _checkpoint_finish(run_id: str, status: str) -> None:
-    """completed 删行（完整 turn 已落 agent_chat_history，快照无用）；
-    failed/interrupted 保留，供 P2 恢复。想留审计改成 mark + 定期清理。"""
-    try:
-        if status == "completed":
-            store.delete_checkpoint(run_id)
-        else:
-            store.mark_checkpoint(run_id, status)
-    except Exception:
-        logger.exception("checkpoint 终态写入失败 run_id=%s status=%s", run_id, status)
-
-
-def _drop_empty_assistant(messages: list[ChatMessage]) -> None:
-    """空正文收尾前摘掉刚写入的空气泡，避免上下文里连续两条 assistant。"""
-    last = messages[-1] if messages else None
-    if (
-        last
-        and last.get("role") == "assistant"
-        and not last.get("tool_calls")
-        and not str(last.get("content") or "").strip()
-    ):
-        messages.pop()
-
-
-def _stash_partial_assistant(
-    messages: list[ChatMessage],
-    streamed: str,
-    run_id: str | None,
-    step: int,
-) -> None:
-    """流被掐断或失败时把已吐出的半截 assistant 写进 messages，
-    刷新后历史还能看到，checkpoint 也能据此恢复。"""
-    if not streamed:
-        return
-    last = messages[-1] if messages else None
-    if last and last.get("role") == "assistant" and not last.get("tool_calls"):
-        # prefill 续写场景：last 就是送给模型的半截种子，本次流的增量
-        # 必须接在旧内容后面，整体覆盖会丢掉断点前的文本
-        last["content"] = str(last.get("content") or "") + streamed
-    else:
-        messages.append({"role": "assistant", "content": streamed})
-    if run_id:
-        _checkpoint_update(run_id, messages, step + 1)
-
-
-def _dedupe_seam(head: str, tail: str) -> str:
-    """去掉 tail 开头与 head 结尾的重叠段（模型续写时偶尔复述最后一句）。
-    只处理较长的重叠，短前缀巧合不误删。"""
-    limit = min(len(head), len(tail))
-    for k in range(limit, _SEAM_MIN_OVERLAP - 1, -1):
-        if head.endswith(tail[:k]):
-            return tail[k:]
-    return tail
-
-
-def _pop_incomplete_assistant(messages: list[ChatMessage]) -> list[ChatMessage]:
-    """（resume_prefill=False 的回退路径）半截 assistant 只给前端展示，
-    不送给模型：从上一轮完整消息接着跑，整段替换半截回答。"""
-    if (
-        messages
-        and messages[-1].get("role") == "assistant"
-        and not messages[-1].get("tool_calls")
-    ):
-        return messages[:-1]
-    return messages
-
-
-def _messages_chars(messages: list[ChatMessage]) -> int:
-    """上下文长度的粗估（字符数）。中文场景 1 字符 ≈ 0.6~1 token，
-    用字符数做预算天然偏保守，不会把上下文撑爆。"""
-    total = 0
-    for msg in messages:
-        total += len(str(msg.get("content") or ""))
-        for call in msg.get("tool_calls") or []:
-            total += len(str(call.get("arguments") or ""))
-    return total
-
-
-def _fit_context(messages: list[ChatMessage], max_chars: int) -> list[ChatMessage]:
-    """超预算时对送模型的副本做裁剪：从最旧的完整轮次开始整轮丢弃。
-
-    只动副本，原列表原封不动——落库、checkpoint 快照都依赖原始 messages，
-    裁剪绝不能影响它们。整轮（user + 其后的 assistant/tool）一起丢，
-    保证 assistant(tool_calls) 和它的 tool 结果永远成对，不会因裁剪
-    出现孤儿 tool 消息（会被 API 400）。摘要对保留，丢了早期轮次的
-    信息至少还有摘要兜底；最后一个 turn 是当前进行中的回合，永不丢。
-    """
-    if max_chars <= 0 or _messages_chars(messages) <= max_chars:
-        return messages
-    system, rest = take_system(messages)
-    summary, rest = take_summary(rest)
-    turns = iter_turns(rest)
-    while len(turns) > 1:
-        turns.pop(0)
-        if _messages_chars([*system, *flatten(turns)]) <= max_chars:
-            break
-    sys_text = str(system[0].get("content") or "") if system else ""
-    fitted = assemble(sys_text, summary, flatten(turns))
-    if not sys_text and fitted and fitted[0].get("role") == "system":
-        fitted = fitted[1:]
-    logger.info(
-        "上下文超预算已裁剪 chars=%d budget=%d kept_turns=%d",
-        _messages_chars(messages),
-        max_chars,
-        len(turns),
-    )
-    return fitted
-
-
-def _keep_prefill_tail(messages: list[ChatMessage]) -> bool:
-    """（prefill 续写路径）半截 assistant 留在上下文尾部作为续写种子，
-    并打上消息级 partial 标记：服务端据此从断点接着生成，不整段重开。
-    返回是否存在可续写的半截。"""
-    last = messages[-1] if messages else None
-    if (
-        last is not None
-        and last.get("role") == "assistant"
-        and not last.get("tool_calls")
-        and last.get("content")
-    ):
-        last["content"] = str(last["content"]).rstrip()
-        last["partial"] = True
-        return True
-    return False
-
-
-def _session_state(user_id: str, chat_session_id: str) -> tuple[list[ChatMessage], str]:
-    cached = short_term_memory.load(chat_session_id, user_id=user_id)
-    if cached is not None:
-        return cached.messages, cached.summary
-    try:
-        summary = store.get_session_summary(user_id, chat_session_id)
-        recent = store.load_recent_turns(
-            user_id, chat_session_id, turns=short_term_memory.max_turns
-        )
-    except Exception:
-        logger.exception("会话记忆加载失败")
-        return [], ""
-    return recent, summary
-
-
-def _persist_turn(user_id: str, chat_session_id: str, turn: list[ChatMessage]) -> None:
-    try:
-        store.append_chat(user_id, chat_session_id, turn)
-    except Exception:
-        logger.exception("会话记忆保存失败")
-
-
-def _replace_last_turn(
-    user_id: str, chat_session_id: str, turn: list[ChatMessage]
-) -> None:
-    """重新生成成功后的落库：同一事务内删旧回答、写新回答。"""
-    try:
-        store.replace_chat_after_last_user(user_id, chat_session_id, turn)
-    except Exception:
-        logger.exception("重新生成结果保存失败")
-
-
-def _capture_turn(
-    user_id: str, turn: list[ChatMessage], summary: str, user_input: str
-) -> None:
-    try:
-        capture_long_term(user_id, turn, summary, user_input)
-    except Exception:
-        logger.exception("长期记忆抽取失败")
-
-
-def _compress_and_cache(
-    user_id: str,
-    chat_session_id: str,
-    messages: list[ChatMessage],
-    summary: str,
-) -> None:
-    window, new_summary = messages, summary
-    try:
-        window, new_summary = compress(
-            messages,
-            keep=short_term_memory.max_turns,
-            old_summary=summary,
-            summarize=summarize_session,
-        )
-    except Exception:
-        logger.exception("短期记忆压缩失败")
-    if new_summary != summary:
-        try:
-            store.update_session_summary(user_id, chat_session_id, new_summary)
-        except Exception:
-            logger.exception("会话摘要保存失败")
-    short_term_memory.save(
-        chat_session_id, window, user_id=user_id, summary=new_summary
-    )
 
 
 def run_stream(
