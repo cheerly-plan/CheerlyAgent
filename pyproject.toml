@@ -1,7 +1,7 @@
 [project]
 name = "almost-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "多用户 AI Agent 后端：RAG + 知识图谱 + 记忆系统"
 readme = "README.md"
 authors = [
     { name = "魏佳楠", email = "weijianan@szkingdom.com" }
@@ -35,7 +35,25 @@ packages = ["src/ai_agent"]
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
 ]
+
+[tool.ruff]
+# 先保守：默认规则集（E pycodestyle + F pyflakes），让现有代码能过；
+# 后续渐进收紧（加 I isort、UP pyupgrade 等），避免一次性 500 告警吓退
+line-length = 100
+target-version = "py313"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+# E: pycodestyle 错误；F: pyflakes（未用变量/导入错误等真实 bug）
+select = ["E", "F"]
+# 忽略行宽类样式告警（靠格式化工具，不靠人工）
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里常用未用导入（pytest fixture 注入）、魔法常量，放宽
+"tests/**" = ["F401", "F841"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

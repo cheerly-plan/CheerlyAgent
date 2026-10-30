@@ -551,7 +551,6 @@ def _pdf_glossary_tables(
         rows, bbox = _glossary_rows(_word_lines(words))
         if len(rows) < _GLOSS_MIN_ROWS or bbox is None:
             continue
-        area = max((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), 1.0)
         if any(
             pno + 1 == page and _overlap_ratio(bbox, box) > 0.3
             for page, box in exclude
