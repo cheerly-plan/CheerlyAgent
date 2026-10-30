@@ -1,282 +1,34 @@
-"""知识图谱的 DB 存取。
+"""知识图谱的查询。
 
-与 KbStore 同为 mixin，挂到 MemoryStore 上共享连接池。
+从 graph_store.py 拆出(S5)。与 KgWriteStore（写入）同为 mixin，挂到
+MemoryStore 上共享连接池。本模块负责取图、搜实体、邻域扩展、取实体所在
+切片与统计。
 
 设计取舍：
-- 实体按「文件内唯一」（file_id, norm_name, type）去重。跨文件同名实体**不合并**——
-  合并需要全局实体表 + 冲突消解，而当前知识库是共享文档库，同一实体在不同文档里
-  的表述和关系并不一致，合并反而会串味；前端按文件名过滤即可。
-- 关系额外存 chunk_seq，前端点边可以直接定位到原文切片。
+- 实体按「文件内唯一」（file_id, norm_name, type）去重，跨文件同名不合并；
+- 关系额外存 chunk_seq，前端点边可以直接定位到原文切片；
 - 邻域扩展在 Python 层做 BFS 而不是递归 CTE：单文件实体量在几十到几百，
   逐层查一轮比一条复杂的双向递归 SQL 更好读、也更好限制节点预算。
 """
 
-import re
+from __future__ import annotations
+
 import uuid
 
 from pgvector import Vector
 
-
-# ——— 检索打分：向量分 + 字面依据 ———
-#
-# 向量模型对完全不相关的词也会给 0.45~0.52 的相似度（模型基线就这么高），
-# 只靠绝对阈值切不干净：搜「天气预报」照样能召回一堆芯片公司。所以在向量分
-# 之上再叠一层字面证据，并让「没有字面证据」的候选自己过一道更高的门槛：
-#   · 名称完全相同        +0.30（搜「HBM」命中实体「HBM」）
-#   · 名称互相包含        +0.18（搜「长鑫」命中「长鑫存储」）
-#   · 检索词 token 命中名称或描述  最多 +0.12
-# 有字面证据的候选直接保留，避免因为描述写法不同漏掉真正相关的实体。
-
-_STRIP_PUNCT = re.compile(
-    r"""[\s\-_/·・,，。.、:：;；!！?？'"“”‘’()（）\[\]【】<>《》]+"""
+from ai_agent.kb.kg_match import (
+    _ALIAS_IN_QUERY_MIN,
+    _norm_text,
+    _query_tokens,
+    _rank_candidates,
+    _score_candidate,
 )
-_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
-_LATIN_WORD = re.compile(r"[a-z0-9][a-z0-9+#.]*")
-
-NAME_BOOST_EXACT = 0.30
-NAME_BOOST_PART = 0.18
-KEYWORD_BOOST_MAX = 0.12
-# token 命中到这个比例即视为「有字面依据」，不再受相似度门槛约束
-KEYWORD_HIT_RATIO = 0.5
-# 确认「问到点子上了」之后，其余候选的分数线可以比 min_score 低这么多
-WEAK_SCORE_DROP = 0.12
-# 同时和最强候选比：差得太远的（名字对上了但只是同话题）也一并切掉
-RELATIVE_BAND = 0.3
-# 主体锚类型：这类实体（公司/机构）命中后，跨文件同名 metric 要隔离，避免串公司
-_ANCHOR_TYPES = {"org"}
-# 受「主体锚 + file_id 收敛」约束的类型：指标/概念这类词家家都有，最易跨文件串入
-_SCOPED_TYPES = {"metric", "concept", "other"}
-
-
-def _norm_text(text: str) -> str:
-    """与实体 norm_name 同口径：去掉空白与常见标点、转小写。"""
-    return _STRIP_PUNCT.sub("", (text or "").lower())
-
-
-def _query_tokens(query: str) -> list[str]:
-    """检索词切词：英文数字按词切，中文按二元组（单字太泛、整串太严）。"""
-    text = (query or "").lower()
-    tokens = _LATIN_WORD.findall(text)
-    for run in _CJK_RUN.findall(text):
-        if len(run) == 1:
-            tokens.append(run)
-        else:
-            tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
-    return [t for t in tokens if t]
-
-
-def _literal_match(
-    query_norm: str, tokens: list[str], name: str, description: str
-) -> tuple[float, str, float]:
-    """字面匹配：返回（加分, 依据类型, 关键词命中比例）。"""
-    name_norm = _norm_text(name)
-    if not query_norm or not name_norm:
-        return 0.0, "", 0.0
-    if query_norm == name_norm:
-        return NAME_BOOST_EXACT, "name", 1.0
-    if len(name_norm) >= 2 and (query_norm in name_norm or name_norm in query_norm):
-        return NAME_BOOST_PART, "name", 1.0
-    if not tokens:
-        return 0.0, "", 0.0
-    haystack = name_norm + _norm_text(description)
-    ratio = sum(1 for token in tokens if token in haystack) / len(tokens)
-    if ratio <= 0:
-        return 0.0, "", 0.0
-    return min(KEYWORD_BOOST_MAX, KEYWORD_BOOST_MAX * ratio), "keyword", ratio
-
-
-# 查询包含别名时，别名太短容易误中（「国电」出现在很多公司名里）
-_ALIAS_IN_QUERY_MIN = 4
-
-
-def _score_candidate(
-    query_norm: str,
-    tokens: list[str],
-    row: dict,
-    alias_name: str = "",
-) -> dict:
-    """给一条实体候选打分。别名按名称口径匹配：对齐删掉的简称要能成为强命中。"""
-    vector = float(row.get("score") or 0)
-    boost, basis, ratio = _literal_match(
-        query_norm, tokens, row.get("name") or "", row.get("description") or ""
-    )
-    if alias_name:
-        a_boost, a_basis, a_ratio = _literal_match(
-            query_norm, tokens, alias_name, ""
-        )
-        if a_basis == "name" and basis != "name":
-            boost, basis, ratio = a_boost, "alias", a_ratio
-        elif basis != "name" and a_boost > boost:
-            boost, basis, ratio = (
-                a_boost,
-                "alias" if a_basis == "name" else a_basis,
-                a_ratio,
-            )
-    literal = basis in {"name", "alias"} or ratio >= KEYWORD_HIT_RATIO
-    return {
-        **row,
-        "score": min(1.0, vector + boost),
-        "vector": vector,
-        "literal": literal,
-        "matched": basis or "vector",
-    }
-
-
-def _rank_candidates(
-    scored: list[dict], *, min_score: float, top_k: int
-) -> list[dict]:
-    """把打分后的候选挑成种子列表。
-
-    三条规则：
-    1. 整批都没有「问到点子上」的证据（字面命中，或向量分过 min_score）→ 返回空。
-       向量对无关词也会给 0.45~0.52，不这样切，搜「天气预报」也能拉出一串芯片公司。
-    2. 一旦确认问到了，字面命中的全留；纯向量的候选过一条双重线：
-       不低于 `min_score - WEAK_SCORE_DROP`，也不比最强候选低超过 `RELATIVE_BAND`。
-       前者保证「相关但描述里没写这个词」的实体不被切掉，后者砍掉只是同话题的尾部。
-    3. 同一实体在每份文档里各有一条记录，按 norm_name 合并；代表记录取提及次数
-       最多的那条（与全库图合并同一规则），分数取组内最高。
-
-    主体收敛（解决跨公司串数据）：当候选里出现「字面强命中 + org 类型」的主体锚
-    （如明确问「安克创新」）时，同名的指标类实体（metric/concept）在各家文件里
-    都有，向量召回会把别家公司的同名词也带进来。此时：
-      - 与主体锚同文件（file_id 一致）的候选照常走放宽线；
-      - 跨文件（file_id 不在锚集合里）的指标类候选不享受 WEAK_SCORE_DROP 放宽，
-        必须字面命中或向量分 ≥ min_score 原值才保留。
-    没有主体锚（只问「毛利率」没提公司）时保持现状，交给下游/LLM 消歧，不硬过滤。
-    """
-    if not scored:
-        return []
-    if not any(r["literal"] or float(r["vector"]) >= min_score for r in scored):
-        return []
-
-    # 主体锚：有字面强命中（matched 是 name/alias）且 type=org 的实体
-    anchor_files: set[str] = {
-        str(r["file_id"])
-        for r in scored
-        if r.get("type") in _ANCHOR_TYPES and r["literal"] and r.get("matched") in {"name", "alias"}
-    }
-
-    best_vector = max(float(r["vector"]) for r in scored)
-    floor = max(min_score - WEAK_SCORE_DROP, best_vector - RELATIVE_BAND)
-
-    # 有主体锚时，按 (norm_name, file_id) 分组，避免安克/顺丰的同名 metric 被合并
-    # 成一个代表（取错文件）；无主体锚时仍按 norm_name 合并（保持原行为）。
-    group_key = (
-        (lambda r: (r["norm_name"] or r["name"], str(r["file_id"])))
-        if anchor_files
-        else (lambda r: r["norm_name"] or r["name"])
-    )
-
-    grouped: dict[str, list[dict]] = {}
-    for row in scored:
-        if row["literal"]:
-            # 字面命中直接保留
-            grouped.setdefault(group_key(row), []).append(row)
-            continue
-        vector = float(row["vector"])
-        # 主体收敛：跨文件的指标类候选，不享受放宽，必须过 min_score 原值
-        if (
-            anchor_files
-            and row.get("type") in _SCOPED_TYPES
-            and str(row["file_id"]) not in anchor_files
-        ):
-            if vector < min_score:
-                continue
-        elif vector < floor:
-            continue
-        grouped.setdefault(group_key(row), []).append(row)
-
-    picked: list[dict] = []
-    for group in grouped.values():
-        best = max(
-            group,
-            key=lambda r: (int(r["mention_count"] or 0), r["name"] or ""),
-        )
-        top = max(group, key=lambda r: float(r["score"] or 0))
-        picked.append({**best, "score": top["score"], "matched": top["matched"]})
-
-    picked.sort(key=lambda r: float(r["score"] or 0), reverse=True)
-    return picked[:top_k]
 
 
 class KgStore:
-    # ——— 写入 ———
+    # ——— 查询 ———
 
-    def replace_file_graph(
-        self,
-        file_id: uuid.UUID,
-        entities: list[dict],
-        relations: list[dict],
-        mentions: list[dict],
-    ) -> None:
-        """整文件覆盖写入（先删后插，重跑幂等）。
-
-        删除走 agent_kg_entity → relation / mention 的级联；
-        另外单独删一次 relation，兼容「实体全被过滤掉但关系还在」的边界情况。
-        """
-        with self._get_pool().connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM agent_kg_relation WHERE file_id = %s", (file_id,))
-                cur.execute("DELETE FROM agent_kg_entity WHERE file_id = %s", (file_id,))
-                if entities:
-                    cur.executemany(
-                        """
-                        INSERT INTO agent_kg_entity
-                            (id, file_id, name, norm_name, type, description,
-                             embedding, mention_count)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (file_id, norm_name, type) DO NOTHING
-                        """,
-                        [
-                            (
-                                e["id"],
-                                file_id,
-                                e["name"],
-                                e["norm_name"],
-                                e["type"],
-                                e.get("description", ""),
-                                Vector(e["embedding"]) if e.get("embedding") else None,
-                                e.get("mention_count", 1),
-                            )
-                            for e in entities
-                        ],
-                    )
-                if relations:
-                    cur.executemany(
-                        """
-                        INSERT INTO agent_kg_relation
-                            (id, file_id, source_id, target_id, relation,
-                             description, weight, chunk_seq)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        [
-                            (
-                                r["id"],
-                                file_id,
-                                r["source_id"],
-                                r["target_id"],
-                                r["relation"],
-                                r.get("description", ""),
-                                r.get("weight", 1.0),
-                                r.get("chunk_seq"),
-                            )
-                            for r in relations
-                        ],
-                    )
-                if mentions:
-                    cur.executemany(
-                        """
-                        INSERT INTO agent_kg_mention (entity_id, file_id, chunk_seq, hits)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (entity_id, chunk_seq)
-                        DO UPDATE SET hits = agent_kg_mention.hits + EXCLUDED.hits
-                        """,
-                        [
-                            (m["entity_id"], file_id, m["chunk_seq"], m.get("hits", 1))
-                            for m in mentions
-                        ],
-                    )
-            conn.commit()
 
     # ——— 实体对齐（图谱质量 P2） ———
 
@@ -329,135 +81,6 @@ class KgStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def apply_alignment(self, file_id: uuid.UUID, merges: list[dict]) -> dict:
-        """按 merge 列表把实体并成一份：提及/关系/描述并到代表实体上。
-
-        顺序有讲究：先把提及搬到代表实体（否则删源实体时级联删掉就丢了），
-        再把关系重新指向代表，最后才删源实体（它的关系/提及随级联清空）。
-        全程一个事务，中途失败不会留下"关系指向已删实体"的半成品。
-        """
-        if not merges:
-            return {"merged": 0, "relations": 0, "aliases": 0}
-
-        merged = 0
-        with self._get_pool().connection() as conn:
-            with conn.cursor() as cur:
-                for merge in merges:
-                    src = uuid.UUID(str(merge["from_id"]))
-                    dst = uuid.UUID(str(merge["to_id"]))
-                    cur.execute(
-                        """
-                        INSERT INTO agent_kg_mention (entity_id, file_id, chunk_seq, hits)
-                        SELECT %s, file_id, chunk_seq, hits
-                        FROM agent_kg_mention WHERE entity_id = %s
-                        ON CONFLICT (entity_id, chunk_seq)
-                        DO UPDATE SET hits = agent_kg_mention.hits + EXCLUDED.hits
-                        """,
-                        (dst, src),
-                    )
-                    cur.execute(
-                        "UPDATE agent_kg_relation SET source_id = %s WHERE source_id = %s",
-                        (dst, src),
-                    )
-                    cur.execute(
-                        "UPDATE agent_kg_relation SET target_id = %s WHERE target_id = %s",
-                        (dst, src),
-                    )
-                    # 描述取更长的那个、提及数累加，再删源实体
-                    cur.execute(
-                        """
-                        UPDATE agent_kg_entity d
-                        SET mention_count = d.mention_count + COALESCE(s.mention_count, 0),
-                            description = CASE
-                                WHEN length(COALESCE(s.description, ''))
-                                     > length(COALESCE(d.description, ''))
-                                THEN s.description ELSE d.description END
-                        FROM agent_kg_entity s
-                        WHERE d.id = %s AND s.id = %s
-                        """,
-                        (dst, src),
-                    )
-                    cur.execute(
-                        """
-                        INSERT INTO agent_kg_alias
-                            (id, file_id, entity_id, alias_name, alias_norm, method, score)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (file_id, alias_norm) DO NOTHING
-                        """,
-                        (
-                            uuid.uuid4(),
-                            file_id,
-                            dst,
-                            merge["alias_name"],
-                            merge["alias_norm"],
-                            "llm",
-                            float(merge.get("score") or 0),
-                        ),
-                    )
-                    cur.execute("DELETE FROM agent_kg_entity WHERE id = %s", (src,))
-                    merged += 1
-
-                # 合并后会出现自环（A→B 与 B→A 同时存在）和重复边，一并清掉
-                cur.execute(
-                    "DELETE FROM agent_kg_relation WHERE file_id = %s AND source_id = target_id",
-                    (file_id,),
-                )
-                cur.execute(
-                    """
-                    DELETE FROM agent_kg_relation a
-                    USING agent_kg_relation b
-                    WHERE a.file_id = %s
-                      AND a.file_id = b.file_id
-                      AND a.source_id = b.source_id
-                      AND a.target_id = b.target_id
-                      AND a.relation = b.relation
-                      AND a.ctid > b.ctid
-                    """,
-                    (file_id,),
-                )
-                # 连接池是 dict_row，按列别名取，别用下标
-                remaining = cur.execute(
-                    "SELECT count(*) AS n FROM agent_kg_relation WHERE file_id = %s",
-                    (file_id,),
-                ).fetchone()["n"]
-                total = cur.execute(
-                    "SELECT count(*) AS n FROM agent_kg_entity WHERE file_id = %s",
-                    (file_id,),
-                ).fetchone()["n"]
-                aliases = cur.execute(
-                    "SELECT count(*) AS n FROM agent_kg_alias WHERE file_id = %s",
-                    (file_id,),
-                ).fetchone()["n"]
-            conn.commit()
-        return {
-            "merged": merged,
-            "entities": int(total),
-            "relations": int(remaining),
-            "aliases": int(aliases),
-        }
-
-    def set_align_status(
-        self,
-        file_id: uuid.UUID,
-        status: str,
-        *,
-        alias_count: int | None = None,
-        entity_count: int | None = None,
-    ) -> None:
-        with self._get_pool().connection() as conn:
-            conn.execute(
-                """
-                UPDATE agent_kb_file
-                SET align_status = %s,
-                    alias_count = COALESCE(%s, alias_count),
-                    graph_entity_count = COALESCE(%s, graph_entity_count),
-                    updated_at = now()
-                WHERE id = %s
-                """,
-                (status, alias_count, entity_count, file_id),
-            )
-            conn.commit()
-
     def get_align_status(self, file_id: uuid.UUID) -> dict:
         with self._get_pool().connection() as conn:
             row = conn.execute(
@@ -490,43 +113,6 @@ class KgStore:
                 (file_id,),
             ).fetchall()
         return [dict(r) for r in rows]
-
-    def update_graph_status(
-        self,
-        file_id: uuid.UUID,
-        status: str,
-        *,
-        entity_count: int | None = None,
-        batch_done: int | None = None,
-        batch_total: int | None = None,
-    ) -> None:
-        with self._get_pool().connection() as conn:
-            conn.execute(
-                """
-                UPDATE agent_kb_file
-                SET graph_status = %s,
-                    graph_entity_count = COALESCE(%s, graph_entity_count),
-                    graph_batch_done = COALESCE(%s, graph_batch_done),
-                    graph_batch_total = COALESCE(%s, graph_batch_total),
-                    updated_at = now()
-                WHERE id = %s
-                """,
-                (status, entity_count, batch_done, batch_total, file_id),
-            )
-            conn.commit()
-
-    def reset_stuck_graphs(self) -> int:
-        """启动时把上次异常退出留下的 building 标记为 failed，重跑由用户触发。"""
-        with self._get_pool().connection() as conn:
-            cur = conn.execute(
-                """
-                UPDATE agent_kb_file
-                SET graph_status = 'failed', updated_at = now()
-                WHERE graph_status = 'building'
-                """
-            )
-            conn.commit()
-        return cur.rowcount
 
     # ——— 读取 ———
 

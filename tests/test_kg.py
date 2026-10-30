@@ -213,7 +213,7 @@ def _cand(name, vector, *, score=None, literal=False, norm=None, mentions=1, mat
 
 
 def test_query_tokens_split_latin_and_cjk_bigram():
-    from ai_agent.kb.graph_store import _query_tokens
+    from ai_agent.kb.kg_match import _query_tokens
 
     assert _query_tokens("HBM 涨价")[:2] == ["hbm", "涨价"]
     # 中文按二元组切，不保留整串（整串太严），也不会只剩单字（单字太泛）
@@ -222,7 +222,7 @@ def test_query_tokens_split_latin_and_cjk_bigram():
 
 def test_score_candidate_alias_is_literal_when_canonical_misses():
     """对齐删掉的「发行人」对不上全称，必须靠别名才能成为强命中。"""
-    from ai_agent.kb.graph_store import _query_tokens, _score_candidate
+    from ai_agent.kb.kg_match import _query_tokens, _score_candidate
 
     row = {
         "id": "e1",
@@ -242,7 +242,7 @@ def test_score_candidate_alias_is_literal_when_canonical_misses():
 
 
 def test_score_candidate_keeps_canonical_name_over_alias():
-    from ai_agent.kb.graph_store import _query_tokens, _score_candidate
+    from ai_agent.kb.kg_match import _query_tokens, _score_candidate
 
     row = {"id": "e1", "name": "HBM", "description": "", "score": 0.7}
     scored = _score_candidate("hbm", _query_tokens("HBM"), row, alias_name="HBM3E")
@@ -251,7 +251,7 @@ def test_score_candidate_keeps_canonical_name_over_alias():
 
 
 def test_literal_match_boosts_name_hits():
-    from ai_agent.kb.graph_store import _literal_match, _query_tokens
+    from ai_agent.kb.kg_match import _literal_match, _query_tokens
 
     boost, basis, _ = _literal_match("hbm", _query_tokens("HBM"), "HBM", "")
     assert basis == "name" and boost > 0.2
@@ -264,7 +264,7 @@ def test_literal_match_boosts_name_hits():
 
 
 def test_rank_candidates_drops_noise_when_nothing_matches():
-    from ai_agent.kb.graph_store import _rank_candidates
+    from ai_agent.kb.kg_match import _rank_candidates
 
     # 「天气预报」那类查询：全都只是话题沾边，没有任何字面依据
     scored = [_cand("界面新闻", 0.47), _cand("出口管制", 0.46), _cand("Gartner", 0.45)]
@@ -272,7 +272,7 @@ def test_rank_candidates_drops_noise_when_nothing_matches():
 
 
 def test_rank_candidates_keeps_related_when_one_strong_hit():
-    from ai_agent.kb.graph_store import _rank_candidates
+    from ai_agent.kb.kg_match import _rank_candidates
 
     scored = [
         # 名称命中会把展示分顶到 1.0，但「相对带宽」看的是原始向量分
@@ -286,7 +286,7 @@ def test_rank_candidates_keeps_related_when_one_strong_hit():
 
 
 def test_rank_candidates_trims_far_tail_by_relative_band():
-    from ai_agent.kb.graph_store import _rank_candidates
+    from ai_agent.kb.kg_match import _rank_candidates
 
     scored = [
         _cand("三星", 0.9, score=1.0, literal=True, matched="name"),
@@ -296,7 +296,7 @@ def test_rank_candidates_trims_far_tail_by_relative_band():
 
 
 def test_rank_candidates_merges_same_norm_and_picks_top_score():
-    from ai_agent.kb.graph_store import _rank_candidates
+    from ai_agent.kb.kg_match import _rank_candidates
 
     scored = [
         _cand("HBM", 0.72, norm="hbm", mentions=2),
@@ -329,7 +329,7 @@ def test_rank_candidates_isolates_cross_file_metric_when_org_anchor():
     这里验证：有 org 主体锚时，跨文件的 metric 候选不享受 WEAK_SCORE_DROP 放宽，
     必须向量分 ≥ min_score 原值才保留。
     """
-    from ai_agent.kb.graph_store import _rank_candidates
+    from ai_agent.kb.kg_match import _rank_candidates
 
     ank, sf = "file-ank", "file-sf"
     scored = [
@@ -354,7 +354,7 @@ def test_rank_candidates_isolates_cross_file_metric_when_org_anchor():
 
 def test_rank_candidates_keeps_cross_file_metric_when_above_min_score():
     """同名 metric 跨文件但分数都够高：分 file 独立保留，交 LLM 消歧，不合并。"""
-    from ai_agent.kb.graph_store import _rank_candidates
+    from ai_agent.kb.kg_match import _rank_candidates
 
     ank, sf = "file-ank", "file-sf"
     scored = [
@@ -373,7 +373,7 @@ def test_rank_candidates_keeps_cross_file_metric_when_above_min_score():
 
 def test_rank_candidates_no_anchor_keeps_original_behavior():
     """无主体锚（只问「毛利率」没提公司）：不触发收敛，保持原合并行为。"""
-    from ai_agent.kb.graph_store import _rank_candidates
+    from ai_agent.kb.kg_match import _rank_candidates
 
     ank, sf = "file-ank", "file-sf"
     scored = [

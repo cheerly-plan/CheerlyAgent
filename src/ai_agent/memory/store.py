@@ -1,4 +1,5 @@
 from ai_agent.kb.graph_store import KgStore
+from ai_agent.kb.graph_write import KgWriteStore
 from ai_agent.kb.store import KbStore
 from ai_agent.memory.auth_store import AuthStore
 from ai_agent.memory.checkpoint_store import CheckpointStore
@@ -36,6 +37,7 @@ class MemoryStore(
     CheckpointStore,
     KbStore,
     KgStore,
+    KgWriteStore,
 ):
     def clear_long_term(self, user_id: str | None = None) -> None:
         with self._get_pool().connection() as conn:
