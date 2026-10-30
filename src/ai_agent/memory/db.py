@@ -381,6 +381,11 @@ class Database:
             conn.execute(
                 "ALTER TABLE agent_kb_chunk ADD COLUMN IF NOT EXISTS section TEXT"
             )
+            # 报表口径（consolidated / parent）：同一指标在合并报表与母公司
+            # 报表里各有一份数，检索要能按用户的默认预期（集团口径）区分
+            conn.execute(
+                "ALTER TABLE agent_kb_chunk ADD COLUMN IF NOT EXISTS scope TEXT"
+            )
             # 知识图谱（P2）：实体 / 关系 / 提及三层。
             # 全部挂在文件上做外键级联，删文件即清空图谱，不留脏数据；
             # embedding 维度跟随 EMBEDDING_DIM（与切片向量同模型），供实体语义检索。

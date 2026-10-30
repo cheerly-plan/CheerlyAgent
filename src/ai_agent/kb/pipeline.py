@@ -183,6 +183,8 @@ class KbPipeline:
                 chunks,
                 doc_type=doc_type,
                 level=level,
+                # 文件名进 prompt：表格片段里没有公司全称，模型要靠它认主体
+                doc_name=record.get("filename"),
                 progress=lambda c: store.update_graph_status(
                     file_id,
                     "building",
@@ -248,6 +250,9 @@ class KbPipeline:
                         filename=filename,
                         page=c["page"],
                         kind=c["kind"],
+                        # 与首次写入路径保持一致：漏传 section 会让改名后
+                        # 的向量和首次解析的向量不同源
+                        section=c.get("section"),
                     )
                     for c in chunks
                 ],

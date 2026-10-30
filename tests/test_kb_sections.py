@@ -5,9 +5,10 @@
 """
 
 from ai_agent.kb.chunking import Chunk, chunk_segments, chunk_text
-from ai_agent.kb.parsing import FIGURE, TEXT, Segment
+from ai_agent.kb.parsing import FIGURE, TEXT, Segment, _label_at, _merge_wrapped
 from ai_agent.kb.sections import (
     Line,
+    Section,
     body_size,
     group_by_section,
     is_l1_heading,
@@ -101,6 +102,105 @@ def test_group_by_section_without_headings_returns_single_group():
     lines = [line("扫描件文字", 1), line("第二页", 2)]
     sections = group_by_section(lines, BODY)
     assert len(sections) == 1 and sections[0].id == ""
+
+
+def test_cn_numbering_becomes_l1_when_no_section_headings():
+    """季报没有「第X节」：一级就是「一、」，二级是「（一）」。
+
+    实测三份季报的 206 个切片一个章节名都没有，图谱 prompt 只能给页码。
+    """
+    lines = [
+        line("封面文字", 1),
+        line("一、主要财务数据", 2),
+        line("正文一", 2),
+        line("（一）主要会计数据和财务指标", 2, size=10.4),
+        line("正文二", 2),
+        line("二、股东信息", 3),
+    ]
+    secs = group_by_section(lines, 10.4)
+    labels = [s.label for s in secs if s.label]
+    assert labels == [
+        "一、主要财务数据",
+        "一、主要财务数据 · （一）主要会计数据和财务指标",
+        "二、股东信息",
+    ]
+
+
+def test_cn_numbering_becomes_sub_when_section_headings_exist():
+    # 招股书里「第十节」是一级，「一、」是它下面的细分，不能提成同级
+    lines = [
+        line("第十节 管理层讨论与分析", page=2, size=16.0),
+        line("一、主营业务", page=2, size=14.0),
+        line("正文", page=2),
+    ]
+    secs = group_by_section(lines, BODY)
+    assert secs[-1].path == "第十节 管理层讨论与分析"
+    assert secs[-1].label == "第十节 管理层讨论与分析 · 一、主营业务"
+
+
+def test_cn_heading_rejects_sentence_like_lines():
+    # 报表行「一、经营活动产生的现金流量：」和带逗号的整句都不是标题
+    lines = [
+        line("一、经营活动产生的现金流量：", 1),
+        line("二、公司实现营业收入 12 亿元，同比增长", 1),
+    ]
+    secs = group_by_section(lines, BODY)
+    assert len(secs) == 1 and secs[0].label == ""
+
+
+def test_label_keeps_narrow_space_after_cn_marker():
+    sec = Section("一、", "主要财务数据", start_page=2, sub="（一）主要会计数据")
+    assert sec.path == "一、主要财务数据"
+    assert sec.label == "一、主要财务数据 · （一）主要会计数据"
+
+
+def boxed(text: str, *, x0: float = 56.0, x1: float = 530.0, y0: float = 100.0) -> Line:
+    return Line(text, 1, BODY, y0 / 800, (x0, y0, x1, y0 + 14))
+
+
+def test_merge_wrapped_joins_line_broken_mid_sentence():
+    # 「占总营」+「收94.84%」被版面折成两行：不接回去，切片边界就落在词中间
+    lines = [
+        boxed("公司境外实现营业收入247.91 亿元，同比增长21.99%，占总营"),
+        boxed("收94.84%；境内实现营业收入13.50 亿元。"),
+    ]
+    assert _merge_wrapped(lines) == [
+        "公司境外实现营业收入247.91 亿元，同比增长21.99%，占总营收94.84%；"
+        "境内实现营业收入13.50 亿元。"
+    ]
+
+
+def test_merge_wrapped_keeps_paragraph_ending_with_punctuation():
+    lines = [boxed("第一段结束。"), boxed("第二段开始，还没有结束")]
+    assert _merge_wrapped(lines) == ["第一段结束。", "第二段开始，还没有结束"]
+
+
+def test_merge_wrapped_does_not_join_two_columns():
+    # 封面「证券代码：…」贴左、「公告编号：…」贴右，x0 不对就不能接
+    lines = [
+        boxed("证券代码：300866", x0=300.0, x1=530.0),
+        boxed("债券代码：123257"),
+    ]
+    assert _merge_wrapped(lines) == ["证券代码：300866", "债券代码：123257"]
+
+
+def test_merge_wrapped_does_not_glue_heading_to_body():
+    lines = [
+        boxed("（一）主要会计数据和财务指标"),
+        boxed("本报告期营业收入 9,535,167,697.58 元。"),
+    ]
+    assert _merge_wrapped(lines) == [
+        "（一）主要会计数据和财务指标",
+        "本报告期营业收入 9,535,167,697.58 元。",
+    ]
+
+
+def test_label_at_picks_nearest_heading_and_carries_across_pages():
+    markers = [(2, 100.0, "一、主要财务数据"), (2, 400.0, "一、主要财务数据 · （一）x")]
+    assert _label_at(markers, 2, 350.0) == "一、主要财务数据"
+    assert _label_at(markers, 2, 500.0) == "一、主要财务数据 · （一）x"
+    # 表格页没有正文行：沿用上一页最后一个标题，而不是丢掉
+    assert _label_at(markers, 3, 90.0) == "一、主要财务数据 · （一）x"
 
 
 def test_chunk_segments_merges_pages_within_section():

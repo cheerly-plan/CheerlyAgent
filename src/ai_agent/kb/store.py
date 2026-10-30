@@ -231,6 +231,7 @@ class KbStore:
                 chunk.page_end,
                 chunk.section,
                 chunk.kind,
+                chunk.scope,
                 chunk.text,
                 Vector(vector),
             )
@@ -242,8 +243,8 @@ class KbStore:
                     """
                     INSERT INTO agent_kb_chunk
                         (id, file_id, user_id, seq, page, page_end, section,
-                         kind, text, embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         kind, scope, text, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
@@ -412,7 +413,7 @@ class KbStore:
             return conn.execute(
                 """
                 SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
-                       c.kind, c.text,
+                       c.kind, c.scope, c.text,
                        f.filename, c.embedding <=> %(emb)s AS distance
                 FROM agent_kb_chunk c
                 JOIN agent_kb_file f ON f.id = c.file_id
@@ -465,7 +466,7 @@ class KbStore:
             return conn.execute(
                 f"""
                 SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
-                       c.kind, c.text,
+                       c.kind, c.scope, c.text,
                        f.filename,
                        ({score_sql})::float8 AS keyword_score
                 FROM agent_kb_chunk c
@@ -478,6 +479,40 @@ class KbStore:
                 """,
                 params,
             ).fetchall()
+
+    def keyword_doc_freq(
+        self,
+        keywords: list[str],
+        *,
+        file_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[int, dict[str, int]]:
+        """返回（切片总数, {关键词: 命中切片数}）。
+
+        ILIKE 子串计数没有 IDF：「营业收入」这种词在财务表里遍地都是，
+        命中不代表相关。一次聚合把 df 取出来，调用方据此只保留稀有词
+        （编号、专名），关键词路才不会被通用词灌满。
+        """
+        if not keywords:
+            return 0, {}
+        cols = ", ".join(
+            f"count(*) FILTER (WHERE c.text ILIKE %(kw{i})s) AS df{i}"
+            for i in range(len(keywords))
+        )
+        params: dict = {"file_ids": file_ids or None}
+        for i, kw in enumerate(keywords):
+            params[f"kw{i}"] = f"%{kw}%"
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                f"""
+                SELECT count(*) AS total, {cols}
+                FROM agent_kb_chunk c
+                WHERE (%(file_ids)s::uuid[] IS NULL
+                       OR c.file_id = ANY(%(file_ids)s::uuid[]))
+                """,
+                params,
+            ).fetchone()
+        total = int(row["total"] or 0)
+        return total, {kw: int(row[f"df{i}"] or 0) for i, kw in enumerate(keywords)}
 
     def kb_chunk_neighbors(
         self,

@@ -293,6 +293,7 @@ def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
             timeout=settings.kb_rewrite_timeout_seconds,
             max_retries=0,
             max_tokens=256,
+            temperature=settings.kb_rewrite_temperature,
             extra_body={
                 "enable_thinking": False,
                 "chat_template_kwargs": {"enable_thinking": False},

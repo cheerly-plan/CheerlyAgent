@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # 空 = 跟随 MODEL（主模型）。不用 SMALL_MODEL：抽取是长 JSON 结构化任务，
     # 小模型漏关系严重，而且部署方的 SMALL_MODEL 不一定真的开通了
     kb_graph_model: str = ""
+    # 抽取温度：结构化输出必须取 0。不传时走服务端默认（OpenAI 系 1.0），
+    # 实测同一批切片两次跑出的实体数能差 ±20，JSON 偶发坏输出（裸词没引号、
+    # 括号没闭合），实体对齐的裁决结论也会翻。实体对齐裁决共用这个值
+    kb_graph_temperature: float = 0.0
     kb_graph_batch_chunks: int = 8
     # 每积累多少批就把当前图谱覆盖落库一次。抽 700 多个切片要跑几十批、
     # 几十分钟，中途崩了不能前功尽弃：落过库的部分图能直接看，
@@ -195,6 +199,9 @@ class Settings(BaseSettings):
     kb_rerank_enabled: bool = True
     # 空 = 跟随 MODEL（主模型）。重排是短文本判别，不需要大模型
     kb_rerank_model: str = ""
+    # 重排只输出一串编号，要的是稳定排序而不是多样性：0.0 保证同一组候选
+    # 每次排出同一个顺序，否则评测结果会随采样抖动，改动好坏无法归因
+    kb_rerank_temperature: float = 0.0
     kb_rerank_timeout_seconds: float = 30.0
     # 对话改写：多轮对话里，当前这句省略了主体/语境（上轮在问「中国能源
     # 建设」、这轮问「股东持股情况」），预检索前用小模型结合上一轮对话把
@@ -203,6 +210,9 @@ class Settings(BaseSettings):
     kb_rewrite_enabled: bool = True
     # 空 = 用 small_model（或回落主模型）。改写是短任务，不需要大模型
     kb_rewrite_model: str = ""
+    # 改写是「同一句话补主体」，不该每次补出不同措辞：不同措辞会引出不同的
+    # 召回集合，让「重排坏了」和「改写抖了」分不清
+    kb_rewrite_temperature: float = 0.0
     kb_rewrite_timeout_seconds: float = 6.0
     # 改写喂给模型的最近几轮「完整对话（user 问句 + assistant 最终回答）」：
     # 主体（公司名）可能出现在更早那轮、中间隔了无主体的追问，取 2 轮更稳。

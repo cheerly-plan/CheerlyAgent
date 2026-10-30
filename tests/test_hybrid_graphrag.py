@@ -61,6 +61,21 @@ def test_rrf_merge_ranks_double_hits_first():
     assert [row["seq"] for row in merged] == [1, 0, 2]
 
 
+def test_rrf_merge_keyword_path_is_discounted():
+    """关键词路第 1 名不能压过向量路第 2 名。
+
+    关键词路只数「命中了几个词」，没有 IDF、没有长度归一，同分还按
+    (file_id, seq) 排——封面页、目录这种又靠前又短、恰好写着公司名的
+    片段会排到第一。同权时它能和向量第一名打平，把带数据的切片挤下去；
+    实测「安克创新和顺丰控股哪家营收增速更快」就因此 miss。
+    """
+    first = _row(FILE_ID, 10, "向量第一名")
+    second = _row(FILE_ID, 11, "向量第二名")
+    kw_only = _row(OTHER_ID, 20, "只是字面命中了公司名")
+    merged = retrieval._rrf_merge([first, second], [kw_only])
+    assert [row["seq"] for row in merged] == [10, 11, 20]
+
+
 def test_rrf_merge_keyword_only_rows_carry_no_distance():
     only_kw = _row(FILE_ID, 3, "关键词命中")
     only_kw.pop("distance")
@@ -267,8 +282,8 @@ def test_kg_search_reports_empty_graph(monkeypatch):
 # ---------- 标签预过滤 ----------
 
 
-def _kb_file(fid, tags, status="ready"):
-    return {"file_id": fid, "tags": tags, "status": status}
+def _kb_file(fid, tags, status="ready", filename=""):
+    return {"file_id": fid, "tags": tags, "status": status, "filename": filename}
 
 
 def test_tag_scope_narrows_to_tagged_match():
@@ -277,11 +292,109 @@ def test_tag_scope_narrows_to_tagged_match():
     assert retrieval._tag_scope_ids(["考勤"], files) == [a]
 
 
-def test_tag_scope_none_when_any_file_untagged():
+def test_tag_scope_falls_back_to_filename_when_tags_empty():
+    """文件一个标签都没打时，靠文件名主体收窄——否则这层逻辑永远不生效。"""
     a, b = uuid.uuid4(), uuid.uuid4()
-    files = [_kb_file(a, ["考勤"]), _kb_file(b, [])]
-    # 有文件没标签：标签语义覆盖不了它，收窄会漏，宁可放弃
-    assert retrieval._tag_scope_ids(["考勤"], files) is None
+    files = [
+        _kb_file(a, [], filename="顺丰控股股份有限公司2026 年第三季度报告"),
+        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
+    ]
+    assert retrieval._tag_scope_ids(["顺丰控股"], files) == [a]
+
+
+def test_tag_scope_matches_abbreviated_subject():
+    """简称与全称差字，子串对不上，靠二元组重合判定同一主体。"""
+    a, b = uuid.uuid4(), uuid.uuid4()
+    files = [
+        _kb_file(a, [], filename="中国能源建设股份有限公司2026 年第三季度报告"),
+        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
+    ]
+    assert retrieval._tag_scope_ids(["中国能建"], files) == [a]
+
+
+def test_tag_scope_ignores_unrelated_subject():
+    a, b = uuid.uuid4(), uuid.uuid4()
+    files = [
+        _kb_file(a, [], filename="顺丰控股股份有限公司2026 年第三季度报告"),
+        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
+    ]
+    # 库外的主体不该把范围收到任何一份文件上
+    assert retrieval._tag_scope_ids(["宁德时代"], files) is None
+
+
+def test_file_subject_strips_year_and_report_type():
+    assert (
+        retrieval._file_subject("顺丰控股股份有限公司2026 年第三季度报告.pdf")
+        == "顺丰控股股份有限公司"
+    )
+
+
+def test_query_mentions_allows_abbreviation_but_not_other_company():
+    full = "中国能源建设股份有限公司"
+    # 简称与全称只共享「中国能」，但足以判定是同一主体
+    assert retrieval._query_mentions("中国能建前三季度营收", full)
+    assert retrieval._query_mentions("中国能源建设营收", full)
+    # 库外的公司一个连续字都对不上，不能收窄
+    assert not retrieval._query_mentions("宁德时代营收", full)
+    # 少于 3 字的重合不足以判定（"公司" 这类通用后缀不算）
+    assert not retrieval._query_mentions("公司营收", full)
+
+
+def test_keep_distinctive_keywords_drops_ubiquitous_terms(monkeypatch):
+    """全库过半切片都含的词没有区分度：命中它不代表相关。"""
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_doc_freq",
+        lambda kws, file_ids=None: (100, {"营业收入": 80, "601868": 1}),
+    )
+    assert retrieval._keep_distinctive_keywords(
+        ["营业收入", "601868"], None
+    ) == ["601868"]
+
+
+def test_keep_distinctive_keywords_keeps_rare_terms_and_boundary(monkeypatch):
+    # 恰好一半：仍保留（只剔除「过半」的）
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_doc_freq",
+        lambda kws, file_ids=None: (100, {"营业": 50, "收入": 12}),
+    )
+    assert retrieval._keep_distinctive_keywords(["营业", "收入"], None) == [
+        "营业",
+        "收入",
+    ]
+
+
+def test_keep_distinctive_keywords_survives_stats_failure(monkeypatch):
+    """统计失败时保留全部：不能让一次查询失败改变召回行为。"""
+
+    def boom(kws, file_ids=None):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(retrieval.store, "keyword_doc_freq", boom)
+    assert retrieval._keep_distinctive_keywords(["营业", "收入"], None) == [
+        "营业",
+        "收入",
+    ]
+
+
+def test_fuse_falls_back_to_vector_when_all_keywords_are_ubiquitous(monkeypatch):
+    """关键词全被筛掉时退回纯向量，而不是拿空词表去查库。"""
+    monkeypatch.setattr(
+        retrieval, "_extract_keywords", lambda q: ["营业收入"]
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_doc_freq",
+        lambda kws, file_ids=None: (100, {"营业收入": 90}),
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "search_kb_chunks_keyword",
+        lambda *a, **k: pytest.fail("全被筛掉时不该走关键词路"),
+    )
+    rows = [{"file_id": "f", "seq": 0, "text": "t"}]
+    assert retrieval._fuse_with_keywords("营收多少", rows, None) is rows
 
 
 def test_tag_scope_none_when_no_discrimination():
@@ -302,47 +415,93 @@ def test_tag_scope_matches_bidirectional_substring_case_insensitive():
     assert retrieval._tag_scope_ids(["考勤处罚规定"], files2) == [a]
 
 
-def test_search_with_tag_scope_pads_from_full_search(monkeypatch):
+def _hit(fid, seq):
     from ai_agent.kb.retrieval import Hit
-    from ai_agent.tools import kb_search
 
-    def hit(fid, seq):
-        return Hit(
-            file_id=str(fid), filename="f", seq=seq, page=None,
-            kind="text", text="t", distance=0.4,
-        )
+    return Hit(
+        file_id=str(fid), filename="f", seq=seq, page=None,
+        kind="text", text="t", distance=0.4,
+    )
+
+
+def test_search_knowledge_narrows_then_pads_from_full(monkeypatch):
+    """收窄后召回不足 top_k：用全库补位，收窄结果仍排前面。"""
+    from ai_agent.kb import retrieval
 
     scoped, other = uuid.uuid4(), uuid.uuid4()
-    monkeypatch.setattr(kb_search, "tag_file_scope", lambda q: [scoped])
+    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
+    monkeypatch.setattr(retrieval, "tag_file_scope", lambda q: [scoped])
 
     calls = []
 
-    def fake_search(query, file_ids=None, top_k=3):
+    def fake_core(query, embedding, *, file_ids, top_k):
         calls.append(file_ids)
         if file_ids:  # 收窄那一搜只有 1 条：弱召回
-            return [hit(scoped, 0)]
-        return [hit(scoped, 0), hit(other, 1), hit(other, 2)]
+            return [_hit(scoped, 0)]
+        return [_hit(scoped, 0), _hit(other, 1), _hit(other, 2)]
 
-    monkeypatch.setattr(kb_search, "search_knowledge", fake_search)
-    hits = kb_search._search_with_tag_scope("考勤怎么算", top_k=3)
+    monkeypatch.setattr(retrieval, "_core_search", fake_core)
+    hits = retrieval.search_knowledge("考勤怎么算", top_k=3)
     assert calls == [[scoped], None]  # 先收窄，兜底走全库
     assert len(hits) == 3
     assert (hits[0].file_id, hits[0].seq) == (str(scoped), 0)  # 收窄结果排前
 
 
-def test_search_with_tag_scope_skips_when_no_scope(monkeypatch):
-    from ai_agent.tools import kb_search
+def test_search_knowledge_skips_scope_when_none(monkeypatch):
+    from ai_agent.kb import retrieval
 
-    monkeypatch.setattr(kb_search, "tag_file_scope", lambda q: None)
+    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
+    monkeypatch.setattr(retrieval, "tag_file_scope", lambda q: None)
     calls = []
 
-    def fake_search(query, file_ids=None, top_k=3):
+    def fake_core(query, embedding, *, file_ids, top_k):
         calls.append(file_ids)
         return []
 
-    monkeypatch.setattr(kb_search, "search_knowledge", fake_search)
-    kb_search._search_with_tag_scope("随便问", top_k=3)
+    monkeypatch.setattr(retrieval, "_core_search", fake_core)
+    retrieval.search_knowledge("随便问", top_k=3)
     assert calls == [None]  # 没有可用范围：只搜一次全库
+
+
+def test_search_knowledge_skips_scope_when_file_ids_given(monkeypatch):
+    """模型/前端已显式圈定文件时不该再猜范围。"""
+    from ai_agent.kb import retrieval
+
+    pinned = [uuid.uuid4()]
+    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
+    monkeypatch.setattr(
+        retrieval, "tag_file_scope", lambda q: pytest.fail("显式范围下不该推导")
+    )
+    calls = []
+
+    def fake_core(query, embedding, *, file_ids, top_k):
+        calls.append(file_ids)
+        return []
+
+    monkeypatch.setattr(retrieval, "_core_search", fake_core)
+    retrieval.search_knowledge("考勤怎么算", file_ids=pinned, top_k=3)
+    assert calls == [pinned]
+
+
+def test_search_knowledge_survives_scope_failure(monkeypatch):
+    """范围推导抛异常时退回全库，不能把检索拖挂。"""
+    from ai_agent.kb import retrieval
+
+    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
+
+    def boom(q):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(retrieval, "tag_file_scope", boom)
+    calls = []
+
+    def fake_core(query, embedding, *, file_ids, top_k):
+        calls.append(file_ids)
+        return []
+
+    monkeypatch.setattr(retrieval, "_core_search", fake_core)
+    retrieval.search_knowledge("考勤怎么算", top_k=3)
+    assert calls == [None]
 
 
 # ---------- 图谱抽取并行化 ----------
@@ -354,7 +513,7 @@ def _chunk(seq):
     return Chunk(text=f"片段{seq}", page=None, kind="text")
 
 
-def _extract_with_marker(chunks, start_seq, _system=None):
+def _extract_with_marker(chunks, start_seq, _system=None, **_kw):
     """让结果携带 start_seq，验证批序与分批正确性。"""
     from ai_agent.kb.graph import _Entity, _Extraction
 
@@ -384,7 +543,7 @@ def test_extract_all_skips_failed_batch(monkeypatch):
 
     calls = []
 
-    def flaky(chunks, start_seq, _system=None):
+    def flaky(chunks, start_seq, _system=None, **_kw):
         calls.append(start_seq)
         if start_seq == 8:
             raise ConnectionError("网关抖动")
@@ -408,7 +567,7 @@ def test_extract_all_raises_when_all_batches_fail(monkeypatch):
 
     from ai_agent.kb import graph
 
-    def boom(chunks, start_seq, _system=None):
+    def boom(chunks, start_seq, _system=None, **_kw):
         raise ConnectionError("模型不存在")
 
     monkeypatch.setattr(graph, "_extract_batch", boom)
@@ -503,3 +662,35 @@ def test_prompt_omits_section_head_for_mixed_batch():
     assert "全部来自" not in prompt
     # 每片自己的 section 标签仍在，模型分得清片段归属
     assert "第一节 释义" in prompt and "第二节 概览" in prompt
+
+
+def test_prompt_carries_doc_name_and_span():
+    """文件名必须进 prompt：表格片段里没有公司全称，模型只能靠它认主体。
+
+    实录：安克 74 片里只有 3 片出现公司全称，某批全为现金流量表片段时，
+    模型把 prompt 示例里的公司名抄成了主语，长出 14 条错误关系。
+    """
+    from ai_agent.kb.chunking import Chunk
+    from ai_agent.kb.graph import _build_prompt
+
+    chunks = [
+        Chunk(text="甲", page=18, kind="table"),
+        Chunk(text="乙", page=19, kind="table"),
+    ]
+    prompt = _build_prompt(chunks, 65, "安克创新科技股份有限公司2026 年第三季度报告")
+    head = prompt.split("\n\n")[0]
+    assert head.startswith("以下是《安克创新科技股份有限公司2026 年第三季度报告》")
+    assert "第 65–66 段" in head
+    assert "第 18–19 页" in head
+
+
+def test_prompt_drops_file_extension_and_keeps_backward_compat():
+    from ai_agent.kb.chunking import Chunk
+    from ai_agent.kb.graph import _build_prompt
+
+    prompt = _build_prompt([Chunk(text="甲", page=3)], 0, "2026年三季报.pdf")
+    assert "《2026年三季报》" in prompt
+    assert ".pdf" not in prompt
+    # 不传 doc_name 时退回原文案，老调用方不受影响
+    plain = _build_prompt([Chunk(text="甲", page=3)], 0)
+    assert plain.startswith("以下是文档的第 0 段")

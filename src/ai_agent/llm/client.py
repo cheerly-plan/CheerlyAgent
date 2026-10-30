@@ -173,7 +173,14 @@ def complete_chat(
     max_retries: int | None = None,
     max_tokens: int | None = None,
     extra_body: dict[str, Any] | None = None,
+    temperature: float | None = None,
 ) -> str:
+    """非流式补全。温度默认不传 → 服务端默认（OpenAI 系为 1.0）。
+
+    `temperature` 必须显式传，不做全局默认：主对话需要一点发散，而图谱抽取/
+    对齐/重排是结构化任务，温度高会让实体数抖动、JSON 偶发写坏、同一批输入
+    两次跑出不同结果（评测失败集合跟着变）。这几处各自从 settings 取值。
+    """
     options: dict[str, float | int] = {}
     if timeout is not None:
         options["timeout"] = timeout
@@ -187,6 +194,8 @@ def complete_chat(
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if temperature is not None:
+        payload["temperature"] = temperature
     if extra_body is not None:
         payload["extra_body"] = extra_body
     try:

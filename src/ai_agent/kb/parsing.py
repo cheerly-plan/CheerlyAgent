@@ -39,6 +39,8 @@ class Segment:
     kind: str = TEXT
     # 所属一级节（如「第十节 管理层讨论与分析」）；无法识别章节的文档为 None
     section: str | None = None
+    # 报表口径（consolidated / parent），只对表格段有意义，见 _table_scope
+    scope: str | None = None
 
 _SUPPORTED = {".pdf", ".docx", ".xlsx", ".xlsm", ".md", ".markdown", ".txt", ".csv"}
 
@@ -147,53 +149,94 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
         logger.info("PDF 噪声剔除与表格 %s", stats)
 
     if not settings.kb_section_chunking:
-        page_section: dict[int, str | None] = {}
+        groups = [sections.Section("", "", start_page=kept[0].page if kept else 1, lines=list(kept))]
     else:
         groups = sections.group_by_section(kept, body)
-        page_section = _page_section_map(groups)
-        kept_by_sec: list[sections.Line] = []
-        for sec in groups:
-            kept_by_sec.extend(sec.lines)
-        kept = kept_by_sec
+        kept = [ln for sec in groups for ln in sec.lines]
+    # 表格不在正文行里，只能靠同页的标题位置推断它属于哪一小节：
+    # 表题/表头之下、下一个标题之上的表，才算这一节的
+    markers = _section_markers(groups)
 
     # (页, 纵向位置, 段)：文本段与表格段按原版面顺序归并
     items: list[tuple[int, float, Segment]] = []
-    for y, seg in _page_segments(kept, page_section):
+    for y, seg in _page_segments(groups):
         items.append((seg.page or 0, y, seg))
-    for page, y0, _bbox, rows in tables:
+    # 表题接在表格正文前面（一行）：切成多片时每片都会带上它，
+    # 「母公司利润表 + 营业收入 + 数值」因此能落在同一个切片里
+    for page, y0, _bbox, rows, caption in _attach_captions(tables, kept):
         markdown = _rows_to_markdown(rows)
         if not markdown:
             continue
+        text = f"{caption}\n{markdown}" if caption else markdown
         items.append(
-            (page, y0, Segment(markdown, page, TABLE, page_section.get(page)))
+            (
+                page,
+                y0,
+                Segment(
+                    text,
+                    page,
+                    TABLE,
+                    _label_at(markers, page, y0),
+                    scope=_table_scope(caption),
+                ),
+            )
         )
     items.sort(key=lambda it: (it[0], it[1]))
     return [seg for _page, _y, seg in items], text_lens
 
 
-def _page_section_map(groups: list[sections.Section]) -> dict[int, str | None]:
-    """页 → 所属一级节：表格不在正文行里，只能靠同页的正文行推断归属。"""
-    mapping: dict[int, str | None] = {}
+def _section_markers(
+    groups: list[sections.Section],
+) -> list[tuple[int, float, str]]:
+    """(页, 纵坐标, 章节标签)：每个小节首行的位置就是这一节的起点。
+
+    行内顺序即版面顺序，所以标记天然升序，查表走二分即可。用「点」坐标
+    而不是 y_ratio，是因为表格的 y0 就是 pymupdf 的页面坐标，两者要能直接比。
+    """
+    out: list[tuple[int, float, str]] = []
     for sec in groups:
-        label = sec.path if sec.id else None
-        for ln in sec.lines:
-            mapping.setdefault(ln.page, label)
-    return mapping
+        label = sec.label
+        if not label or not sec.lines:
+            continue
+        first = sec.lines[0]
+        y = first.bbox[1] if first.bbox else first.y_ratio * 1000
+        out.append((first.page, y, label))
+    return out
+
+
+def _label_at(
+    markers: list[tuple[int, float, str]], page: int, y: float
+) -> str | None:
+    """查某个位置所属的章节：取它上方最近的那个标题，跨页继续沿用。"""
+    best: str | None = None
+    for m_page, m_y, label in markers:
+        if m_page > page or (m_page == page and m_y > y + 1):
+            break
+        best = label
+    return best
 
 
 def _page_segments(
-    lines: list[sections.Line], page_section: dict[int, str | None]
+    groups: list[sections.Section],
 ) -> list[tuple[float, Segment]]:
-    """按页聚成 Segment，同时带回该页首行的纵坐标（与表格排序混排用）。"""
+    """按 (节, 页) 聚成 Segment，同时带回该段首行的纵坐标（与表格排序混排用）。
+
+    一格小节一页一段：同一页里「（一）主要会计数据」和「（二）非经常性
+    损益」各成一段，切片因此不会跨小节拼接，每片都能标到具体小节。
+    """
     out: list[tuple[float, Segment]] = []
-    for page, page_lines in groupby(lines, key=lambda ln: ln.page):
-        group = list(page_lines)
-        text = "\n".join(ln.text for ln in group).strip()
-        if not text:
-            continue
-        first = group[0]
-        y = first.bbox[1] if first.bbox else first.y_ratio * 1000
-        out.append((y, Segment(text, page, TEXT, page_section.get(page))))
+    for sec in groups:
+        label = sec.label or None
+        for page, page_lines in groupby(sec.lines, key=lambda ln: ln.page):
+            group = list(page_lines)
+            # 版面折行接回段落：PDF 每行一个 line，直接按行拼接会把
+            # 「占总营」「收94.84%」切成两段，切片边界和引用都断在词中间
+            text = "\n".join(_merge_wrapped(group)).strip()
+            if not text:
+                continue
+            first = group[0]
+            y = first.bbox[1] if first.bbox else first.y_ratio * 1000
+            out.append((y, Segment(text, page, TEXT, label)))
     return out
 
 
@@ -207,6 +250,74 @@ def _segments_by_page(
         if text:
             out.append(Segment(text, page, TEXT, section))
     return out
+
+
+# 版面折行：上一行排到右边界、下一行从左边距起，且上一行没有句末标点，
+# 那就是同一个自然段被排版折开。不接回去的代价很直观——安克的
+# 「占总营」「收94.84%」、「持」「续加大研发」会被切成两条段落，切片边界
+# 落在词中间，检索命中后引用出来是半句话，图谱也从半句里抽实体。
+_SENT_END = re.compile(r"[。！？；：!?;:…」』”\"）)》】]$")
+# 换块信号：编号标题、表题、注释、单位行。上一行即使没有句末标点，
+# 后面跟着这些也不该接（「……具体情况如下」+「（1）充电储能类产品」）
+_BLOCK_START = re.compile(
+    r"^(第[一二三四五六七八九十百]+[节章]|[一二三四五六七八九十]+、|"
+    r"（[一二三四五六七八九十\d]+）|\(\d+\)|\d+[、.．]|[①-⑳]|"
+    r"表\s*\d|附表|单位[:：]|注[:：]|资料来源)"
+)
+_EDGE_SLACK = 6.0  # 点：判「贴左右边距」的容差，中文排版两端对齐会差几个点
+
+
+def _merge_wrapped(lines: list[sections.Line]) -> list[str]:
+    """把版面折行的行接回自然段，返回段落文本列表。
+
+    只认同页内的折行：跨页的那一行是另一个版面，接起来会把页眉残留、
+    页脚页码掺进正文（它们的坐标早就被剔除了，但相邻行仍在）。
+    """
+    boxes = [ln.bbox for ln in lines if ln.bbox]
+    plain = [ln.text.strip() for ln in lines if ln.text.strip()]
+    if len(boxes) < 2:
+        return plain
+    left = min(b[0] for b in boxes)
+    right = max(b[2] for b in boxes)
+    slack = max((right - left) * 0.05, _EDGE_SLACK)
+
+    paras: list[str] = []
+    prev: sections.Line | None = None
+    for ln in lines:
+        text = ln.text.strip()
+        if not text:
+            continue
+        if prev is not None and _wraps(prev, ln, left, right, slack):
+            paras[-1] += text
+        else:
+            paras.append(text)
+        prev = ln
+    return paras
+
+
+def _wraps(
+    prev: sections.Line,
+    cur: sections.Line,
+    left: float,
+    right: float,
+    slack: float,
+) -> bool:
+    if not prev.bbox or not cur.bbox:
+        return False
+    if prev.bbox[2] < right - slack:
+        return False  # 上一行没排满 → 本来就是段末
+    if abs(cur.bbox[0] - left) > slack:
+        return False  # 下一行缩进/另有栏位 → 不是同一段
+    # 上一行也必须从左边距起（允许 2 字缩进）：封面上的「证券代码：…」
+    # 与右侧「公告编号：…」排在同一行，前者贴左、后者贴右，不看 x0
+    # 会把上下两栏的文字接成一句
+    if prev.bbox[0] > left + slack * 4:
+        return False
+    if _SENT_END.search(prev.text.strip()):
+        return False
+    if len(prev.norm) <= 40 and _BLOCK_START.match(prev.norm):
+        return False  # 上一行本身是标题，别把标题并进正文
+    return not _BLOCK_START.match(cur.norm)
 
 
 # ——— PDF 表格 ———
@@ -233,6 +344,38 @@ _SPACE_AFTER_PUNCT = re.compile(r"([（【《「『])\s+")
 _MAX_HEADER_CELL = 6
 # 纯数字（允许千分位、百分比、负号）：表头碎片不会是这个形状
 _NUM_ONLY = re.compile(r"^[\d.,%+\-]+$")
+# 跨页续表：表格顶边在这个纵坐标以内就算"从页顶开始"
+_HEAD_CARRY_Y = 130.0
+# 表题离表体多远以内还算它的标题（pt）。财务报表的「母公司利润表」离表体
+# 约 58pt，中间还夹着「2026 年1—9 月」「编制单位：」「单位：」三行，
+# 窗口太窄就只找到元信息行
+_CAPTION_WINDOW = 120.0
+# 表题候选里要跳过的是表格元信息，不是表名
+_CAPTION_NOISE = re.compile(
+    r"^(单位|币种|金额单位|编制单位|审计类型|数据来源|资料来源|注\s*[:：])"
+    r"|^[√□■☑]|^(适用|不适用)|^\d{4}\s*年|^\d+\s*/\s*\d+$"
+)
+# 表题的结构：以「表」结尾（合并资产负债表/母公司利润表）、带（续）、
+# 或以节编号开头（（一）主要会计数据和财务指标）。只认这三种，宁缺毋滥——
+# 认错表题比没有表题更坏，会把别的表的主体安到这张表上
+_CAPTION_SHAPE = re.compile(
+    r"(表$|（续）$"
+    r"|^\(?[一二三四五六七八九十]+[、.]\s*[^\d\s]"
+    r"|^（[一二三四五六七八九十]+）"
+    # 编号后面必须接非数字：「1、截至本报告期末」是标题，「3.1%，较上年…」是句子
+    r"|^\d{1,2}\s*[、.．]\s*[^\d\s])"
+)
+# 以这些标点收尾的是句子/引导语，不是表题：「…如下：」「…提升0.2 个百分点。」
+_CAPTION_SENTENCE = re.compile(r"[。：；，、]$")
+# 表题的长度上限：再长就是正文句子了
+_CAPTION_MAX_CHARS = 40
+# 上一页最后一张表的底边离页底不足这么远，说明它是被页面切断的、不是自己结束的
+_PAGE_BOTTOM_SLACK = 90.0
+# 列名单元格的字数上限：超过基本都是解释性长句
+_HEADER_CELL_MAX = 20
+# 带这些标点的是句子，不是列名。刻意不含「、」「，」——「质押、标记或冻结
+# 情况」这种真列名就用顿号，排掉它反而漏认
+_HEADER_SENTENCE = re.compile(r"[。；！？]")
 # 另一种断法：整数连写、小数点/逗号被画成独立块甩到单元格末尾
 # 「401825 , .」= 4,018.25、「5358 .」= 53.58、「人民币100元 .」= 人民币1.00元
 # （有小数点时末两位是小数，只有逗号时是纯千分位）
@@ -489,7 +632,12 @@ def _find_page_tables(page) -> list:
 def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
     """逐页找表格，返回 (页码, 顶部纵坐标, bbox, 清洗后的二维行)。"""
     out: list[tuple[int, float, tuple, list[list[str]]]] = []
+    heights: dict[int, float] = {}
     for pno in range(doc.page_count):
+        try:
+            heights[pno + 1] = float(doc[pno].rect.height)
+        except Exception:
+            heights[pno + 1] = 0.0
         try:
             tables = _find_page_tables(doc[pno])
         except Exception:
@@ -503,7 +651,178 @@ def _pdf_tables(doc) -> list[tuple[int, float, tuple, list[list[str]]]]:
                 if len(rows) < 2 or max(len(r) for r in rows) < 2:
                     continue
                 out.append((pno + 1, float(bbox[1]), bbox, rows))
+    return _carry_page_headers(out, heights)
+
+
+def _carry_page_headers(
+    tables: list[tuple[int, float, tuple, list[list[str]]]],
+    page_heights: dict[int, float],
+) -> list[tuple[int, float, tuple, list[list[str]]]]:
+    """跨页续表补表头。
+
+    PDF 里一张表排到页底、下一页接着排时，第二页**不重印列名**，抽出来
+    第一行就是数据。原样渲染成 Markdown 后首行被当成表头，于是
+    「基本每股收益（元/股） | 0.01 | …」成了列名，后面所有数字都没有
+    列名可对——而 `_chunk_table` 又会把这一行当表头复制到每一片。
+
+    补的条件同时成立才动手，宁可漏补也不误补：
+    - 表格在页面顶部（续表只会从顶部开始）；
+    - 首行是数据行（含纯数字单元格）；
+    - 上一页最后一张表排到了页底（说明它是被切断的，不是自己结束的）；
+    - 列数与最近一次见到的表头一致。
+    """
+    prev_bottom: dict[int, float] = {}
+    for pno, _y, bbox, _rows in tables:
+        prev_bottom[pno] = float(bbox[3])
+
+    out: list[tuple[int, float, tuple, list[list[str]]]] = []
+    last_header: list[str] | None = None
+    for pno, y, bbox, rows in tables:
+        width = max(len(row) for row in rows)
+        if (
+            y <= _HEAD_CARRY_Y
+            and _is_data_row(rows[0])
+            and last_header is not None
+            and len(last_header) == width
+            and _reached_page_bottom(
+                prev_bottom.get(pno - 1), page_heights.get(pno - 1)
+            )
+        ):
+            rows = [_tidy_header(last_header), *rows]
+        out.append((pno, y, bbox, rows))
+        if _is_header_row(rows[0]):
+            last_header = rows[0]
     return out
+
+
+def _reached_page_bottom(bottom: float | None, height: float | None) -> bool:
+    if not bottom or not height:
+        return False
+    return bottom >= height - _PAGE_BOTTOM_SLACK
+
+
+def _tidy_header(row: list[str]) -> list[str]:
+    """表头首格常和第一条数据粘在一起（「项目流动资产：」），还原成「项目」。"""
+    return [re.sub(r"^项目[^：]{1,10}：$", "项目", cell) if cell else cell for cell in row]
+
+
+def _attach_captions(
+    tables: list[tuple[int, float, tuple, list[list[str]]]],
+    lines: list[sections.Line],
+) -> list[tuple[int, float, tuple, list[list[str]], str | None]]:
+    """给每张表找回表题，返回多带一个 caption 字段的五元组。
+
+    为什么必须做：表格切片的正文只有「项目 | 本期 | 上期」和一堆数字，
+    **表题（「母公司利润表」）不进来**。于是"母公司营业收入是多少"这种问题，
+    数值所在的切片里根本没有"母公司"三个字——向量和关键词都够不着，只能
+    靠相邻的标题切片勉强召回，而那一片没有数值。同理，图谱抽取也拿不到
+    "这张表属于谁"，metric 实体因此连不到 org 上（实测孤立率 44%）。
+
+    用 kept（已剔页眉页脚）而不是原始行：页眉每页重复，直接往上找会把
+    「XX公司2026年第三季度报告」误当表题。
+    """
+    out: list[tuple[int, float, tuple, list[list[str]], str | None]] = []
+    prev_header: list[str] | None = None
+    prev_caption: str | None = None
+    for page, y, bbox, rows in tables:
+        caption = _caption_above(lines, page, y)
+        if (
+            caption is None
+            and y <= _HEAD_CARRY_Y
+            and prev_header is not None
+            and rows[0] == prev_header
+        ):
+            # 跨页续表：表题只在首页印一次。必须同时满足「从页顶开始」和
+            # 「表头与上一张表一致」（_carry_page_headers 补过的表头就是上一张的），
+            # 否则会把上一节的标题安到一张无关的表上——顺丰第 5 页三张
+            # 页顶表就差点被冠上「（二）非经常性损益项目和金额」
+            caption = prev_caption
+        # 只跟紧邻的上一张表接续：中间隔了一张没表题的表，链就断了，
+        # 免得把更早那张表的标题递到后面去
+        prev_caption = caption
+        prev_header = rows[0]
+        out.append((page, y, bbox, rows, caption))
+    return out
+
+
+def _caption_above(lines: list[sections.Line], page: int, y0: float) -> str | None:
+    """在表体上方找最近的一条「像表题」的行，找不到返回 None。
+
+    从近往远走、跳过元信息行：正常的报表上方依次是「单位：千元」「编制单位：」
+    「2026 年1—9 月」，真正的表题在更上面一行。
+    """
+    candidates = [
+        ln
+        for ln in lines
+        if ln.page == page
+        and ln.bbox
+        and y0 - _CAPTION_WINDOW <= ln.bbox[3] <= y0 + 1
+    ]
+    candidates.sort(key=lambda ln: ln.bbox[3], reverse=True)
+    for ln in candidates:
+        text = ln.text.strip()
+        if not text or len(text) > _CAPTION_MAX_CHARS:
+            continue
+        if _CAPTION_NOISE.search(text):
+            continue
+        if _CAPTION_SENTENCE.search(text):
+            continue
+        if _CAPTION_SHAPE.search(text):
+            return text
+    return None
+
+
+# 报表口径：同一个指标在「合并报表」与「母公司报表」里各有一份数，值不一样，
+# 而用户的问法通常不带口径（「中国能建期末现金余额」默认问集团口径）。
+# 不区分会错得毫无痕迹：能建期末现金，母公司 2,721,444、合并 77,436,294，
+# 相差 28 倍，两片都含「期末现金及现金等价物余额」这串字。
+SCOPE_CONSOLIDATED = "consolidated"
+SCOPE_PARENT = "parent"
+_PARENT_SCOPE = re.compile(r"母公司|个别报表|单体报表")
+_CONSOLIDATED_SCOPE = re.compile(r"合并")
+
+
+def _table_scope(caption: str | None) -> str | None:
+    """从表题判断报表口径，判不出返回 None（不猜）。
+
+    只看表题不看表体：表内的「其中：」小计项在两张表里都出现，拿它判口径
+    会把合并表和母公司表判成同一个。
+    """
+    if not caption:
+        return None
+    if _PARENT_SCOPE.search(caption):
+        return SCOPE_PARENT
+    if _CONSOLIDATED_SCOPE.search(caption):
+        return SCOPE_CONSOLIDATED
+    return None
+
+
+def _is_data_row(row: list[str]) -> bool:
+    """数据行：至少有一个纯数字单元格。"""
+    return any(cell and _NUM_ONLY.match(cell) for cell in row)
+
+
+def _is_header_row(row: list[str]) -> bool:
+    """列名行：至少两个非空单元格、不含纯数字、带中文。"""
+    cells = [cell for cell in row if cell]
+    if len(cells) < 2 or _is_data_row(row):
+        return False
+    return any(_CJK_RE.search(cell) for cell in cells)
+
+
+def _headerish_row(row: list[str]) -> bool:
+    """更像列名行：每格都短、都不含数字和句读。
+
+    比 `_is_header_row` 更严，用来在页内认「第二张表的列名」——那里没有
+    重复列名可比，只能看形状。
+    """
+    cells = [cell for cell in row if cell]
+    if len(cells) < 2 or _is_data_row(row):
+        return False
+    return all(
+        len(cell) <= _HEADER_CELL_MAX and not _HEADER_SENTENCE.search(cell)
+        for cell in cells
+    )
 
 
 def _clean_table(raw: list[list[str | None]]) -> list[list[list[str]]]:
@@ -526,8 +845,22 @@ def _clean_table(raw: list[list[str | None]]) -> list[list[list[str]]]:
         part = _merge_header(part)
         part = _split_interleaved(part)
         part = _align_header(part)
-        out.append(_add_kv_header(_drop_empty_cols(part)))
+        out.append(_add_kv_header(_fill_header_corner(_drop_empty_cols(part))))
     return out
+
+
+def _fill_header_corner(rows: list[list[str]]) -> list[list[str]]:
+    """表头左上角空着就补「项目」。
+
+    合并单元格切出来的表头常是「空 | 本报告期末 | 上年度末」——Markdown
+    首行即列名，空着的那格就成了无名列。
+    """
+    if len(rows) < 2 or len(rows[0]) < 3 or rows[0][0]:
+        return rows
+    filled = sum(1 for row in rows[1:] if row[0])
+    if filled * 2 < len(rows) - 1:
+        return rows
+    return [["项目", *rows[0][1:]], *rows[1:]]
 
 
 def _add_kv_header(rows: list[list[str]]) -> list[list[str]]:
@@ -558,16 +891,20 @@ def _kv_headerish(cell: str) -> bool:
 
 
 def _split_repeated_header(rows: list[list[str]]) -> list[list[list[str]]]:
-    """body 里又出现与首行结构相同的表头行 → 从那里断成两张表。
+    """body 里又出现表头行 → 从那里断成两张表。
 
-    判据：非空列与首行完全一致（合并单元格切出来的网格位置都一样），
-    且这些单元格都不是纯数字——否则就是普通数据行。
+    两条判据任一成立即可，但都要求前面已有表体、前面那段表体多数行带
+    数字（数据表才有；释义是整句）：
 
-    释义表（"X 指 Y"）每条的行形状都一样，只靠上面两条会被逐条切开，
-    一张表碎成十几张两行小表。所以还要求：
-    - 重复行与首行有 ≥2 字同名的列名（真表头重印列名；释义表各行词条
-      不同，能对上的只有「指」这种一两字的连接词）；
-    - 前面那段表体多数行带数字（数据表才有；释义是整句）。
+    - **重印列名**：非空列与首行完全一致，且有 ≥2 字同名的列名。这是
+      「同一张表翻页后重印表头」；
+    - **页内叠表**：这一行长得像列名（每格都短、无数字、无句读），且紧
+      挨着的上一行是数据行。这是「上下排的两张表被识成一张」，第二张的
+      列名接在第一张的数据后面，列占用常与首行不同（合并单元格切出的
+      空列位置不一样），所以不能要求列占用一致。
+
+    释义表（"X 指 Y"）每条的行形状都一样，只靠「重印列名」会被逐条切开，
+    一张表碎成十几张两行小表——所以那条还要求 `_same_head_label`。
     """
     if len(rows) < 3:
         return [rows]
@@ -576,13 +913,10 @@ def _split_repeated_header(rows: list[list[str]]) -> list[list[list[str]]]:
     cur: list[list[str]] = [rows[0]]
     for row in rows[1:]:
         cols = {i for i, cell in enumerate(row) if cell}
-        if (
-            cols == head_cols
-            and len(cur) > 1
-            and not any(cell and _NUM_ONLY.match(cell) for cell in row)
-            and _same_head_label(rows[0], row)
-            and _mostly_numeric(cur[1:])
-        ):
+        numeric = any(cell and _NUM_ONLY.match(cell) for cell in row)
+        reprinted = cols == head_cols and _same_head_label(rows[0], row)
+        stacked = _headerish_row(row) and any(_is_data_row(r) for r in cur[-2:])
+        if (reprinted or stacked) and len(cur) > 1 and not numeric and _mostly_numeric(cur[1:]):
             parts.append(cur)
             cur = [row]
         else:

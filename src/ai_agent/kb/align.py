@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from pydantic import BaseModel, Field
@@ -47,6 +48,36 @@ _SOFT_TYPES = {"other", "concept"}
 # 短名参与"包含即合并"的最小长度：「国电」这种 2 字词包含关系太容易误中
 _MIN_CONTAIN_LEN = 4
 
+# 名字本身已经"锁死"语义的类型：差一个字就是另一个东西，不存在"同一实体的
+# 不同写法"。财务科目是最典型的一类——「经营活动现金流入小计」和「流出小计」
+# 的向量相似度高得离谱，「应付职工薪酬」和「长期应付职工薪酬」同理，交给模型
+# 逐对裁决必然出错。实测库里 39 条合并有 32 条是 metric，其中过半是把方向
+# 相反或口径不同的科目并成了一个，整条科目的关系全被串到对面去。
+_RIGID_TYPES = {"metric"}
+
+# 文档内泛指词：「本公司」和「该公司」在同一份文件里可能指向不同主体，
+# 并成一个会让所有关系挂到错的公司在；这类词要归一只能靠指代消解，不是对齐。
+_PRONOUN_NAMES = {
+    "本公司", "该公司", "公司", "本集团", "发行人",
+    "上市公司", "本行", "本基金", "本单位", "本企业",
+}
+
+
+def is_rigid(entity: dict) -> bool:
+    """这个名字是否已精确到「只能和完全同名合并」。
+
+    三条都指向同一件事：字面上差一点，语义上就是另一个对象。
+    - metric 类型（财务科目、指标）；
+    - 文档内泛指词（本公司/该公司）；
+    - 名字基本由数字/日期构成（「2005年」「62,200万千瓦」）。
+    """
+    if entity.get("type") in _RIGID_TYPES:
+        return True
+    name = (entity.get("name") or "").strip()
+    if name in _PRONOUN_NAMES:
+        return True
+    return is_metric_like(name)
+
 _SYSTEM = """你在做实体消歧：判断每一对名称是否指**同一个现实对象**。
 
 判定要点：
@@ -56,7 +87,12 @@ _SYSTEM = """你在做实体消歧：判断每一对名称是否指**同一个�
    型号相近但不同的产品（"iPhone 15" / "iPhone 15 Pro"）、数值型指标的不同口径；
    特别注意：**一个名字是另一个的前缀，不等于同一实体**——「国电电力」是发行人的
    简称，但「国电电力大同发电有限责任公司」是另一家法人，三者不能并成一个；
-3. 拿不准时判 0——错并比漏并更糟，并把两个不相关的部分连成一片。
+3. 产品名的型号后缀（Pro / Max / Plus / Edge / SE / 标准版 / 增强版）不同，
+   一律判 0——「C30」和「C30 Edge」是两款产品；只有中英文对照、
+   「拓展坞 = Hub」这类同义译名才算同一产品；
+4. 财务科目、报表行一律判 0：「经营活动现金流入」与「流出」、「应付职工薪酬」
+   与「长期应付职工薪酬」都是两张不同的行，方向或口径变了就是另一个数；
+5. 拿不准时判 0——错并比漏并更糟，会把两个不相关的部分连成一片。
 
 只输出一行 JSON：{"same":[1,0,1,...]}，个数与输入对数一致，1=同一个，0=不同。
 不要解释、不要 Markdown 代码块。"""
@@ -109,6 +145,48 @@ def looks_like_subunit(short: str, long_: str) -> bool:
     return rest.endswith(_SUBUNIT_TAIL)
 
 
+# 限定词放在短名前面 = 另一个东西：「应付职工薪酬」和「长期应付职工薪酬」
+# 是两张报表行（流动/非流动），「期末现金」和「期初现金」是两个时点。
+# 这类名字在字面上是「包含」关系，包含规则会一路放行到模型面前。
+_QUALIFIER_PREFIX = (
+    "长期", "短期", "期初", "期末", "年初", "年末", "本期", "上期",
+    "非流动", "流动", "其他", "其中", "净", "总",
+)
+
+
+def has_qualifier_prefix(short: str, long_: str) -> bool:
+    """长名 = 限定词 + 短名：限定词改变了语义，不是同一实体的两种写法。
+
+    只处理「限定词在前、短名在后」这一侧；短名在前缀、只多出通用法人后缀的
+    情形由 `pure_suffix_extension` 判定为同一实体，两者互补。
+    """
+    if short == long_ or not long_.endswith(short):
+        return False
+    head = long_[: len(long_) - len(short)]
+    return any(head.startswith(q) for q in _QUALIFIER_PREFIX)
+
+
+_DIGIT_RUN = re.compile(r"\d+(?:\.\d+)?")
+
+
+def number_conflict(a: str, b: str) -> bool:
+    """两个名字里的数字对不上 → 不是同一个东西。
+
+    「ActiveShield™4.0 温控系统」和「5.0」只差一个数字，向量相似度 0.93、
+    模型也判了同一个，但这是两代产品。同理「第1期回购」vs「第2期回购」
+    是两个方案。
+
+    判据用「数字集合互不包含」而不是「不等」：「A股回购股份」与
+    「2025年第1期A股回购股份方案」一边没有数字，简称补上年份/期数是
+    正常写法，放行。
+    """
+    na = set(_DIGIT_RUN.findall(a or ""))
+    nb = set(_DIGIT_RUN.findall(b or ""))
+    if not na or not nb:
+        return False
+    return not (na <= nb or nb <= na)
+
+
 def pure_suffix_extension(short: str, long_: str) -> bool:
     """短名是全称的前缀，且剩下那截只是通用法人后缀（没有加地名/厂名）。
 
@@ -130,6 +208,39 @@ def pure_suffix_extension(short: str, long_: str) -> bool:
         else:
             return False
     return True
+
+
+# 产品/技术类名字：同一个品牌前缀挂着一串型号，字面上高度相似，但都是不同的东西。
+# 这类不能交给模型裁决——本地 7b 看到「Anker」「Anker Travel Charging Station」
+# 「Anker Universal Charger」会把它们连成一个簇，品牌点吞掉全部产品。
+_SKU_TYPES = {"product", "technology"}
+
+
+def looks_like_different_sku(a: str, b: str) -> bool:
+    """两个产品名是不是「同品牌不同型号」。
+
+    三种形态都算（都已归一化成小写、无标点）：
+    1. 一个名字是另一个的前缀，尾巴不是通用后缀（「Anker」vs「Anker Travel
+       Charging Station」）——品牌挂型号；
+    2. 共享一段够长的开头，但谁也不包含谁（「Anker Universal Charger」vs
+       「Anker Travel Charging Station」）——同品牌的两个型号；
+    3. 一个名字是另一个加了尾巴（「X 充电器」vs「X 充电器 Pro」）。
+    只有「拓展坞」和「Hub」这种一个字都不共用的同义译名才放行——那种情况
+    本来也过不了前缀判据。
+    """
+    if not a or not b or a == b:
+        return False
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    if name_contained(a, b):
+        # 包含关系里，前缀扩展只在「尾巴是通用法人后缀」时才算同一实体；
+        # 产品名没有法人后缀这一说，所以一律按不同型号处理
+        return not pure_suffix_extension(short, long_)
+    common = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            break
+        common += 1
+    return common >= _MIN_CONTAIN_LEN
 
 
 def candidate_pairs(
@@ -161,16 +272,25 @@ def candidate_pairs(
             continue
         if not type_compatible(a["type"], b["type"]):
             continue
-        # 两个"名字基本是数字/日期"的实体，只有一字不差才可能同一个
-        if is_metric_like(a["name"]) and is_metric_like(b["name"]):
+        # 语义已锁死的名字（metric / 泛指词 / 纯数值）不进候选：
+        # 它们之间「相似」几乎总是意味着「不同」，问模型只会被带偏
+        if is_rigid(a) or is_rigid(b):
             continue
+        # 数字对不上（4.0 vs 5.0、第1期 vs 第2期）是不同对象，问模型也会被判成
+        if number_conflict(a["name"], b["name"]):
+            continue
+        norm_a = a.get("norm_name") or normalize_name(a["name"])
+        norm_b = b.get("norm_name") or normalize_name(b["name"])
+        # 同品牌不同型号：字面高度相似、向量也近，但都是独立产品。
+        # 交给模型裁决时 7b 会把品牌点和整串型号连成一个簇
+        if a["type"] in _SKU_TYPES and b["type"] in _SKU_TYPES:
+            if looks_like_different_sku(norm_a, norm_b):
+                continue
         # 概念/指标类只认字面包含：模型在"其他应付款 vs 应付账款"、
         # "东北地区 vs 华北地区"这种同领域近邻上判错过太多次，光靠向量
         # 相似度过不了这道关
         if a["type"] in _SOFT_TYPES and b["type"] in _SOFT_TYPES:
-            na = a.get("norm_name") or normalize_name(a["name"])
-            nb = b.get("norm_name") or normalize_name(b["name"])
-            if not name_contained(na, nb):
+            if not name_contained(norm_a, norm_b):
                 continue
         key = _pair_key(src, dst)
         if key in out:
@@ -186,12 +306,23 @@ def candidate_pairs(
             norm_b = b.get("norm_name") or normalize_name(b["name"])
             if not type_compatible(a["type"], b["type"]):
                 continue
+            if is_rigid(a) or is_rigid(b):
+                continue
+            if number_conflict(a["name"], b["name"]):
+                continue
             if not name_contained(norm_a, norm_b):
                 continue
             short, long_ = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
             # 前缀 + 厂/部/分公司 = 下属单位，连候选都不进
             if looks_like_subunit(short, long_):
                 continue
+            # 限定词 + 短名 = 另一个科目/另一个口径（长期↔短期、期初↔期末）
+            if has_qualifier_prefix(short, long_):
+                continue
+            # 同品牌不同型号（Anker / Anker Travel Charging Station）
+            if a["type"] in _SKU_TYPES and b["type"] in _SKU_TYPES:
+                if looks_like_different_sku(norm_a, norm_b):
+                    continue
             key = _pair_key(str(a["id"]), str(b["id"]))
             # 纯通用后缀扩展（简称 + 发展股份有限公司）是最可靠的一类，给最高分：
             # 排序靠前，簇容量截断时先保它
@@ -293,6 +424,8 @@ def judge_pairs(pairs: list[dict]) -> list[bool]:
                 timeout=settings.kg_align_timeout_seconds,
                 max_retries=0,
                 max_tokens=256,
+                # 裁决共用抽取温度（0）：并错一对就丢一个实体，且合并不可逆
+                temperature=settings.kb_graph_temperature,
                 extra_body={"enable_thinking": False},
             )
             data = load_llm_json(raw)

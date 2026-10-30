@@ -34,7 +34,7 @@ def main() -> int:
     with store._get_pool().connection() as conn:
         rows = conn.execute(
             """
-            SELECT c.id, c.text, c.page, c.kind, f.filename
+            SELECT c.id, c.text, c.page, c.kind, c.section, f.filename
             FROM agent_kb_chunk c
             JOIN agent_kb_file f ON f.id = c.file_id
             WHERE f.status = 'ready'
@@ -57,6 +57,9 @@ def main() -> int:
                     filename=row["filename"] or "",
                     page=row["page"],
                     kind=row["kind"],
+                    # 章节必须一起传：写入路径（pipeline）带了它，
+                    # 这里漏传就等于同一片文本算出两套向量
+                    section=row["section"],
                 )
                 for row in part
             ]

@@ -244,6 +244,26 @@ def test_chunk_long_table_repeats_header():
     assert all(c.kind == "table" for c in chunks)
 
 
+def test_chunk_long_table_repeats_caption_too():
+    """表题（「母公司利润表」）要跟着每一片走。
+
+    否则长表切完之后，后半张表的切片只剩「项目 | 本期 | 上期 + 数字」，
+    「母公司」三个字不在正文里，检索和实体抽取都看不出这张表属于谁。
+    """
+    rows = "\n".join(f"| 项目{year} | {year} |" for year in range(2000, 2060))
+    text = "母公司利润表\n| 项目 | 本期 |\n|---|---|\n" + rows
+    chunks = chunk_segments([Segment(text, 16, "table")], max_chars=200)
+    assert len(chunks) > 1
+    assert all(c.text.startswith("母公司利润表\n| 项目 | 本期 |") for c in chunks)
+
+
+def test_chunk_short_table_with_caption_stays_one_piece():
+    text = "母公司利润表\n| 项目 | 本期 |\n|---|---|\n| 营业收入 | 1 |"
+    chunks = chunk_segments([Segment(text, 16, "table")], max_chars=500)
+    assert len(chunks) == 1
+    assert chunks[0].text.startswith("母公司利润表")
+
+
 def test_format_hit_labels_content_kind():
     base = {"filename": "报告.pdf", "seq": 0, "text": "内容"}
     assert _format_hit({**base, "kind": "text", "page": 3}) == "[报告.pdf · 第3页]\n内容"

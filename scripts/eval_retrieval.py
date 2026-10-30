@@ -18,6 +18,9 @@
 用「；」把两句拼起来——拼接串永远不会出现在单个切片里，那条用例从
 写下的那一刻就不可能命中。
 
+指标：hit@1 / hit@3 / hit@k 看"能不能查到"，recall@10 看"证据够不够
+模型答全"，MRR@10 看"排得多靠前"——三档都命中时靠 MRR 分辨优劣。
+
 用法：
     uv run python scripts/eval_retrieval.py            # 全量评测（默认关重排，纯检索质量）
     uv run python scripts/eval_retrieval.py --validate # 只校验用例与语料是否对齐
@@ -152,31 +155,44 @@ def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
         # 预热连接与模型路径，避免首例冷启动拉高波动
         embed_texts(["预热"])
 
-    n1 = n3 = nk = 0
+    # 观察窗口至少 10：Recall@10 / MRR@10 需要看到第 10 名，而 hit@1/3/5
+    # 只取前几条。一次检索拿满窗口，指标在本地切片算，不多花调用
+    window = max(top_k, 10)
+    n1 = n3 = nk = n10 = 0
+    rr = 0.0
     failures: list[str] = []
-    print(f"{'query':<28} hit@  命中位置")
-    print("-" * 64)
+    print(f"{'query':<30} hit@  命中位置")
+    print("-" * 70)
     for case in cases:
-        hits = retrieval.search_knowledge(case["query"], top_k=top_k)
+        hits = retrieval.search_knowledge(case["query"], top_k=window)
         rank = hit_rank(hits, case["expect"])
 
         at1 = rank == 1
         at3 = rank is not None and rank <= 3
-        atk = rank is not None
+        atk = rank is not None and rank <= top_k
+        at10 = rank is not None and rank <= 10
         n1 += at1
         n3 += at3
         nk += atk
+        n10 += at10
+        # 跨多条证据时 rank 是"最后一条凑齐"的位置，用它算 MRR 与
+        # "证据全部可见"的体验一致（只要有片段没进窗口，模型就答不全）
+        rr += 1.0 / rank if rank else 0.0
         shown = f"#{rank}" if rank is not None else "miss"
-        print(f"{case['query']:<28} {'✓' if atk else '✗'}   {shown}/{len(hits)}")
+        print(f"{case['query'][:28]:<30} {'✓' if atk else '✗'}   {shown}/{len(hits)}")
         if not at3:
             failures.append(case["query"])
 
     total = len(cases)
-    print("-" * 64)
+    print("-" * 70)
     print(
         f"用例 {total} 条 | hit@1 {n1}/{total} ({n1 / total:.0%}) | "
         f"hit@3 {n3}/{total} ({n3 / total:.0%}) | hit@{top_k} {nk}/{total} ({nk / total:.0%})"
+        f" | recall@10 {n10}/{total} ({n10 / total:.0%})"
     )
+    # MRR 比 hit@k 更细：同样"都命中了"，排第 1 和第 5 的差别要能看出来，
+    # 否则调参到最后几名来回挪，hit@k 一动不动
+    print(f"MRR@10 {rr / total:.3f}")
     if failures:
         print(f"hit@3 未通过：{'、'.join(failures)}")
     ok = n3 / total >= HIT3_THRESHOLD

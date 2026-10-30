@@ -6,6 +6,14 @@
 一起误杀（实测只剩 12 节），所以判据必须是「字号 + 纵向位置 + 编号正则」
 三者组合，文本重复只能作辅助。
 
+两级标题都要认，因为两类文档的骨架不一样：
+- 招股书用「第X节」做一级，节内再用「一、（一）」细分；
+- 定期报告（季报/年报）**没有「第X节」**，一级就是「一、主要财务数据」，
+  二级是「（一）主要会计数据和财务指标」。只认「第X节」时，三份季报的
+  71/74/61 个切片一个章节名都没有，图谱 prompt 只能给「第 N 段」。
+所以「有没有第X节」决定中文序号算一级还是二级，两级都带上：切片的
+section 形如「第十节 管理层讨论与分析 · （一）主营业务」。
+
 同样的噪声也是图谱里「管理层讨论与分析」「其他事项说明」这类章节名
 实体的来源——它们本来就该是切片的 section 标签，而不是正文内容。
 
@@ -31,6 +39,10 @@ logger = get_logger(__name__)
 
 # 一级节标题：第X节 / 第X章（招股书用「节」，公司章程类文档用「章」）
 _SEC_L1 = re.compile(r"^(第[一二三四五六七八九十百]+[节章])(.*)$")
+# 中文序号标题：「一、主要财务数据」（一级，或招股书里的节内一级细分）
+_CN_TOP = re.compile(r"^([一二三四五六七八九十]+、)\s*(.*)$")
+# 括号序号标题：「（一）主要会计数据和财务指标」（二级）
+_CN_SUB = re.compile(r"^（([一二三四五六七八九十]+)）\s*(.*)$")
 # 目录行的点线引导符：………… 或 …… 或 .....
 _TOC_DOTS = re.compile(r"[.．·…]{3,}")
 # 纯页码 / 页脚编号：1-1-141、- 12 -
@@ -41,6 +53,13 @@ REPEAT_TOP_RATIO = 0.09  # 跨页重复文本只在贴顶时才当页眉
 BOTTOM_RATIO = 0.90  # 页脚区：页面下部 10%（实测页码 y=0.93）
 HEADING_SCALE = 1.2  # 标题字号至少是正文的 1.2 倍（12pt 正文 → 14.4pt 起）
 MAX_TITLE_LEN = 40  # 标题不会太长
+# 标题行不会以句读收尾；「一、经营活动产生的现金流量：」是报表行不是标题，
+# 靠这条和表格行剔除双重挡住（中文序号标题在季报里字号与正文一致，字号
+# 判据在这里不起作用，只能靠「形状」）
+_NOT_HEADING_TAIL = re.compile(r"[，,、。；;：:！？]$")
+# 标题里不出现句中停顿：正文整句被折行后常以「二、…」开头，
+# 「二、公司实现营业收入12 亿元，同比增长」这种靠逗号识别
+_NOT_HEADING_INNER = re.compile(r"[，,。；;]")
 
 
 @dataclass(frozen=True)
@@ -65,12 +84,22 @@ class Section:
     title: str  # 「管理层讨论与分析」
     start_page: int
     end_page: int = 0
+    # 二级标题（「一、主要财务数据」「（一）非经常性损益项目和金额」）。
+    # 季报没有第X节，此时 id/title 直接放中文序号标题，sub 放括号标题
+    sub: str = ""
     lines: list[Line] = field(default_factory=list)
 
     @property
     def path(self) -> str:
-        """切片/引用用的章节标签：「第十节 管理层讨论与分析」。"""
-        return f"{self.id} {self.title}".strip()
+        """切片/引用用的章节标签：「第十节 管理层讨论与分析」「一、主要财务数据」。"""
+        # 「一、」自带分隔符，再加空格会变成「一、 主要财务数据」
+        sep = "" if self.id.endswith("、") else " "
+        return f"{self.id}{sep}{self.title}".strip()
+
+    @property
+    def label(self) -> str:
+        """带二级标题的完整标签：没有二级标题时与 path 一致。"""
+        return f"{self.path} · {self.sub}" if self.sub and self.path else (self.path or self.sub)
 
 
 def extract_lines(doc) -> list[Line]:
@@ -106,6 +135,28 @@ def is_l1_heading(ln: Line, body: float) -> bool:
         and len(ln.norm) <= MAX_TITLE_LEN
         and ln.size >= body * HEADING_SCALE
     )
+
+
+def _cn_heading(ln: Line) -> tuple[int, str, str] | None:
+    """中文序号标题：返回 (层级, 标记, 标题)。
+
+    层级 1 = 「一、」，2 = 「（一）」。字号不参与判定——季报里一级标题
+    和正文同为 10.4pt（实测中国能建），只能靠「短 + 不带句读」的形状。
+    正文里偶尔以「一、」开头的整句，因为带逗号/句号会被 _NOT_HEADING_TAIL
+    和 _NOT_HEADING_INNER 挡掉。
+    """
+    if len(ln.norm) > MAX_TITLE_LEN:
+        return None
+    text = ln.text.strip()
+    if _NOT_HEADING_TAIL.search(text) or _NOT_HEADING_INNER.search(ln.norm):
+        return None
+    m = _CN_TOP.match(ln.norm)
+    if m:
+        return 1, m.group(1), m.group(2)
+    m = _CN_SUB.match(ln.norm)
+    if m:
+        return 2, f"（{m.group(1)}）", m.group(2)
+    return None
 
 
 def strip_noise(lines: list[Line], body: float) -> tuple[list[Line], dict[str, int]]:
@@ -159,32 +210,58 @@ def strip_noise(lines: list[Line], body: float) -> tuple[list[Line], dict[str, i
 
 
 def group_by_section(lines: list[Line], body: float) -> list[Section]:
-    """按一级节切分。识别不到任何标题时返回单组（id 为空），由调用方降级。
+    """按标题切分。识别不到任何标题时返回单组（id 为空），由调用方降级。
+
+    切分点包括一级标题（第X节 / 无「第X节」时的「一、」）和二级标题
+    （「一、」/「（一）」）。一个页面里有几个二级标题就出几段，切片不会
+    跨小节拼接——「（二）非经常性损益项目和金额」的表格不该和
+    「（一）主要会计数据和财务指标」的正文混进同一片。
 
     空章节也保留：亚厦招股书第十五章那 7 页是扫描件签名页，只有标题行、
     正文是图片，丢掉它会让章节树少一章，反而更难排查。
     """
+    if not lines:
+        return []
+    # 文档骨架有没有「第X节」决定中文序号是几级标题
+    has_l1 = any(is_l1_heading(ln, body) for ln in lines)
+
     sections: list[Section] = []
-    current = Section("", "", start_page=lines[0].page if lines else 1)
+    l1_id, l1_title, sub = "", "", ""
+    current = Section("", "", start_page=lines[0].page)
     for ln in lines:
-        if not is_l1_heading(ln, body):
+        heading: tuple[str, str, str, str] | None = None  # kind, id, title, sub
+        if is_l1_heading(ln, body):
+            m = _SEC_L1.match(ln.norm)
+            sid, title = (m.group(1), m.group(2)) if m else (ln.norm, "")
+            if sid != l1_id:  # 同一节标题每页重复时忽略（字号也放大的排版）
+                heading = ("l1", sid, title, "")
+        else:
+            cn = _cn_heading(ln)
+            if cn:
+                level, mark, title = cn
+                if level == 1 and not has_l1:
+                    if mark != l1_id:
+                        heading = ("l1", mark, title, "")
+                elif mark != sub:
+                    heading = ("sub", l1_id, l1_title, f"{mark}{title}")
+        if heading is None:
             current.lines.append(ln)
             continue
-        m = _SEC_L1.match(ln.norm)
-        sid, title = (m.group(1), m.group(2)) if m else (ln.norm, "")
-        # 同一节标题重复出现（个别文档每页重复且字号也放大）时忽略
-        if sections and sections[-1].id == sid:
-            continue
+        kind, sid, title, new_sub = heading
+        if kind == "l1":
+            l1_id, l1_title, sub = sid, title, ""
+        else:
+            sub = new_sub
         current.end_page = max(ln.page, current.end_page)
         sections.append(current)
-        current = Section(sid, title, start_page=ln.page)
+        current = Section(l1_id, l1_title, start_page=ln.page, sub=sub)
     current.end_page = max((ln.page for ln in current.lines), default=current.start_page)
     sections.append(current)
 
     for sec in sections:
         if sec.lines:
             sec.end_page = max(ln.page for ln in sec.lines)
-    found = sum(1 for s in sections if s.id)
+    found = sum(1 for s in sections if s.path)
     if not found:
-        logger.info("未识别到一级节标题（可能无字号元信息），降级为按页切分")
+        logger.info("未识别到节标题（可能无字号元信息），降级为按页切分")
     return sections

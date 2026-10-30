@@ -7,10 +7,14 @@ PDF 里没有「表格」对象，pymupdf 反推出来的单元格带着一堆�
 
 from ai_agent.kb.parsing import (
     _align_header,
+    _attach_captions,
+    _caption_above,
+    _carry_page_headers,
     _clean_cell,
     _clean_table,
     _drop_empty_cols,
     _drop_table_lines,
+    _fill_header_corner,
     _find_page_tables,
     _header_has_cjk,
     _merge_header,
@@ -18,6 +22,7 @@ from ai_agent.kb.parsing import (
     _pdf_glossary_tables,
     _rows_to_markdown,
     _split_repeated_header,
+    _tidy_header,
     _word_lines,
 )
 from ai_agent.kb.sections import Line
@@ -234,6 +239,104 @@ def test_split_repeated_header_separates_stacked_tables():
     assert len(parts) == 2
     assert parts[0][0] == rows[0]
     assert parts[1] == [rows[3], rows[4]]
+
+
+def test_split_repeated_header_accepts_new_header_with_other_column_layout():
+    """三季度报第 2 页：EPS 表下面直接接「资产负债表摘要」。
+
+    第二段的列名跟首行对不上（「本报告期末」vs「本报告期」，空列位置
+    也不同），只能靠「长得像列名 + 上一行是数据」认出来。
+    """
+    rows = [
+        ["项目", "本报告期", "增减(%)", "年初至报告期末", "增减(%)"],
+        ["营业收入", "100,924,954", "-9.45", "309,237,206", "-4.42"],
+        ["利润总额", "1,823,608", "-6.22", "7,633,400", "-10.27"],
+        ["", "本报告期末", "上年度末", "", "增减幅度(%)"],
+        ["总资产", "993,101,072", "941,597,382", "", "5.47"],
+    ]
+    parts = _split_repeated_header(rows)
+    assert len(parts) == 2
+    assert parts[0][1:] == rows[1:3]
+    assert parts[1] == rows[3:5]
+
+
+def test_split_repeated_header_keeps_plain_data_table_intact():
+    # 每行都是数据，没有列名形状的行：不许切
+    rows = [
+        ["项目", "本期", "上期"],
+        ["营业收入", "100", "90"],
+        ["营业成本", "60", "55"],
+        ["毛利率", "40.00%", "38.89%"],
+    ]
+    assert len(_split_repeated_header(rows)) == 1
+
+
+def test_split_repeated_header_keeps_sentence_rows_in_one_table():
+    # 释义表：行的形状一样但没有数字，不该被逐条切开
+    rows = [
+        ["术语", "指"],
+        ["发行人", "指本公司的全称"],
+        ["证监会", "指中国证券监督管理委员会"],
+        ["交易所", "指上海证券交易所"],
+    ]
+    assert len(_split_repeated_header(rows)) == 1
+
+
+def test_carry_page_headers_prepends_header_to_continuation():
+    header = ["项目", "本报告期", "年初至报告期末"]
+    prev = (1, 577.0, (0.0, 577.0, 500.0, 800.0), [header, ["营业收入", "100", "309"]])
+    cont = (2, 72.0, (0.0, 72.0, 500.0, 300.0), [["基本每股收益", "0.01", "0.06"]])
+    out = _carry_page_headers([prev, cont], {1: 842.0, 2: 842.0})
+    assert out[1][3][0] == header
+    assert out[1][3][1] == ["基本每股收益", "0.01", "0.06"]
+
+
+def test_carry_page_headers_skips_when_previous_table_ended_midpage():
+    # 上一页的表在页中结束（528 < 842-90），说明它没被切断，下一张不是它的续表
+    header = ["项目", "本报告期", "年初至报告期末"]
+    prev = (1, 300.0, (0.0, 300.0, 500.0, 528.0), [header, ["a", "1", "2"]])
+    cont = (2, 72.0, (0.0, 72.0, 500.0, 300.0), [["b", "3", "4"]])
+    out = _carry_page_headers([prev, cont], {1: 842.0, 2: 842.0})
+    assert out[1][3] == [["b", "3", "4"]]
+
+
+def test_carry_page_headers_skips_width_mismatch():
+    header = ["项目", "本报告期", "年初至报告期末"]
+    prev = (1, 577.0, (0.0, 577.0, 500.0, 800.0), [header, ["a", "1", "2"]])
+    cont = (2, 72.0, (0.0, 72.0, 500.0, 300.0), [["b", "3", "4", "5"]])
+    out = _carry_page_headers([prev, cont], {1: 842.0, 2: 842.0})
+    assert len(out[1][3]) == 1
+
+
+def test_carry_page_headers_skips_table_starting_midpage():
+    header = ["项目", "本报告期", "年初至报告期末"]
+    prev = (1, 577.0, (0.0, 577.0, 500.0, 800.0), [header, ["a", "1", "2"]])
+    cont = (1, 500.0, (0.0, 500.0, 500.0, 700.0), [["b", "3", "4"]])
+    out = _carry_page_headers([prev, cont], {1: 842.0})
+    assert out[1][3] == [["b", "3", "4"]]
+
+
+def test_carry_page_headers_never_borrows_a_data_row():
+    # 上一张表自己就没表头（首行是数据），拿它当列名只会把错的东西固化
+    prev = (1, 577.0, (0.0, 577.0, 500.0, 800.0), [["营业收入", "100", "309"]])
+    cont = (2, 72.0, (0.0, 72.0, 500.0, 300.0), [["总资产", "1", "2"]])
+    out = _carry_page_headers([prev, cont], {1: 842.0, 2: 842.0})
+    assert out[1][3] == [["总资产", "1", "2"]]
+
+
+def test_tidy_header_restores_item_label_glued_to_first_row():
+    assert _tidy_header(["项目流动资产："]) == ["项目"]
+    assert _tidy_header(["项目", "期末余额"]) == ["项目", "期末余额"]
+
+
+def test_fill_header_corner_names_the_empty_corner():
+    rows = [["", "本报告期末", "上年度末"], ["总资产", "993", "941"], ["负债", "500", "480"]]
+    assert _fill_header_corner(rows)[0][0] == "项目"
+
+
+def test_fill_header_corner_skips_when_first_column_is_empty():
+    rows = [["", "期末", "期初"], ["", "993", "941"]]
+    assert _fill_header_corner(rows)[0][0] == ""
 
 
 def test_clean_table_returns_one_part_for_plain_table():
@@ -577,3 +680,63 @@ def test_add_kv_header_skips_table_with_real_header():
     for header in (["指标", "数值"], ["词语", "含义"]):
         rows = _clean_table([header, ["国电集团", "中国国电集团公司"]])[0]
         assert rows[0] == header
+
+
+# --- 表题（caption）--------------------------------------------------------
+# 实录：能建三季报 p16，表体从 136.8pt 开始，上方依次是
+# 「母公司利润表」「2026 年1—9 月」「编制单位：…」「单位：千元…」。
+# 没有表题时，母公司利润表的切片里一个「母公司」都没有。
+
+
+def test_caption_above_skips_unit_and_date_lines():
+    lines = [
+        line("母公司利润表", 16, 0.09, (60.0, 78.8, 300.0, 90.0)),
+        line("2026 年1—9 月", 16, 0.11, (60.0, 92.9, 300.0, 104.0)),
+        line("编制单位：中国能源建设股份有限公司", 16, 0.13, (60.0, 110.0, 400.0, 122.0)),
+        line("单位：千元币种：人民币审计类型：未经审计", 16, 0.15, (60.0, 124.0, 500.0, 136.0)),
+    ]
+    assert _caption_above(lines, 16, 137.0) == "母公司利润表"
+
+
+def test_caption_above_accepts_section_heading():
+    # 正文数据表没有「XX表」的表题，最近的一行是节标题
+    lines = [line("（一）主要会计数据和财务指标", 1, 0.5, (60.0, 500.0, 400.0, 512.0))]
+    assert _caption_above(lines, 1, 577.0) == "（一）主要会计数据和财务指标"
+
+
+def test_caption_above_ignores_body_sentence():
+    # 「…如下：」是正文，不是表题；认错表题会把别的主体安到这张表上
+    lines = [line("报告期内公司主要经营情况如下：", 3, 0.1, (60.0, 100.0, 400.0, 110.0))]
+    assert _caption_above(lines, 3, 130.0) is None
+
+
+def test_caption_above_ignores_other_pages_and_far_lines():
+    lines = [line("合并资产负债表", 7, 0.2, (60.0, 180.0, 300.0, 192.0))]
+    assert _caption_above(lines, 8, 240.0) is None
+    # 超出窗口（120pt）不算：那是上一张表的标题
+    assert _caption_above(lines, 7, 400.0) is None
+
+
+def test_attach_captions_inherits_title_for_page_top_continuation():
+    """跨页续表：表题只在首页印一次，后续页从页顶接着排。"""
+    header = ["项目", "2026年9月30日"]
+    tables = [
+        (7, 240.0, (0.0, 240.0, 500.0, 800.0), [header, ["营业收入", "1"]]),
+        (8, 76.0, (0.0, 76.0, 500.0, 700.0), [header, ["总资产", "2"]]),
+    ]
+    lines = [line("合并资产负债表", 7, 0.2, (60.0, 180.0, 300.0, 192.0))]
+    out = _attach_captions(tables, lines)
+    assert out[0][4] == "合并资产负债表"
+    assert out[1][4] == "合并资产负债表"
+
+
+def test_attach_captions_does_not_borrow_for_midpage_table():
+    """页中开始的表是新表，不能套上一张表的表题。"""
+    tables = [
+        (7, 240.0, (0.0, 240.0, 500.0, 400.0), [["项目", "值"], ["营业收入", "1"]]),
+        (7, 600.0, (0.0, 600.0, 500.0, 760.0), [["项目", "值"], ["手续费收入", "2"]]),
+    ]
+    lines = [line("合并资产负债表", 7, 0.2, (60.0, 180.0, 300.0, 192.0))]
+    out = _attach_captions(tables, lines)
+    assert out[0][4] == "合并资产负债表"
+    assert out[1][4] is None

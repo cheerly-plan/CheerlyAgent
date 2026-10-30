@@ -13,6 +13,7 @@ from ai_agent.kb import graph
 from ai_agent.kb.chunking import Chunk
 from ai_agent.kb.graph import build_file_graph, normalize_name
 from ai_agent.kb.graph_store import KgStore
+from ai_agent.memory import parse
 from ai_agent.tools.registry import TOOLS_MAP
 
 
@@ -63,12 +64,15 @@ def test_build_file_graph_merges_and_links(monkeypatch):
     counts = build_file_graph(uuid.uuid4(), [Chunk(body), Chunk(body)])
 
     # DRAM 两条合并成一个；「报告」被停用词表过滤
-    assert counts["entities"] == 2
     names = {e["name"] for e in captured["entities"]}
-    assert names == {"长鑫存储", "DRAM"}
-    # 重复关系去重，指向不存在实体/自身的关系被丢弃
-    assert counts["relations"] == 1
-    assert captured["relations"][0]["relation"] == "生产"
+    assert names == {"长鑫存储", "DRAM", "不存在的实体"}
+    # 「不存在的实体」只在关系里出现过：收尾时补成桩实体，让这条关系落地，
+    # 而不是连同关系一起消失（见 _GraphAccumulator.finalize）
+    stub = next(e for e in captured["entities"] if e["name"] == "不存在的实体")
+    assert stub["type"] == "other"
+    # 重复关系去重（同一 source/target/relation 只留一条）
+    assert counts["relations"] == 2
+    assert {r["relation"] for r in captured["relations"]} == {"生产", "投资"}
     # 合并后描述取更长的那个
     dram = next(e for e in captured["entities"] if e["name"] == "DRAM")
     assert "动态随机存储器" in dram["description"]
@@ -431,7 +435,7 @@ def test_parse_extraction_rejects_unknown_shape():
 
 
 def test_bad_output_splits_batch_and_offsets_chunk(monkeypatch):
-    """上下文吃紧时模型会换个 schema：拆半重试，且后半的片段序号要偏移回来。
+    """上下文吃紧时模型会换个 schema：先重问，再拆半；后半的片段序号要偏移回来。
 
     旧实现直接把这种批当"没有实体"丢掉——静默丢人比慢更糟。
     """
@@ -440,7 +444,7 @@ def test_bad_output_splits_batch_and_offsets_chunk(monkeypatch):
     def fake_complete(messages, **kwargs):
         prompt = messages[-1]["content"]
         calls.append(prompt.count("[0]") + prompt.count("[1]") + prompt.count("[2]") + prompt.count("[3]"))
-        if prompt.count("\n[") >= 4:  # 整批 → 模型跑偏
+        if prompt.count("\n[") >= 4:  # 整批（含重问）→ 模型始终跑偏
             return '{"公司": ["发行人"], "关系": []}'
         return '{"e": [["发行人马甲公司", "org", "发行人", 0]], "r": []}'
 
@@ -448,7 +452,8 @@ def test_bad_output_splits_batch_and_offsets_chunk(monkeypatch):
     chunks = [Chunk(_long_text(f"片段{i}")) for i in range(4)]
     result = graph._extract_batch(chunks, 0, "你是抽取器")
 
-    assert len(calls) == 3  # 1 次整批失败 + 2 次半批
+    # 整批失败 1 次 + 原样重问 1 次 + 两个半批各 1 次
+    assert len(calls) == 4
     assert len(result.entities) == 2
     # 后半批的 chunk=0 要加上偏移，指回原批的第 2 个片段
     assert [e.chunk for e in result.entities] == [0, 2]
@@ -459,7 +464,7 @@ def test_low_value_chunks_are_filtered_before_llm(monkeypatch):
     monkeypatch.setattr(settings, "kb_graph_min_chunk_chars", 40)
     seen: list[str] = []
 
-    def fake_extract(batch, start_seq, _depth=0):
+    def fake_extract(batch, start_seq, _depth=0, **_kw):
         seen.extend(c.text for c in batch)
         from ai_agent.kb.graph import _Extraction
 
@@ -485,7 +490,7 @@ def test_graph_flushes_progressively(monkeypatch):
     monkeypatch.setattr(
         graph,
         "_extract_batch",
-        lambda batch, start_seq, _depth=0: __import__(
+        lambda batch, start_seq, _depth=0, **_kw: __import__(
             "ai_agent.kb.graph", fromlist=["_Extraction"]
         )._Extraction(
             entities=[
@@ -604,3 +609,315 @@ def test_unknown_doc_type_falls_back_to_general(monkeypatch):
 
     assert counts == {"entities": 0, "relations": 0}
     assert "通用商业文档" in seen["system"]
+
+
+# ---------- 坏输出修复：裸词补引号 / 截断补括号 ----------
+
+
+def test_repair_json_quotes_bare_tokens():
+    """本地模型偶发把中文名裸着写，一行坏掉会让整批实体丢失。"""
+    raw = '{"e":[["甲公司","org","",0]],"r":[["甲公司","由",乙公司,1,0]]}'
+    assert parse.load_llm_json(raw) is None  # 严格模式：确实是坏 JSON
+    data = parse.load_llm_json(raw, repair=True)
+    assert [r[1] for r in data["r"]] == ["由"]
+    assert data["r"][0][2] == "乙公司"
+
+
+def test_repair_json_closes_truncated_output():
+    """max_tokens 截断：括号不配平，前几条实体要救回来。"""
+    raw = (
+        '{"e":[["甲公司","org","",0],["乙公司","org","",1]],'
+        '"r":[["甲公司","控股",""'
+    )
+    assert parse.load_llm_json(raw) is None
+    data = parse.load_llm_json(raw, repair=True)
+    assert [e[0] for e in data["e"]] == ["甲公司", "乙公司"]
+
+
+def test_repair_json_keeps_outer_object_when_truncated():
+    """截断时不能退化成「取内层数组」——那样 e 留下了、r 整段丢掉。"""
+    raw = '{"e":[["甲公司","org","",0]],"r":[["甲公司","持股",1214365'
+    data = parse.load_llm_json(raw, repair=True)
+    assert isinstance(data, dict) and "r" in data
+
+
+def test_repair_json_leaves_wellformed_output_alone():
+    raw = '{"e":[["甲 公司","org","说明：注意 空格",0]],"r":[]}'
+    assert parse.load_llm_json(raw, repair=True) == parse.load_llm_json(raw)
+    # 代码块包裹照常剥掉
+    fenced = '```json\n{"e":[],"r":[]}\n```'
+    assert parse.load_llm_json(fenced, repair=True) == {"e": [], "r": []}
+
+
+def test_repair_json_returns_none_for_prose():
+    assert parse.load_llm_json("抱歉，我无法处理", repair=True) is None
+
+
+# ---------- 抽取重试：先原样重问，再拆半 ----------
+
+
+def _ok_payload():
+    return '{"e":[["甲公司","org","",0]],"r":[]}'
+
+
+def test_extract_batch_reasks_before_splitting(monkeypatch):
+    """失败是随机的：同批重问一次通常就能好，比拆半便宜且不断关系。"""
+    calls: list[int] = []
+
+    def fake_complete(messages, **kwargs):
+        calls.append(1)
+        return _ok_payload() if len(calls) == 2 else "抱歉，我无法处理"
+
+    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    chunks = [Chunk("甲公司是一家制造企业，主营若干产品线。") for _ in range(4)]
+    result = graph._extract_batch(chunks, 0, "system")
+    assert [e.name for e in result.entities] == ["甲公司"]
+    assert len(calls) == 2  # 原调用 + 重问，没有拆半
+
+
+def test_extract_batch_splits_when_reask_also_fails(monkeypatch):
+    calls: list[int] = []
+
+    def fake_complete(messages, **kwargs):
+        calls.append(1)
+        return "抱歉，我无法处理"
+
+    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    chunks = [Chunk("甲公司是一家制造企业，主营若干产品线。") for _ in range(4)]
+    result = graph._extract_batch(chunks, 0, "system")
+    assert result.entities == []
+    # 原调用 + 重问 + 拆成两半各一次；拆出来的半批不再重问，避免调用爆炸
+    assert len(calls) == 4
+
+
+def test_extract_batch_does_not_reask_when_split_depth_reached(monkeypatch):
+    calls: list[int] = []
+
+    def fake_complete(messages, **kwargs):
+        calls.append(1)
+        return "抱歉，我无法处理"
+
+    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    # 2 片：拆不动，重问一次后放弃
+    chunks = [Chunk("甲公司是一家制造企业。"), Chunk("乙公司是另一家制造企业。")]
+    graph._extract_batch(chunks, 0, "system")
+    assert len(calls) == 2
+
+
+# ---------- 关系行缺客体：丢掉，不猜 ----------
+
+
+def test_compact_relation_missing_target_is_dropped():
+    """[主体, 关系, 空/数值, 序号] 是漏了客体的写法，不能补成假关系。"""
+    meta = {
+        "r": [
+            ["深圳明德控股", "持有股份", "", 0],
+            ["深圳明德控股", "通过子公司持股", 121436506, 1],
+        ]
+    }
+    parsed = graph._parse_extraction(meta)
+    assert parsed.relations == []
+
+
+def test_compact_relation_four_items_with_target_is_kept():
+    """第 3 项是文字时是 [主体, 客体, 关系, 序号]，照常用。"""
+    parsed = graph._parse_extraction({"r": [["甲公司", "乙公司", "控股", 0]]})
+    assert len(parsed.relations) == 1
+    rel = parsed.relations[0]
+    assert (rel.source, rel.target, rel.relation, rel.description, rel.chunk) == (
+        "甲公司",
+        "乙公司",
+        "控股",
+        "",
+        0,
+    )
+
+
+def test_compact_relation_five_items_unchanged():
+    parsed = graph._parse_extraction(
+        {"r": [["甲公司", "乙公司", "控股", "持股 51%", 2]]}
+    )
+    rel = parsed.relations[0]
+    assert rel.description == "持股 51%" and rel.chunk == 2
+
+
+def test_system_prompt_requires_five_item_relations():
+    from ai_agent.kb.doc_profiles import build_system_prompt
+
+    prompt = build_system_prompt(None)
+    assert "r 必须是 5 项" in prompt
+
+
+# ---------- 关系不能因为「端点晚出现」或「本批没实体」而丢 ----------
+
+
+def _acc():
+    return graph._GraphAccumulator(uuid.uuid4())
+
+
+def _ext(entities=(), relations=()):
+    return graph._Extraction(
+        entities=[graph._Entity(name=n, type="org") for n in entities],
+        relations=[
+            graph._Relation(source=s, target=t, relation=r) for s, t, r in relations
+        ],
+    )
+
+
+def test_batch_with_relations_but_no_entities_is_kept():
+    """本批没抽到新实体、只有指向别批实体的关系时，整批不能被跳过。"""
+    acc = _acc()
+    batch = [Chunk("甲公司向乙公司采购原材料。")]
+    acc.add(0, batch, _ext(entities=["甲公司", "乙公司"]))
+    acc.add(1, batch, _ext(relations=[("甲公司", "乙公司", "采购自")]))
+    assert [(r["source"], r["relation"]) for r in acc.relations.values()] == [
+        ("甲公司", "采购自")
+    ]
+
+
+def test_relation_to_entity_in_later_batch_is_recovered():
+    """端点在前一批还没出现：先挂起，等后批抽出该实体再补上。
+
+    直接丢会让「关系指向后文才出现的实体」整条消失，表现为大量孤立点。
+    """
+    acc = _acc()
+    batch = [Chunk("甲公司控股丙公司。")]
+    acc.add(0, batch, _ext(entities=["甲公司"], relations=[("甲公司", "丙公司", "控股")]))
+    assert acc.relations == {}  # 丙公司还没出现，先挂起
+    acc.add(5, batch, _ext(entities=["丙公司"]))
+    assert [(r["source"], r["target"], r["relation"]) for r in acc.relations.values()] == [
+        ("甲公司", "丙公司", "控股")
+    ]
+    assert acc._pending == []  # 挂起队列已清空
+
+
+def test_pending_relation_lands_with_stub_entity_on_finalize():
+    """端点始终没被抽成实体的关系，收尾时补桩落地而不是消失。
+
+    挂起队列只在 add() 里重试，最后一批之后没有 add 了：这些关系原本
+    随进程一起消失，表现为"关系数总比预期少一截"。
+    """
+    acc = _acc()
+    acc.add(0, [Chunk("甲公司投资某公司。")], _ext(entities=["甲公司"], relations=[("甲公司", "某公司", "投资")]))
+    assert acc.relations == {}  # 收尾前仍然只是挂起，不提前落地
+    assert len(acc._pending) == 1
+
+    assert acc.finalize() == 1  # 给「某公司」补了一个桩实体
+    assert acc._pending == []
+    assert [(r["source"], r["target"], r["relation"]) for r in acc.relations.values()] == [
+        ("甲公司", "某公司", "投资")
+    ]
+    stub = acc.entities["某公司"]
+    assert stub["type"] == "other"
+    assert "仅作为关系端点" in stub["description"]
+
+
+def test_finalize_retries_pending_before_stubbing():
+    """收尾先整体重试一次：最后补上的端点不该被当成缺失端点再补一个桩。"""
+    acc = _acc()
+    acc.add(0, [Chunk("甲公司控股丙公司。")], _ext(entities=["甲公司"], relations=[("甲公司", "丙公司", "控股")]))
+    # 模拟「最后一批补出了端点，但 add() 的重试发生在写入之前」的时序：
+    # 手工把实体塞进去，再走收尾
+    acc.entities["丙公司"] = {
+        "name": "丙公司",
+        "norm": "丙公司",
+        "type": "org",
+        "description": "",
+    }
+    assert acc.finalize() == 0  # 没有补桩
+    assert acc._pending == []
+    assert [(r["source"], r["target"]) for r in acc.relations.values()] == [("甲公司", "丙公司")]
+
+
+def test_pending_relation_with_metric_endpoint_is_dropped_on_finalize():
+    """桩不是无脑补：纯数值/时间点端点补进来只是噪声，关系照旧丢掉。"""
+    acc = _acc()
+    acc.add(0, [Chunk("甲公司2026年前三季度营收增长。")], _ext(
+        entities=["甲公司"],
+        relations=[("甲公司", "2026年前三季度", "报告期")],
+    ))
+    assert acc.finalize() == 0
+    assert acc.relations == {}
+    assert acc._pending == []
+    assert "2026年前三季度" not in acc.entities
+
+
+def test_subject_from_filename_takes_full_name():
+    assert (
+        graph._subject_from_filename("安克创新科技股份有限公司2026 年第三季度报告.pdf")
+        == "安克创新科技股份有限公司"
+    )
+    # 推不出公司全称就不兜底（宁可不改，也不能乱认主体）
+    assert graph._subject_from_filename("行业研究方法.pdf") is None
+
+
+def test_predicate_names_are_not_entities_but_compounds_are():
+    """动词不能当实体，但同词根的复合名词必须留着。"""
+    for verb in ("搭载", "发布", "任职", "支持", "持股"):
+        assert not graph._usable_name(verb, normalize_name(verb))
+    for noun in ("持股比例", "研发投入", "发布渠道"):
+        assert graph._usable_name(noun, normalize_name(noun))
+
+
+def test_self_reference_endpoint_lands_on_subject():
+    """「本公司持股…」不能建泛称节点，也不能整条丢掉：落到主体全称上。"""
+    acc = graph._GraphAccumulator(uuid.uuid4(), "安克创新科技股份有限公司")
+    acc.add(
+        0,
+        [Chunk("本公司持有长鑫存储 30% 股权。")],
+        _ext(
+            entities=["长鑫存储"],
+            relations=[("本公司", "长鑫存储", "持股")],
+        ),
+    )
+    assert "本公司" not in acc.entities  # 泛称不建点
+    assert [(r["source"], r["target"], r["relation"]) for r in acc.relations.values()] == [
+        ("安克创新科技股份有限公司", "长鑫存储", "持股")
+    ]
+    assert acc.self_ref_hits == 1
+
+
+def test_self_reference_without_subject_is_dropped():
+    """文件名推不出主体时退回老行为：不猜，关系丢掉。"""
+    acc = graph._GraphAccumulator(uuid.uuid4(), None)
+    acc.add(
+        0,
+        [Chunk("本公司持有长鑫存储 30% 股权。")],
+        _ext(entities=["长鑫存储"], relations=[("本公司", "长鑫存储", "持股")]),
+    )
+    assert acc.finalize() == 0
+    assert acc.relations == {}
+
+
+def test_placeholder_names_from_prompt_example_are_rejected():
+    """示例里的占位词不能变成实体。
+
+    prompt 曾用真实公司名做示例，模型在缺主语的片段里直接照抄，安克文件的
+    图里因此出现一个挂着 14 条关系的「顺丰控股」（安克语料 0 片提到它）。
+    """
+    assert not graph._usable_name("某某控股", normalize_name("某某控股"))
+    assert not graph._usable_name("某某公司", normalize_name("某某公司"))
+    # 真实公司名不能被这条规则误伤
+    assert graph._usable_name("顺丰控股", normalize_name("顺丰控股"))
+
+
+def test_build_file_graph_passes_doc_name_to_prompt(monkeypatch):
+    seen: dict = {}
+
+    def fake_complete(messages, **kwargs):
+        seen["user"] = messages[1]["content"]
+        return '{"e":[],"r":[]}'
+
+    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(
+        graph, "embed_texts_parallel", lambda texts, **k: [[0.1, 0.2] for _ in texts]
+    )
+    monkeypatch.setattr(graph.store, "replace_file_graph", lambda *a, **k: None)
+
+    body = "长鑫存储是国内 DRAM 厂商，报告期内 DRAM 产能持续爬坡，客户以模组厂为主。"
+    build_file_graph(
+        uuid.uuid4(),
+        [Chunk(body)],
+        doc_name="安克创新科技股份有限公司2026 年第三季度报告",
+    )
+    assert "《安克创新科技股份有限公司2026 年第三季度报告》" in seen["user"]

@@ -37,6 +37,25 @@ def test_type_compatible_allows_soft_types_only():
     assert not align.type_compatible("person", "org")
 
 
+def test_number_conflict_blocks_different_versions():
+    # 实测错并：「ActiveShield™4.0 温控系统」被并进了 5.0，相似度 0.927
+    assert align.number_conflict("ActiveShield™4.0 温控系统", "ActiveShield™5.0 温控系统")
+    assert align.number_conflict("2025年第1期A股回购股份方案", "2025年第2期A股回购股份方案")
+
+
+def test_number_conflict_allows_added_year_or_period():
+    # 简称补上期数/年份是正常写法，方向是"包含"而不是"对不上"
+    assert not align.number_conflict("A股回购股份", "2025年第1期A股回购股份方案")
+    assert not align.number_conflict("国电电力", "国电电力发展股份有限公司")
+
+
+def test_candidate_pairs_skips_pairs_with_conflicting_numbers():
+    a = ent("ActiveShield™4.0 温控系统", "product")
+    b = ent("ActiveShield™5.0 温控系统", "product")
+    sim_pairs = [{"src": a["id"], "dst": b["id"], "sim": 0.93}]
+    assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
+
+
 def test_candidate_pairs_containment_without_high_similarity():
     a = ent("国电电力发展股份有限公司", "org", 12)
     b = ent("国电电力", "org", 30)
@@ -65,6 +84,67 @@ def test_candidate_pairs_dedupes_vector_and_containment():
     # 字面包含比向量更硬，应覆盖 why；纯通用后缀给到最高分
     assert pairs[0]["why"] == "suffix"
     assert pairs[0]["score"] > 0.9
+
+
+def test_rigid_metric_never_becomes_candidate():
+    """财务科目差一个字就是另一个科目：向量再像也不能进候选。
+
+    实测教训：库里 39 条合并有 32 条是 metric，「经营活动现金流入小计」和
+    「流出小计」向量相似度 0.99，交给模型逐对裁决被判成同一个，整条科目的
+    关系全串到对面去。
+    """
+    a = ent("经营活动现金流入小计", "metric", 5)
+    b = ent("经营活动现金流出小计", "metric", 5)
+    sim_pairs = [{"src": a["id"], "dst": b["id"], "sim": 0.99}]
+    assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
+
+
+def test_rigid_metric_skips_containment_path_too():
+    """包含路径同样要拦：应付职工薪酬 ⊂ 长期应付职工薪酬，但不是同一科目。"""
+    a = ent("应付职工薪酬", "metric", 9)
+    b = ent("长期应付职工薪酬", "metric", 3)
+    assert align.candidate_pairs([a, b], [], min_sim=0.86) == []
+
+
+def test_pronoun_entities_never_paired():
+    """本公司/该公司在同一份文件里可能指不同主体，并成一个会让关系挂错公司。"""
+    a = ent("本公司", "org", 5)
+    b = ent("该公司", "org", 2)
+    sim_pairs = [{"src": a["id"], "dst": b["id"], "sim": 0.97}]
+    assert align.candidate_pairs([a, b], sim_pairs, min_sim=0.86) == []
+
+
+def test_org_abbreviation_still_aligned_after_rigid_rule():
+    """新规则不能误伤正常的公司简称对齐。"""
+    a = ent("极兔速递", "org", 4)
+    b = ent("极兔速递环球有限公司", "org", 6)
+    pairs = align.candidate_pairs([a, b], [], min_sim=0.86)
+    assert len(pairs) == 1
+
+
+def test_is_rigid_classification():
+    assert align.is_rigid(ent("营业收入", "metric"))
+    assert align.is_rigid(ent("本公司", "org"))
+    assert align.is_rigid(ent("2005年", "other"))
+    assert not align.is_rigid(ent("极兔速递", "org"))
+    assert not align.is_rigid(ent("中国能源建设股份有限公司", "org"))
+
+
+def test_qualifier_prefix_changes_meaning():
+    """限定词在前 = 另一个东西：长期↔短期、期初↔期末、流动↔非流动。"""
+    assert align.has_qualifier_prefix("应付职工薪酬", "长期应付职工薪酬")
+    assert align.has_qualifier_prefix("现金及现金等价物余额", "期初现金及现金等价物余额")
+    assert align.has_qualifier_prefix("非流动资产", "其他非流动资产")
+    # 短名在前缀、只多出法人后缀，是同一实体，不该被这条规则拦
+    assert not align.has_qualifier_prefix("国电电力", "国电电力发展股份有限公司")
+    assert not align.has_qualifier_prefix("极兔速递", "极兔速递环球有限公司")
+
+
+def test_qualifier_pair_never_becomes_candidate():
+    """即使类型都是 other（绕过 metric 规则），限定词对也要拦住。"""
+    a = ent("应付职工薪酬", "other", 9)
+    b = ent("长期应付职工薪酬", "other", 3)
+    assert align.candidate_pairs([a, b], [], min_sim=0.86) == []
 
 
 def test_containment_is_candidate_but_not_auto_accepted():
@@ -248,3 +328,37 @@ def test_soft_types_need_literal_containment():
     c, d = ent("每股收益", "concept"), ent("基本每股收益", "concept")
     sim_pairs = [{"src": c["id"], "dst": d["id"], "sim": 0.9}]
     assert len(align.candidate_pairs([c, d], sim_pairs, min_sim=0.86)) == 1
+
+
+def test_looks_like_different_sku_separates_brand_from_models():
+    """同品牌挂一串型号：字面高度相似，但都是独立产品。
+
+    本地 7b 会把「Anker」「Anker Travel Charging Station」「Anker Universal
+    Charger」连成一个簇，品牌点吞掉全部产品，图谱里就只剩一个产品。
+    """
+    assert align.looks_like_different_sku("anker", "ankertravelchargingstation")
+    # 同品牌前缀、谁也不包含谁，也是不同型号
+    assert align.looks_like_different_sku(
+        "ankeruniversalcharger", "ankertravelchargingstation"
+    )
+    # 中间插限定词（AI 芯片 / AI 音频芯片）
+    assert align.looks_like_different_sku("thus™ai芯片", "thus™ai音频芯片")
+    # 型号后缀
+    assert align.looks_like_different_sku("ipad充电器", "ipad充电器pro")
+
+
+def test_looks_like_different_sku_allows_translated_alias():
+    """一个字都不共用的同义译名要放行：拓展坞 = Hub。"""
+    assert not align.looks_like_different_sku("ankerdesktopusbchub", "安克拓展坞")
+
+
+def test_sku_guard_only_applies_to_product_and_technology():
+    """品牌/型号判据只对产品、技术类生效，法人的简称补全不受影响。"""
+    a = ent("极兔速递", "org")
+    b = ent("极兔速递环球有限公司", "org")
+    pairs = align.candidate_pairs([a, b], [])
+    assert len(pairs) == 1  # org 仍然进候选，交给模型裁决
+
+    c = ent("Anker", "product")
+    d = ent("Anker Travel Charging Station", "product")
+    assert align.candidate_pairs([c, d], []) == []

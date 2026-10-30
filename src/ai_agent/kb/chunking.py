@@ -56,6 +56,8 @@ class Chunk:
     kind: str = TEXT  # text / table / figure
     page_end: int | None = None  # 同节内聚合导致的跨页切片：末页页码
     section: str | None = None  # 所属一级节，如「第十节 管理层讨论与分析」
+    # 报表口径：consolidated / parent / None（非报表或无表题）
+    scope: str | None = None
 
 
 def chunk_segments(
@@ -91,6 +93,7 @@ def chunk_segments(
                     kind=seg.kind,
                     page_end=seg.page,
                     section=seg.section,
+                    scope=seg.scope,
                 )
                 for piece in _chunk_table(seg.text, max_chars=max_chars)
             )
@@ -235,21 +238,31 @@ def _normalize(text: str) -> str:
 
 
 def _chunk_table(text: str, *, max_chars: int) -> list[str]:
-    """表格切片：短表整片保留；长表按行切，每片重复表头（含工作表名）。"""
+    """表格切片：短表整片保留；长表按行切，每片重复表头（含工作表名）。
+
+    表格正文第一行可能是**表题**（「母公司利润表」「合并资产负债表」），
+    它不含竖线。表题必须当成表头的一部分在每片里重复——否则长表被切开后，
+    后半张表的切片又退回「项目 | 本期 | 上期 + 一堆数字」，看不出这张表
+    属于母公司还是合并口径。
+    """
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return []
     if len(text) <= max_chars:
         return [text]
 
+    caption: list[str] = []
+    if len(lines) > 1 and "|" not in lines[0]:
+        caption, lines = lines[:1], lines[1:]
+
     sep_index = next(
         (i for i, line in enumerate(lines[:5]) if _MD_SEPARATOR.match(line.strip())),
         None,
     )
     if sep_index is not None:
-        header, data = lines[: sep_index + 1], lines[sep_index + 1 :]
+        header, data = [*caption, *lines[: sep_index + 1]], lines[sep_index + 1 :]
     else:
-        header, data = lines[:1], lines[1:]
+        header, data = [*caption, *lines[:1]], lines[1:]
     if not data:
         # 不是表格形态（单行超长），退回普通切分
         return chunk_text(text, max_chars=max_chars, overlap=0)
@@ -304,7 +317,12 @@ def embedding_input(
     kind: str,
     section: str | None = None,
 ) -> str:
-    """送进向量模型的文本 = 语境前缀 + 正文。"""
+    """送进向量模型的文本 = 语境前缀 + 正文。
+
+    章节用完整标签（一级 + 二级）：试过只取一级，MRR 从 0.879 掉到 0.869
+    ——二级标题里的「非经常性损益」「股东信息」恰恰是把数字表区分开的那几个
+    字，砍掉反而更难找。
+    """
     return f"{context_prefix(filename, page=page, kind=kind, section=section)}\n{text}"
 
 

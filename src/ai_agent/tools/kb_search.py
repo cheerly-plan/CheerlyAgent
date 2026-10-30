@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import Citation, add_citations
-from ai_agent.kb.retrieval import Hit, format_where, search_knowledge, tag_file_scope
+from ai_agent.kb.retrieval import Hit, format_where, search_knowledge
 from ai_agent.kb.scope import kb_scope
 from ai_agent.memory.store import store
 from ai_agent.tools.base import Tool
@@ -48,10 +48,9 @@ def _kb_search(
                 return f"ERROR: 非法的文件 id {raw}"
 
     try:
-        if parsed_ids is None:
-            hits = _search_with_tag_scope(query, top_k)
-        else:
-            hits = search_knowledge(query, file_ids=parsed_ids, top_k=top_k)
+        # 未指定文件时，search_knowledge 内部会按标签/文件名主体推断范围，
+        # 并用全库结果兜底（见 kb/retrieval.py）
+        hits = search_knowledge(query, file_ids=parsed_ids, top_k=top_k)
     except Exception:
         logger.exception("知识库检索失败 query=%s", query[:80])
         return "ERROR: 知识库暂时不可用，请稍后重试"
@@ -68,33 +67,6 @@ def _kb_search(
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(hits))
     return "\n\n".join(_format_hit_with_context(hit) for hit in hits)
-
-
-def _search_with_tag_scope(query: str, top_k: int) -> list[Hit]:
-    """标签预过滤 + 弱召回兜底。
-
-    用户没圈定范围时先按标签收窄：查询关键词命中文件标签 → 只搜这批
-    文件，别的文件（尤其是 FAQ 这类干扰项）出不了候选，重排输入更干净。
-    收窄是"猜"出来的，可能判窄，所以召回不足 top_k 就用全库结果补位，
-    收窄结果排前面——宁可多花一次向量调用，不拿召回率换精度。
-    """
-    try:
-        scope_ids = tag_file_scope(query)
-    except Exception:
-        logger.warning("kb 标签范围推导失败，走全库检索", exc_info=True)
-        scope_ids = None
-    if not scope_ids:
-        return search_knowledge(query, top_k=top_k)
-    logger.info("kb 标签预过滤：收窄到 %d 份文件", len(scope_ids))
-    hits = search_knowledge(query, file_ids=scope_ids, top_k=top_k)
-    if len(hits) >= top_k:
-        return hits
-    seen = {(h.file_id, h.seq) for h in hits}
-    for extra in search_knowledge(query, top_k=top_k):
-        if (extra.file_id, extra.seq) not in seen:
-            hits.append(extra)
-            seen.add((extra.file_id, extra.seq))
-    return hits[:top_k]
 
 
 def _citations_of(hits: list[Hit]) -> list[Citation]:
