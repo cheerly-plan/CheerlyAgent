@@ -272,6 +272,44 @@ def test_kg_search_evidence_where_matches_kb_conventions():
     )
     assert kg_search._evidence_where({"kind": "text", "page": 5, "chunk_seq": 0}) == "第5页"
     assert kg_search._evidence_where({"kind": "text", "page": None, "chunk_seq": 4}) == "第5段"
+    assert (
+        kg_search._evidence_where(
+            {
+                "kind": "text",
+                "page": 17,
+                "page_end": 19,
+                "section": "四、季度财务报表",
+                "chunk_seq": 0,
+            }
+        )
+        == "第17–19页 · 四、季度财务报表"
+    )
+
+
+def test_kg_search_citations_keep_section_out_of_chip_where():
+    """给模型的原文依据可以带章节；前端芯片的 where 只能是页码。"""
+    [citation] = kg_search._citations_of(
+        [
+            {
+                "file_id": FILE_ID,
+                "chunk_seq": 3,
+                "page": 17,
+                "page_end": 19,
+                "kind": "text",
+                "filename": "中国能源建设股份有限公司2026年第三季度报告.pdf",
+                "section": "四、季度财务报表 · （二） 财务报表",
+                "text": "营业收入",
+            }
+        ]
+    )
+    assert citation.where == "第17–19页"
+    assert citation.section == "四、季度财务报表 · （二） 财务报表"
+    assert citation.page_end == 19
+    payload = citation.payload()
+    assert payload["where"] == "第17–19页"
+    assert payload["section"] == citation.section
+    assert payload["page_start"] == 17
+    assert payload["page_end"] == 19
 
 
 def test_kg_search_reports_empty_graph(monkeypatch):

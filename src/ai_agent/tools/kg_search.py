@@ -221,18 +221,39 @@ def _collect_evidence(
 
 
 def _citations_of(evidence: list[dict]) -> list[Citation]:
-    return [
-        Citation(
-            file_id=str(item["file_id"]),
-            filename=item.get("filename") or "",
-            seq=int(item["chunk_seq"]),
-            page=item.get("page"),
-            kind=item.get("kind") or "text",
-            where=_evidence_where(item),
-            text=item.get("text") or "",
+    """芯片只放页码；章节进 section 字段，展开后再显示。
+
+    给模型看的原文依据仍用 _evidence_where（页码 · 章节），这里不能照搬：
+    章节比文件名还长，塞进 where 会把芯片上的文件名挤成一个字。
+    """
+    citations: list[Citation] = []
+    for item in evidence:
+        kind = item.get("kind") or "text"
+        page = item.get("page")
+        page_end = item.get("page_end")
+        filename = item.get("filename") or ""
+        seq = int(item.get("chunk_seq") or item.get("seq") or 0)
+        citations.append(
+            Citation(
+                file_id=str(item["file_id"]),
+                filename=filename,
+                seq=seq,
+                page=page,
+                kind=kind,
+                where=format_where(
+                    kind=kind,
+                    page=page,
+                    page_end=page_end,
+                    seq=seq,
+                    filename=filename,
+                    mime=item.get("mime") or "",
+                ),
+                text=item.get("text") or "",
+                page_end=page_end,
+                section=item.get("section"),
+            )
         )
-        for item in evidence
-    ]
+    return citations
 
 
 kg_search_tool = Tool(
