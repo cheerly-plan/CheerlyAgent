@@ -309,6 +309,84 @@ def test_rank_candidates_merges_same_norm_and_picks_top_score():
     assert hbm["mention_count"] == 9
 
 
+# ——— 主体收敛：同名 metric 跨文件隔离（串公司防护）———
+
+
+def _cand_scoped(name, vector, *, file_id, type, norm=None, literal=False, matched="vector", mentions=1):
+    c = _cand(name, vector, norm=norm, literal=literal, matched=matched, mentions=mentions)
+    c["file_id"] = file_id
+    c["type"] = type
+    return c
+
+
+def test_rank_candidates_isolates_cross_file_metric_when_org_anchor():
+    """问「安克创新 毛利率」时，顺丰的低分同名 metric 不该漏进种子。
+
+    线上 bug：改写补全了主体「安克创新」，但顺丰文件的「2026 年第三季度」
+    等 metric 因向量分过了放宽线（floor）被当成 seed，扩出「单票收入/业务量」。
+    这里验证：有 org 主体锚时，跨文件的 metric 候选不享受 WEAK_SCORE_DROP 放宽，
+    必须向量分 ≥ min_score 原值才保留。
+    """
+    from ai_agent.kb.graph_store import _rank_candidates
+
+    ank, sf = "file-ank", "file-sf"
+    scored = [
+        # 主体锚：安克创新（org，字面强命中）
+        _cand_scoped("安克创新科技股份有限公司", 0.85, file_id=ank, type="org", literal=True, matched="name", mentions=10),
+        # 安克自己的毛利率（同文件 metric，0.60 过放宽线保留）
+        _cand_scoped("毛利率", 0.60, file_id=ank, type="metric", mentions=3),
+        # 顺丰的「2026 年第三季度」（跨文件 metric，0.52 < min_score 0.55，应被挡）
+        _cand_scoped("2026 年第三季度", 0.52, file_id=sf, type="metric", mentions=1),
+        # 顺丰的「单票收入」（跨文件 metric，0.54 < 0.55，应被挡）
+        _cand_scoped("单票收入", 0.54, file_id=sf, type="metric", mentions=1),
+    ]
+    picked = _rank_candidates(scored, min_score=0.55, top_k=6)
+
+    names = [p["name"] for p in picked]
+    assert "安克创新科技股份有限公司" in names
+    assert "毛利率" in names
+    # 跨文件的低分 metric 被隔离，不再混进种子
+    assert "2026 年第三季度" not in names
+    assert "单票收入" not in names
+
+
+def test_rank_candidates_keeps_cross_file_metric_when_above_min_score():
+    """同名 metric 跨文件但分数都够高：分 file 独立保留，交 LLM 消歧，不合并。"""
+    from ai_agent.kb.graph_store import _rank_candidates
+
+    ank, sf = "file-ank", "file-sf"
+    scored = [
+        _cand_scoped("安克创新科技股份有限公司", 0.85, file_id=ank, type="org", literal=True, matched="name", mentions=10),
+        _cand_scoped("毛利率", 0.60, file_id=ank, type="metric", mentions=3),
+        # 顺丰的毛利率 0.58 ≥ 0.55，作为独立实体保留（不再与安克毛利率合并成一个）
+        _cand_scoped("毛利率", 0.58, file_id=sf, type="metric", mentions=5),
+    ]
+    picked = _rank_candidates(scored, min_score=0.55, top_k=6)
+
+    gross_margins = [p for p in picked if p["name"] == "毛利率"]
+    # 两条「毛利率」都保留，且分属不同文件（不合并、不取错代表）
+    assert len(gross_margins) == 2
+    assert {p["file_id"] for p in gross_margins} == {ank, sf}
+
+
+def test_rank_candidates_no_anchor_keeps_original_behavior():
+    """无主体锚（只问「毛利率」没提公司）：不触发收敛，保持原合并行为。"""
+    from ai_agent.kb.graph_store import _rank_candidates
+
+    ank, sf = "file-ank", "file-sf"
+    scored = [
+        # 没有任何 org 字面强命中 → 无主体锚
+        _cand_scoped("毛利率", 0.60, file_id=ank, type="metric", mentions=3),
+        _cand_scoped("毛利率", 0.52, file_id=sf, type="metric", mentions=5),
+    ]
+    picked = _rank_candidates(scored, min_score=0.55, top_k=6)
+    # 无主体锚时：同名仍按 norm_name 合并成一条（保持原行为），
+    # 代表记录取提及数最多的（sf 那条 mentions=5）
+    gross = [p for p in picked if p["name"] == "毛利率"]
+    assert len(gross) == 1
+    assert gross[0]["mention_count"] == 5
+
+
 # ——— 抽取链路的成本与健壮性 ———
 
 

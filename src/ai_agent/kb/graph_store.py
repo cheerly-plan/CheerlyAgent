@@ -42,6 +42,10 @@ KEYWORD_HIT_RATIO = 0.5
 WEAK_SCORE_DROP = 0.12
 # 同时和最强候选比：差得太远的（名字对上了但只是同话题）也一并切掉
 RELATIVE_BAND = 0.3
+# 主体锚类型：这类实体（公司/机构）命中后，跨文件同名 metric 要隔离，避免串公司
+_ANCHOR_TYPES = {"org"}
+# 受「主体锚 + file_id 收敛」约束的类型：指标/概念这类词家家都有，最易跨文件串入
+_SCOPED_TYPES = {"metric", "concept", "other"}
 
 
 def _norm_text(text: str) -> str:
@@ -131,20 +135,56 @@ def _rank_candidates(
        前者保证「相关但描述里没写这个词」的实体不被切掉，后者砍掉只是同话题的尾部。
     3. 同一实体在每份文档里各有一条记录，按 norm_name 合并；代表记录取提及次数
        最多的那条（与全库图合并同一规则），分数取组内最高。
+
+    主体收敛（解决跨公司串数据）：当候选里出现「字面强命中 + org 类型」的主体锚
+    （如明确问「安克创新」）时，同名的指标类实体（metric/concept）在各家文件里
+    都有，向量召回会把别家公司的同名词也带进来。此时：
+      - 与主体锚同文件（file_id 一致）的候选照常走放宽线；
+      - 跨文件（file_id 不在锚集合里）的指标类候选不享受 WEAK_SCORE_DROP 放宽，
+        必须字面命中或向量分 ≥ min_score 原值才保留。
+    没有主体锚（只问「毛利率」没提公司）时保持现状，交给下游/LLM 消歧，不硬过滤。
     """
     if not scored:
         return []
     if not any(r["literal"] or float(r["vector"]) >= min_score for r in scored):
         return []
 
+    # 主体锚：有字面强命中（matched 是 name/alias）且 type=org 的实体
+    anchor_files: set[str] = {
+        str(r["file_id"])
+        for r in scored
+        if r.get("type") in _ANCHOR_TYPES and r["literal"] and r.get("matched") in {"name", "alias"}
+    }
+
     best_vector = max(float(r["vector"]) for r in scored)
     floor = max(min_score - WEAK_SCORE_DROP, best_vector - RELATIVE_BAND)
 
+    # 有主体锚时，按 (norm_name, file_id) 分组，避免安克/顺丰的同名 metric 被合并
+    # 成一个代表（取错文件）；无主体锚时仍按 norm_name 合并（保持原行为）。
+    group_key = (
+        (lambda r: (r["norm_name"] or r["name"], str(r["file_id"])))
+        if anchor_files
+        else (lambda r: r["norm_name"] or r["name"])
+    )
+
     grouped: dict[str, list[dict]] = {}
     for row in scored:
-        if not row["literal"] and float(row["vector"]) < floor:
+        if row["literal"]:
+            # 字面命中直接保留
+            grouped.setdefault(group_key(row), []).append(row)
             continue
-        grouped.setdefault(row["norm_name"] or row["name"], []).append(row)
+        vector = float(row["vector"])
+        # 主体收敛：跨文件的指标类候选，不享受放宽，必须过 min_score 原值
+        if (
+            anchor_files
+            and row.get("type") in _SCOPED_TYPES
+            and str(row["file_id"]) not in anchor_files
+        ):
+            if vector < min_score:
+                continue
+        elif vector < floor:
+            continue
+        grouped.setdefault(group_key(row), []).append(row)
 
     picked: list[dict] = []
     for group in grouped.values():
