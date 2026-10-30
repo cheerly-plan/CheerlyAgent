@@ -264,6 +264,70 @@ def test_chunk_short_table_with_caption_stays_one_piece():
     assert chunks[0].text.startswith("母公司利润表")
 
 
+def test_chunk_long_table_repeats_unit_meta():
+    """单位和审计状态跟表题一样，切开后每一片都要带着。"""
+    rows = "\n".join(f"| 项目{year} | {year} |" for year in range(2000, 2060))
+    text = (
+        "母公司利润表\n单位：千元 · 未经审计\n"
+        "| 项目 | 本期 |\n|---|---|\n" + rows
+    )
+    chunks = chunk_segments([Segment(text, 16, "table")], max_chars=200)
+    assert len(chunks) > 1
+    assert all(
+        c.text.startswith("母公司利润表\n单位：千元 · 未经审计\n| 项目 | 本期 |")
+        for c in chunks
+    )
+
+
+def test_chunk_table_keeps_nested_financial_rows_together():
+    """金融投资和三个计量子项是一组，不能按字数切到两片里。"""
+    pad = "\n".join(f"| 填充科目{i} | {i}000 | {i}111 |" for i in range(8))
+    group = "\n".join(
+        [
+            "| 金融投资 | 100 | 90 |",
+            "| 其中：以公允价值计量且其变动计入当期损益的金融资产 | 10 | 9 |",
+            "| 以公允价值计量且其变动计入其他综合收益的金融资产 | 20 | 19 |",
+            "| 以摊余成本计量的金融资产 | 70 | 62 |",
+        ]
+    )
+    text = (
+        "中国银行资产表\n单位：百万元人民币\n"
+        "| 项目 | 本期 | 上期 |\n|---|---|---|\n"
+        f"{pad}\n{group}"
+    )
+    chunks = chunk_segments([Segment(text, 8, "table")], max_chars=220)
+    assert len(chunks) > 1
+    joined = "\n".join(c.text for c in chunks)
+    assert "金融投资" in joined
+    holders = [c for c in chunks if "金融投资" in c.text]
+    assert len(holders) == 1
+    body = holders[0].text
+    assert "以公允价值计量且其变动计入当期损益的金融资产" in body
+    assert "以公允价值计量且其变动计入其他综合收益的金融资产" in body
+    assert "以摊余成本计量的金融资产" in body
+    assert "单位：百万元人民币" in holders[0].text
+
+
+def test_chunk_table_does_not_isolate_total_row():
+    """资产总计不能单独成片，必须跟本表最后一组明细走。"""
+    pad = "\n".join(f"| 明细科目{i} | {i}00 | {i}11 |" for i in range(12))
+    text = (
+        "合并资产负债表\n单位：千元\n"
+        "| 项目 | 期末 | 期初 |\n|---|---|---|\n"
+        f"{pad}\n| 资产总计 | 999 | 888 |"
+    )
+    chunks = chunk_segments([Segment(text, 7, "table")], max_chars=180)
+    assert len(chunks) > 1
+    total_chunks = [c for c in chunks if "资产总计" in c.text]
+    assert len(total_chunks) == 1
+    data_rows = [
+        ln
+        for ln in total_chunks[0].text.splitlines()
+        if ln.startswith("| ") and "---" not in ln and "项目" not in ln
+    ]
+    assert any("明细科目" in ln for ln in data_rows)
+
+
 def test_chunk_merged_table_keeps_page_span():
     text = "| 项目 | 本期 |\n|---|---|\n| 营业收入 | 1 |\n| 营业成本 | 2 |"
     chunks = chunk_segments(

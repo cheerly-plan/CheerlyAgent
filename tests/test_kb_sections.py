@@ -58,6 +58,28 @@ def test_strip_noise_removes_repeated_top_header():
     assert stats["页眉(贴顶小字号)"] == 3
 
 
+def test_strip_noise_keeps_statement_signatories():
+    """报表底部签字栏常在 y>0.90，旧页脚规则会连法定代表人一起删。"""
+    lines = [
+        line("负债和所有者权益总计 41108449", 10, BODY, 0.72),
+        line("葛海蛟", 10, BODY, 0.91),
+        line("法定代表人", 10, BODY, 0.93),
+        line("张辉", 10, 10.0, 0.91),
+        line("主管财会工作负责人", 10, 10.0, 0.93),
+        line("文栋", 10, 10.0, 0.91),
+        line("财会机构负责人", 10, 10.0, 0.93),
+        line("10", 10, 9.0, 0.97),
+    ]
+    kept, stats = strip_noise(lines, BODY)
+    texts = [ln.text for ln in kept]
+    assert "法定代表人" in texts
+    assert "葛海蛟" in texts
+    assert "主管财会工作负责人" in texts
+    assert "财会机构负责人" in texts
+    assert "10" not in texts
+    assert stats.get("页脚(贴底/页码)") == 1
+
+
 def test_strip_noise_keeps_table_column_headers():
     # 财务表列头跨页重复，但在页面中部（y≈0.17）：不能当页眉删，否则表头没了
     lines = []

@@ -51,6 +51,12 @@ _FOOTER_NO = re.compile(r"^[\s\-–—]*\d+([-–—]\d+)*[\s\-–—]*$")
 TOP_RATIO = 0.07  # 页眉区：页面上部 7%（实测页眉 y=0.052，真标题 y≥0.086）
 REPEAT_TOP_RATIO = 0.09  # 跨页重复文本只在贴顶时才当页眉
 BOTTOM_RATIO = 0.90  # 页脚区：页面下部 10%（实测页码 y=0.93）
+# 报表末页签字栏常落在页脚区，且每张主表重复。不能当页眉/页脚删。
+_SIGNATORY_ROLE = re.compile(
+    r"(法定代表人|主管会计工作负责人|主管财会工作负责人|"
+    r"会计机构负责人|财会机构负责人|财务负责人|"
+    r"主管会计工作的负责人)"
+)
 HEADING_SCALE = 1.2  # 标题字号至少是正文的 1.2 倍（12pt 正文 → 14.4pt 起）
 MAX_TITLE_LEN = 40  # 标题不会太长
 # 标题行不会以句读收尾；「一、经营活动产生的现金流量：」是报表行不是标题，
@@ -159,6 +165,11 @@ def _cn_heading(ln: Line) -> tuple[int, str, str] | None:
     return None
 
 
+def is_signatory(ln: Line) -> bool:
+    """报表签字栏（法定代表人等），不能当页眉页脚或表格内文本丢掉。"""
+    return bool(_SIGNATORY_ROLE.search(ln.norm))
+
+
 def strip_noise(lines: list[Line], body: float) -> tuple[list[Line], dict[str, int]]:
     """剔除页眉、页脚、目录点线行，返回 (保留行, 删除统计)。
 
@@ -190,13 +201,19 @@ def strip_noise(lines: list[Line], body: float) -> tuple[list[Line], dict[str, i
     stats: Counter[str] = Counter()
     for ln in lines:
         size_small = ln.size < body * 1.05
+        # 签字栏每张主表都会印，且常落在页脚区，必须先于页眉页脚规则留下。
+        if is_signatory(ln):
+            kept.append(ln)
+            continue
         if ln.y_ratio <= TOP_RATIO and size_small:
             stats["页眉(贴顶小字号)"] += 1
             continue
         if ln.norm in header_texts and size_small:
             stats["页眉(同文本异位)"] += 1
             continue
-        if ln.y_ratio >= BOTTOM_RATIO and (size_small or _FOOTER_NO.match(ln.text)):
+        # 贴底只删页码。旧规则把「正文字号 × 底部 10%」整段清掉，
+        # 资产负债表末的「葛海蛟」正好落在那里。
+        if ln.y_ratio >= BOTTOM_RATIO and _FOOTER_NO.match(ln.text):
             stats["页脚(贴底/页码)"] += 1
             continue
         if ln.norm in repeated and size_small and ln.y_ratio <= REPEAT_TOP_RATIO:

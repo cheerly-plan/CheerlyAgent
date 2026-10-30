@@ -7,8 +7,9 @@
 
 按内容类型分派：
 - text：上面的常规策略
-- table：整表成一片，超长时按行切并**每片重复表头**，否则行与列名
-  脱节，检索命中后无法还原"哪一年的营收"
+- table：整表成一片，超长时按**行组**切并**每片重复表头 / 表题 / 单位**，
+  「其中：」子项和合计行不拆开，否则行与列名脱节，检索命中后无法还原
+  "哪一年的营收、单位是百万还是元"
 - figure：图像描述本身很短，直接沿用常规策略（一般不触发切分）
 
 两级栅栏，谁窄听谁的：
@@ -47,6 +48,13 @@ _TOC_RESIDUE = re.compile(r"^目\s*录$|^contents$", re.IGNORECASE)
 _SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
 # Markdown 表格的分隔行：|---|---|
 _MD_SEPARATOR = re.compile(r"^\|[\s:\-|]+\|$")
+# 嵌套子行：紧跟上一行，不能单独切到下一片
+_TABLE_SUB = re.compile(r"^(其中[:：]?|[（(]其中[）)]|[—–\-•·]\s*|[加减][:：])")
+# 金融工具三个计量类别是同一组，即使没写「其中：」也不能拆
+_TABLE_IFRS_SUB = re.compile(r"^以(公允价值|摊余成本)计量")
+# 汇总行必须跟本片明细走，禁止单独成片
+_TABLE_TOTAL = re.compile(r"(合计|小计|总计)$")
+_NUM_ONLY_CELL = re.compile(r"^[\d.,%+\-]+$")
 
 
 @dataclass
@@ -242,12 +250,15 @@ def _normalize(text: str) -> str:
 
 
 def _chunk_table(text: str, *, max_chars: int) -> list[str]:
-    """表格切片：短表整片保留；长表按行切，每片重复表头（含工作表名）。
+    """表格切片：短表整片保留；长表按行组切，每片重复表头（含工作表名）。
 
-    表格正文第一行可能是**表题**（「母公司利润表」「合并资产负债表」），
-    它不含竖线。表题必须当成表头的一部分在每片里重复——否则长表被切开后，
-    后半张表的切片又退回「项目 | 本期 | 上期 + 一堆数字」，看不出这张表
-    属于母公司还是合并口径。
+    表格正文开头可能有若干不含竖线的行：表题（「母公司利润表」）和
+    单位 / 审计状态。这些必须当成表头的一部分在每片里重复——否则长表
+    被切开后，后半张表的切片又退回「项目 | 本期 | 上期 + 一堆数字」，
+    看不出这张表属于母公司还是合并口径，也不知道单位是百万还是元。
+
+    切分边界是行组而不是单行：「其中：」子项、金融工具三个计量类别、
+    合计 / 总计都跟它们所属的明细走，避免半组数字进检索。
     """
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
@@ -256,8 +267,8 @@ def _chunk_table(text: str, *, max_chars: int) -> list[str]:
         return [text]
 
     caption: list[str] = []
-    if len(lines) > 1 and "|" not in lines[0]:
-        caption, lines = lines[:1], lines[1:]
+    while lines and "|" not in lines[0]:
+        caption.append(lines.pop(0))
 
     sep_index = next(
         (i for i, line in enumerate(lines[:5]) if _MD_SEPARATOR.match(line.strip())),
@@ -271,16 +282,101 @@ def _chunk_table(text: str, *, max_chars: int) -> list[str]:
         # 不是表格形态（单行超长），退回普通切分
         return chunk_text(text, max_chars=max_chars, overlap=0)
 
+    return _pack_table_units(header, _table_row_units(data), max_chars) or [text]
+
+
+def _md_first_cell(line: str) -> str:
+    """Markdown 表行的第一列（科目名）。"""
+    raw = line.strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    parts = re.split(r"(?<!\\)\|", raw)
+    return parts[0].strip() if parts else ""
+
+
+def _is_sub_row(cell: str) -> bool:
+    return bool(_TABLE_SUB.match(cell) or _TABLE_IFRS_SUB.match(cell))
+
+
+def _is_total_row(cell: str) -> bool:
+    return bool(_TABLE_TOTAL.search(cell))
+
+
+def _is_section_label(line: str) -> bool:
+    """「流动资产：」这种只有科目、没有数字的分组标题。"""
+    cell = _md_first_cell(line)
+    if not cell.endswith(("：", ":")):
+        return False
+    return not any(
+        _NUM_ONLY_CELL.match(part.strip())
+        for part in re.split(r"(?<!\\)\|", line.strip().strip("|"))
+        if part.strip()
+    )
+
+
+def _table_row_units(data: list[str]) -> list[list[str]]:
+    """把数据行收成不可拆的行组：父行 + 其中/子项，合计贴到上一组。"""
+    units: list[list[str]] = []
+    for line in data:
+        cell = _md_first_cell(line)
+        if units and (_is_sub_row(cell) or _is_total_row(cell)):
+            units[-1].append(line)
+            continue
+        units.append([line])
+    return units
+
+
+def _pack_table_units(
+    header: list[str], units: list[list[str]], max_chars: int
+) -> list[str]:
+    """按行组装箱。一组超长就整组独占一片，合计绝不单独开片。"""
     out: list[str] = []
     buf: list[str] = list(header)
-    for line in data:
-        if len(buf) > len(header) and _joined_len(buf + [line]) > max_chars:
+    hanging: list[str] = []
+
+    def emit() -> None:
+        skip = set(header)
+        if any(line not in skip and not _is_section_label(line) for line in buf):
             out.append("\n".join(buf))
-            buf = list(header)
-        buf.append(line)
-    if len(buf) > len(header):
-        out.append("\n".join(buf))
-    return out or [text]
+
+    def restart() -> None:
+        nonlocal buf
+        buf = [*header, *hanging]
+
+    for unit in units:
+        if len(unit) == 1 and _is_section_label(unit[0]):
+            if len(buf) > len(header) and _joined_len(buf + unit) > max_chars:
+                emit()
+                hanging = list(unit)
+                restart()
+            else:
+                hanging = list(unit)
+                if unit[0] not in buf:
+                    buf.extend(unit)
+            continue
+        if len(buf) > len(header) and _joined_len(buf + unit) > max_chars:
+            if _is_total_row(_md_first_cell(unit[0])):
+                buf.extend(unit)
+                emit()
+                restart()
+                continue
+            emit()
+            restart()
+        buf.extend(unit)
+    emit()
+    return _merge_orphan_total_chunks(header, out)
+
+
+def _merge_orphan_total_chunks(header: list[str], chunks: list[str]) -> list[str]:
+    """最后一片如果只剩合计/总计，并回上一片。"""
+    if len(chunks) < 2:
+        return chunks
+    last_lines = chunks[-1].splitlines()
+    body = last_lines[len(header) :]
+    if body and all(_is_total_row(_md_first_cell(line)) for line in body):
+        prev = chunks[-2].splitlines()
+        return [*chunks[:-2], "\n".join(prev + body)]
+    return chunks
 
 
 def _joined_len(lines: list[str]) -> int:

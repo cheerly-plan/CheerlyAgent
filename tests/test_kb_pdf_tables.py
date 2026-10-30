@@ -23,6 +23,9 @@ from ai_agent.kb.parsing import (
     _pdf_glossary_tables,
     _rows_to_markdown,
     _split_repeated_header,
+    _table_content_bbox,
+    _table_meta_above,
+    _table_prefix,
     _tidy_header,
     _word_lines,
 )
@@ -96,6 +99,32 @@ def test_merge_header_combines_split_header():
     assert merged[1][0] == "主营业务收入"
 
 
+def test_merge_header_flattens_column_groups():
+    """银行财报：集团 / 母公司跨列，下面再写期间和审计状态。"""
+    rows = [
+        ["项目", "中国银行集团", "", "中国银行", ""],
+        ["", "2026年9月30日", "2025年12月31日", "2026年9月30日", "2025年12月31日"],
+        ["", "未经审计", "经审计", "未经审计", "经审计"],
+        ["现金及存放中央银行款项", "2706517", "2534817", "2434103", "2260411"],
+    ]
+    merged = _merge_header(rows)
+    assert merged[0][0] == "项目"
+    assert merged[0][1] == "中国银行集团2026年9月30日未经审计"
+    assert merged[0][2] == "中国银行集团2025年12月31日经审计"
+    assert merged[0][3] == "中国银行2026年9月30日未经审计"
+    assert merged[0][4] == "中国银行2025年12月31日经审计"
+    assert merged[1][0] == "现金及存放中央银行款项"
+
+
+def test_merge_header_does_not_flatten_data_under_groups():
+    """分组名下面如果已经是数字，不能当成第二行表头拼进去。"""
+    rows = [
+        ["项目", "集团", "", "母公司", ""],
+        ["现金", "100", "90", "80", "70"],
+    ]
+    assert _merge_header(rows) == rows
+
+
 def test_drop_empty_cols_removes_merged_cells():
     rows = [["项目", "销量", ""], ["2005年", "18959", ""]]
     assert _drop_empty_cols(rows) == [["项目", "销量"], ["2005年", "18959"]]
@@ -144,6 +173,30 @@ def test_drop_table_lines_removes_rows_inside_table():
     ]
     kept = _drop_table_lines(lines, tables)
     assert [ln.text for ln in kept] == ["表格外的正文"]
+
+
+def test_table_content_bbox_stops_at_last_row():
+    class _Row:
+        def __init__(self, bottom: float):
+            self.bbox = (0.0, 80.0, 500.0, bottom)
+
+    class _Table:
+        bbox = (0.0, 80.0, 500.0, 800.0)
+        rows = [_Row(120.0), _Row(400.0)]
+
+    assert _table_content_bbox(_Table()) == (0.0, 80.0, 500.0, 406.0)
+
+
+def test_drop_table_lines_keeps_signatory_under_table():
+    """表格外框若把签字栏包进去，法定代表人仍应留在正文。"""
+    tables = [(10, 80.0, (0.0, 80.0, 500.0, 780.0), [["项目", "期末"]])]
+    lines = [
+        line("负债和所有者权益总计", 10, 0.7, (20.0, 400.0, 200.0, 412.0)),
+        line("法定代表人", 10, 0.93, (40.0, 720.0, 120.0, 732.0)),
+        line("葛海蛟", 10, 0.91, (40.0, 700.0, 90.0, 712.0)),
+    ]
+    kept = _drop_table_lines(lines, tables)
+    assert [ln.text for ln in kept] == ["法定代表人", "葛海蛟"]
 
 
 def test_drop_table_lines_keeps_partial_overlap():
@@ -762,6 +815,26 @@ def test_caption_above_skips_unit_and_date_lines():
         line("单位：千元币种：人民币审计类型：未经审计", 16, 0.15, (60.0, 124.0, 500.0, 136.0)),
     ]
     assert _caption_above(lines, 16, 137.0) == "母公司利润表"
+
+
+def test_table_meta_above_picks_unit_currency_audit():
+    lines = [
+        line("母公司利润表", 16, 0.09, (60.0, 78.8, 300.0, 90.0)),
+        line("2026 年1—9 月", 16, 0.11, (60.0, 92.9, 300.0, 104.0)),
+        line("编制单位：中国能源建设股份有限公司", 16, 0.13, (60.0, 110.0, 400.0, 122.0)),
+        line("单位：千元币种：人民币审计类型：未经审计", 16, 0.15, (60.0, 124.0, 500.0, 136.0)),
+    ]
+    assert _table_meta_above(lines, 16, 137.0) == "单位：千元 · 币种：人民币 · 未经审计"
+    # 编制单位不能当成计量单位
+    assert "中国能源建设" not in (_table_meta_above(lines, 16, 137.0) or "")
+    assert _table_prefix("母公司利润表", _table_meta_above(lines, 16, 137.0)) == (
+        "母公司利润表\n单位：千元 · 币种：人民币 · 未经审计"
+    )
+
+
+def test_table_meta_above_reads_million_yuan_unit():
+    lines = [line("单位：百万元人民币", 8, 0.15, (60.0, 120.0, 400.0, 132.0))]
+    assert _table_meta_above(lines, 8, 140.0) == "单位：百万元人民币"
 
 
 def test_caption_above_accepts_section_heading():

@@ -175,7 +175,10 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
         markdown = _rows_to_markdown(rows)
         if not markdown:
             continue
-        text = f"{caption}\n{markdown}" if caption else markdown
+        # 单位/审计状态跟表题一起写进正文：长表切开后每一片都还知道
+        # 「数字是百万元、这张表未经审计」，否则后半段只剩格子
+        prefix = _table_prefix(caption, _table_meta_above(kept, page, y0))
+        text = f"{prefix}\n{markdown}" if prefix else markdown
         items.append(
             (
                 page,
@@ -745,8 +748,9 @@ def _pdf_tables(
             continue
         for table in tables:
             # 一张图里可能拆出多张表（见 _split_repeated_header）：共用同一
-            # 个 bbox 即可，正文行照样整块剔掉
-            bbox = tuple(table.bbox)
+            # 个 bbox 即可，正文行照样整块剔掉。外框常比最后一行格子大一截，
+            # 会把表下的签字栏（法定代表人）也当成表格内文本删掉。
+            bbox = _table_content_bbox(table)
             for rows in _clean_table(table.extract()):
                 if len(rows) < 2 or max(len(r) for r in rows) < 2:
                     continue
@@ -917,12 +921,10 @@ def _attach_captions(
     return out
 
 
-def _caption_above(lines: list[sections.Line], page: int, y0: float) -> str | None:
-    """在表体上方找最近的一条「像表题」的行，找不到返回 None。
-
-    从近往远走、跳过元信息行：正常的报表上方依次是「单位：千元」「编制单位：」
-    「2026 年1—9 月」，真正的表题在更上面一行。
-    """
+def _lines_above(
+    lines: list[sections.Line], page: int, y0: float
+) -> list[sections.Line]:
+    """表体上方窗口内的行，从近到远。表题和单位都从这里捡。"""
     candidates = [
         ln
         for ln in lines
@@ -931,7 +933,16 @@ def _caption_above(lines: list[sections.Line], page: int, y0: float) -> str | No
         and y0 - _CAPTION_WINDOW <= ln.bbox[3] <= y0 + 1
     ]
     candidates.sort(key=lambda ln: ln.bbox[3], reverse=True)
-    for ln in candidates:
+    return candidates
+
+
+def _caption_above(lines: list[sections.Line], page: int, y0: float) -> str | None:
+    """在表体上方找最近的一条「像表题」的行，找不到返回 None。
+
+    从近往远走、跳过元信息行：正常的报表上方依次是「单位：千元」「编制单位：」
+    「2026 年1—9 月」，真正的表题在更上面一行。
+    """
+    for ln in _lines_above(lines, page, y0):
         text = ln.text.strip()
         if not text or len(text) > _CAPTION_MAX_CHARS:
             continue
@@ -942,6 +953,58 @@ def _caption_above(lines: list[sections.Line], page: int, y0: float) -> str | No
         if _CAPTION_SHAPE.search(text):
             return text
     return None
+
+
+# 报表上方常把单位、币种、审计状态粘在一行：
+# 「单位：千元币种：人民币审计类型：未经审计」。编制单位是主体名，太长
+# 也容易和表题抢戏，不收。
+_UNIT_FIELD = re.compile(
+    r"(?:金额单位|(?<![编准])单位)[:：]\s*(.+?)(?=币种|审计类型|编制单位|$)"
+)
+_CURRENCY_FIELD = re.compile(
+    r"币种[:：]\s*(.+?)(?=审计类型|金额单位|(?<![编准])单位|编制单位|$)"
+)
+_AUDIT_FIELD = re.compile(r"(?:审计类型[:：]\s*)?(未经审计|已审计|经审计)")
+
+
+def _table_meta_above(lines: list[sections.Line], page: int, y0: float) -> str | None:
+    """从表上方捡单位 / 币种 / 审计状态，拼成跟在表题后面的一行。
+
+    这些字不进切片的话，后半张表被切开后只剩数字，模型会把百万元当成元。
+    近的行优先：两张表叠在一起时，要的是紧挨着这张表的那行。
+    """
+    unit = currency = audit = None
+    for ln in _lines_above(lines, page, y0):
+        text = ln.text.strip()
+        if not text:
+            continue
+        if unit is None:
+            m = _UNIT_FIELD.search(text)
+            if m:
+                unit = m.group(1).strip(" 。；;，,")
+        if currency is None:
+            m = _CURRENCY_FIELD.search(text)
+            if m:
+                currency = m.group(1).strip(" 。；;，,")
+        if audit is None:
+            m = _AUDIT_FIELD.search(text)
+            if m:
+                audit = m.group(1)
+        if unit and currency and audit:
+            break
+    parts: list[str] = []
+    if unit:
+        parts.append(unit if unit.startswith("单位") else f"单位：{unit}")
+    if currency:
+        parts.append(currency if "币种" in currency else f"币种：{currency}")
+    if audit:
+        parts.append(audit)
+    return " · ".join(parts) if parts else None
+
+
+def _table_prefix(caption: str | None, meta: str | None) -> str:
+    """表题 + 单位行。口径判断只用表题，所以两者分开传、拼的时候再合。"""
+    return "\n".join(part for part in (caption, meta) if part)
 
 
 # 报表口径：同一个指标在「合并报表」与「母公司报表」里各有一份数，值不一样，
@@ -1273,14 +1336,16 @@ def _align_header(rows: list[list[str]]) -> list[list[str]]:
 def _merge_header(rows: list[list[str]]) -> list[list[str]]:
     """表头占了多行时拼回一行，最多吃三行（表头再复杂就认命）。
 
-    两种形态，判据是「第二行的非空列和第一行重不重叠」：
+    三种形态，判据是「第二行的非空列和第一行重不重叠」：
 
     - **续行**：第二行的列是第一行的子集，且都是短碎片——"销售收入（万"
       + "元）"、"占总收入比例" + "（%"）。长内容说明那是数据行，不动；
     - **分散**：两行的非空列完全不重叠——招股书常见的斜线表头把「年份」
       放第 0 列、「2006年1-6月」放第 1~4 列，分了两三行才写完。
+    - **分组**：第一行是合并单元格的分组名（「中国银行集团」「中国银行」），
+      第二行填期间 / 审计状态。两行部分重叠，按分组名向右沿用再拼到每一列。
 
-    部分重叠（既像续行又像数据）说不清，一律不动——宁可留着多行表头，
+    部分重叠但第二行已经是数字，一律不动——宁可留着多行表头，
     也不能把两行数据粘成一行。
     """
     for _ in range(3):
@@ -1298,22 +1363,66 @@ def _merge_header(rows: list[list[str]]) -> list[list[str]]:
             # 纯数字的一律是数据行（"100"、"200"），拼进表头就串味了
             if any(_NUM_ONLY.match(cell) for cell in cells):
                 break
+            merged = _concat_header_rows(first, second)
         elif s_cols & f_cols:
-            break
+            merged = _flatten_group_header(first, second)
+            if merged is None:
+                break
         elif _alternating(f_cols, s_cols):
             # 两行的非空列均匀交替（表头在 1/4/7 列、数据在 0/3/6 列）不是
             # 分两行写的表头，而是合并单元格把表头和数据挤进了同一套网格。
             # 合并起来就成了「1 | 序号 | 孙瑞良 | 股东名称」这种串味的行，
             # 交给后面的 _align_header 按数据列归位
             break
-        merged = list(first)
-        for i, cell in enumerate(second):
-            if not cell:
-                continue
-            # 第一行该列为空时直接落下来，别把表头碎片丢了
-            merged[i] = merged[i] + cell if merged[i] else cell
+        else:
+            merged = _concat_header_rows(first, second)
         rows = [merged] + rows[2:]
     return rows
+
+
+def _concat_header_rows(first: list[str], second: list[str]) -> list[str]:
+    merged = list(first)
+    for i, cell in enumerate(second):
+        if not cell:
+            continue
+        merged[i] = merged[i] + cell if merged[i] else cell
+    return merged
+
+
+def _flatten_group_header(first: list[str], second: list[str]) -> list[str] | None:
+    """把「分组名跨列 + 下面一行期间」摊成每列一个完整列名。
+
+    只在第二行像列名、不像数据时动手。股东名册那种表头/数据交错
+    走的是另一条路，不会进这里（非空列互不重叠）。
+    """
+    if _is_data_row(second) or not _headerish_row(second):
+        return None
+    filled = _carry_span_labels(first)
+    return [_join_header_cell(a, b) for a, b in zip(filled, second)]
+
+
+def _carry_span_labels(row: list[str]) -> list[str]:
+    """合并单元格留下的空列，用左侧分组名填上。左上角「项目」不往右传。"""
+    out = list(row)
+    corner = out[0] if out else ""
+    last = ""
+    for i, cell in enumerate(out):
+        if cell:
+            last = cell
+            continue
+        if i > 0 and last and last != corner:
+            out[i] = last
+    return out
+
+
+def _join_header_cell(top: str, bottom: str) -> str:
+    if not bottom:
+        return top
+    if not top or bottom.startswith(top) or top in bottom:
+        return bottom
+    if top.startswith(bottom):
+        return top
+    return top + bottom
 
 
 def _split_interleaved(rows: list[list[str]]) -> list[list[str]]:
@@ -1386,6 +1495,44 @@ def _drop_empty_cols(rows: list[list[str]]) -> list[list[str]]:
     return [[row[i] for i in keep] for row in rows]
 
 
+def _table_content_bbox(table) -> tuple:
+    """用最后一行格子收紧表格外框，避免把表下的签字栏包进去。"""
+    outer = tuple(table.bbox)
+    try:
+        rows = table.rows
+    except Exception:
+        return outer
+    bottoms = [
+        float(row.bbox[3])
+        for row in (rows or [])
+        if getattr(row, "bbox", None)
+    ]
+    if not bottoms:
+        return outer
+    return (outer[0], outer[1], outer[2], min(float(outer[3]), max(bottoms) + 6.0))
+
+
+# 签字人姓名：葛海蛟 / 张辉，印在职务上一行，和职务一起留
+_SIGNATORY_NAME = re.compile(rf"^[{_CJK}]{{2,4}}$")
+
+
+def _signatory_pages(lines: list[sections.Line]) -> dict[int, list[float]]:
+    pages: dict[int, list[float]] = {}
+    for ln in lines:
+        if sections.is_signatory(ln):
+            pages.setdefault(ln.page, []).append(ln.y_ratio)
+    return pages
+
+
+def _keep_signatory_block(ln: sections.Line, pages: dict[int, list[float]]) -> bool:
+    if sections.is_signatory(ln):
+        return True
+    ys = pages.get(ln.page)
+    if not ys or not _SIGNATORY_NAME.match(ln.norm):
+        return False
+    return any(abs(ln.y_ratio - y) <= 0.08 for y in ys)
+
+
 def _drop_table_lines(
     lines: list[sections.Line],
     tables: list[tuple[int, float, tuple, list[list[str]]]],
@@ -1394,9 +1541,10 @@ def _drop_table_lines(
     if not tables:
         return lines
     boxes = [(page, bbox) for page, _y, bbox, _rows in tables]
+    sign_pages = _signatory_pages(lines)
     kept: list[sections.Line] = []
     for ln in lines:
-        if ln.bbox and _hit_any_box(ln, boxes):
+        if ln.bbox and _hit_any_box(ln, boxes) and not _keep_signatory_block(ln, sign_pages):
             continue
         kept.append(ln)
     return kept
