@@ -255,6 +255,30 @@ def test_skip_forced_search_weather_and_chitchat(monkeypatch):
     assert loop_mod._skip_forced_kb_search("顺丰在深圳遇上台风对物流有何影响") is False
 
 
+def test_skip_forced_search_skips_meta_queries(monkeypatch):
+    from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
+
+    # 元查询（纯谈「查知识库/看文档」动作、无具体主体）不触发强制检索，
+    # 交由模型澄清或列目录，避免拿原话去撞无关文档
+    for q in (
+        "我想查知识库",
+        "查一下知识库",
+        "看看文档里有什么",
+        "你们有哪些资料",
+        "怎么用知识库",
+        "帮我看看文档",
+    ):
+        assert loop_mod._skip_forced_kb_search(q) is True, q
+
+    # 含具体主体的真实查询仍应检索（不误伤）
+    for q in (
+        "中国能建第三季度营收是多少",
+        "考勤制度里迟到怎么算",
+        "中国银行2024年报净息差",
+    ):
+        assert loop_mod._skip_forced_kb_search(q) is False, q
+
+
 def test_catalog_survives_list_failure(monkeypatch):
     from ai_agent.agents import loop as loop_mod, rewrite as rewrite_mod
 

@@ -189,7 +189,7 @@ _KB_CHITCHAT = re.compile(
 
 
 def _skip_forced_kb_search(query: str) -> bool:
-    """天气/闲聊不要强行检索：关键词会误撞「深圳市顺丰投资」这类公司名。"""
+    """天气/闲聊/元查询不要强行检索：关键词会误撞「深圳市顺丰投资」这类公司名。"""
     text = (query or "").strip()
     if not text:
         return True
@@ -197,7 +197,39 @@ def _skip_forced_kb_search(query: str) -> bool:
         return True
     if _KB_OFFTOPIC.search(text) and not query_looks_on_topic(text):
         return True
+    if _looks_like_meta_query(text):
+        return True
     return False
+
+
+# 元/无实体查询：整句剥离动作词、库称谓、疑问词后几乎不剩实质内容，
+# 强行检索只会拿原话去撞无关文档（如「我想查知识库」）。交给模型澄清或列目录。
+_KB_META_STOPWORDS = (
+    "你好", "嗨", "哈喽", "在吗",
+    "帮我看看", "帮我", "想", "要", "需要", "可以", "能不能", "是否",
+    "怎么", "如何", "查一下", "查", "看看", "了解下", "了解", "检索", "搜", "搜索",
+    "知道", "问", "找", "看", "这个", "那个", "它",
+    "一下", "知识库", "资料", "文档", "文库", "库", "文件", "内容", "里面", "里", "上", "中",
+    "有什么", "有哪些", "有", "什么", "哪些", "哪份", "哪几", "一些", "相关",
+    "吗", "呢", "啊", "吧", "呀", "哦", "的", "了", "是", "在", "到", "这", "那", "关于",
+    "能", "给", "提供", "告诉", "介绍",
+)
+
+
+def _looks_like_meta_query(text: str) -> bool:
+    """整句剥离动作词/库称谓/疑问词后几乎不剩实质内容 → 视为元查询。
+
+    真实查询（如「中国银行季报」「考勤制度」）剥离后必留主体，不会误判；
+    纯谈「查知识库 / 看文档 / 你们有什么资料」的查询剥离后为空，跳过强制检索，
+    交由模型澄清或列出目录，避免拿原话去撞无关文档。纯字符串判断，无 DB 代价。
+    """
+    if len(text) > 30:
+        return False
+    residual = text
+    for stop in _KB_META_STOPWORDS:
+        residual = residual.replace(stop, "")
+    residual = re.sub(r"[^\w\u4e00-\u9fff]", "", residual)
+    return len(residual) <= 2
 
 
 def _usable_rewrite(original: str, rewritten: str) -> bool:
