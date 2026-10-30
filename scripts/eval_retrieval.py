@@ -27,6 +27,7 @@
     uv run python scripts/eval_retrieval.py --rerank   # 带上 LLM 重排（需模型可用，较慢）
     uv run python scripts/eval_retrieval.py --dump     # 列出库内切片，便于编写用例
     uv run python scripts/eval_retrieval.py --top-k 10 # 调大观察窗口
+    uv run python scripts/eval_retrieval.py --stability --rerank   # 同一 query 跑 N 次，量化同问稳定性
 
 退出码：0 通过；1 hit@3 低于阈值（默认 0.85）；2 用例失效（语料已变）。
 """
@@ -200,6 +201,84 @@ def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
     return 0 if ok else 1
 
 
+def set_jaccard(a: list[str], b: list[str]) -> float:
+    """两个 top-k 序列（filename#seq）的集合重合度，1.0 表示完全一致。"""
+    sa, sb = set(a), set(b)
+    if not sa and not sb:
+        return 1.0
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def order_agreement(a: list[str], b: list[str]) -> float:
+    """以 a 为基准的顺序一致性：同序=1.0，完全错位=0.0。
+
+    只比较交集元素的位置差，比 Kendall tau 便宜，足够分辨「同问不同序」。
+    """
+    if not a:
+        return 1.0 if not b else 0.0
+    rank = {k: i for i, k in enumerate(a)}
+    if not b:
+        return 0.0
+    common = [k for k in b if k in rank]
+    if len(common) < 2:
+        return 1.0 if common else 0.0
+    diffs = [abs(rank[common[i]] - i) for i in range(len(common))]
+    max_diff = len(common) - 1
+    return 1.0 - sum(diffs) / (max_diff * len(common))
+
+
+def evaluate_stability(cases: list[dict], top_k: int, rerank: bool, runs: int) -> int:
+    """稳定性评测：同一 query 重复运行 runs 次，量化 top-k 结果是否一致。
+
+    对应「同问每次结果不同」这一不稳定表现。关重排时纯 SQL 链路确定，
+    分数应≈1.0；开 --rerank 后<1.0 即暴露重排/嵌入抖动的来源。
+    """
+    from ai_agent.kb import retrieval
+
+    if not rerank:
+        settings.kb_rerank_enabled = False
+    else:
+        from ai_agent.memory.embeddings import embed_texts
+
+        embed_texts(["预热"])
+
+    window = max(top_k, 10)
+    print(f"{'query':<26} 稳定(集) 稳定(序)  hit@3")
+    print("-" * 60)
+    sset_sum = sord_sum = 0.0
+    n3 = 0
+    for case in cases:
+        runs_keys: list[list[str]] = []
+        last_hits = None
+        for _ in range(runs):
+            last_hits = retrieval.search_knowledge(case["query"], top_k=window)
+            runs_keys.append([f"{h.filename}#{h.seq}" for h in last_hits])
+        base = runs_keys[0]
+        jaccards = [set_jaccard(base, ks) for ks in runs_keys[1:]]
+        orders = [order_agreement(base, ks) for ks in runs_keys[1:]]
+        sset = sum(jaccards) / len(jaccards) if jaccards else 1.0
+        sord = sum(orders) / len(orders) if orders else 1.0
+        rank = hit_rank(last_hits, case["expect"])
+        at3 = rank is not None and rank <= 3
+        n3 += at3
+        sset_sum += sset
+        sord_sum += sord
+        print(
+            f"{case['query'][:24]:<26} {sset:.2f}     {sord:.2f}     "
+            f"{'✓' if at3 else '✗'}"
+        )
+    total = len(cases)
+    print("-" * 60)
+    print(
+        f"平均稳定性(集合) {sset_sum / total:.3f} | 平均稳定性(顺序) "
+        f"{sord_sum / total:.3f} | hit@3 {n3}/{total} ({n3 / total:.0%})"
+    )
+    print("解读：关重排应≈1.0（纯SQL确定）；开 --rerank 后<1.0 即暴露重排/嵌入抖动")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="知识库检索回归评测")
     parser.add_argument("--dump", action="store_true", help="列出库内切片后退出")
@@ -207,6 +286,12 @@ def main() -> int:
     parser.add_argument("--skip-invalid", action="store_true", help="跳过失效用例继续评测")
     parser.add_argument("--rerank", action="store_true", help="启用 LLM 重排（默认关闭）")
     parser.add_argument("--top-k", type=int, default=5, help="观察窗口大小（默认 5）")
+    parser.add_argument(
+        "--stability",
+        action="store_true",
+        help="同一 query 重复运行度量 top-k 稳定性（配合 --rerank 暴露抖动）",
+    )
+    parser.add_argument("--runs", type=int, default=3, help="--stability 重复运行次数")
     args = parser.parse_args()
 
     if args.dump:
@@ -233,6 +318,9 @@ def main() -> int:
     if args.validate:
         print(f"用例校验通过：{len(cases)} 条全部与语料对齐")
         return 0
+
+    if args.stability:
+        return evaluate_stability(cases, args.top_k, args.rerank, args.runs)
 
     return evaluate(cases, args.top_k, args.rerank)
 
