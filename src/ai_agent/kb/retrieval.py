@@ -670,21 +670,35 @@ def _attach_neighbors(hits: list[Hit]) -> list[Hit]:
     return hits
 
 
+_rerank_cache: dict[tuple, list[int]] = {}
+
+
 def _rerank(query: str, rows: list[dict], top_k: int) -> list[dict]:
-    """LLM 重排：只输出候选编号顺序，解析失败就退回向量顺序。"""
-    listing = "\n\n".join(
-        f"[{i + 1}] {row.get('filename') or ''} · {_where(row)}\n{_clip(row.get('text') or '')}"
-        for i, row in enumerate(rows)
-    )
-    prompt = build_rerank_user(query, listing, min(top_k, len(rows)))
-    try:
-        answer = complete_chat_once(prompt)
-    except Exception:
-        logger.warning("kb 重排调用失败，退回向量顺序", exc_info=True)
-        return rows
-    order = _parse_order(answer, len(rows))
-    if not order:
-        return rows
+    """LLM 重排：只输出候选编号顺序，解析失败就退回向量顺序。
+
+    同 (query, 候选序列) 直接复用首次重排结果：LLM 编号输出非确定，缓存可
+    消除「同问不同序」，也省一次重排调用。候选序列用 file_id#seq 签名，
+    重排候选变了（范围/阈值不同）即失效，不会串味。
+    """
+    cache_key = (query, tuple((r.get("file_id"), r.get("seq")) for r in rows))
+    cached = _rerank_cache.get(cache_key)
+    if cached is None:
+        listing = "\n\n".join(
+            f"[{i + 1}] {row.get('filename') or ''} · {_where(row)}\n{_clip(row.get('text') or '')}"
+            for i, row in enumerate(rows)
+        )
+        prompt = build_rerank_user(query, listing, min(top_k, len(rows)))
+        try:
+            answer = complete_chat_once(prompt)
+        except Exception:
+            logger.warning("kb 重排调用失败，退回向量顺序", exc_info=True)
+            return rows
+        order = _parse_order(answer, len(rows))
+        if not order:
+            return rows
+        _rerank_cache[cache_key] = order
+    else:
+        order = cached
     # 重排结果里没提到的候选按原顺序补在后面：宁可多给一条，也别丢候选
     ordered = [rows[i - 1] for i in order]
     ordered.extend(row for i, row in enumerate(rows, start=1) if i not in set(order))
