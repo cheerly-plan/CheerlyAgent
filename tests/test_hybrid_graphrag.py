@@ -602,7 +602,7 @@ def _chunk(seq):
 
 def _extract_with_marker(chunks, start_seq, _system=None, **_kw):
     """让结果携带 start_seq，验证批序与分批正确性。"""
-    from ai_agent.kb.graph import _Entity, _Extraction
+    from ai_agent.kb.graph_extract import _Entity, _Extraction
 
     return _Extraction(
         entities=[_Entity(name=f"e{start_seq}", chunk=0)],
@@ -611,9 +611,9 @@ def _extract_with_marker(chunks, start_seq, _system=None, **_kw):
 
 def test_extract_all_keeps_batch_order(monkeypatch):
     """并发执行但结果按批序排列：合并阶段的跨批语义不因并行而变。"""
-    from ai_agent.kb import graph
+    from ai_agent.kb import graph, graph_extract
 
-    monkeypatch.setattr(graph, "_extract_batch", _extract_with_marker)
+    monkeypatch.setattr(graph_extract, "_extract_batch", _extract_with_marker)
     monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 4)
 
     chunks = [_chunk(i) for i in range(20)]  # 8/批 → 3 批
@@ -626,7 +626,7 @@ def test_extract_all_keeps_batch_order(monkeypatch):
 
 def test_extract_all_skips_failed_batch(monkeypatch):
     """单批异常只跳过该批，其余批结果保留。"""
-    from ai_agent.kb import graph
+    from ai_agent.kb import graph, graph_extract
 
     calls = []
 
@@ -636,7 +636,7 @@ def test_extract_all_skips_failed_batch(monkeypatch):
             raise ConnectionError("网关抖动")
         return _extract_with_marker(chunks, start_seq)
 
-    monkeypatch.setattr(graph, "_extract_batch", flaky)
+    monkeypatch.setattr(graph_extract, "_extract_batch", flaky)
     monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 2)
 
     chunks = [_chunk(i) for i in range(24)]
@@ -652,12 +652,12 @@ def test_extract_all_raises_when_all_batches_fail(monkeypatch):
     """全部批失败 = 配置类错误：抛给上层标 failed，不能伪装成空图。"""
     import pytest as _pytest
 
-    from ai_agent.kb import graph
+    from ai_agent.kb import graph, graph_extract
 
     def boom(chunks, start_seq, _system=None, **_kw):
         raise ConnectionError("模型不存在")
 
-    monkeypatch.setattr(graph, "_extract_batch", boom)
+    monkeypatch.setattr(graph_extract, "_extract_batch", boom)
     monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 2)
 
     chunks = [_chunk(i) for i in range(16)]
@@ -666,9 +666,9 @@ def test_extract_all_raises_when_all_batches_fail(monkeypatch):
 
 
 def test_extract_all_serial_when_concurrency_one(monkeypatch):
-    from ai_agent.kb import graph
+    from ai_agent.kb import graph, graph_extract
 
-    monkeypatch.setattr(graph, "_extract_batch", _extract_with_marker)
+    monkeypatch.setattr(graph_extract, "_extract_batch", _extract_with_marker)
     monkeypatch.setattr(graph.settings, "kb_graph_concurrency", 1)
 
     out = graph._extract_all([_chunk(i) for i in range(8)], 8, "sys")
@@ -686,7 +686,7 @@ def _section_chunk(seq, section):
 
 def test_batch_bounds_never_splits_a_small_section():
     """一节只有 3 片时不能和上一节的尾巴各切一半：整节成批。"""
-    from ai_agent.kb.graph import _batch_bounds
+    from ai_agent.kb.graph_extract import _batch_bounds
 
     chunks = [_section_chunk(i, "第一节") for i in range(3)] + [
         _section_chunk(i, "第二节") for i in range(3, 6)
@@ -698,7 +698,7 @@ def test_batch_bounds_never_splits_a_small_section():
 
 
 def test_batch_bounds_splits_oversize_section_without_crossing_it():
-    from ai_agent.kb.graph import _batch_bounds
+    from ai_agent.kb.graph_extract import _batch_bounds
 
     chunks = [_section_chunk(i, "第一节") for i in range(10)] + [
         _section_chunk(i, "第二节") for i in range(10, 12)
@@ -712,7 +712,7 @@ def test_batch_bounds_splits_oversize_section_without_crossing_it():
 
 
 def test_batch_bounds_falls_back_to_sequential_without_sections():
-    from ai_agent.kb.graph import _batch_bounds
+    from ai_agent.kb.graph_extract import _batch_bounds
 
     chunks = [_chunk(i) for i in range(20)]
     assert [start for start, _b in _batch_bounds(chunks, 8)] == [0, 8, 16]
@@ -720,7 +720,7 @@ def test_batch_bounds_falls_back_to_sequential_without_sections():
 
 def test_prompt_carries_section_and_page_range():
     from ai_agent.kb.chunking import Chunk
-    from ai_agent.kb.graph import _build_prompt
+    from ai_agent.kb.graph_extract import _build_prompt
 
     chunks = [
         Chunk(
@@ -739,7 +739,7 @@ def test_prompt_carries_section_and_page_range():
 
 def test_prompt_omits_section_head_for_mixed_batch():
     from ai_agent.kb.chunking import Chunk
-    from ai_agent.kb.graph import _build_prompt
+    from ai_agent.kb.graph_extract import _build_prompt
 
     chunks = [
         Chunk(text="甲", page=1, kind="text", section="第一节 释义"),
@@ -758,7 +758,7 @@ def test_prompt_carries_doc_name_and_span():
     模型把 prompt 示例里的公司名抄成了主语，长出 14 条错误关系。
     """
     from ai_agent.kb.chunking import Chunk
-    from ai_agent.kb.graph import _build_prompt
+    from ai_agent.kb.graph_extract import _build_prompt
 
     chunks = [
         Chunk(text="甲", page=18, kind="table"),
@@ -773,7 +773,7 @@ def test_prompt_carries_doc_name_and_span():
 
 def test_prompt_drops_file_extension_and_keeps_backward_compat():
     from ai_agent.kb.chunking import Chunk
-    from ai_agent.kb.graph import _build_prompt
+    from ai_agent.kb.graph_extract import _build_prompt
 
     prompt = _build_prompt([Chunk(text="甲", page=3)], 0, "2026年三季报.pdf")
     assert "《2026年三季报》" in prompt

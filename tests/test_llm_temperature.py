@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 from ai_agent.agents import loop
 from ai_agent.core.config import settings
-from ai_agent.kb import align, graph, retrieval
+from ai_agent.kb import align, graph, graph_extract, retrieval
 from ai_agent.kb.chunking import Chunk
 from ai_agent.llm import client
 
@@ -89,9 +89,9 @@ def test_graph_extraction_forwards_temperature(monkeypatch):
             ensure_ascii=False,
         )
 
-    monkeypatch.setattr(graph, "complete_chat", fake)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake)
     monkeypatch.setattr(settings, "kb_graph_temperature", 0.3)
-    graph._extract_batch([Chunk("甲公司本期营业收入同比增长百分之十。")], 0, "system")
+    graph_extract._extract_batch([Chunk("甲公司本期营业收入同比增长百分之十。")], 0, "system")
     assert seen["temperature"] == 0.3
     assert "client" in seen
 

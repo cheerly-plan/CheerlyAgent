@@ -9,9 +9,10 @@ import uuid
 import pytest
 
 from ai_agent.core.config import settings
-from ai_agent.kb import graph
+from ai_agent.kb import graph, graph_extract
 from ai_agent.kb.chunking import Chunk
-from ai_agent.kb.graph import build_file_graph, normalize_name
+from ai_agent.kb.graph import build_file_graph
+from ai_agent.kb.graph_extract import normalize_name
 from ai_agent.kb.graph_store import KgStore
 from ai_agent.memory import parse
 from ai_agent.tools.registry import TOOLS_MAP
@@ -45,7 +46,7 @@ def test_build_file_graph_merges_and_links(monkeypatch):
       {"source":"长鑫存储","target":"不存在的实体","relation":"投资","chunk":0}
     ]}
     """
-    monkeypatch.setattr(graph, "complete_chat", lambda *a, **k: payload)
+    monkeypatch.setattr(graph_extract, "complete_chat", lambda *a, **k: payload)
     monkeypatch.setattr(
         graph, "embed_texts_parallel", lambda texts, **k: [[0.01, 0.02] for _ in texts]
     )
@@ -108,7 +109,7 @@ def test_build_file_graph_drops_year_nodes_and_their_edges(monkeypatch):
       {"source":"发行人","target":"装机容量","relation":"拥有","description":"2004年末","chunk":0}
     ]}
     """
-    monkeypatch.setattr(graph, "complete_chat", lambda *a, **k: payload)
+    monkeypatch.setattr(graph_extract, "complete_chat", lambda *a, **k: payload)
     monkeypatch.setattr(
         graph, "embed_texts_parallel", lambda texts, **k: [[0.01, 0.02] for _ in texts]
     )
@@ -132,7 +133,7 @@ def test_build_file_graph_drops_year_nodes_and_their_edges(monkeypatch):
 
 
 def test_build_file_graph_skips_non_json(monkeypatch):
-    monkeypatch.setattr(graph, "complete_chat", lambda *a, **k: "抱歉，我无法处理")
+    monkeypatch.setattr(graph_extract, "complete_chat", lambda *a, **k: "抱歉，我无法处理")
     called = {"replace": False}
     monkeypatch.setattr(
         graph.store,
@@ -401,7 +402,7 @@ def _long_text(seed: str) -> str:
 
 def test_parse_extraction_accepts_compact_arrays():
     """紧凑格式（e/r 数组）是主线：省掉逐项重复的键，输出 token 少一半。"""
-    from ai_agent.kb.graph import _parse_extraction
+    from ai_agent.kb.graph_extract import _parse_extraction
 
     parsed = _parse_extraction(
         {
@@ -416,7 +417,7 @@ def test_parse_extraction_accepts_compact_arrays():
 
 
 def test_parse_extraction_still_accepts_verbose_objects():
-    from ai_agent.kb.graph import _parse_extraction
+    from ai_agent.kb.graph_extract import _parse_extraction
 
     parsed = _parse_extraction(
         {"entities": [{"name": "HBM", "type": "product"}], "relations": []}
@@ -425,7 +426,7 @@ def test_parse_extraction_still_accepts_verbose_objects():
 
 
 def test_parse_extraction_rejects_unknown_shape():
-    from ai_agent.kb.graph import _parse_extraction
+    from ai_agent.kb.graph_extract import _parse_extraction
 
     assert _parse_extraction({"公司": ["发行人"]}) is None
     assert _parse_extraction("不是 dict") is None
@@ -445,9 +446,9 @@ def test_bad_output_splits_batch_and_offsets_chunk(monkeypatch):
             return '{"公司": ["发行人"], "关系": []}'
         return '{"e": [["发行人马甲公司", "org", "发行人", 0]], "r": []}'
 
-    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake_complete)
     chunks = [Chunk(_long_text(f"片段{i}")) for i in range(4)]
-    result = graph._extract_batch(chunks, 0, "你是抽取器")
+    result = graph_extract._extract_batch(chunks, 0, "你是抽取器")
 
     # 整批失败 1 次 + 原样重问 1 次 + 两个半批各 1 次
     assert len(calls) == 4
@@ -463,11 +464,11 @@ def test_low_value_chunks_are_filtered_before_llm(monkeypatch):
 
     def fake_extract(batch, start_seq, _depth=0, **_kw):
         seen.extend(c.text for c in batch)
-        from ai_agent.kb.graph import _Extraction
+        from ai_agent.kb.graph_extract import _Extraction
 
         return _Extraction()
 
-    monkeypatch.setattr(graph, "_extract_batch", fake_extract)
+    monkeypatch.setattr(graph_extract, "_extract_batch", fake_extract)
     chunks = [
         Chunk("目录 ........ 12"),
         Chunk("12"),
@@ -485,13 +486,13 @@ def test_graph_flushes_progressively(monkeypatch):
     monkeypatch.setattr(settings, "kb_graph_flush_batches", 1)
     monkeypatch.setattr(graph, "embed_texts_parallel", lambda texts, **k: [[0.1] for _ in texts])
     monkeypatch.setattr(
-        graph,
+        graph_extract,
         "_extract_batch",
         lambda batch, start_seq, _depth=0, **_kw: __import__(
             "ai_agent.kb.graph", fromlist=["_Extraction"]
         )._Extraction(
             entities=[
-                __import__("ai_agent.kb.graph", fromlist=["_Entity"])._Entity(
+                __import__("ai_agent.kb.graph_extract", fromlist=["_Entity"])._Entity(
                     name=f"实体{start_seq}", type="org", chunk=0
                 )
             ]
@@ -527,7 +528,8 @@ def test_relation_links_across_batches(monkeypatch):
     找端点的话，这类关系整条丢掉，最后全是孤立点（实测 407 个实体 225 个
     一条关系都没挂上）。
     """
-    from ai_agent.kb.graph import _Extraction, _GraphAccumulator
+    from ai_agent.kb.graph import _GraphAccumulator
+    from ai_agent.kb.graph_extract import _Extraction
 
     monkeypatch.setattr(
         graph, "embed_texts_parallel", lambda texts, **k: [[0.01] for _ in texts]
@@ -542,11 +544,11 @@ def test_relation_links_across_batches(monkeypatch):
     acc = _GraphAccumulator(uuid.uuid4())
     # 第一批只抽到主体
     acc.add(0, [Chunk("第一段正文，发行人主营建筑装饰工程。")], _Extraction(
-        entities=[graph._Entity(name="亚厦股份", type="org", chunk=0)],
+        entities=[graph_extract._Entity(name="亚厦股份", type="org", chunk=0)],
     ))
     # 第二批的关系提到主体，但主体本身没被当实体抽出来（只在句子里被顺带提及）
     acc.add(8, [Chunk("第二段正文，亚厦股份向亚厦控股采购幕墙材料。")], _Extraction(
-        entities=[graph._Entity(name="亚厦控股", type="org", chunk=0)],
+        entities=[graph_extract._Entity(name="亚厦控股", type="org", chunk=0)],
         relations=[
             graph._Relation(source="亚厦股份", target="亚厦控股", relation="采购", chunk=0)
         ],
@@ -575,7 +577,7 @@ def test_doc_type_switches_config_block_in_system_prompt(monkeypatch):
         # 不返回实体，避免 flush 走到向量化/落库（本用例只验 prompt 装配）
         return '{"e": [], "r": []}'
 
-    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake_complete)
     chunks = [Chunk("国电电力发展股份有限公司向控股子公司采购煤炭，装机容量同比增长。")]
 
     build_file_graph(uuid.uuid4(), chunks, doc_type="prospectus", level="light")
@@ -599,7 +601,7 @@ def test_unknown_doc_type_falls_back_to_general(monkeypatch):
         seen["system"] = messages[0]["content"]
         return '{"e": [], "r": []}'
 
-    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake_complete)
     counts = build_file_graph(
         uuid.uuid4(), [Chunk("某份不知道类型的商业文档，提到若干主体。")], doc_type="没这个类型"
     )
@@ -665,9 +667,9 @@ def test_extract_batch_reasks_before_splitting(monkeypatch):
         calls.append(1)
         return _ok_payload() if len(calls) == 2 else "抱歉，我无法处理"
 
-    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake_complete)
     chunks = [Chunk("甲公司是一家制造企业，主营若干产品线。") for _ in range(4)]
-    result = graph._extract_batch(chunks, 0, "system")
+    result = graph_extract._extract_batch(chunks, 0, "system")
     assert [e.name for e in result.entities] == ["甲公司"]
     assert len(calls) == 2  # 原调用 + 重问，没有拆半
 
@@ -679,9 +681,9 @@ def test_extract_batch_splits_when_reask_also_fails(monkeypatch):
         calls.append(1)
         return "抱歉，我无法处理"
 
-    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake_complete)
     chunks = [Chunk("甲公司是一家制造企业，主营若干产品线。") for _ in range(4)]
-    result = graph._extract_batch(chunks, 0, "system")
+    result = graph_extract._extract_batch(chunks, 0, "system")
     assert result.entities == []
     # 原调用 + 重问 + 拆成两半各一次；拆出来的半批不再重问，避免调用爆炸
     assert len(calls) == 4
@@ -694,10 +696,10 @@ def test_extract_batch_does_not_reask_when_split_depth_reached(monkeypatch):
         calls.append(1)
         return "抱歉，我无法处理"
 
-    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake_complete)
     # 2 片：拆不动，重问一次后放弃
     chunks = [Chunk("甲公司是一家制造企业。"), Chunk("乙公司是另一家制造企业。")]
-    graph._extract_batch(chunks, 0, "system")
+    graph_extract._extract_batch(chunks, 0, "system")
     assert len(calls) == 2
 
 
@@ -712,13 +714,13 @@ def test_compact_relation_missing_target_is_dropped():
             ["深圳明德控股", "通过子公司持股", 121436506, 1],
         ]
     }
-    parsed = graph._parse_extraction(meta)
+    parsed = graph_extract._parse_extraction(meta)
     assert parsed.relations == []
 
 
 def test_compact_relation_four_items_with_target_is_kept():
     """第 3 项是文字时是 [主体, 客体, 关系, 序号]，照常用。"""
-    parsed = graph._parse_extraction({"r": [["甲公司", "乙公司", "控股", 0]]})
+    parsed = graph_extract._parse_extraction({"r": [["甲公司", "乙公司", "控股", 0]]})
     assert len(parsed.relations) == 1
     rel = parsed.relations[0]
     assert (rel.source, rel.target, rel.relation, rel.description, rel.chunk) == (
@@ -731,7 +733,7 @@ def test_compact_relation_four_items_with_target_is_kept():
 
 
 def test_compact_relation_five_items_unchanged():
-    parsed = graph._parse_extraction(
+    parsed = graph_extract._parse_extraction(
         {"r": [["甲公司", "乙公司", "控股", "持股 51%", 2]]}
     )
     rel = parsed.relations[0]
@@ -754,7 +756,7 @@ def _acc():
 
 def _ext(entities=(), relations=()):
     return graph._Extraction(
-        entities=[graph._Entity(name=n, type="org") for n in entities],
+        entities=[graph_extract._Entity(name=n, type="org") for n in entities],
         relations=[
             graph._Relation(source=s, target=t, relation=r) for s, t, r in relations
         ],
@@ -816,7 +818,7 @@ def test_no_stub_entity_reaches_the_graph(monkeypatch):
     而落到库里的实体才是前端、检索、图谱问答看到的全部内容。
     """
     monkeypatch.setattr(
-        graph,
+        graph_extract,
         "complete_chat",
         lambda *a, **k: """
         {"entities":[{"name":"长鑫存储","type":"org","description":"国产 DRAM 厂商","chunk":0}],
@@ -950,7 +952,7 @@ def test_build_file_graph_passes_doc_name_to_prompt(monkeypatch):
         seen["user"] = messages[1]["content"]
         return '{"e":[],"r":[]}'
 
-    monkeypatch.setattr(graph, "complete_chat", fake_complete)
+    monkeypatch.setattr(graph_extract, "complete_chat", fake_complete)
     monkeypatch.setattr(
         graph, "embed_texts_parallel", lambda texts, **k: [[0.1, 0.2] for _ in texts]
     )
@@ -971,7 +973,7 @@ def test_build_file_graph_passes_doc_name_to_prompt(monkeypatch):
 def _ext_at(entities=(), relations=(), chunk=0):
     return graph._Extraction(
         entities=[
-            graph._Entity(name=n, type="org", chunk=chunk) for n in entities
+            graph_extract._Entity(name=n, type="org", chunk=chunk) for n in entities
         ],
         relations=[
             graph._Relation(source=s, target=t, relation=r, chunk=chunk)
@@ -1040,7 +1042,7 @@ def test_relation_chunk_points_at_source_chunk():
 def test_prompt_labels_chunks_with_absolute_seq():
     """片段标号必须是绝对段号：批内下标 [0] 和开头的「第 33–34 段」互相矛盾。"""
     chunks = [Chunk("甲段正文够长可以抽", seq=33), Chunk("乙段正文够长可以抽", seq=34)]
-    prompt = graph._build_prompt(chunks, 33, "某公司季报")
+    prompt = graph_extract._build_prompt(chunks, 33, "某公司季报")
     assert "[33] （text" in prompt
     assert "[34] （text" in prompt
     assert "[0]" not in prompt
