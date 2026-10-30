@@ -97,7 +97,7 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 | 目录 | 职责 |
 |---|---|
 | `api/` | FastAPI 应用、中间件（request_id / 鉴权 / 限流）、路由、请求响应模型 |
-| `agents/` | Agent 主循环（`loop.py`）、Prompt（`prompts.py`）、上下文预算（`budget.py`） |
+| `agents/` | Agent 主循环与周边：`loop.py` 主流程、`rewrite.py` 查询改写与目录注入、`messages.py` 上下文裁剪与断点缝合、`turn.py` 持久化与收尾、`prompts.py`、`budget.py` |
 | `llm/` | OpenAI 兼容客户端，流式输出与超时控制 |
 | `tools/` | 工具定义与注册：`kb_search`、`kg_search`、`memory_search`、`memory_write`、`web_search`、`weather` |
 | `kb/` | 知识库：解析、切片、嵌入、检索、图谱、引用溯源、视觉识别 |
@@ -118,7 +118,14 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 | `office.py` | DOCX / XLSX 解析，含内嵌图片与内嵌表格 |
 | `chunking.py` | 按章节/页切块，表格整表成片 |
 | `retrieval.py` | 查询改写 → 标签预过滤 → 混合检索（关键词 + 向量 RRF）→ LLM 重排 |
-| `graph*.py` / `align.py` / `community.py` | 知识图谱：实体关系抽取、存储、实体对齐、社区发现 |
+| `graph.py` / `graph_extract.py` | 图谱构建：`graph_extract` 负责 LLM 抽取与命名规范化，`graph` 负责跨批合并与落库编排 |
+| `graph_store.py` / `graph_write.py` / `kg_match.py` | 图谱存取：查询侧 mixin / 写入侧 mixin / 检索候选打分（均为 MemoryStore 的 mixin） |
+| `align.py` / `community.py` | 实体对齐、社区发现 |
+
+> `memory/store.py` 的 `MemoryStore` 由多个 mixin 组合而成（`KbStore` /
+> `KgStore` / `KgWriteStore` / `AuthStore` / …），共享同一个连接池。所以
+> 知识库、图谱、认证的存取方法都通过全局单例 `store` 调用；新增存储能力时
+> 加一个 mixin 并挂进继承列表即可。
 
 ---
 
