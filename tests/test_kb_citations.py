@@ -18,7 +18,7 @@ from ai_agent.kb.retrieval import Hit
 FILE_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
 
-def _hit(seq: int = 2, *, page: int | None = 3, kind: str = "text") -> Hit:
+def _hit(seq: int = 2, *, page: int | None = 3, kind: str = "text", distance: float = 0.2) -> Hit:
     return Hit(
         file_id=str(FILE_ID),
         filename="考勤制度.docx",
@@ -26,7 +26,7 @@ def _hit(seq: int = 2, *, page: int | None = 3, kind: str = "text") -> Hit:
         page=page,
         kind=kind,
         text="一个月内迟到三次视为旷工，按事假处理。",
-        distance=0.2,
+        distance=distance,
     )
 
 
@@ -171,6 +171,43 @@ def test_run_loop_streams_sources_and_attaches_them_to_answer(monkeypatch):
     answer = messages[-1]
     assert answer["role"] == "assistant"
     assert answer["meta"]["sources"][0]["key"] == f"{FILE_ID}#4"
+
+
+def test_kb_search_returns_no_hit_when_all_hits_irrelevant(monkeypatch):
+    """全部命中距离都超阈值（无关片段被顶进 top_k）时，当未命中处理，
+    不下发任何引用——避免「文档没提及」却挂着不相关来源。"""
+    from ai_agent.prompts.tools import KB_NO_HIT_HINT
+    from ai_agent.tools import kb_search as kb_tool
+
+    monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
+    monkeypatch.setattr(
+        kb_tool,
+        "search_knowledge",
+        lambda *a, **kw: [_hit(distance=0.85), _hit(seq=7, distance=0.91)],
+    )
+    with collect_citations() as cited:
+        text = kb_tool._kb_search("我想查知识库")
+    assert text == KB_NO_HIT_HINT
+    assert cited == []
+
+
+def test_kb_search_keeps_only_relevant_hits(monkeypatch):
+    """命中存在相关与不相关混杂时，只保留距离达标的片、剔除噪音，
+    下发引用也只含相关片。"""
+    from ai_agent.tools import kb_search as kb_tool
+
+    monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
+    monkeypatch.setattr(
+        kb_tool,
+        "search_knowledge",
+        lambda *a, **kw: [_hit(distance=0.2), _hit(seq=7, distance=0.9)],
+    )
+    with collect_citations() as cited:
+        text = kb_tool._kb_search("考勤")
+    assert "[考勤制度.docx · 第3页]" in text
+    assert "[考勤制度.docx · 第7页]" not in text
+    assert len(cited) == 1
+    assert cited[0].key == f"{FILE_ID}#2"
 
 
 def test_run_loop_keeps_sources_from_every_tool_round(monkeypatch):

@@ -21,6 +21,7 @@ from openai import (
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.prompts.kb import VISION_PROMPT
 
 logger = get_logger(__name__)
 
@@ -49,16 +50,6 @@ _IMAGE_MIME = {
     "image/webp": "webp",
     "image/gif": "gif",
 }
-
-_PROMPT = """这是一份文档里的图表或图片。请用中文输出便于检索的描述，按以下顺序：
-1. 图表类型（折线/柱状/饼图/流程图/截图表/其他）和标题；
-2. 坐标轴含义与单位、图例里的系列名称；
-3. 能看清的关键数值，按「系列: 数值」逐条列出；
-4. 一句话总结趋势或结论。
-
-要求：只写图上确实存在的信息；看不清的数值写「无法精确读取」，不要推测、
-不要补全缺失数据。总长度不超过 300 字。"""
-
 
 def enabled() -> bool:
     return bool(settings.kb_vision_model.strip())
@@ -113,7 +104,7 @@ def describe_image(data: bytes, mime: str = "image/png") -> str | None:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": _PROMPT},
+                        {"type": "text", "text": VISION_PROMPT},
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:{mime};base64,{b64}"},

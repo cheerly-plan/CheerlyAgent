@@ -18,16 +18,18 @@ from pydantic import BaseModel, Field
 from ai_agent.core import http
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.prompts.tools import (
+    WEB_SEARCH_DESC,
+    WEB_SEARCH_FRESHNESS_DESC,
+    WEB_SEARCH_NO_KEY_HINT,
+    WEB_SEARCH_QUERY_DESC,
+    build_web_search_max_results_desc,
+)
 from ai_agent.tools.base import Tool
 
 logger = get_logger(__name__)
 
-_NO_KEY_HINT = (
-    "ERROR: 联网搜索未配置。请在服务端 .env 里配置任一搜索 API key 后重启：\n"
-    "TAVILY_API_KEY（免费 1000 次/月，https://tavily.com）\n"
-    "BOCHA_API_KEY（国内直连，https://bocha-ai.com）\n"
-    "SERPER_API_KEY（Google 结果，免费 2500 次，https://serper.dev）"
-)
+_NO_KEY_HINT = WEB_SEARCH_NO_KEY_HINT
 
 # 模型侧 freshness 取值 → 各 provider 的时间参数
 _TAVILY_DAYS = {"day": 1, "week": 7, "month": 30}
@@ -41,21 +43,14 @@ _BOCHA_FRESHNESS = {
 
 
 class WebSearchArgs(BaseModel):
-    query: str = Field(description="搜索关键词，尽量具体，可用引号精确匹配短语")
+    query: str = Field(description=WEB_SEARCH_QUERY_DESC)
     max_results: int = Field(
         default=settings.web_search_max_results,
         ge=1,
         le=10,
-        description=f"返回结果条数，默认 {settings.web_search_max_results}",
+        description=build_web_search_max_results_desc(settings.web_search_max_results),
     )
-    freshness: str = Field(
-        default="",
-        description=(
-            "时间范围过滤：day（24小时内）/ week / month / year。"
-            "查新闻、刚发生的事件、最新版本时必传 day 或 week；"
-            "一般性查询留空。"
-        ),
-    )
+    freshness: str = Field(default="", description=WEB_SEARCH_FRESHNESS_DESC)
 
 
 def _http_json(url: str, body: dict, headers: dict) -> dict:
@@ -193,11 +188,7 @@ def _format(query: str, name: str, results: list[dict]) -> str:
 web_search_tool = Tool(
     name="web_search",
     display_name="智能搜索",
-    description=(
-        "联网搜索最新信息。当问题涉及实时数据、新闻、价格、版本更新、"
-        "或你的知识可能过时时调用。query 用具体的搜索词，不要整句照抄"
-        "用户提问；查刚发生的事情时传 freshness=\"day\"。"
-    ),
+    description=WEB_SEARCH_DESC,
     func=web_search,
     args_model=WebSearchArgs,
 )

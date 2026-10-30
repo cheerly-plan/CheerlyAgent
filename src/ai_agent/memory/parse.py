@@ -21,6 +21,7 @@ def complete_memory_chat(
     messages: list[ChatMessage],
     *,
     max_tokens: int,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     return complete_chat(
         messages,
@@ -29,6 +30,7 @@ def complete_memory_chat(
         max_retries=0,
         max_tokens=max_tokens,
         extra_body=_MEMORY_EXTRA_BODY,
+        response_format=response_format,
     )
 
 

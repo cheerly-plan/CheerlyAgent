@@ -28,6 +28,7 @@ from ai_agent.kb.graph_schema import _Extraction, _parse_extraction
 from ai_agent.llm.client import complete_chat, graph_client, graph_model
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.parse import load_llm_json
+from ai_agent.prompts.kb import GRAPH_TAIL_INSTRUCTION, build_graph_head
 
 logger = get_logger(__name__)
 
@@ -88,15 +89,9 @@ def _build_prompt(chunks: list[Chunk], start_seq: int, doc_name: str | None = No
         low, high = min(pages), max(pages)
         span += f"（第 {low} 页）" if low == high else f"（第 {low}–{high} 页）"
     title = _doc_title(doc_name)
-    head = f"以下是《{title}》的{span}起的连续片段" if title else f"以下是文档的{span}起的连续片段"
-    if len(sections) == 1 and chunks[0].section:
-        head += f"，全部来自【{chunks[0].section}】"
-    return (
-        head
-        + "：\n\n"
-        + "\n\n".join(parts)
-        + "\n\n请抽取这些片段中的实体与关系，按约定 JSON 输出。"
-    )
+    section = chunks[0].section if len(sections) == 1 else ""
+    head = build_graph_head(title or "", span, section)
+    return head + "\n\n".join(parts) + GRAPH_TAIL_INSTRUCTION
 
 
 def _extract_batch(

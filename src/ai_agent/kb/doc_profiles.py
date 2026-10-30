@@ -23,12 +23,27 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+# CONFIG_SLOT 与图谱底座已迁到 ai_agent.prompts.kb —— 它们是纯提示词，
+# 不该和文档类型配置的解析逻辑混在一起。这里 import 进来保持原有导入路径可用。
+from ai_agent.prompts.builder import render
+from ai_agent.prompts.kb import (
+    CONFIG_LABEL_ALIASES,
+    CONFIG_LABEL_DOC_TYPE,
+    CONFIG_LABEL_NOTES,
+    CONFIG_LABEL_PREDICATES,
+    CONFIG_LABEL_SCOPE,
+    CONFIG_LABEL_SCOPE_ANY,
+    CONFIG_LEVEL_FULL,
+    CONFIG_LEVEL_LIGHT,
+    CONFIG_SLOT,
+    GRAPH_BASE_SYSTEM,
+)
 
 logger = get_logger(__name__)
 
-# 占位符用 replace 而不是 str.format：prompt 正文里有 JSON 示例的裸花括号，
-# format 会把 {"e": ...} 当成字段名直接抛 KeyError
-CONFIG_SLOT = "{{DOC_CONFIG}}"
+# 兼容别名：tests/test_doc_profiles.py 直接 import _BASE_SYSTEM 做契约断言
+# （底座不许出现行业词、关键约束一条不能少），保留旧名让它们零改动。
+_BASE_SYSTEM = GRAPH_BASE_SYSTEM
 
 # 抽取粒度：同一份文档配置下再分轻重。
 # 轻量不是「少抽一半片段」，而是**同一批片段里只留主干**——投研快速看图时
@@ -383,36 +398,30 @@ def render_config(profile: DocProfile, level: str = DEFAULT_LEVEL) -> str:
     写成自然语言而不是 JSON：模型对「文档类型：IPO 招股意向书 / 重点实体范围：…」
     这种配置块的服从度，明显高于嵌套 JSON（后者会被它当成待抽取的内容）。
     """
-    lines: list[str] = [f"文档类型：{profile.doc_name}"]
+    lines: list[str] = [render(CONFIG_LABEL_DOC_TYPE, NAME=profile.doc_name)]
 
     if profile.entity_scope:
-        lines.append("重点实体范围（优先抽这些）：" + "、".join(profile.entity_scope))
+        lines.append(CONFIG_LABEL_SCOPE + "、".join(profile.entity_scope))
     else:
-        lines.append("重点实体范围：不限定白名单，按基础规则抽取原文中的专有名词与关键概念。")
+        lines.append(CONFIG_LABEL_SCOPE_ANY)
 
     if profile.predicates:
-        lines.append(
-            "推荐谓词（优先选用，也可按原文合理新增）：" + "、".join(profile.predicates)
-        )
+        lines.append(CONFIG_LABEL_PREDICATES + "、".join(profile.predicates))
 
     if profile.aliases:
         lines.append(
-            "别名归一（遇到左边写法，统一换成右边标准名）："
+            CONFIG_LABEL_ALIASES
             + "；".join(f"{src} → {dst}" for src, dst in profile.aliases)
         )
 
     if profile.notes:
-        lines.append("补充要求：")
+        lines.append(CONFIG_LABEL_NOTES)
         lines.extend(f"- {note}" for note in profile.notes)
 
     if normalize_level(level) == "light":
-        lines.append(
-            "抽取粒度：轻量。只保留主干实体（主体公司、主要产品、核心指标、关键人物）"
-            "与它们之间的主要关系；零散供应商/客户、次要人员、一次性事件、"
-            "通用财务科目一律不抽。"
-        )
+        lines.append(CONFIG_LEVEL_LIGHT)
     else:
-        lines.append("抽取粒度：完整。在遵循上述范围的前提下尽量抽全实体与关系。")
+        lines.append(CONFIG_LEVEL_FULL)
 
     return "\n".join(lines)
 
@@ -426,41 +435,3 @@ def build_system_prompt(doc_type: str | None, level: str = DEFAULT_LEVEL) -> str
 def reload_profiles() -> None:
     """运维改完 JSON 后调一次即可生效（不必重启服务）。"""
     _overrides.cache_clear()
-
-
-# ——— 通用底座：所有文档共用，只放「与文档类型无关」的约束 ———
-#
-# 刻意不写具体行业词（招股书白名单之类），那些属于配置块。这里只保留：
-# 输出契约、片段序号规则、禁止项、别名处理、格式示例的占位符警告。
-_BASE_SYSTEM = """你是知识图谱抽取器。从给定文档片段中抽取实体与它们之间明确陈述的关系。
-
-【通用基础约束】
-1. 实体必须是**名词或名词短语**：公司/机构/人物/产品/技术/指标/项目/地区/制度这类
-   能单独指称、能回答「是什么」的东西。动词、动宾短语、形容词、副词一律不是实体——
-   「搭载」「发布」「任职」「支持」「持股」「对接」「建设」「签约」在原文里
-   出现得再多，也只是谓词，写进 relation（或关系的说明），不要单独成点。
-   自检：能填进「……是什么」的才是实体；只能填进「……做了什么」的是谓词。
-2. 禁止抽取：通用描述词、章节名称、页眉页脚、页码、时间词、通用量词、代词、孤立纯数字、纯时间点（「2004年」「2017年12月31日」）、带单位的数值（「62,200万千瓦」「1,017,077.00元」「12.5%」）。这些是限定语或指标取值，写进关系或实体的说明，不要单独成点。年份只作为事件/产品名一部分时可以留（「2017年重大资产重组」）。
-3. 禁止泛化无价值名词：如“文档、报告、数据、情况、事项、内容、表格”这类宽泛词汇。
-4. 关系必须是片段原文明确写明的，不能脑补编造；没有明确关系就不要强行生成三元组，
-   尽量避免产出没有关联的孤立低价值实体。
-5. relation 使用 2–8 个汉字的短语。
-6. type 只能取：person / org / product / technology / metric / event / location / concept / other。
-7. e 的每项是 [名称, 类型, 说明, 片段序号]；r 的每项是 [主体, 客体, 关系, 说明, 片段序号]。
-   说明是不超过 20 字的身份或作用，信息不足就填空字符串；
-   片段序号从 0 开始，必须是该内容实际出现的那个片段，禁止编造。
-   r 必须是 5 项：主体和客体缺一不可，缺了就不要输出这一条。
-   持股数量、金额、比例、日期这类数值不是实体，写在「说明」里
-   （如 ["某某控股","某某公司","持股","持股 121,436,506 股",0]），
-   不要单独占一项、也不要当成客体。
-8. 同一个 batch 内，同一个实体只输出一次，不要重复添加。
-9. 实体名称严格取自原文；若下方配置给出了别名映射，按映射统一成标准名称。
-   片段开头会给出所属文件名，文中指代本文件主体（「本公司」「公司」「本集团」等）
-   时，用文件名里的主体全称，**不要**用示例或其它文档里的公司名。
-10. 只输出一行 JSON，不要解释、不要 Markdown 代码块。
-格式示例（仅示意，示例里的「某某」系列是占位词，不要当成实体）：
-{"e":[["某某公司","org","",0]],"r":[["某某公司","某某产品","生产","",0]]}
-
-【本次任务附加配置】
-{{DOC_CONFIG}}
-"""

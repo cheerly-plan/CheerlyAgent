@@ -5,26 +5,23 @@ from ai_agent.llm.client import complete_chat
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.gate import jev_noul_batch
 from ai_agent.memory.short_term import crude_summary, flatten, iter_turns
+from ai_agent.prompts.memory import (
+    FABRICATION_INSTRUCTIONS,
+    LABEL_INHERITED_SUMMARY,
+    LABEL_ORIGINAL_DIALOG,
+    LABEL_SUMMARY_TO_CHECK,
+    OMISSION_INSTRUCTIONS,
+    SUMMARY_SYSTEM,
+    TURN_KEEP_INSTRUCTIONS,
+    build_retry_feedback,
+    build_summary_user,
+)
 
 logger = get_logger(__name__)
-
-SUMMARY_SYSTEM = """
-你是会话摘要器。把对话压缩成后续回复仍需要的上下文摘要。
-规则：
-1. 只输出摘要正文，不要标题、前缀或解释；
-2. 保留关键事实、用户偏好、已做约定、未完成事项和重要结论；
-3. 去掉寒暄、重复内容和工具调用细节；
-4. 一次性时效信息（天气、汇率、股价、临时查询结果）不写入摘要——
-   它们很快过时，留在摘要里会误导后续回复；
-5. 不要编造对话中没有的信息；
-6. 使用简洁中文陈述句，控制在 400 字以内。
-"""
 
 # 摘要质量校验（Jev 双 Noul 并行）。摘要会每轮注入对话开头直到会话结束，
 # 一条编造内容会持续污染后续上下文，所以生成后加一道独立第二意见。
 # 阈值先硬编码，按日志观察误报率后再考虑提升为配置项。
-_FABRICATION_INSTRUCTIONS = "摘要是否包含对话中不存在、也无法从对话合理推断的信息（编造）"
-_OMISSION_INSTRUCTIONS = "摘要是否遗漏了对话中已确认的约定、偏好或未完成事项"
 # 编造危害大，阈值放低些；遗漏相对可容忍且判断模糊，要求高置信才动手
 _FABRICATION_THRESHOLD = 0.6
 _OMISSION_THRESHOLD = 0.85
@@ -34,12 +31,6 @@ _MAX_SUMMARY_ATTEMPTS = 2
 # 摘要预过滤（Jev 逐轮 Noul）：溢出轮次先判断有无保留价值，
 # 天气/寒暄这类轮次直接剔除，不送精摘——精摘输入更短更聚焦。
 # 阈值与长期记忆门控一致（偏低）：漏保留比多保留代价大
-_TURN_KEEP_INSTRUCTIONS = (
-    "这一轮对话是否包含值得保留进会话摘要的信息？"
-    "值得保留：关键事实、用户偏好、已做约定、未完成事项、重要结论。"
-    "不值得保留：寒暄、闲聊、一次性时效信息（如天气、汇率、临时查询结果）、"
-    "工具调用的中间过程。"
-)
 _TURN_KEEP_THRESHOLD = 0.4
 
 
@@ -49,10 +40,7 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
     if not source.strip():
         # 全部轮次被过滤：旧摘要保持原样，不调精摘
         return previous.strip()
-    if previous.strip():
-        base_content = f"已有摘要：\n{previous.strip()}\n\n新增对话：\n{source}"
-    else:
-        base_content = f"对话内容：\n{source}"
+    base_content = build_summary_user(previous, source)
     feedback = ""
     for _ in range(_MAX_SUMMARY_ATTEMPTS):
         user_content = (
@@ -123,7 +111,7 @@ def _filter_overflow_turns(overflow: list[ChatMessage]) -> list[ChatMessage]:
     if len(turns) < 2:
         return overflow
     answers = jev_noul_batch(
-        {f"turn_{i}": _TURN_KEEP_INSTRUCTIONS for i in range(len(turns))},
+        {f"turn_{i}": TURN_KEEP_INSTRUCTIONS for i in range(len(turns))},
         _turn_filter_state(turns),
     )
     if answers is None:
@@ -158,8 +146,8 @@ def _jev_check(
     """
     answers = jev_noul_batch(
         {
-            "fabrication": _FABRICATION_INSTRUCTIONS,
-            "omission": _OMISSION_INSTRUCTIONS,
+            "fabrication": FABRICATION_INSTRUCTIONS,
+            "omission": OMISSION_INSTRUCTIONS,
         },
         _check_state(previous, overflow, text),
     )
@@ -175,11 +163,11 @@ def _check_state(
     精摘会保留旧摘要内容，只给溢出部分会把合法继承误判为编造。"""
     parts: list[str] = []
     if previous.strip():
-        parts.append("已有摘要（其内容并入新摘要属正常继承，不算编造）：")
+        parts.append(LABEL_INHERITED_SUMMARY)
         parts.append(previous.strip()[:3000])
-    parts.append("对话原文：")
+    parts.append(LABEL_ORIGINAL_DIALOG)
     parts.append(_format_overflow(overflow)[:6000])
-    parts.append("待检摘要：")
+    parts.append(LABEL_SUMMARY_TO_CHECK)
     parts.append(text)
     return "\n".join(parts)
 
@@ -190,10 +178,7 @@ def _retry_feedback(fabrication: float, omission: float) -> str:
         problems.append("包含了对话中不存在的编造内容")
     if omission >= _OMISSION_THRESHOLD:
         problems.append("遗漏了已确认的约定或未完成事项")
-    return (
-        "质量校验发现上一版摘要" + "、".join(problems)
-        + "。请严格基于对话原文重新生成摘要，不得添加原文没有的信息。"
-    )
+    return build_retry_feedback(problems)
 
 
 def _format_overflow(overflow: list[ChatMessage]) -> str:

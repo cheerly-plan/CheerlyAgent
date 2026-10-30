@@ -51,6 +51,17 @@ _THINKING_OFF = {
 }
 
 
+def json_response_format(mode: str) -> dict[str, Any] | None:
+    """把配置里的 json_mode 字符串转成 `response_format` 参数。
+
+    "off" 或无法识别的取值一律返回 None（不下发该字段），保证行为与加这个
+    开关之前完全一致。网关不支持 JSON 模式时会抛 LLMError，由调用侧降级。
+    """
+    if (mode or "").strip().lower() == "json_object":
+        return {"type": "json_object"}
+    return None
+
+
 def _status_of(exc: Exception) -> int | None:
     """取上游 HTTP 状态码，用于上层区分鉴权失败和临时故障。"""
     return exc.status_code if isinstance(exc, APIStatusError) else None
@@ -193,12 +204,17 @@ def complete_chat(
     extra_body: dict[str, Any] | None = None,
     temperature: float | None = None,
     client: OpenAI | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     """非流式补全。温度默认不传 → 服务端默认（OpenAI 系为 1.0）。
 
     `temperature` 必须显式传，不做全局默认：主对话需要一点发散，而图谱抽取/
     对齐/重排是结构化任务，温度高会让实体数抖动、JSON 偶发写坏、同一批输入
     两次跑出不同结果（评测失败集合跟着变）。这几处各自从 settings 取值。
+
+    `response_format` 传 None 时不下发该字段，行为与加参数前完全一致。
+    网关不支持（本地小模型、Ollama 之类）会直接 400，因此**降级逻辑放在
+    调用侧**：那里才知道该回退成什么（prompt 约束 + load_llm_json 兜底）。
     """
     options: dict[str, float | int] = {}
     if timeout is not None:
@@ -216,6 +232,8 @@ def complete_chat(
         payload["max_tokens"] = max_tokens
     if temperature is not None:
         payload["temperature"] = temperature
+    if response_format is not None:
+        payload["response_format"] = response_format
     if extra_body is not None:
         payload["extra_body"] = extra_body
     try:

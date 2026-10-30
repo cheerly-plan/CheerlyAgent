@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -35,10 +36,16 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.graph_names import is_metric_like, normalize_name
-from ai_agent.llm.client import complete_chat, graph_client, graph_model
+from ai_agent.llm.client import (
+    complete_chat,
+    graph_client,
+    graph_model,
+    json_response_format,
+)
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.parse import load_llm_json
 from ai_agent.memory.store import store
+from ai_agent.prompts.kb import ALIGN_SYSTEM, build_align_user
 
 logger = get_logger(__name__)
 
@@ -77,26 +84,6 @@ def is_rigid(entity: dict) -> bool:
     if name in _PRONOUN_NAMES:
         return True
     return is_metric_like(name)
-
-_SYSTEM = """你在做实体消歧：判断每一对名称是否指**同一个现实对象**。
-
-判定要点：
-1. 同一个对象的常见不同写法要判 1：全称与简称（"国电电力" / "国电电力发展股份有限公司"）、
-   中英文名、带或不带地名/行业后缀、曾用名、明显的错别字；
-2. 只要有一方可能是**不同的对象**就判 0：母公司与子公司、同一集团下两个厂、
-   型号相近但不同的产品（"iPhone 15" / "iPhone 15 Pro"）、数值型指标的不同口径；
-   特别注意：**一个名字是另一个的前缀，不等于同一实体**——「国电电力」是发行人的
-   简称，但「国电电力大同发电有限责任公司」是另一家法人，三者不能并成一个；
-3. 产品名的型号后缀（Pro / Max / Plus / Edge / SE / 标准版 / 增强版）不同，
-   一律判 0——「C30」和「C30 Edge」是两款产品；只有中英文对照、
-   「拓展坞 = Hub」这类同义译名才算同一产品；
-4. 财务科目、报表行一律判 0：「经营活动现金流入」与「流出」、「应付职工薪酬」
-   与「长期应付职工薪酬」都是两张不同的行，方向或口径变了就是另一个数；
-5. 拿不准时判 0——错并比漏并更糟，会把两个不相关的部分连成一片。
-
-只输出一行 JSON：{"same":[1,0,1,...]}，个数与输入对数一致，1=同一个，0=不同。
-不要解释、不要 Markdown 代码块。"""
-
 
 class _Verdict(BaseModel):
     same: list[int] = Field(default_factory=list)
@@ -406,29 +393,45 @@ def judge_pairs(pairs: list[dict]) -> list[bool]:
     batch = max(1, settings.kg_align_batch)
     verdicts: list[bool] = []
     failures = 0
+
+    def _ask(messages: list[ChatMessage], fmt: dict[str, Any] | None) -> str:
+        return complete_chat(
+            messages,
+            model=graph_model(),
+            client=graph_client(),
+            # 裁决的提示词只有几百字、输出不到 100 字，正常几秒就回；
+            # 等 180 秒只会在服务卡死时把整轮对齐拖垮
+            timeout=settings.kg_align_timeout_seconds,
+            max_retries=0,
+            max_tokens=256,
+            # 裁决共用抽取温度（0）：并错一对就丢一个实体，且合并不可逆
+            temperature=settings.kb_graph_temperature,
+            extra_body={"enable_thinking": False},
+            response_format=fmt,
+        )
+
+    fmt = json_response_format(settings.kb_align_json_mode)
     for start in range(0, len(pairs), batch):
         part = pairs[start : start + batch]
+        messages = [
+            ChatMessage(role="system", content=ALIGN_SYSTEM),
+            ChatMessage(
+                role="user",
+                content=build_align_user(len(part), _format_pairs(part)),
+            ),
+        ]
         try:
-            raw = complete_chat(
-                [
-                    ChatMessage(role="system", content=_SYSTEM),
-                    ChatMessage(
-                        role="user",
-                        content=f"共 {len(part)} 对：\n\n{_format_pairs(part)}\n\n"
-                        "请输出 JSON。",
-                    ),
-                ],
-                model=graph_model(),
-                client=graph_client(),
-                # 裁决的提示词只有几百字、输出不到 100 字，正常几秒就回；
-                # 等 180 秒只会在服务卡死时把整轮对齐拖垮
-                timeout=settings.kg_align_timeout_seconds,
-                max_retries=0,
-                max_tokens=256,
-                # 裁决共用抽取温度（0）：并错一对就丢一个实体，且合并不可逆
-                temperature=settings.kb_graph_temperature,
-                extra_body={"enable_thinking": False},
-            )
+            try:
+                raw = _ask(messages, fmt)
+            except LLMError as e:
+                if fmt is None:
+                    raise
+                # 网关不支持 JSON 模式会直接 400。这是配置问题不是模型抖动，
+                # 不该计入「连续失败」把整轮对齐中止掉——本轮后续批次改用
+                # prompt 约束即可，输出仍由 load_llm_json 兜底解析。
+                logger.warning("实体对齐 JSON 模式不受支持，回退 prompt 约束：%s", e)
+                fmt = None
+                raw = _ask(messages, None)
             data = load_llm_json(raw)
             same = _Verdict.model_validate(data).same if isinstance(data, dict) else []
             failures = 0

@@ -18,6 +18,14 @@ from ai_agent.kb.retrieval import query_looks_on_topic
 from ai_agent.llm.client import complete_chat
 from ai_agent.llm.types import ChatMessage, ChatResult, ToolCall
 from ai_agent.memory.store import store
+from ai_agent.prompts.kb import (
+    CATALOG_EMPTY,
+    CATALOG_HEADER,
+    CATALOG_REWRITE_HINT,
+    CATALOG_RULES,
+    build_catalog_rewrite_line,
+)
+from ai_agent.prompts.tasks import REWRITE_SYSTEM, build_rewrite_user
 
 logger = get_logger(__name__)
 
@@ -42,23 +50,15 @@ def _drop_old_kb_catalog(messages: list[ChatMessage]) -> None:
 def _format_kb_catalog(
     files: list[dict], *, original: str, rewritten: str
 ) -> str:
-    lines = [
-        "本轮知识库已就绪的文件如下。回答其中的公司、产品、财报、数字、日期、"
-        "条款等事实之前，必须先调用 kb_search，不要凭训练知识直接作答。",
-        "天气、出行、闲聊等与这些文件无关的问题不要查知识库，改用其他工具或直接回答。",
-        "涉及「和谁有关、上下游、投资、产业链」时用 kg_search。",
-        "限定范围时 files 填文件名（可简称、可多份），不要填文件 id；"
-        "不填则按问题自动匹配或查全库。",
-        "",
-    ]
+    lines = [CATALOG_RULES, ""]
     if rewritten and original and rewritten.strip() != original.strip():
-        lines.append(f"建议检索词：{rewritten.strip()}")
-        lines.append("调用 kb_search / kg_search 时优先用这条检索词；换角度再改 query。")
+        lines.append(build_catalog_rewrite_line(rewritten.strip()))
+        lines.append(CATALOG_REWRITE_HINT)
         lines.append("")
     if not files:
-        lines.append("当前没有已处理完成的文件，不要调用 kb_search / kg_search。")
+        lines.append(CATALOG_EMPTY)
         return "\n".join(lines)
-    lines.append("文件目录：")
+    lines.append(CATALOG_HEADER)
     for item in files:
         name = str(item.get("filename") or "").strip() or "(未命名)"
         tags = [
@@ -95,21 +95,6 @@ def _kb_catalog_message(original: str, rewritten: str) -> ChatMessage | None:
     }
 
 
-_REWRITE_SYSTEM = (
-    "你是检索词改写助手。用户在多轮对话里追问时，常常省略上一轮已经说过的"
-    "主体或语境（例如上一轮在问「中国能源建设股份有限公司」，这一轮只说"
-    "「股东持股情况」）。你的任务：结合上一轮对话，把当前这句改写/扩写成"
-    "一条自包含、能独立完成检索的查询词。\n"
-    "要求：\n"
-    "1. 必须结合上一轮对话的语境，把省略的主体、指代补全，必要时可适当扩写"
-    "补充同义词、相关要点，让检索更充分；\n"
-    "2. 补全的主体应来自上一轮对话里出现过的事实，不要凭空编造与上下文"
-    "无关的专有名词；\n"
-    "3. 如果当前这句本身已经自包含、无需改写，原样输出当前这句即可；\n"
-    "4. 只输出改写后的那一条查询词，不要回答问题，不要解释，不要换行。"
-)
-
-
 def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
     """对话改写（补全 + 扩写）：结合上一轮完整对话，把当前追问改写成自包含的检索词。
 
@@ -135,14 +120,10 @@ def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
     try:
         out = complete_chat(
             [
-                {"role": "system", "content": _REWRITE_SYSTEM},
+                {"role": "system", "content": REWRITE_SYSTEM},
                 {
                     "role": "user",
-                    "content": (
-                        f"上一轮对话：\n{context}\n\n"
-                        f"当前问题：{user_input}\n"
-                        "请结合上一轮对话，输出改写后的检索词。"
-                    ),
+                    "content": build_rewrite_user(context, user_input),
                 },
             ],
             model=model,

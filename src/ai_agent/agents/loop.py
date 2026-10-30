@@ -3,7 +3,13 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 from ai_agent.agents.budget import Budget
-from ai_agent.agents.prompts import SYSTEM_PROMPT
+from ai_agent.prompts.chat import (
+    RUNTIME_BUDGET_EXHAUSTED,
+    RUNTIME_DUP_CALL,
+    RUNTIME_DUP_OUTPUT,
+    RUNTIME_EMPTY_ANSWER,
+    build_system_prompt,
+)
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
@@ -93,11 +99,15 @@ def _profile_prompt(user_id: str) -> str:
     return format_profile_block(items)
 
 
-def _system_prompt(user_id: str) -> str:
+def _system_prompt(user_id: str, *, use_kb: bool = True) -> str:
+    # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
+    # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
+    # 调用 kb_search」只会让模型去调一个不存在的工具。
+    base = build_system_prompt(use_kb=use_kb)
     block = _profile_prompt(user_id)
     if not block:
-        return SYSTEM_PROMPT
-    return f"{SYSTEM_PROMPT}\n\n{block}"
+        return base
+    return f"{base}\n\n{block}"
 
 
 def run_stream(
@@ -175,12 +185,12 @@ def run_stream(
                 return
             replacing = True
             user_input = str(recent[-1].get("content") or "")
-            messages = assemble(_system_prompt(user_id), summary, recent)
+            messages = assemble(_system_prompt(user_id, use_kb=use_kb), summary, recent)
             # 先清旧目录再记落库边界，避免下标被删目录带偏
             _drop_old_kb_catalog(messages)
             persisted = len(messages)
         else:
-            messages = assemble(_system_prompt(user_id), summary, recent)
+            messages = assemble(_system_prompt(user_id, use_kb=use_kb), summary, recent)
             _drop_old_kb_catalog(messages)
             persisted = len(messages)
             turn_anchor = {"role": "user", "content": user_input}
@@ -420,14 +430,7 @@ def run_loop(
                 logger.warning("最终回答为空，追加一轮强制作答 run_id=%s", run_id)
                 _drop_empty_assistant(messages)
                 messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "（系统提示）刚才没有给出文字回答。"
-                            "请立即基于以上已获取的信息，用简体中文给出完整回答；"
-                            "不要再调用任何工具。"
-                        ),
-                    }
+                    {"role": "system", "content": RUNTIME_EMPTY_ANSWER}
                 )
                 streamed = ""
                 result = None
@@ -488,10 +491,7 @@ def run_loop(
                         "role": "tool",
                         "tool_call_id": call["id"],
                         "name": call["name"],
-                        "content": (
-                            "（系统）你已用完全相同的参数调用过该工具，结果不会变化。"
-                            "请更换检索词、改用其他工具，或基于已有信息直接作答。"
-                        ),
+                        "content": RUNTIME_DUP_CALL,
                     }
                 )
                 continue
@@ -524,12 +524,7 @@ def run_loop(
                     call["name"],
                     seen_outputs[out_key] + 1,
                 )
-                output += (
-                    "\n\n（系统）该工具已经返回过完全相同的结果，换参数也查不到"
-                    "新内容。请改用更具体的检索词（例如直接搜材料名、指标名、"
-                    "表格标题，而不是公司名这类大词），或换用其他工具，"
-                    "或基于已有信息直接作答。"
-                )
+                output += "\n\n" + RUNTIME_DUP_OUTPUT
             seen_outputs[out_key] = seen_outputs.get(out_key, 0) + 1
             end_event: ChatEvent = {"type": "tool_end", "name": call["name"]}
             if turn_sources:
@@ -555,16 +550,7 @@ def run_loop(
     # 说「我即将检索」的半截话。剥掉工具再问最后一次，强制它基于已
     # 拿到的结果给出回答——收尾消息用 system（前端不渲染、不污染气泡）。
     # 这次也失败才真正报错。
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "（系统提示）检索轮次已用完，不能再调用任何工具。"
-                "请立即基于以上已获取的信息给出最终回答；"
-                "确实缺少关键数据时，明确说明缺什么即可。"
-            ),
-        }
-    )
+    messages.append({"role": "system", "content": RUNTIME_BUDGET_EXHAUSTED})
     streamed = ""
 
     def _stash_final(content: str) -> None:

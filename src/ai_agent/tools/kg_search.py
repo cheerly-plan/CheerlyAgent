@@ -24,6 +24,14 @@ from ai_agent.kb.retrieval import format_where
 from ai_agent.kb.scope import effective_kb_query, resolve_tool_file_ids
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
+from ai_agent.prompts.tools import (
+    KB_FILES_DESC,
+    KG_NO_ENTITY_HINT,
+    KG_SEARCH_DEPTH_DESC,
+    KG_SEARCH_DESC,
+    KG_SEARCH_QUERY_DESC,
+    KG_SEARCH_TOPK_DESC,
+)
 from ai_agent.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -61,15 +69,10 @@ def format_neighborhood(
 
 
 class KgSearchArgs(BaseModel):
-    query: str = Field(
-        ..., description="要检索的实体、主题或问题，用自然语言描述"
-    )
-    files: list[str] | None = Field(
-        default=None,
-        description="限定检索的文件名（可简称、可多份），对照本轮文件目录填写；不填则按问题自动匹配或查全库",
-    )
-    depth: int = Field(default=1, ge=1, le=2, description="从命中实体向外扩展的跳数")
-    top_k: int = Field(default=5, ge=1, le=10, description="参与扩展的种子实体数")
+    query: str = Field(..., description=KG_SEARCH_QUERY_DESC)
+    files: list[str] | None = Field(default=None, description=KB_FILES_DESC)
+    depth: int = Field(default=1, ge=1, le=2, description=KG_SEARCH_DEPTH_DESC)
+    top_k: int = Field(default=5, ge=1, le=10, description=KG_SEARCH_TOPK_DESC)
 
 
 def _evidence_where(item: dict) -> str:
@@ -112,7 +115,7 @@ def _kg_search(
         min_score=settings.kb_graph_min_score,
     )
     if not seeds:
-        return "图谱里没有找到相关实体，可以换个说法，或用 kb_search 直接检索原文。"
+        return KG_NO_ENTITY_HINT
 
     graph = store.expand_subgraph(
         [s["id"] for s in seeds],
@@ -251,12 +254,7 @@ def _citations_of(evidence: list[dict]) -> list[Citation]:
 kg_search_tool = Tool(
     name="kg_search",
     display_name="图谱检索",
-    description=(
-        "按实体与关系检索知识库图谱。当问题涉及「某公司/技术/指标和谁有关、"
-        "上下游、投资关系、产业链位置」这类关系型问题时优先使用；"
-        "只查原文表述时用 kb_search。files 填本轮目录里的文件名（可简称），"
-        "不要填文件 id。"
-    ),
+    description=KG_SEARCH_DESC,
     func=_kg_search,
     args_model=KgSearchArgs,
 )

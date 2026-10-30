@@ -205,6 +205,12 @@ class Settings(BaseSettings):
     # 每次排出同一个顺序，否则评测结果会随采样抖动，改动好坏无法归因
     kb_rerank_temperature: float = 0.0
     kb_rerank_timeout_seconds: float = 30.0
+    # 实体对齐是否要求模型输出 JSON（response_format），取值与
+    # memory_extract_json_mode 相同（off / json_object）。
+    # 对齐的输出形状最简单（{"same":[1,0,1]}），但裁决结果会被直接拿去合并
+    # 实体，猜错代价大——正是最需要硬约束的地方，所以和记忆抽取一起试点。
+    # 默认 off，理由同上：先实测网关支持度。
+    kb_align_json_mode: str = "off"
     # 对话改写：多轮对话里，当前这句省略了主体/语境（上轮在问「中国能源
     # 建设」、这轮问「股东持股情况」），结合上一轮对话把这句改写/扩写成
     # 自包含的检索词。改写结果写入本轮目录消息，模型若仍用用户原话调工具
@@ -256,6 +262,14 @@ class Settings(BaseSettings):
     jev_model: str = "jev-latest"
     memory_gate_threshold: float = 0.65
     jev_timeout_seconds: float = 4
+    # 长期记忆抽取是否要求模型输出 JSON（response_format）。
+    # off = 不下发该字段，靠 prompt 里的格式约定 + parse.load_llm_json 兜底，
+    #   这是迁移前的行为，任何网关都能跑；
+    # json_object = 下发 {"type":"json_object"}。部分网关/本地小模型不支持，
+    #   不支持会直接 400 —— 调用侧已做降级，退回 off 再跑一次。
+    # 默认 off：记忆抽取常走 SMALL_MODEL（可能是 Ollama），贸然开启会整条
+    # 链路 400。先在支持 JSON 模式的网关上实测后再打开。
+    memory_extract_json_mode: str = "off"
 
     def resolve_llm(self, business_model: str = "") -> str:
         return business_model or self.small_model or self.model

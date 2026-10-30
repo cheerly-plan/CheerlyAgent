@@ -27,6 +27,7 @@ from ai_agent.kb.parsing import FIGURE, TABLE
 from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
+from ai_agent.prompts.kb import build_rerank_user
 
 logger = get_logger(__name__)
 
@@ -675,13 +676,7 @@ def _rerank(query: str, rows: list[dict], top_k: int) -> list[dict]:
         f"[{i + 1}] {row.get('filename') or ''} · {_where(row)}\n{_clip(row.get('text') or '')}"
         for i, row in enumerate(rows)
     )
-    prompt = (
-        "你在做检索结果重排。下面是知识库候选片段，每个用编号标注。"
-        "请按「能否直接回答用户问题」从高到低排序。\n\n"
-        f"用户问题：{query}\n\n候选：\n{listing}\n\n"
-        f"只输出一个 JSON 数组，元素是候选编号，例如 [3,1,2]；"
-        f"最多输出 {min(top_k, len(rows))} 个编号，不要输出任何解释。"
-    )
+    prompt = build_rerank_user(query, listing, min(top_k, len(rows)))
     try:
         answer = complete_chat_once(prompt)
     except Exception:

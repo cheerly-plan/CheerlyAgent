@@ -7,9 +7,9 @@ from typing import Literal
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
+from ai_agent.llm.client import json_response_format
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.facets import (
-    FACET_WRITE_RULES,
     coalesce_by_facet,
     format_profile_line,
     normalize_facet,
@@ -18,41 +18,18 @@ from ai_agent.memory.gate import jev_noul
 from ai_agent.memory.parse import complete_memory_chat, load_llm_json
 from ai_agent.memory.profile import ProfileAction, apply_profile_action
 from ai_agent.memory.store import store
+from ai_agent.prompts.memory import (
+    EXTRACT_SYSTEM,
+    GATE_INSTRUCTIONS,
+    LABEL_CURRENT_TURN,
+    LABEL_EXISTING_EPISODES,
+    LABEL_EXISTING_EPISODES_EMPTY,
+    LABEL_EXISTING_PROFILE,
+    LABEL_EXISTING_PROFILE_EMPTY,
+    LABEL_SESSION_SUMMARY,
+)
 
 logger = get_logger(__name__)
-
-EXTRACT_SYSTEM = f"""
-你是用户长期记忆抽取器。只记「关于用户本人、且下一场对话还用得上」的事实。
-只输出 JSON，不要解释。格式：
-{{"memories":[{{"kind":"episode","content":"..."}},{{"kind":"profile","op":"add"|"update"|"delete","facet":"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}}]}}
-没有可记内容时必须输出 {{"memories":[]}}。拿不准就空数组。
-
-kind:
-- profile: 用户用第一人称说清的姓名、职业、居住地、语言、长期偏好、约束
-- episode: 用户自己正在做、会跨会话延续的任务（项目、已确认的技术方案、明确要求记住的进展）
-
-严禁写入：
-- 本轮问答摘要（「用户询问了…」「讨论了某公司…」「助手建议…」）
-- 查知识库/招股书/年报/公告得到的公司事实、股东、财务数字
-- 把用户问过的公司写成用户的职业或身份（问董事长 ≠ 用户是董事长）
-- 一次性查询：天气、股价、某家公司概况、某页表格
-- 助手建议、工具调用过程
-- 已有相同事实、只是换种说法、闲聊
-
-episode 的 content 约 40～120 字，写用户本人近况，不要写成对话纪要。
-profile 必须带 op 和 facet。name / occupation / locale / language 同一侧面只输出一条：
-- add: 新的侧面
-- update: 同一侧面事实变化或更完整，content 写成该侧面的完整当前描述
-- delete: 用户明确否定旧事实
-preference / constraint 是累积型：每条独立事实单独输出一个 add，可多条并存，不要 update 合并已有条目；否定某一条时 delete 并在 content 写该条原文。
-{FACET_WRITE_RULES}
-若已有 other 把姓名/职业混在一起，要拆开写入正确 facet，并 delete other。
-
-规则：
-1. 只记用户明确陈述的自身事实，或双方已确认、属于用户本人的技术选择
-2. 身份和近况拆开
-3. 最多 2 条
-"""
 
 
 @dataclass(frozen=True)
@@ -113,17 +90,26 @@ def extract_turn_memories(
     user_content = _build_user_content(
         source, summary, existing_episodes, existing_profile
     )
+    messages = [
+        {"role": "system", "content": EXTRACT_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+    # JSON 模式（MEMORY_EXTRACT_JSON_MODE=json_object）：网关不支持会直接 400，
+    # 这时退回「prompt 约束 + load_llm_json 兜底」再跑一次，不让开关整条链路
+    # 挂掉。默认 off，行为与开启前一致。
+    fmt = json_response_format(settings.memory_extract_json_mode)
     try:
-        raw = complete_memory_chat(
-            [
-                {"role": "system", "content": EXTRACT_SYSTEM},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=384,
-        )
+        raw = complete_memory_chat(messages, max_tokens=384, response_format=fmt)
     except LLMError as e:
-        logger.warning("抽取长期记忆失败: %s", e)
-        return []
+        if fmt is None:
+            logger.warning("抽取长期记忆失败: %s", e)
+            return []
+        logger.warning("JSON 模式抽取失败（网关可能不支持），回退 prompt 约束: %s", e)
+        try:
+            raw = complete_memory_chat(messages, max_tokens=384)
+        except LLMError as e2:
+            logger.warning("抽取长期记忆失败: %s", e2)
+            return []
     items = _parse_memories(raw)
     if items:
         logger.info("长期记忆已抽取 count=%s", len(items))
@@ -141,15 +127,6 @@ def _write_extracted(user_id: str, item: ExtractedMemory) -> None:
             store.write_episode(item.content, user_id=user_id)
     except Exception:
         logger.exception("长期记忆写入失败 kind=%s", item.kind)
-
-
-GATE_INSTRUCTIONS = (
-    "这段对话是否包含值得写入跨会话长期记忆的信息？"
-    "值得记忆：用户用第一人称明确陈述的姓名、职业、身份、居住地、语言、"
-    "长期偏好或约束；用户自己正在做且会跨会话延续的任务或技术方案。"
-    "不值得记忆：查文档或问某家公司、天气、新闻、一次性事实查询、"
-    "本轮问答摘要、助手建议、把检索结果当成用户身份。"
-)
 
 
 def _gate_blocks(turn: list[ChatMessage], summary: str) -> bool:
@@ -183,10 +160,10 @@ def _build_gate_state(turn: list[ChatMessage], summary: str) -> str:
     parts: list[str] = []
     text = summary.strip()
     if text:
-        parts.append(f"会话摘要：{text[:600]}")
+        parts.append(f"{LABEL_SESSION_SUMMARY}{text[:600]}")
     turn_text = _format_turn(turn)[:6000]
     if turn_text:
-        parts.append(f"本轮对话：\n{turn_text}")
+        parts.append(f"{LABEL_CURRENT_TURN}\n{turn_text}")
     return "\n\n".join(parts)
 
 
@@ -199,17 +176,17 @@ def _build_user_content(
     parts: list[str] = []
     text = summary.strip()
     if text:
-        parts.append(f"会话摘要：\n{text}")
+        parts.append(f"{LABEL_SESSION_SUMMARY}\n{text}")
     if existing_profile:
-        parts.append("已有用户画像：\n" + "\n".join(existing_profile))
+        parts.append(LABEL_EXISTING_PROFILE + "\n".join(existing_profile))
     else:
-        parts.append("已有用户画像：无")
+        parts.append(LABEL_EXISTING_PROFILE_EMPTY)
     if existing_episodes:
         lines = "\n".join(f"- {item}" for item in existing_episodes)
-        parts.append(f"已有相近情景记忆：\n{lines}")
+        parts.append(f"{LABEL_EXISTING_EPISODES}\n{lines}")
     else:
-        parts.append("已有相近情景记忆：无")
-    parts.append(f"本轮对话：\n{source}")
+        parts.append(LABEL_EXISTING_EPISODES_EMPTY)
+    parts.append(f"{LABEL_CURRENT_TURN}\n{source}")
     return "\n\n".join(parts)
 
 
