@@ -194,11 +194,14 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     assert seen["file_ids"] == [FILE_ID]
 
-    # 模型显式给了 file_ids 时以模型为准（它可能只查其中一份）
+    # 模型显式给了文件名时以解析结果为准（它可能只查其中一份）
     other = uuid.UUID("99999999-9999-9999-9999-999999999999")
+    monkeypatch.setattr(
+        "ai_agent.kb.retrieval.resolve_files_by_name", lambda names: [other]
+    )
     token = set_kb_scope([str(FILE_ID)])
     try:
-        kb_tool._kb_search("问题", file_ids=[str(other)])
+        kb_tool._kb_search("问题", files=["别的文件.pdf"])
     finally:
         reset_kb_scope(token)
     assert seen["file_ids"] == [other]
@@ -234,6 +237,41 @@ def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     kg_tool._kg_search("问题和谁有关")
     assert seen["file_ids"] is None
+
+
+def test_kb_search_uses_rewritten_query_when_model_echoes_user(monkeypatch):
+    from ai_agent.kb.scope import reset_kb_query_hint, set_kb_query_hint
+    from ai_agent.tools import kb_search as kb_tool
+
+    queries: list[str] = []
+
+    def fake_search(query, *, file_ids=None, top_k=3):
+        queries.append(query)
+        return []
+
+    monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
+    monkeypatch.setattr(kb_tool, "search_knowledge", fake_search)
+    token = set_kb_query_hint("股东持股情况", "中国能建 股东持股情况")
+    try:
+        kb_tool._kb_search("股东持股情况")
+        kb_tool._kb_search("前十大股东持股比例")
+    finally:
+        reset_kb_query_hint(token)
+
+    assert queries == ["中国能建 股东持股情况", "前十大股东持股比例"]
+
+
+def test_kb_search_schema_exposes_files_not_ids():
+    from ai_agent.tools.registry import tool_schemas
+
+    schema = next(s for s in tool_schemas() if s["function"]["name"] == "kb_search")
+    props = schema["function"]["parameters"]["properties"]
+    assert "files" in props
+    assert "file_ids" not in props
+    kg = next(s for s in tool_schemas() if s["function"]["name"] == "kg_search")
+    kg_props = kg["function"]["parameters"]["properties"]
+    assert "files" in kg_props
+    assert "file_ids" not in kg_props
 
 
 def test_kb_scope_is_isolated_and_resettable():
@@ -288,3 +326,21 @@ def test_run_loop_applies_kb_scope_around_tool_execution(monkeypatch):
     assert any(e.get("type") == "text" for e in events)
     # 执行完必须复位，不能泄漏到同一线程里的下一次调用
     assert kb_scope() == ()
+
+
+def test_query_looks_on_topic_needs_company_name(monkeypatch):
+    """「深圳带伞」不能因为文件名里有「深圳市顺丰」就算在查库。"""
+    monkeypatch.setattr(
+        retrieval.store,
+        "list_kb_files",
+        lambda **k: [
+            {
+                "file_id": FILE_ID,
+                "filename": "顺丰控股股份有限公司2026年第三季度报告.pdf",
+                "status": "ready",
+                "tags": ["季报"],
+            }
+        ],
+    )
+    assert retrieval.query_looks_on_topic("顺丰控股投了哪些基金") is True
+    assert retrieval.query_looks_on_topic("深圳宝安明天出门需要带伞吗") is False

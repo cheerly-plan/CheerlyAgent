@@ -86,13 +86,17 @@ def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
     return payload
 
 
-def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[StreamItem]:
+def stream_chat(
+    messages: list[ChatMessage],
+    tools: list[dict],
+    tool_choice: str | dict[str, Any] = "auto",
+) -> Iterator[StreamItem]:
     try:
         stream = _stream_client.chat.completions.create(
             model=settings.model,
             messages=_to_openai_messages(messages),
             tools=tools,
-            tool_choice="auto",
+            tool_choice=tool_choice,
             stream=True,
             extra_body=_THINKING_OFF,
         )

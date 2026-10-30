@@ -202,6 +202,32 @@ class CheckpointStore(Database):
             ).fetchone()
         return row["run_id"] if row else None
 
+    def clear_checkpoints(
+        self, user_id: str, chat_session_id: str | None = None
+    ) -> int:
+        """测试收尾 / 删会话时清掉该用户（或该会话）的 checkpoint。"""
+        with self._get_pool().connection() as conn:
+            if chat_session_id:
+                rows = conn.execute(
+                    """
+                    DELETE FROM agent_checkpoint
+                    WHERE user_id = %s AND chat_session_id = %s
+                    RETURNING run_id
+                    """,
+                    (user_id, chat_session_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    DELETE FROM agent_checkpoint
+                    WHERE user_id = %s
+                    RETURNING run_id
+                    """,
+                    (user_id,),
+                ).fetchall()
+            conn.commit()
+        return len(rows)
+
     def discard_resumable_checkpoints(
         self, user_id: str, chat_session_id: str
     ) -> int:

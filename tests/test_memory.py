@@ -56,6 +56,7 @@ def _clear_test_users(store: MemoryStore) -> None:
         store.clear_long_term(user_id=uid)
         store.clear_chat(uid)
         store.clear_sessions(uid)
+        store.clear_checkpoints(uid)
 
 
 @pytest.fixture
@@ -577,9 +578,19 @@ def test_rename_session_overwrites_existing_title(mem_store):
 def test_delete_session_hides_session_and_clears_chat(mem_store):
     session = mem_store.create_session("a", "del-1")
     mem_store.append_chat("a", session.id, [{"role": "user", "content": "你好"}])
+    run_id = str(uuid.uuid4())
+    assert mem_store.create_checkpoint(
+        run_id, "a", session.id, [{"role": "user", "content": "你好"}]
+    )
     assert mem_store.delete_session("a", session.id) is True
     assert mem_store.get_session("a", session.id) is None
     assert mem_store.load_chat("a", session.id) == []
+    with mem_store._get_pool().connection() as conn:
+        leftover = conn.execute(
+            "SELECT 1 FROM agent_checkpoint WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()
+    assert leftover is None
     assert mem_store.delete_session("a", session.id) is False
 
 

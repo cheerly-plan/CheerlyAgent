@@ -537,6 +537,13 @@ class SessionStore(Database):
                 """,
                 (user_id, session_id),
             )
+            conn.execute(
+                """
+                DELETE FROM agent_checkpoint
+                WHERE user_id = %s AND chat_session_id = %s
+                """,
+                (user_id, session_id),
+            )
             conn.commit()
         return True
 
@@ -572,4 +579,5 @@ class SessionStore(Database):
     def clear_sessions(self, user_id: str) -> None:
         with self._get_pool().connection() as conn:
             conn.execute("DELETE FROM agent_session WHERE user_id = %s", (user_id,))
+            conn.execute("DELETE FROM agent_checkpoint WHERE user_id = %s", (user_id,))
             conn.commit()

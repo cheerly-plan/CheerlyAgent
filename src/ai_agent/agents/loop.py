@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -9,11 +10,17 @@ from ai_agent.agents.prompts import SYSTEM_PROMPT
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.citations import Citation, collect_citations, merge_sources
-from ai_agent.kb.retrieval import Hit, search_knowledge
-from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
+from ai_agent.kb.citations import collect_citations, merge_sources
+from ai_agent.kb.doc_profiles import resolve_profile
+from ai_agent.kb.retrieval import query_looks_on_topic
+from ai_agent.kb.scope import (
+    reset_kb_query_hint,
+    reset_kb_scope,
+    set_kb_query_hint,
+    set_kb_scope,
+)
 from ai_agent.llm.client import complete_chat, stream_chat
-from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
+from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult, ToolCall
 from ai_agent.memory.facets import format_profile_block
 from ai_agent.memory.long_term import capture_long_term
 from ai_agent.memory.short_term import (
@@ -25,12 +32,9 @@ from ai_agent.memory.short_term import (
     take_summary,
     take_system,
 )
-from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store, user_scope
 from ai_agent.memory.summarize import summarize_session
 from ai_agent.tools.registry import TOOLS_MAP, execute_tool, tool_label, tool_schemas
-from ai_agent.tools.kb_search import _citations_of, _format_hit_with_context
-from ai_agent.tools.kg_search import format_neighborhood
 
 logger = get_logger(__name__)
 
@@ -101,141 +105,111 @@ def _output_digest(output: str) -> str:
     return hashlib.sha1(output.strip().encode("utf-8")).hexdigest()
 
 
-def _kb_prefetch(
-    user_input: str, user_id: str, kb_file_ids: tuple[str, ...]
-) -> tuple[ChatMessage | None, list[Citation]]:
-    """kb 开启时先替模型查一次库，命中注入成 system 消息（always-retrieve）。
+def _previous_turns(messages: list[ChatMessage]) -> list[str]:
+    """当前 user 之前最近 N 轮的「问句 + 最终回答」，时间正序。
 
-    为什么不等模型自己决定调不调 kb_search：本地模型对「这问题要不要查」
-    的判断不稳定，提示词再怎么放宽也有漏网——用户把库里的原文粘进对话框，
-    模型照样可能直接用通用知识作答（实测发生过）。检索是毫秒级的便宜操作，
-    主动查一次的代价可以忽略；命中与否交给向量距离：闲聊时没有语义接近的
-    片段，自然不会注入，不会把闲聊带偏。
-
-    命中同时作为引用交给上层（SSE sources 事件 + 落库），和模型主动调
-    kb_search 的命中在展示上完全一致。检索失败不阻断对话，只是这轮退回
-    「靠模型自己调工具」的旧模式。
+    从当前 user 的前一条开始往前扫。不能从 messages[-1] 开始——那会把
+    「当前这句」当成上一轮塞进去，改写上下文里就没有主体（公司名）。
+    倒序扫描先遇到「回答」再遇到「问句」，所以每轮暂存成 (user, answer)，
+    最后按时间正序摊平。
     """
-    query = user_input.strip()
-    if not query:
-        return None, []
-    file_ids = _parse_prefetch_file_ids(kb_file_ids)
-    scope_token = set_kb_scope(kb_file_ids)
-    try:
-        try:
-            with user_scope(user_id):
-                hits = search_knowledge(
-                    query,
-                    file_ids=file_ids,
-                    top_k=settings.kb_prefetch_top_k,
-                )
-        except Exception:
-            logger.exception("kb 预检索失败，本轮退回工具检索模式")
-            return None, []
-    finally:
-        reset_kb_scope(scope_token)
-    if not hits:
-        return None, []
-    # 闲聊门控：有向量距离的命中全部过远才整轮不注入。不要按条剔除——
-    # 重排挑中的「能回答问题」的片段距离常在 0.46~0.60（改写问法），
-    # 按条砍会把相关原文丢掉，只留下更近但答不上的句子。
-    # 关键词独有命中没有 distance，不能当成 0 去打穿这道门；
-    # 纯关键词召回（编号/专名）则整组放行。
-    if _prefetch_too_weak(hits):
-        return None, []
-    citations = _citations_of(hits)
-    blocks = [
-        f"【命中 {i + 1} · {_prefetch_distance_label(hit)}】\n"
-        f"{_format_hit_with_context(hit)}"
-        for i, hit in enumerate(hits)
+    turns: list[tuple[str, str]] = []
+    pending_answer = ""
+    last = len(messages) - 1
+    end = last - 1 if last >= 0 and messages[last].get("role") == "user" else last
+    for i in range(end, -1, -1):
+        msg = messages[i]
+        role = msg.get("role")
+        if role == "assistant":
+            if msg.get("tool_calls"):
+                continue
+            text = str(msg.get("content") or "").strip()
+            if text and not pending_answer:
+                pending_answer = text
+        elif role == "user":
+            text = str(msg.get("content") or "").strip()
+            if text:
+                turns.append((text, pending_answer))
+                pending_answer = ""
+        if len(turns) >= settings.kb_rewrite_history_turns:
+            break
+    prev_turn: list[str] = []
+    for user_q, answer in reversed(turns):
+        prev_turn.append(user_q)
+        if answer:
+            prev_turn.append(answer)
+    return prev_turn
+
+
+def _is_kb_catalog(msg: ChatMessage) -> bool:
+    meta = msg.get("meta")
+    return isinstance(meta, dict) and bool(meta.get("kb_catalog"))
+
+
+def _drop_old_kb_catalog(messages: list[ChatMessage]) -> None:
+    """只保留本轮目录，避免多轮对话里叠多份文件列表。
+
+    目录夹在历史中间。若已经记下落库起点 `persisted` 再删，后面的下标会
+    前移，`messages[persisted:]` 会把本轮 user 问句切掉，刷新后会话记录丢失。
+    """
+    kept = [msg for msg in messages if not _is_kb_catalog(msg)]
+    if len(kept) != len(messages):
+        messages[:] = kept
+
+
+def _format_kb_catalog(
+    files: list[dict], *, original: str, rewritten: str
+) -> str:
+    lines = [
+        "本轮知识库已就绪的文件如下。回答其中的公司、产品、财报、数字、日期、"
+        "条款等事实之前，必须先调用 kb_search，不要凭训练知识直接作答。",
+        "天气、出行、闲聊等与这些文件无关的问题不要查知识库，改用其他工具或直接回答。",
+        "涉及「和谁有关、上下游、投资、产业链」时用 kg_search。",
+        "限定范围时 files 填文件名（可简称、可多份），不要填文件 id；"
+        "不填则按问题自动匹配或查全库。",
+        "",
     ]
-    content = (
-        "以下是系统针对用户最新问题预检索知识库得到的原文片段。回答前先读：\n"
-        "与问题相关时，以这些原文为依据作答，并自然说明出处（文件名、页码）；\n"
-        "片段与问题无关时忽略它们，按你自己的知识回答，不要生搬硬套。\n\n"
-        + "\n\n".join(blocks)
-    )
-    message: ChatMessage = {
-        "role": "system",
-        "content": content,
-        "meta": {"kb_prefetch": True},
-    }
-    return message, citations
+    if rewritten and original and rewritten.strip() != original.strip():
+        lines.append(f"建议检索词：{rewritten.strip()}")
+        lines.append("调用 kb_search / kg_search 时优先用这条检索词；换角度再改 query。")
+        lines.append("")
+    if not files:
+        lines.append("当前没有已处理完成的文件，不要调用 kb_search / kg_search。")
+        return "\n".join(lines)
+    lines.append("文件目录：")
+    for item in files:
+        name = str(item.get("filename") or "").strip() or "(未命名)"
+        tags = [
+            str(tag).strip()
+            for tag in (item.get("tags") or [])
+            if str(tag).strip()
+        ]
+        extras: list[str] = []
+        if tags:
+            extras.append("标签：" + "、".join(tags))
+        doc_type = str(item.get("doc_type") or "").strip()
+        if doc_type:
+            label = resolve_profile(doc_type).label
+            if label:
+                extras.append("类型：" + label)
+        suffix = ("｜" + "｜".join(extras)) if extras else ""
+        lines.append(f"- {name}{suffix}")
+    return "\n".join(lines)
 
 
-def _prefetch_too_weak(hits: list[Hit]) -> bool:
-    """弱相关整轮丢弃。只看走过向量路的命中。"""
-    scored = [hit.distance for hit in hits if hit.distance is not None]
-    if not scored:
-        return False
-    return all(d > settings.kb_prefetch_max_distance for d in scored)
-
-
-def _prefetch_distance_label(hit: Hit) -> str:
-    if hit.distance is None:
-        return "关键词命中"
-    return f"与问题的向量距离 {hit.distance:.2f}"
-
-
-def _parse_prefetch_file_ids(raw_ids: tuple[str, ...]) -> list[uuid.UUID] | None:
-    if not raw_ids:
-        return None
-    parsed: list[uuid.UUID] = []
-    for raw in raw_ids:
-        try:
-            parsed.append(uuid.UUID(raw))
-        except ValueError:
-            continue
-    return parsed or None
-
-
-def _kg_prefetch(
-    user_input: str, user_id: str, kb_file_ids: tuple[str, ...]
-) -> ChatMessage | None:
-    """kb 开启时附带注入实体邻域（只给关系路径，不重复原文切片）。
-
-    切片预检索解决「原文里有没有这段话」；关系题如果模型不调 kg_search，
-    图谱等于白建。实体检索是毫秒级的，有强命中才注入，闲聊不会被带偏。
-    """
-    query = user_input.strip()
-    if not query:
-        return None
-    file_ids = _parse_prefetch_file_ids(kb_file_ids)
+def _kb_catalog_message(original: str, rewritten: str) -> ChatMessage | None:
+    """use_kb 时把就绪文件目录注入成一条 system，供模型决定查哪些文件。"""
     try:
-        with user_scope(user_id):
-            stats = store.graph_stats(file_ids=file_ids)
-            if not stats.get("entities"):
-                return None
-            embedding = embed_query(query)
-            seeds = store.search_entities(
-                embedding,
-                query=query,
-                top_k=settings.kb_graph_top_k,
-                file_ids=file_ids,
-                min_score=settings.kb_graph_min_score,
-            )
-            if not seeds:
-                return None
-            graph = store.expand_subgraph(
-                [s["id"] for s in seeds],
-                depth=1,
-                max_nodes=settings.kb_graph_max_nodes,
-            )
+        rows = store.list_kb_files()
     except Exception:
-        logger.exception("图谱预检索失败，本轮跳过邻域注入")
+        logger.exception("kb 文件目录读取失败，本轮不注入目录")
         return None
-
-    body = "\n".join(format_neighborhood(seeds, graph))
-    content = (
-        "以下是系统针对用户最新问题预检索知识图谱得到的实体邻域。"
-        "涉及「和谁有关、上下游、投资、产业链」时优先依据这些关系作答；"
-        "邻域不够再调用 kg_search（可把 depth 设为 2）；与问题无关则忽略。\n\n"
-        + body
-    )
+    ready = [row for row in rows if row.get("status") == "ready"]
+    ready = ready[: settings.kb_catalog_max_files]
     return {
         "role": "system",
-        "content": content,
-        "meta": {"kg_prefetch": True},
+        "content": _format_kb_catalog(ready, original=original, rewritten=rewritten),
+        "meta": {"kb_catalog": True, "kb_ready_files": len(ready)},
     }
 
 
@@ -250,7 +224,7 @@ _REWRITE_SYSTEM = (
     "2. 补全的主体应来自上一轮对话里出现过的事实，不要凭空编造与上下文"
     "无关的专有名词；\n"
     "3. 如果当前这句本身已经自包含、无需改写，原样输出当前这句即可；\n"
-    "4. 只输出改写后的那一条查询词，不要任何解释、标点引导或换行。"
+    "4. 只输出改写后的那一条查询词，不要回答问题，不要解释，不要换行。"
 )
 
 
@@ -306,30 +280,74 @@ def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
         logger.exception("kb 对话改写异常，退回原话")
         return user_input
     rewritten = (out or "").strip().strip("\"'“”‘’")
-    if not rewritten or rewritten == user_input.strip():
+    if not _usable_rewrite(user_input, rewritten):
+        if rewritten and rewritten != user_input.strip():
+            logger.info("kb 对话改写结果不可用，退回原话：%r", rewritten[:80])
         return user_input
     logger.info("kb 对话改写：%r -> %r", user_input, rewritten)
     return rewritten
 
 
-def _prefetch_knowledge(
-    user_input: str, user_id: str, kb_file_ids: tuple[str, ...]
-) -> tuple[ChatMessage | None, list[Citation]]:
-    """切片预检索 + 图谱邻域，合并成一条 system，避免连注两条挤掉上下文。"""
-    kb_msg, cited = _kb_prefetch(user_input, user_id, kb_file_ids)
-    kg_msg = _kg_prefetch(user_input, user_id, kb_file_ids)
-    if kb_msg is None:
-        return kg_msg, cited
-    if kg_msg is None:
-        return kb_msg, cited
-    merged: ChatMessage = {
-        "role": "system",
-        "content": str(kb_msg.get("content") or "")
-        + "\n\n"
-        + str(kg_msg.get("content") or ""),
-        "meta": {"kb_prefetch": True, "kg_prefetch": True},
+_REWRITE_ANSWER_MARKERS = (
+    "根据知识库",
+    "根据文档",
+    "未明确提及",
+    "建议访问",
+    "请稍后",
+    "作为AI",
+    "我无法",
+)
+
+
+_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
+
+
+def _has_retrieval_call(result: ChatResult | None) -> bool:
+    if not result:
+        return False
+    return any(call.get("name") in _RETRIEVAL_TOOLS for call in result.get("tool_calls") or [])
+
+
+def _forced_kb_search_call(query: str) -> ToolCall:
+    return {
+        "id": f"kb_force_{uuid.uuid4().hex[:12]}",
+        "name": "kb_search",
+        "arguments": {"query": query},
     }
-    return merged, cited
+
+
+_KB_OFFTOPIC = re.compile(
+    r"天气|气象|气温|下雨|落雨|下雪|台风|暴雨|"
+    r"带伞|雨伞|口罩|穿什么|穿啥|多少度|几度|冷不冷|热不热"
+)
+_KB_CHITCHAT = re.compile(
+    r"^(你好|嗨|哈喽|在吗|早上好|中午好|晚上好|谢谢|再见)[！!。.?？\s]*$"
+)
+
+
+def _skip_forced_kb_search(query: str) -> bool:
+    """天气/闲聊不要强行检索：关键词会误撞「深圳市顺丰投资」这类公司名。"""
+    text = (query or "").strip()
+    if not text:
+        return True
+    if _KB_CHITCHAT.match(text):
+        return True
+    if _KB_OFFTOPIC.search(text) and not query_looks_on_topic(text):
+        return True
+    return False
+
+
+def _usable_rewrite(original: str, rewritten: str) -> bool:
+    """改写模型偶发直接作答，那种段落不能当检索词。"""
+    text = (rewritten or "").strip()
+    orig = (original or "").strip()
+    if not text or text == orig:
+        return False
+    if len(text) > 160:
+        return False
+    if text.count("。") >= 2:
+        return False
+    return not any(marker in text for marker in _REWRITE_ANSWER_MARKERS)
 
 
 def _checkpoint_create(
@@ -571,6 +589,9 @@ def run_stream(
         raise ValueError("regenerate 与 resume_run_id 互斥")
     run_id = str(uuid.uuid4())
     replacing = False
+    # 本轮新追加的 user 消息：run_loop 可能删掉历史里的旧目录，下标会前移，
+    # finally 里用对象身份重定位落库起点，避免把这句问话切出 turn。
+    turn_anchor: ChatMessage | None = None
     if resume_run_id:
         # 断点续跑：上下文以 checkpoint 快照为准（热缓存里没有中间 tool 消息）。
         # 旧行已被路由层预检、在这里原子认领（DELETE...RETURNING）。
@@ -628,11 +649,15 @@ def run_stream(
             replacing = True
             user_input = str(recent[-1].get("content") or "")
             messages = assemble(_system_prompt(user_id), summary, recent)
+            # 先清旧目录再记落库边界，避免下标被删目录带偏
+            _drop_old_kb_catalog(messages)
             persisted = len(messages)
         else:
             messages = assemble(_system_prompt(user_id), summary, recent)
+            _drop_old_kb_catalog(messages)
             persisted = len(messages)
-            messages.append({"role": "user", "content": user_input})
+            turn_anchor = {"role": "user", "content": user_input}
+            messages.append(turn_anchor)
     if not _checkpoint_create(
         run_id, user_id, chat_session_id, messages, use_web_search, use_kb
     ):
@@ -674,6 +699,13 @@ def run_stream(
                 "completed" if completed else ("failed" if failed else "interrupted")
             )
         _checkpoint_finish(run_id, terminal)
+        if turn_anchor is not None:
+            try:
+                persisted = next(
+                    i for i, msg in enumerate(messages) if msg is turn_anchor
+                )
+            except StopIteration:
+                pass
         turn = messages[persisted:]
         # replacing（重新生成 / 断点恢复）只有成功完成才落库：
         # 失败或中断保留库里已有内容（旧完整回答或上一轮已写入的半截）。
@@ -740,65 +772,57 @@ def run_loop(
     # 已经走到头了（图谱永远返回同一个中心实体、向量库永远空结果）。
     # 只在下次重复时追加一句系统提示，不阻断调用
     seen_outputs: dict[tuple[str, str], int] = {}
-    # 预检索注入：只在新一轮提问的入口做（最后一条是 user 且其后还没有
-    # 注入块）。断点续跑中断在工具轮时，注入块已在 checkpoint 快照里，
-    # 最后一条是 assistant/tool，不会重复注入。
-    if (
-        use_kb
-        and settings.kb_prefetch_enabled
-        and messages
-        and messages[-1].get("role") == "user"
-    ):
-        current = str(messages[-1].get("content") or "").strip()
-        # 最近几轮完整对话（用户问 + 助手最终答）：对话改写的上下文。助手最终回答
-        # 通常已带出主体全称（即使那轮用户只问「归母净利润」），据此能把「本季度」
-        # 这类指代补回正确的公司。
-        # 从当前 user 的前一条（messages[-2]）开始往前扫，收集最近 N 轮的
-        # （user 问句 → 最终 assistant 回答）。不能从 messages[-1] 开始——那会把
-        # 「当前这句」当成上一轮塞进去，导致改写上下文里没有主体（公司名）。
-        # 倒序扫描先遇到「回答」再遇到「问句」，所以每轮暂存成 (user, answer)，
-        # 最后按时间正序摊平：最早那轮在前。
-        turns: list[tuple[str, str]] = []  # (user 问句, 最终回答)，倒序收集
-        pending_answer = ""  # 已见到某轮的最终回答、尚未配到其 user 问句
-        for i in range(len(messages) - 2, -1, -1):
-            msg = messages[i]
-            role = msg.get("role")
-            if role == "assistant":
-                if msg.get("tool_calls"):
-                    continue  # 中间态：模型要调工具，跳过
-                text = str(msg.get("content") or "").strip()
-                if text and not pending_answer:
-                    pending_answer = text
-            elif role == "user":
-                text = str(msg.get("content") or "").strip()
-                if text:
-                    turns.append((text, pending_answer))
-                    pending_answer = ""
-            if len(turns) >= settings.kb_rewrite_history_turns:
-                break
-        # 时间正序摊平：turns 是倒序收集的，反转轮顺序，每轮内部保持 user→answer
-        prev_turn: list[str] = []
-        for user_q, answer in reversed(turns):
-            prev_turn.append(user_q)
-            if answer:
-                prev_turn.append(answer)
-        prefetch_query = _rewrite_query(current, prev_turn)
-        prefetch_msg, prefetch_cited = _prefetch_knowledge(
-            prefetch_query, user_id, kb_file_ids
+    # 目录 + 改写：只在新一轮提问的入口做（最后一条是 user）。断点续跑
+    # 中断在工具轮时，目录已在 checkpoint 快照里，最后一条是 assistant/tool，
+    # 不会重复注入。改写词留给后面工具执行时替换「原话 query」。
+    original_query = ""
+    rewritten_query = ""
+    catalog_has_files = False
+    if use_kb and messages and messages[-1].get("role") == "user":
+        original_query = str(messages[-1].get("content") or "").strip()
+        rewritten_query = _rewrite_query(
+            original_query, _previous_turns(messages)
         )
-        turn_sources = merge_sources(turn_sources, prefetch_cited)
-        if prefetch_msg is not None:
-            messages.append(prefetch_msg)
+        if settings.kb_catalog_enabled:
+            catalog_msg = _kb_catalog_message(original_query, rewritten_query)
+            if catalog_msg is not None:
+                _drop_old_kb_catalog(messages)
+                messages.append(catalog_msg)
+                catalog_has_files = bool(
+                    (catalog_msg.get("meta") or {}).get("kb_ready_files")
+                )
+    # 知识库开着且有文件时，首轮倾向检索（本地模型常直接作答）。
+    # 天气/闲聊除外：强行检索会把「深圳带伞」检索成「深圳市顺丰投资」。
+    force_search = bool(
+        use_kb
+        and settings.kb_force_search
+        and catalog_has_files
+        and original_query
+        and not _skip_forced_kb_search(original_query)
+        and any(s["function"]["name"] == "kb_search" for s in tools)
+    )
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
+        held_text: list[str] = []
+        tool_choice: str | dict = "auto"
+        if force_search:
+            tool_choice = {
+                "type": "function",
+                "function": {"name": "kb_search"},
+            }
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
             context = _fit_context(messages, settings.llm_context_char_budget)
-            for kind, payload in stream_chat(context, tools):
+            for kind, payload in stream_chat(
+                context, tools, tool_choice=tool_choice
+            ):
                 if kind == "text":
                     streamed += payload
-                    yield {"type": "text", "content": payload}
+                    if force_search:
+                        held_text.append(payload)
+                    else:
+                        yield {"type": "text", "content": payload}
                 else:
                     result = payload
         except LLMError as e:
@@ -823,6 +847,19 @@ def run_loop(
             _stash_partial_assistant(messages, streamed, run_id, step)
             yield {"type": "error", "message": "模型没有返回结果"}
             return
+        if force_search:
+            if _has_retrieval_call(result):
+                for chunk in held_text:
+                    yield {"type": "text", "content": chunk}
+            else:
+                query = rewritten_query or original_query
+                logger.info("kb 模型未检索，强制 kb_search query=%r", query[:80])
+                result = {
+                    "content": "",
+                    "tool_calls": [_forced_kb_search_call(query)],
+                }
+                streamed = ""
+            force_search = False
         assistant: ChatMessage = {"role": "assistant", "content": result["content"]}
         if result["tool_calls"]:
             assistant["tool_calls"] = result["tool_calls"]
@@ -941,11 +978,13 @@ def run_loop(
             # 范围必须在工具执行这一层同栈设置：run_stream 的生成器会被
             # 不同线程轮流 next() 推进，外层设的 contextvar 传不进来
             scope_token = set_kb_scope(kb_file_ids)
+            hint_token = set_kb_query_hint(original_query, rewritten_query)
             try:
                 with collect_citations() as cited:
                     with user_scope(user_id):
                         output = execute_tool(call["name"], call["arguments"])
             finally:
+                reset_kb_query_hint(hint_token)
                 reset_kb_scope(scope_token)
             turn_sources = merge_sources(turn_sources, cited)
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，

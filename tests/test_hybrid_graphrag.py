@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from ai_agent.core.config import settings
 from ai_agent.kb import retrieval
 from ai_agent.kb.citations import collect_citations
@@ -365,6 +367,53 @@ def test_file_subject_strips_year_and_report_type():
         retrieval._file_subject("顺丰控股股份有限公司2026 年第三季度报告.pdf")
         == "顺丰控股股份有限公司"
     )
+
+
+def test_resolve_files_by_name_matches_abbreviation_and_full_name(monkeypatch):
+    nengjian = uuid.uuid4()
+    anker = uuid.uuid4()
+    monkeypatch.setattr(
+        retrieval.store,
+        "list_kb_files",
+        lambda **k: [
+            {
+                "file_id": nengjian,
+                "filename": "中国能源建设股份有限公司2026年第三季度报告.pdf",
+                "status": "ready",
+            },
+            {
+                "file_id": anker,
+                "filename": "安克创新科技股份有限公司2026年第三季度报告.pdf",
+                "status": "ready",
+            },
+            {
+                "file_id": uuid.uuid4(),
+                "filename": "顺丰控股股份有限公司2026年第三季度报告.pdf",
+                "status": "ready",
+            },
+            {
+                "file_id": uuid.uuid4(),
+                "filename": "还在处理.pdf",
+                "status": "processing",
+            },
+        ],
+    )
+    assert retrieval.resolve_files_by_name(["中国能建"]) == [nengjian]
+    assert retrieval.resolve_files_by_name(
+        ["中国能源建设股份有限公司2026年第三季度报告.pdf"]
+    ) == [nengjian]
+    assert retrieval.resolve_files_by_name(
+        ["中国能源建设股份有限公司2026年第三季度报告.pdf｜标签：季报"]
+    ) == [nengjian]
+    assert retrieval.resolve_files_by_name(["安克创新"]) == [anker]
+    # 两个提示都能命中 → 两份都纳入
+    assert retrieval.resolve_files_by_name(["中国能建", "安克创新"]) == [
+        nengjian,
+        anker,
+    ]
+    # 命中全部就绪文件 = 没圈范围
+    assert retrieval.resolve_files_by_name(["季度报告"]) is None
+    assert retrieval.resolve_files_by_name([]) is None
 
 
 def test_query_mentions_allows_abbreviation_but_not_other_company():

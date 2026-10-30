@@ -190,15 +190,13 @@ class Settings(BaseSettings):
     # 也有 0.55~0.65 的基线距离，超过 0.72 基本只是话题沾边，宁缺毋滥；
     # 设 2.0 等于关闭这条门槛。
     kb_search_max_distance: float = 0.72
-    # 知识库预检索（always-retrieve）：kb 开关打开时，每轮回答前服务端先替
-    # 模型查一次库并把命中注入上下文，不依赖模型自觉调用 kb_search——
-    # 本地小模型对「要不要查」的主观判断不稳定，用户把原文粘进对话框
-    # 都可能不触发。检索是毫秒级操作，闲聊时没有语义接近的片段自然不注入
-    kb_prefetch_enabled: bool = True
-    kb_prefetch_top_k: int = 3
-    # 预检索比工具检索更严的距离门槛：注入内容是「被动给模型看的」，
-    # 弱相关片段会把闲聊回答带偏。0.45 在余弦距离下意味着语义相当接近
-    kb_prefetch_max_distance: float = 0.45
+    # 知识库文件目录：kb 开关打开时，把就绪文件的文件名/标签/类型注入上下文，
+    # 由模型自己决定要不要调 kb_search、files 填哪些文件名。不注入 UUID。
+    kb_catalog_enabled: bool = True
+    kb_catalog_max_files: int = 80
+    # 本地模型经常「觉得自己知道」而不调 kb_search。知识库开着且有就绪文件时，
+    # 首轮强制走检索：先要求调用 kb_search，模型仍不调则服务端代调一次。
+    kb_force_search: bool = True
     # LLM 重排：多一次模型调用（约 1~2 秒），换来排序质量。关掉即退回向量顺序
     kb_rerank_enabled: bool = True
     # 空 = 跟随 MODEL（主模型）。重排是短文本判别，不需要大模型
@@ -208,9 +206,9 @@ class Settings(BaseSettings):
     kb_rerank_temperature: float = 0.0
     kb_rerank_timeout_seconds: float = 30.0
     # 对话改写：多轮对话里，当前这句省略了主体/语境（上轮在问「中国能源
-    # 建设」、这轮问「股东持股情况」），预检索前用小模型结合上一轮对话把
-    # 这句改写/扩写成自包含的检索词，避免「股东持股情况」这种全库都有的表
-    # 命中别家公司的文件。补全与扩写都允许；第一问无上文时跳过；失败/超时退回原话。
+    # 建设」、这轮问「股东持股情况」），结合上一轮对话把这句改写/扩写成
+    # 自包含的检索词。改写结果写入本轮目录消息，模型若仍用用户原话调工具
+    # 则服务端自动换成改写词。第一问无上文时跳过；失败/超时退回原话。
     kb_rewrite_enabled: bool = True
     # 空 = 用 small_model（或回落主模型）。改写是短任务，不需要大模型
     kb_rewrite_model: str = ""

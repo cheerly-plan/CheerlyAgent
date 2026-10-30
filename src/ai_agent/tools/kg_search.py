@@ -15,14 +15,13 @@
 """
 
 import logging
-import uuid
 
 from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
 from ai_agent.kb.citations import Citation, add_citations
 from ai_agent.kb.retrieval import format_where
-from ai_agent.kb.scope import kb_scope
+from ai_agent.kb.scope import effective_kb_query, resolve_tool_file_ids
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
 from ai_agent.tools.base import Tool
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 _MAX_NEIGHBOR_ENTITIES = 6
 # 单次返回的证据切片总数
 _MAX_EVIDENCE = 8
-# 注入给模型的关系条数：再多挤掉原文，对话预检索与工具共用这个上限
+# 注入给模型的关系条数：再多挤掉原文
 _MAX_NEIGHBORHOOD_EDGES = 20
 
 
@@ -44,7 +43,7 @@ def format_neighborhood(
     *,
     max_edges: int = _MAX_NEIGHBORHOOD_EDGES,
 ) -> list[str]:
-    """命中实体 + 关系路径。预检索只注入这一段，不带原文（切片预检索已经有了）。"""
+    """命中实体 + 关系路径。工具结果里关系与原文依据分开给，避免重复切片。"""
     name_by_id = {str(n["id"]): n["name"] for n in graph.get("nodes") or []}
     lines = [
         "命中实体："
@@ -65,8 +64,9 @@ class KgSearchArgs(BaseModel):
     query: str = Field(
         ..., description="要检索的实体、主题或问题，用自然语言描述"
     )
-    file_ids: list[str] | None = Field(
-        default=None, description="限定检索的文件 id 列表，缺省检索全部文件"
+    files: list[str] | None = Field(
+        default=None,
+        description="限定检索的文件名（可简称、可多份），对照本轮文件目录填写；不填则按问题自动匹配或查全库",
     )
     depth: int = Field(default=1, ge=1, le=2, description="从命中实体向外扩展的跳数")
     top_k: int = Field(default=5, ge=1, le=10, description="参与扩展的种子实体数")
@@ -88,7 +88,7 @@ def _evidence_where(item: dict) -> str:
 
 def _kg_search(
     query: str,
-    file_ids: list[str] | None = None,
+    files: list[str] | None = None,
     depth: int = 1,
     top_k: int = 5,
 ) -> str:
@@ -96,16 +96,8 @@ def _kg_search(
     if stats["entities"] == 0:
         return "知识图谱还没有数据（可能文件都在建图中或已关闭抽取），可以先改用 kb_search。"
 
-    # 模型没显式指定文件时，跟随用户在输入框里选的会话范围（与 kb_search 同口径）
-    raw_ids = file_ids if file_ids else list(kb_scope())
-    parsed_ids: list | None = None
-    if raw_ids:
-        parsed_ids = []
-        for raw in raw_ids:
-            try:
-                parsed_ids.append(uuid.UUID(raw))
-            except ValueError:
-                return f"ERROR: 非法的文件 id {raw}"
+    query = effective_kb_query(query)
+    parsed_ids = resolve_tool_file_ids(files)
 
     try:
         embedding = embed_query(query)
@@ -262,7 +254,8 @@ kg_search_tool = Tool(
     description=(
         "按实体与关系检索知识库图谱。当问题涉及「某公司/技术/指标和谁有关、"
         "上下游、投资关系、产业链位置」这类关系型问题时优先使用；"
-        "只查原文表述时用 kb_search。"
+        "只查原文表述时用 kb_search。files 填本轮目录里的文件名（可简称），"
+        "不要填文件 id。"
     ),
     func=_kg_search,
     args_model=KgSearchArgs,

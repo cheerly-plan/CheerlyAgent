@@ -5,14 +5,12 @@
 的语义区分：记忆是当前用户的对话沉淀，这里是共享文档原文。
 """
 
-import uuid
-
 from pydantic import BaseModel, Field
 
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import Citation, add_citations
 from ai_agent.kb.retrieval import Hit, format_where, search_knowledge
-from ai_agent.kb.scope import kb_scope
+from ai_agent.kb.scope import effective_kb_query, resolve_tool_file_ids
 from ai_agent.memory.store import store
 from ai_agent.tools.base import Tool
 
@@ -24,28 +22,21 @@ _NEIGHBOR_CLIP = 200
 
 class KbSearchArgs(BaseModel):
     query: str = Field(..., description="检索问题或关键词，用自然语言描述要找的内容")
-    file_ids: list[str] | None = Field(
-        default=None, description="限定检索的文件 id 列表，缺省检索全部文件"
+    files: list[str] | None = Field(
+        default=None,
+        description="限定检索的文件名（可简称、可多份），对照本轮文件目录填写；不填则按问题自动匹配或查全库",
     )
     top_k: int = Field(default=3, ge=1, le=10, description="返回的片段数")
 
 
 def _kb_search(
-    query: str, file_ids: list[str] | None = None, top_k: int = 3
+    query: str, files: list[str] | None = None, top_k: int = 3
 ) -> str:
     if not store.has_ready_kb_file():
         return "知识库为空或还没有处理完成的文件，请提示用户联系管理员上传资料。"
 
-    # 模型没显式指定文件时，跟随用户在输入框里选的会话范围（可能为空 = 全库）
-    raw_ids = file_ids if file_ids else list(kb_scope())
-    parsed_ids: list | None = None
-    if raw_ids:
-        parsed_ids = []
-        for raw in raw_ids:
-            try:
-                parsed_ids.append(uuid.UUID(raw))
-            except ValueError:
-                return f"ERROR: 非法的文件 id {raw}"
+    query = effective_kb_query(query)
+    parsed_ids = resolve_tool_file_ids(files)
 
     try:
         # 未指定文件时，search_knowledge 内部会按标签/文件名主体推断范围，
@@ -152,8 +143,9 @@ kb_search_tool = Tool(
     name="kb_search",
     display_name="知识库检索",
     description=(
-        "检索知识库里的共享文档。当问题可能与团队资料/文档有关，"
-        "或用户要求查文档、查资料时调用；query 用自然语言描述要找的内容。"
+        "检索知识库里的共享文档。涉及目录中的公司、产品、财报、数字、日期、"
+        "条款时必须调用，不要用自己的知识直接回答。files 填本轮目录里的文件名"
+        "（可简称），不要填文件 id；不填则按问题自动匹配。"
     ),
     func=_kb_search,
     args_model=KbSearchArgs,

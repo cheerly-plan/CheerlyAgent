@@ -133,8 +133,7 @@ class Hit:
     page: int | None
     kind: str
     text: str
-    # 向量余弦距离；关键词独有命中没有走过向量路，保持 None。
-    # 不能填 0：0 看起来像完美匹配，会把预检索闲聊门控打穿。
+    # 向量余弦距离；关键词独有命中没有走过向量路，保持 None，不能填 0。
     distance: float | None
     # 跨页切片的末页（同节内聚合会一片跨两页）；单页片等于 page
     page_end: int | None = None
@@ -174,9 +173,8 @@ def search_knowledge(
     收窄结果用全库结果补位。收窄是"猜"出来的，可能判窄，所以绝不能拿
     召回率换精度——见 `_pad_from_full`。
 
-    范围推导放在这一层而不是工具层，是因为预检索（每轮对话都会跑）直接
-    调这里；放在工具层只有模型主动调 kb_search 时才生效，等于主路径白丢
-    了一次提纯候选的机会。
+    范围推导放在这一层而不是工具层：模型不传 files 时，kb_search / kg_search
+    都走这里；放在工具层等于主路径白丢一次提纯候选的机会。
     """
     embedding = embed_query(query)
     if file_ids is None:
@@ -284,6 +282,76 @@ def _extract_keywords(query: str) -> list[str]:
     return unique
 
 
+def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
+    """把模型给的文件名/简称解析成就绪文件 id。
+
+    不要求与库里文件名一字不差：精确全名、去扩展名、去标点子串、主体简称
+    都能命中。解析失败返回 None，调用方应退回会话范围或全库，不要报错。
+    一个提示词命中同一家公司的多份报告时全部纳入。命中了全部就绪文件则
+    等于没圈范围，也返回 None。
+    """
+    hints = [_clean_filename_hint(name) for name in names]
+    hints = [h for h in hints if h]
+    if not hints:
+        return None
+    try:
+        files = store.list_kb_files()
+    except Exception:
+        logger.warning("按文件名解析范围失败，跳过", exc_info=True)
+        return None
+    ready = [item for item in files if item.get("status") == "ready"]
+    if not ready:
+        return None
+    matched: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for hint in hints:
+        for item in ready:
+            fid = item["file_id"]
+            if fid in seen:
+                continue
+            if _filename_hint_matches(hint, item.get("filename") or ""):
+                seen.add(fid)
+                matched.append(fid)
+    if not matched or len(matched) == len(ready):
+        return None
+    return matched
+
+
+def _clean_filename_hint(name: str) -> str:
+    """模型可能把目录行整段贴进来（含「｜标签：…」），只留文件名部分。"""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    for sep in ("｜", " | ", "|"):
+        if sep in text:
+            text = text.split(sep, 1)[0].strip()
+            break
+    return text
+
+
+def _filename_hint_matches(hint: str, filename: str) -> bool:
+    if not hint or not filename:
+        return False
+    hint_l = hint.lower().strip()
+    name_l = filename.lower().strip()
+    if hint_l == name_l:
+        return True
+    hint_stem = _EXT_RE.sub("", hint_l)
+    name_stem = _EXT_RE.sub("", name_l)
+    if hint_stem == name_stem:
+        return True
+    hint_norm = _NAME_PUNCT.sub("", hint_stem)
+    name_norm = _NAME_PUNCT.sub("", name_stem)
+    if hint_norm and name_norm:
+        if hint_norm == name_norm:
+            return True
+        if len(hint_norm) >= 4 and (
+            hint_norm in name_norm or name_norm in hint_norm
+        ):
+            return True
+    return _query_mentions(hint, _file_subject(filename))
+
+
 def tag_file_scope(query: str) -> list[uuid.UUID] | None:
     """按查询关键词推导一个候选文件范围。
 
@@ -352,6 +420,36 @@ def _file_subject(filename: str) -> str:
 def _subject_core(subject: str) -> str:
     """剥掉「股份有限公司」这类组织形式后缀，留下真正的主体名。"""
     return _ENTITY_SUFFIX.sub("", subject)
+
+
+def query_looks_on_topic(
+    query: str, file_ids: list[uuid.UUID] | None = None
+) -> bool:
+    """问句是否点名了库里某份文件的主体或标签。
+
+    用来挡「深圳带伞」这类出行问题：字面能撞上「深圳市顺丰投资」，
+    但问句并没有在问顺丰。点名了公司/标签才算在查库。
+    """
+    probe = (query or "").strip()
+    if not probe:
+        return False
+    try:
+        files = store.list_kb_files()
+    except Exception:
+        logger.warning("kb 主题判断拿文件列表失败", exc_info=True)
+        return False
+    ready = [item for item in files if item.get("status") == "ready"]
+    if file_ids:
+        want = {str(fid) for fid in file_ids}
+        ready = [item for item in ready if str(item.get("file_id")) in want]
+    for item in ready:
+        if _query_mentions(probe, _file_subject(item.get("filename") or "")):
+            return True
+        for tag in item.get("tags") or []:
+            text = str(tag).strip()
+            if len(text) >= 2 and text in probe:
+                return True
+    return False
 
 
 def _query_mentions(query: str, subject: str) -> bool:
