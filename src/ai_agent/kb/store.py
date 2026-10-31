@@ -12,8 +12,19 @@ chunk.user_id 只作为「谁上传的」溯源信息保留。update_kb_status �
 
 import uuid
 
+from psycopg.types.json import Jsonb
+
+from ai_agent.core.config import settings
 from ai_agent.kb.chunking import Chunk
+from ai_agent.kb.meta import COMPANY_SUFFIX, extract_aliases, extract_file_meta
 from pgvector import Vector
+
+# 检索分桶键：按主体（公司）分桶，每个主体的头名在相关性带宽内保底一个
+# 名额（见 search_kb_chunks）。「A 和 B 的营业收入」这种一次调用跨两个
+# 主体时，两边的头名都进得来，不再是一家吃满、一家落空。
+# 主体为空（老数据 / 文件名里抽不出公司名）的切片全部落在同一个桶里，
+# 行为与分桶前逐字一致——回填 subject 之后才生效，不会突然改掉存量结果。
+_SUBJECT_BUCKET = "COALESCE(NULLIF(subject, ''), '')"
 
 
 class KbStore:
@@ -82,16 +93,37 @@ class KbStore:
 
         磁盘文件与展示名同名（complete 时按 filename 落盘），改名必须
         同步重命名磁盘文件，否则下载 404——这在路由层做，这里只管 DB。
+
+        改名会连带重算主体：主体是从文件名规则抽出来的，名字改了主体就得
+        跟着变，否则检索仍按旧主体分桶。切片上冗余的那份一并刷掉。
         """
+        file_meta = extract_file_meta(filename)
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 """
-                UPDATE agent_kb_file SET filename = %s, updated_at = now()
+                UPDATE agent_kb_file
+                SET filename = %s,
+                    subject = %s,
+                    subject_aliases = %s,
+                    period = %s,
+                    meta = %s,
+                    updated_at = now()
                 WHERE id = %s
                 RETURNING id
                 """,
-                (filename, file_id),
+                (
+                    filename,
+                    file_meta["subject"],
+                    list(file_meta["subject_aliases"]),
+                    file_meta["period"],
+                    Jsonb(file_meta["meta"]),
+                    file_id,
+                ),
             ).fetchone()
+            conn.execute(
+                "UPDATE agent_kb_chunk SET subject = %s, period = %s WHERE file_id = %s",
+                (file_meta["subject"], file_meta["period"], file_id),
+            )
             conn.commit()
         return row is not None
 
@@ -161,6 +193,148 @@ class KbStore:
             conn.commit()
         return row is not None
 
+    def set_kb_file_meta(
+        self,
+        file_id: uuid.UUID,
+        *,
+        subject: str,
+        subject_aliases: list[str],
+        period: str,
+        meta: dict | None = None,
+    ) -> bool:
+        """写入文件的检索元数据（主体 / 别名 / 报告期 / 长尾）。
+
+        只动元数据不动切片：存量文件的切片由 backfill 脚本按 file_id 回填，
+        新文件则由 insert_kb_chunks 直接继承。返回 False 表示文件不存在。
+        """
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE agent_kb_file
+                SET subject = %s,
+                    subject_aliases = %s,
+                    period = %s,
+                    meta = %s,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (
+                    subject,
+                    list(subject_aliases),
+                    period,
+                    Jsonb(meta or {}),
+                    file_id,
+                ),
+            ).fetchone()
+            conn.commit()
+        return row is not None
+
+    def backfill_file_meta(
+        self,
+        file_id: uuid.UUID,
+        filename: str,
+        *,
+        subject: str | None = None,
+        period: str | None = None,
+    ) -> tuple[dict, int]:
+        """按当前规则重算一份文件的主体/报告期，并把结果刷到它的切片上。
+
+        存量文件在加元数据之前就入库了，文件行与切片行的 subject 都是空的，
+        检索因此退化成「不分桶」。回填只改元数据不动向量，随时可重跑。
+        ``subject`` / ``period`` 显式传入时用它覆盖规则抽取的结果——文件名
+        不规范（「最终版.pdf」）时规则抽不出来，得让人填。
+
+        返回 (实际写入的元数据, 被刷新的切片行数)。
+        """
+        meta = extract_file_meta(filename)
+        if subject is not None:
+            meta["subject"] = subject.strip()
+            meta["subject_aliases"] = extract_aliases(meta["subject"])
+        if period is not None:
+            meta["period"] = period.strip()
+        with self._get_pool().connection() as conn:
+            conn.execute(
+                """
+                UPDATE agent_kb_file
+                SET subject = %s, subject_aliases = %s, period = %s,
+                    meta = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    meta["subject"],
+                    list(meta["subject_aliases"]),
+                    meta["period"],
+                    Jsonb(meta["meta"]),
+                    file_id,
+                ),
+            )
+            cur = conn.execute(
+                """
+                UPDATE agent_kb_chunk SET subject = %s, period = %s
+                WHERE file_id = %s
+                """,
+                (meta["subject"], meta["period"], file_id),
+            )
+            chunks = cur.rowcount
+            conn.commit()
+        return meta, chunks
+
+    def list_kb_subjects(self, user_id: str) -> list[dict]:
+        """知识库里已出现的全部主体（含别名），供多主体文档切片归属用。
+
+        只取有主体的文件：主体为空说明文件名里抽不出公司名，它既不能被
+        别人引用为候选，也不该让别人的切片归到空主体上。
+        """
+        with self._get_pool().connection() as conn:
+            return conn.execute(
+                """
+                SELECT DISTINCT subject, subject_aliases
+                FROM agent_kb_file
+                WHERE user_id = %s AND COALESCE(subject, '') <> ''
+                """,
+                (user_id,),
+            ).fetchall()
+
+    def list_kb_entity_subjects(self, file_id: uuid.UUID) -> list[str]:
+        """本文件图谱里像「公司主体」的实体名，补充文件级主体词表。
+
+        行业研报这类文档自己的文件主体可能是「新能源行业」，但正文讲的是
+        宁德时代、比亚迪——这些名字只有在图谱实体里才有。用后缀规则筛，
+        不信任模型给的 type（实测 type 会写成 org/company/机构 各种）。
+        """
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT name FROM agent_kg_entity WHERE file_id = %s
+                """,
+                (file_id,),
+            ).fetchall()
+        return [r["name"] for r in rows if COMPANY_SUFFIX.search(r["name"] or "")]
+
+    def reassign_chunk_subjects(
+        self, file_id: uuid.UUID, pairs: list[tuple[int, str]]
+    ) -> int:
+        """按 (seq, subject) 批量覆盖切片主体，返回受影响行数。
+
+        单文件内 seq 唯一，用 executemany 一次刷完；不 commit 到一半——
+        归属错了可以整体重跑，不该留下「一半新一半旧」的中间态。
+        """
+        if not pairs:
+            return 0
+        with self._get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    UPDATE agent_kb_chunk SET subject = %s
+                    WHERE file_id = %s AND seq = %s
+                    """,
+                    [(subject, file_id, seq) for seq, subject in pairs],
+                )
+                affected = cur.rowcount
+            conn.commit()
+        return affected
+
     def update_kb_status(
         self,
         file_id: uuid.UUID,
@@ -220,7 +394,16 @@ class KbStore:
         chunks: list[Chunk],
         vectors: list[list[float]],
         seq_start: int,
+        *,
+        subject: str = "",
+        period: str = "",
     ) -> int:
+        """写入切片，并把文件的主体/报告期冗余到每一行。
+
+        冗余是检索分桶的前提：``ROW_NUMBER() OVER (PARTITION BY subject)``
+        要在单表上做，JOIN 文件表既走不成索引、也让窗口函数变慢。空主体
+        （文件名里抽不出公司名）留空串，检索侧对空主体退回不分桶的原行为。
+        """
         rows = [
             (
                 uuid.uuid4(),
@@ -234,6 +417,8 @@ class KbStore:
                 chunk.scope,
                 chunk.text,
                 Vector(vector),
+                subject,
+                period,
             )
             for i, (chunk, vector) in enumerate(zip(chunks, vectors))
         ]
@@ -243,8 +428,8 @@ class KbStore:
                     """
                     INSERT INTO agent_kb_chunk
                         (id, file_id, user_id, seq, page, page_end, section,
-                         kind, scope, text, embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         kind, scope, text, embedding, subject, period)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
@@ -406,23 +591,45 @@ class KbStore:
         `max_distance` 是余弦距离上限：超出的直接不返回。向量模型对无关
         内容也会给出 0.55~0.65 的基线距离，不设门槛时 top_k 会硬凑满，
         把"话题沾边但没用"的片段喂给模型，反而稀释了真正相关的内容。
+
+        名额按主体（``subject``）保底：每个主体的头名只要与全局最佳命中
+        的距离差在 ``kb_subject_quota_band`` 内，就先各占一个名额，剩下的
+        再按距离竞争。这样一次调用里圈了两家公司的文档时两家都出得来
+        （否则它们共用一个 query 向量，离混合向量更近的那家会把名额吃满）；
+        而只问一家时，别家头名差得远就不保底，不会白白稀释上下文。
         """
         # 查询向量必须包成 Vector：裸 list 会被 psycopg 适配成
         # double precision[]，与 vector 的 <=> 运算符类型不匹配直接报错
         emb = Vector(query_embedding)
         with self._get_pool().connection() as conn:
             return conn.execute(
-                """
-                SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
-                       c.kind, c.scope, c.text,
-                       f.filename, c.embedding <=> %(emb)s AS distance
-                FROM agent_kb_chunk c
-                JOIN agent_kb_file f ON f.id = c.file_id
-                WHERE (%(file_ids)s::uuid[] IS NULL
-                       OR c.file_id = ANY(%(file_ids)s::uuid[]))
-                  AND (%(max_distance)s::float8 IS NULL
-                       OR c.embedding <=> %(emb)s <= %(max_distance)s)
-                ORDER BY c.embedding <=> %(emb)s
+                f"""
+                WITH hit AS (
+                    SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
+                           c.kind, c.scope, c.text, f.filename, c.subject,
+                           c.embedding <=> %(emb)s AS distance
+                    FROM agent_kb_chunk c
+                    JOIN agent_kb_file f ON f.id = c.file_id
+                    WHERE (%(file_ids)s::uuid[] IS NULL
+                           OR c.file_id = ANY(%(file_ids)s::uuid[]))
+                      AND (%(max_distance)s::float8 IS NULL
+                           OR c.embedding <=> %(emb)s <= %(max_distance)s)
+                ),
+                ranked AS (
+                    SELECT hit.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY {_SUBJECT_BUCKET} ORDER BY distance
+                           ) AS rn,
+                           MIN(distance) OVER (PARTITION BY {_SUBJECT_BUCKET})
+                               AS subject_best,
+                           MIN(distance) OVER () AS global_best
+                    FROM hit
+                )
+                SELECT id, file_id, seq, page, page_end, section,
+                       kind, scope, text, filename, distance
+                FROM ranked
+                ORDER BY (rn = 1 AND subject_best <= global_best + %(band)s) DESC,
+                         distance
                 LIMIT %(top_k)s
                 """,
                 {
@@ -432,6 +639,7 @@ class KbStore:
                     "file_ids": file_ids or None,
                     "max_distance": max_distance,
                     "top_k": top_k,
+                    "band": settings.kb_subject_quota_band,
                 },
             ).fetchall()
 
@@ -448,6 +656,9 @@ class KbStore:
         拉远），这里按关键词子串匹配召回：命中的关键词个数越多排越前，
         同分按出现位置靠前的先出。返回字段与 search_kb_chunks 一致
         （无 distance，用 keyword_score 代替），便于上层统一融合。
+
+        名额同样按主体保底（与向量路同一套规则，带宽为 1 个关键词）：
+        关键词路也会被「营业收入」这种通用词灌满单一主体的切片。
         """
         if not keywords:
             return []
@@ -460,22 +671,41 @@ class KbStore:
         params: dict = {
             "file_ids": file_ids or None,
             "top_k": top_k,
+            # 关键词分是「命中了几个关键词」的整数，带宽 1 = 只给「少命中
+            # 一个词以内」的主体保底；差两个词以上的主体硬塞只会灌水
+            "band": 1,
         }
         for i, kw in enumerate(keywords):
             params[f"kw{i}"] = f"%{kw}%"
         with self._get_pool().connection() as conn:
             return conn.execute(
                 f"""
-                SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
-                       c.kind, c.scope, c.text,
-                       f.filename,
-                       ({score_sql})::float8 AS keyword_score
-                FROM agent_kb_chunk c
-                JOIN agent_kb_file f ON f.id = c.file_id
-                WHERE (%(file_ids)s::uuid[] IS NULL
-                       OR c.file_id = ANY(%(file_ids)s::uuid[]))
-                  AND ({score_sql}) > 0
-                ORDER BY keyword_score DESC, c.file_id, c.seq
+                WITH hit AS (
+                    SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
+                           c.kind, c.scope, c.text, f.filename, c.subject,
+                           ({score_sql})::float8 AS keyword_score
+                    FROM agent_kb_chunk c
+                    JOIN agent_kb_file f ON f.id = c.file_id
+                    WHERE (%(file_ids)s::uuid[] IS NULL
+                           OR c.file_id = ANY(%(file_ids)s::uuid[]))
+                      AND ({score_sql}) > 0
+                ),
+                ranked AS (
+                    SELECT hit.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY {_SUBJECT_BUCKET}
+                               ORDER BY keyword_score DESC, file_id, seq
+                           ) AS rn,
+                           MAX(keyword_score) OVER (PARTITION BY {_SUBJECT_BUCKET})
+                               AS subject_best,
+                           MAX(keyword_score) OVER () AS global_best
+                    FROM hit
+                )
+                SELECT id, file_id, seq, page, page_end, section,
+                       kind, scope, text, filename, keyword_score
+                FROM ranked
+                ORDER BY (rn = 1 AND subject_best >= global_best - %(band)s) DESC,
+                         keyword_score DESC, file_id, seq
                 LIMIT %(top_k)s
                 """,
                 params,

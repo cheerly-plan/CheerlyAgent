@@ -213,6 +213,11 @@ class Settings(BaseSettings):
     kb_hybrid_keywords: int = 6
     # 关键词路的召回条数：与向量路同量级，融合后一起去重/重排
     kb_hybrid_candidates: int = 12
+    # 主体配额的「相关性带宽」：某一主体的最佳命中与全局最佳命中的距离差
+    # 在带宽内时，才保证它至少拿到一个名额（对比问句靠这条两家都出得来）。
+    # 超出带宽的主体不保底——问一家公司时，别家的头名差 0.3 也硬塞进来
+    # 只会稀释上下文。0 = 关掉配额，退回纯按距离取前 N 条。
+    kb_subject_quota_band: float = 0.12
 
     database_url: str
     embedding_model: str

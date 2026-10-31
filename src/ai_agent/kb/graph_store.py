@@ -330,9 +330,11 @@ class KgStore:
         tokens = _query_tokens(query)
         pool = max(top_k * 6, 24)
 
+        # subject 必须带：种子名额要按主体分桶（见 kg_match.take_by_subject），
+        # 否则「A 和 B 的营收」里分数高的那家会把种子名额全吃掉
         columns = """
                 SELECT e.id, e.name, e.norm_name, e.type, e.description, e.file_id,
-                       f.filename, e.mention_count,
+                       f.filename, f.subject, e.mention_count,
                        1 - (e.embedding <=> %(emb)s) AS score
                 FROM agent_kg_entity e
                 JOIN agent_kb_file f ON f.id = e.file_id
@@ -383,7 +385,7 @@ class KgStore:
                 alias_rows = conn.execute(
                     """
                 SELECT e.id, e.name, e.norm_name, e.type, e.description, e.file_id,
-                       f.filename, e.mention_count,
+                       f.filename, f.subject, e.mention_count,
                        1 - (e.embedding <=> %(emb)s) AS score,
                        a.alias_name
                 FROM agent_kg_entity e

@@ -16,6 +16,7 @@ from ai_agent.core.logging import get_logger
 from ai_agent.kb.align import align_file_graph
 from ai_agent.kb.chunking import Chunk, chunk_segments, embedding_input
 from ai_agent.kb.graph import build_file_graph
+from ai_agent.kb.meta import extract_aliases, extract_file_meta, pick_chunk_subject
 from ai_agent.kb.parsing import parse_segments
 from ai_agent.memory.embeddings import embed_texts_parallel
 from ai_agent.memory.store import store
@@ -32,9 +33,7 @@ class KbPipeline:
     """
 
     def __init__(self, workers: int = 2, graph_workers: int = 1) -> None:
-        self._pool = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="kb-pipeline"
-        )
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kb-pipeline")
         self._graph_pool = ThreadPoolExecutor(
             max_workers=max(1, graph_workers), thread_name_prefix="kb-graph"
         )
@@ -74,9 +73,7 @@ class KbPipeline:
     def _process(self, file_id: uuid.UUID, user_id: str, path: Path) -> None:
         try:
             stage = time.perf_counter()
-            store.update_kb_status(
-                file_id, "parsing", chunk_count=0, text_count=0, table_count=0
-            )
+            store.update_kb_status(file_id, "parsing", chunk_count=0, text_count=0, table_count=0)
             segments = parse_segments(path)
             parse_seconds = time.perf_counter() - stage
             chunks = chunk_segments(
@@ -93,6 +90,17 @@ class KbPipeline:
             # 存储的正文不变，只是送进向量模型的那份文本更有辨识度。
             # 批间并行（EMBEDDING_CONCURRENCY），结果顺序与切片一致
             filename = (store.get_kb_file(file_id) or {}).get("filename") or path.name
+            # 检索元数据：主体/报告期从文件名规则抽取（见 kb/meta.py）。
+            # 写进文件行是给管理页和后续回填看的；切片再冗余一份，检索分桶
+            # 用的就是切片上那份（PARTITION BY subject 必须在单表上做）。
+            file_meta = extract_file_meta(filename)
+            store.set_kb_file_meta(
+                file_id,
+                subject=file_meta["subject"],
+                subject_aliases=file_meta["subject_aliases"],
+                period=file_meta["period"],
+                meta=file_meta["meta"],
+            )
             embed_stage = time.perf_counter()
             vectors = embed_texts_parallel(
                 [
@@ -118,6 +126,8 @@ class KbPipeline:
                     chunks[seq_start : seq_start + batch],
                     vectors[seq_start : seq_start + batch],
                     seq_start,
+                    subject=file_meta["subject"],
+                    period=file_meta["period"],
                 )
             text_n = sum(1 for c in chunks if c.kind == "text")
             table_n = sum(1 for c in chunks if c.kind == "table")
@@ -199,6 +209,8 @@ class KbPipeline:
             # 对齐失败不把 ready 打回 failed（图仍可用，只是多几个重复点），
             # entity_count 回退用抽取的原始数
             aligned = self._align(file_id)
+            # 建图/对齐后才有实体，多主体文档的切片归属放这一步做
+            self._attribute_subjects(file_id)
             store.update_graph_status(
                 file_id,
                 "ready",
@@ -234,6 +246,47 @@ class KbPipeline:
             logger.exception("kb 实体对齐失败 file_id=%s", file_id)
             store.set_align_status(file_id, "failed")
             return None
+
+    def _attribute_subjects(self, file_id: uuid.UUID) -> None:
+        """多主体文档（行业研报等）的切片级主体归属。
+
+        一份文件只讲一家公司时，切片直接继承文件主体就够了。但「新能源行业
+        研报」这种一份文件讲十家的，切片全继承「新能源行业」会让检索分桶
+        形同虚设——问「宁德时代营收」时所有切片都在同一个桶里抢名额。
+
+        候选主体 = 知识库里已知的公司主体 + 本文件图谱里像公司的实体名；
+        每个切片按提及次数归属到最像的那个主体，提不到的退回文件主体。
+        纯规则、可重跑：图谱变了再跑一遍就刷新，不留隐式状态。
+        """
+        try:
+            record = store.get_kb_file(file_id) or {}
+            user_id = record.get("user_id") or ""
+            default = (record.get("subject") or "").strip()
+            candidates: list[tuple[str, list[str]]] = [
+                (r["subject"], list(r["subject_aliases"] or []))
+                for r in store.list_kb_subjects(user_id)
+            ]
+            known = {item[0] for item in candidates}
+            for name in store.list_kb_entity_subjects(file_id):
+                if name not in known:
+                    candidates.append((name, extract_aliases(name)))
+                    known.add(name)
+            if default and default not in known:
+                candidates.append((default, extract_aliases(default)))
+            if len(candidates) < 2:
+                return  # 只有一个主体可归，切片继承文件主体即可
+            pairs = []
+            for row in store.list_kb_chunk_inputs(file_id):
+                subject = pick_chunk_subject(row["text"], candidates, default=default)
+                # 切片入库时继承的就是文件主体，只有归属不同的才需要回写
+                if subject != default:
+                    pairs.append((row["seq"], subject))
+            moved = store.reassign_chunk_subjects(file_id, pairs)
+            if moved:
+                logger.info("kb 切片主体归属 file_id=%s 覆盖 %d 片", file_id, moved)
+        except Exception:
+            # 归属失败不影响图谱与检索：切片仍带文件主体，只是分桶粗一些
+            logger.exception("kb 切片主体归属失败 file_id=%s", file_id)
 
     def _reembed(self, file_id: uuid.UUID) -> None:
         """改名重嵌：语境前缀《文件名》在嵌入时就烧进向量里（不落库），

@@ -8,6 +8,9 @@
     uv run python scripts/kb.py graph --name 中行            # 切片已核对，只重建图谱
     uv run python scripts/kb.py reembed                     # 正文没变，只重算切片向量
     uv run python scripts/kb.py reembed --target all        # 切片 + 情景记忆 + 图谱实体
+    uv run python scripts/kb.py meta --all --dry-run        # 看存量文件会被抽出什么主体
+    uv run python scripts/kb.py meta --all                  # 回填主体/报告期，切片跟着刷
+    uv run python scripts/kb.py meta --name 中行 --subject "中国银行" --period 2026Q3
     uv run python scripts/kb.py coverage --name 中行        # 哪些页没有切片
 
 --file / --name / --all 选文件；--dry-run 只看会动谁；--all 要加 --yes。
@@ -98,6 +101,14 @@ def _parser() -> argparse.ArgumentParser:
     p_reembed.add_argument("--dry-run", action="store_true")
     _add_embed_override(p_reembed)
     p_reembed.set_defaults(handler=_cmd_reembed)
+
+    p_meta = sub.add_parser(
+        "meta", help="回填检索元数据（主体/报告期），切片跟着刷"
+    )
+    _add_select(p_meta)
+    p_meta.add_argument("--subject", help="手动指定主体，覆盖规则抽取")
+    p_meta.add_argument("--period", help="手动指定报告期，覆盖规则抽取")
+    p_meta.set_defaults(handler=_cmd_meta)
 
     p_cov = sub.add_parser("coverage", help="看哪些页没有切片")
     p_cov.add_argument("--file", help="文件 id（可只给前缀）")
@@ -391,6 +402,50 @@ def _cmd_reembed(args: argparse.Namespace) -> int:
         print(f"{table}: 完成 {done} 条")
         total += done
     print(f"合计: {total} 条" + ("（dry-run，未写库）" if args.dry_run else ""))
+    return 0
+
+
+def _cmd_meta(args: argparse.Namespace) -> int:
+    """存量文件补 subject/period。
+
+    元数据是后加的维度：在这之前入库的文件，文件行与切片行的 subject 都是
+    空值，检索分桶等于没开（所有切片在同一个桶里抢名额）。回填只改元数据、
+    不动向量，跑几次结果都一样，随时可重跑。
+
+    文件名不规范（「最终版.pdf」）时规则抽不出主体，用 --subject 手填。
+    """
+    from ai_agent.memory.store import store
+
+    files = _require_files(args)
+    if files is None:
+        return 1
+    if not files:
+        return 0
+    for rec in files:
+        with store._get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT subject, period FROM agent_kb_file WHERE id = %s",
+                (rec["id"],),
+            ).fetchone()
+        old = (
+            f"{row['subject'] or '(空)'}/{row['period'] or '(空)'}" if row else "?"
+        )
+        if args.dry_run:
+            from ai_agent.kb.meta import extract_file_meta
+
+            meta = extract_file_meta(rec["filename"])
+            new = f"{meta['subject'] or '(空)'}/{meta['period'] or '(空)'}"
+            print(f"  (dry-run) {rec['filename']}\n      {old} → {new}")
+            continue
+        meta, chunks = store.backfill_file_meta(
+            rec["id"],
+            rec["filename"],
+            subject=args.subject,
+            period=args.period,
+        )
+        new = f"{meta['subject'] or '(空)'}/{meta['period'] or '(空)'}"
+        print(f"  ✓ {rec['filename']}\n      {old} → {new}  切片刷 {chunks} 行")
+    print("完成" + ("（dry-run，未写库）" if args.dry_run else ""))
     return 0
 
 

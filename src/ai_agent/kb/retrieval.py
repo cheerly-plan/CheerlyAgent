@@ -23,6 +23,10 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.kb.meta import ENTITY_SUFFIX as _ENTITY_SUFFIX
+from ai_agent.kb.meta import EXT_RE as _EXT_RE
+from ai_agent.kb.meta import FILENAME_NOISE as _FILENAME_NOISE
+from ai_agent.kb.meta import NAME_PUNCT as _NAME_PUNCT
 from ai_agent.kb.parsing import FIGURE, TABLE
 from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.memory.embeddings import embed_query
@@ -78,16 +82,6 @@ _SHEET_EXTS = {".xlsx", ".xlsm", ".xls", ".csv"}
 # 「顺丰控股」×全称 = 4/4；库里没被问到的公司一律 0。
 _SUBJECT_MIN_COMMON = 3
 _SUBJECT_MIN_RATIO = 0.4
-_EXT_RE = re.compile(r"\.(pdf|docx?|xlsx?|xlsm|md|markdown|txt|csv)$", re.I)
-# 每份文件标题里都有、对「是哪家主体」没有区分度的部分
-_FILENAME_NOISE = re.compile(
-    r"\d{4}\s*年|第[一二三四五六七八九十]+季度|半年度报告|季度报告|年度报告|报告|公告"
-)
-# 组织形式后缀：剥掉才知道主体核心名有多长
-_ENTITY_SUFFIX = re.compile(r"(股份有限公司|有限责任公司|有限公司|集团公司|集团|公司)$")
-_NAME_PUNCT = re.compile(
-    r"""[\s\-_/·・,，。.、:：;；!！?？'"“”‘’()（）\[\]【】<>《》]+"""
-)
 
 
 def is_sheet_file(filename: str = "", mime: str = "") -> bool:
