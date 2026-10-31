@@ -70,7 +70,11 @@ def _to_auth_response(user: UserRecord) -> AuthResponse:
     return AuthResponse(
         token=token,
         expires_at=expires_at.isoformat(),
-        user=AuthUser(user_id=user.user_id, user_name=user.display_name),
+        user=AuthUser(
+            user_id=user.user_id,
+            user_name=user.display_name,
+            is_admin=settings.is_admin_username(user.username),
+        ),
     )
 
 
@@ -109,4 +113,10 @@ def logout(request: Request, _user: UserRecord = Depends(get_current_user)) -> d
 
 @router.get("/me", response_model=AuthUser)
 def me(user: UserRecord = Depends(get_current_user)) -> AuthUser:
-    return AuthUser(user_id=user.user_id, user_name=user.display_name)
+    # 与登录响应、/user/info 保持同构：三个入口都必须带 is_admin，
+    # 否则前端换一个取用户信息的来源就会丢失知识库入口
+    return AuthUser(
+        user_id=user.user_id,
+        user_name=user.display_name,
+        is_admin=settings.is_admin_username(user.username),
+    )

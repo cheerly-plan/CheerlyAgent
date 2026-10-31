@@ -8,7 +8,6 @@ from ai_agent.core.logging import get_logger
 from ai_agent.memory.db import MemoryItem, current_user_id
 from ai_agent.memory.facets import (
     FACET_LABELS,
-    FACET_WRITE_RULES,
     coalesce_by_facet,
     format_profile_line,
     is_mutex_facet,
@@ -17,17 +16,18 @@ from ai_agent.memory.facets import (
 from ai_agent.memory.gate import jev_noul_batch
 from ai_agent.memory.parse import complete_memory_chat, load_llm_json
 from ai_agent.memory.store import store
+from ai_agent.prompts.memory import (
+    DUP_INSTRUCTIONS,
+    LABEL_EXISTING_PROFILE,
+    LABEL_NEW_FACT,
+    RESOLVE_SYSTEM,
+)
 
 logger = get_logger(__name__)
 
 # Jev 语义去重阈值：新条目与某条已有条目「同一偏好」概率达到该值即跳过写入。
 # 刻意偏高（宁可漏去重不可错杀新偏好），跑一段时间看日志再调
 _JEV_DUP_THRESHOLD = 0.7
-
-_DUP_INSTRUCTIONS = (
-    "判断两条用户画像条目是否表达同一个事实或偏好（意思相同或高度相近，"
-    "只是措辞不同也算）。是则输出高概率，不是则输出低概率。"
-)
 
 _OCCUPATION_JOB_HINTS = (
     "工程师",
@@ -39,32 +39,6 @@ _OCCUPATION_JOB_HINTS = (
     "画家",
     "开发",
 )
-
-RESOLVE_SYSTEM = f"""
-你是用户画像写入器。根据已有画像和新事实，决定如何更新。
-只输出 JSON，不要解释。格式：
-{{"actions":[{{"op":"add"|"update"|"delete"|"skip","facet":"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}}]}}
-
-facet:
-- name: 姓名
-- occupation: 职业或长期身份
-- locale: 地区或居住地
-- language: 语言
-- preference: 长期偏好
-- constraint: 长期约束
-- other: 其他稳定事实
-
-{FACET_WRITE_RULES}
-
-规则：
-1. 一条输入可拆成多个 actions：姓名用 name，职业用 occupation
-2. 已有 other 把姓名/职业混在一起时，要拆开写入正确 facet，并 delete other
-3. 已有相同事实或只是换种说法：skip
-4. 用户明确否定旧事实：delete
-5. 不要把当前任务写成画像
-6. preference / constraint 的独立新事实输出 add 新条目，不要 update 合并已有条目
-"""
-
 
 @dataclass(frozen=True)
 class ProfileAction:
@@ -147,7 +121,7 @@ def _jev_duplicate(content: str, facet: str, existing: list[MemoryItem]) -> bool
         + "\n".join(f"{i}. {text}" for i, text in enumerate(candidates))
     )
     answers = jev_noul_batch(
-        {f"dup_{i}": _DUP_INSTRUCTIONS for i in range(len(candidates))},
+        {f"dup_{i}": DUP_INSTRUCTIONS for i in range(len(candidates))},
         state,
     )
     if answers is None:
@@ -223,7 +197,7 @@ def resolve_profile_write(
                 {"role": "system", "content": RESOLVE_SYSTEM},
                 {
                     "role": "user",
-                    "content": f"已有用户画像：\n{numbered}\n\n新事实：\n{text}",
+                    "content": f"{LABEL_EXISTING_PROFILE}\n{numbered}\n\n{LABEL_NEW_FACT}\n{text}",
                 },
             ],
             max_tokens=256,

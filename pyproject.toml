@@ -1,19 +1,25 @@
 [project]
 name = "almost-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "多用户 AI Agent 后端：RAG + 知识图谱 + 记忆系统"
 readme = "README.md"
 authors = [
     { name = "魏佳楠", email = "weijianan@szkingdom.com" }
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "alembic>=1.13",
     "ddgs>=9.16.1",
     "fastapi>=0.143.3",
+    "jieba>=0.42.1",
     "openai>=3.33.0",
+    "openpyxl>=3.1.5",
     "pgvector>=0.5.1",
     "psycopg[binary,pool]>=3.3.6",
     "pydantic-settings>=2.11.0",
+    "pymupdf>=2.0",
+    "pypdf>=6.21.2",
+    "python-docx>=1.2.0",
     "uvicorn>=0.54.0",
 ]
 
@@ -30,8 +36,29 @@ packages = ["src/ai_agent"]
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
 ]
+
+[tool.ruff]
+# 先保守：默认规则集（E pycodestyle + F pyflakes），让现有代码能过；
+# 后续渐进收紧（加 I isort、UP pyupgrade 等），避免一次性 500 告警吓退
+line-length = 100
+target-version = "py313"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+# E: pycodestyle 错误；F: pyflakes（未用变量/导入错误等真实 bug）
+select = ["E", "F"]
+# 忽略行宽类样式告警（靠格式化工具，不靠人工）
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里常用未用导入（pytest fixture 注入）、魔法常量，放宽
+"tests/**" = ["F401", "F841"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tests/test_eval_retrieval.py 直接 import scripts.eval_retrieval，
+# 需要仓库根目录在 sys.path 上（否则只能靠调用方手动设 PYTHONPATH）
+pythonpath = ["."]
 

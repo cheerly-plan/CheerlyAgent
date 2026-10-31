@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.llm.types import ChatMessage
@@ -11,6 +13,8 @@ from pgvector.psycopg import register_vector
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _current_user_id: ContextVar[str] = ContextVar("current_user_id", default="default")
 DEFAULT_SESSION_TITLE = "新会话"
@@ -67,6 +71,7 @@ class Database:
     def __init__(self, database_url: str | None = None) -> None:
         self._database_url = database_url or settings.database_url
         self._pool: ConnectionPool | None = None
+        self._atexit_hooked = False
 
     def _configure_connection(self, conn: Connection) -> None:
         # 扩展创建放在 ensure_schema 里做一次即可；
@@ -83,6 +88,13 @@ class Database:
                 configure=self._configure_connection,
                 open=True,
             )
+            # 脚本/一次性进程没人调 close 时，ConnectionPool 会走 __del__，
+            # 那里只能限时等 scheduler 线程退出，等不到就打
+            # "couldn't stop thread 'pool-1-scheduler' within 5.0 seconds"。
+            # 服务的 lifespan 已显式 close，这里只是兜底，close 幂等。
+            if not self._atexit_hooked:
+                atexit.register(self.close)
+                self._atexit_hooked = True
         return self._pool
 
     def _point_id(self, table: str, user_id: str, text: str) -> uuid.UUID:
@@ -115,6 +127,12 @@ class Database:
                 """
                 CREATE INDEX IF NOT EXISTS agent_episode_embedding_hnsw
                 ON agent_episode USING hnsw (embedding vector_cosine_ops)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_episode_created_at_idx
+                ON agent_episode (created_at)
                 """
             )
             conn.execute(
@@ -179,6 +197,15 @@ class Database:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE (user_id, chat_session_id, seq)
                 )
+                """
+            )
+            # 存量库迁移：消息级附属信息（目前是知识库引用 sources）。
+            # 单独一列而不是塞进 content：正文要原样回放给模型，附件信息
+            # 只用于前端渲染，混在一起会让历史消息和模型输入失真
+            conn.execute(
+                """
+                ALTER TABLE agent_chat_history
+                ADD COLUMN IF NOT EXISTS meta JSONB
                 """
             )
             conn.execute(
@@ -258,6 +285,7 @@ class Database:
                     step            INT NOT NULL DEFAULT 0,
                     messages        JSONB NOT NULL,
                     use_web_search  BOOLEAN NOT NULL DEFAULT TRUE,
+                    use_kb          BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
@@ -268,6 +296,13 @@ class Database:
                 """
                 ALTER TABLE agent_checkpoint
                 ADD COLUMN IF NOT EXISTS use_web_search BOOLEAN NOT NULL DEFAULT TRUE
+                """
+            )
+            # 同上：知识库工具开关（工具是否挂载要跟原 run 保持一致）
+            conn.execute(
+                """
+                ALTER TABLE agent_checkpoint
+                ADD COLUMN IF NOT EXISTS use_kb BOOLEAN NOT NULL DEFAULT TRUE
                 """
             )
             # 启动时不存在本进程的进行中 run（单进程部署）：残留的 running
@@ -290,9 +325,322 @@ class Database:
                 WHERE status = 'running'
                 """
             )
+            # 知识库：元数据在 agent_kb_file，切片在 agent_kb_chunk
+            # （外键级联删除，删文件即清空切片）
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kb_file (
+                    id UUID PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    size_bytes BIGINT NOT NULL,
+                    mime TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'uploaded',
+                    error TEXT NOT NULL DEFAULT '',
+                    chunk_count INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_file_user_id_idx
+                ON agent_kb_file (user_id)
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS agent_kb_chunk (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL,
+                    seq INT NOT NULL,
+                    page INT,
+                    page_end INT,
+                    section TEXT,
+                    kind TEXT NOT NULL DEFAULT 'text',
+                    text TEXT NOT NULL,
+                    embedding vector({dim}) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (file_id, seq)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_chunk_embedding_hnsw
+                ON agent_kb_chunk USING hnsw (embedding vector_cosine_ops)
+                """
+            )
+            # 既有库的增量列：CREATE IF NOT EXISTS 不会补列，靠 ALTER 兜底
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_chunk
+                ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'text'
+                """
+            )
+            # 跨页切片的末页：page 存起始页，page_end 存结束页（单页片两者
+            # 相等）。引用要按「第134–135页」展示，只存起始页会误导溯源
+            conn.execute(
+                "ALTER TABLE agent_kb_chunk ADD COLUMN IF NOT EXISTS page_end INT"
+            )
+            # 所属一级节：「第十节 管理层讨论与分析」。检索/引用/图谱抽取
+            # 都要用它做上下文与分组
+            conn.execute(
+                "ALTER TABLE agent_kb_chunk ADD COLUMN IF NOT EXISTS section TEXT"
+            )
+            # 报表口径（consolidated / parent）：同一指标在合并报表与母公司
+            # 报表里各有一份数，检索要能按用户的默认预期（集团口径）区分
+            conn.execute(
+                "ALTER TABLE agent_kb_chunk ADD COLUMN IF NOT EXISTS scope TEXT"
+            )
+            # 知识图谱（P2）：实体 / 关系 / 提及三层。
+            # 全部挂在文件上做外键级联，删文件即清空图谱，不留脏数据；
+            # embedding 维度跟随 EMBEDDING_DIM（与切片向量同模型），供实体语义检索。
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS agent_kg_entity (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    norm_name TEXT NOT NULL,
+                    type TEXT NOT NULL DEFAULT 'other',
+                    description TEXT NOT NULL DEFAULT '',
+                    embedding vector({dim}),
+                    mention_count INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (file_id, norm_name, type)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_entity_file_idx
+                ON agent_kg_entity (file_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_entity_norm_idx
+                ON agent_kg_entity (norm_name)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_entity_embedding_hnsw
+                ON agent_kg_entity USING hnsw (embedding vector_cosine_ops)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kg_relation (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    source_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    target_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    relation TEXT NOT NULL DEFAULT '相关',
+                    description TEXT NOT NULL DEFAULT '',
+                    weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    chunk_seq INT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_relation_file_idx
+                ON agent_kg_relation (file_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_relation_source_idx
+                ON agent_kg_relation (source_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_relation_target_idx
+                ON agent_kg_relation (target_id)
+                """
+            )
+            # 提及表：实体出现在哪些切片，供前端「点实体 → 回溯原文」
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kg_mention (
+                    entity_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    chunk_seq INT NOT NULL,
+                    hits INT NOT NULL DEFAULT 1,
+                    PRIMARY KEY (entity_id, chunk_seq)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_mention_file_idx
+                ON agent_kg_mention (file_id)
+                """
+            )
+            # 实体对齐（图谱质量 P2）：被合并掉的写法留档，便于回溯
+            # "为什么这两个实体变成一个了"，也供前端展示别名
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_kg_alias (
+                    id UUID PRIMARY KEY,
+                    file_id UUID NOT NULL REFERENCES agent_kb_file(id) ON DELETE CASCADE,
+                    entity_id UUID NOT NULL REFERENCES agent_kg_entity(id) ON DELETE CASCADE,
+                    alias_name TEXT NOT NULL,
+                    alias_norm TEXT NOT NULL,
+                    method TEXT NOT NULL DEFAULT 'llm',
+                    score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (file_id, alias_norm)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kg_alias_file_idx
+                ON agent_kg_alias (file_id)
+                """
+            )
+            # 文件表的图谱进度：'' 未构建 / building 构建中 / ready / stale 切片修订后待重建 / failed
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_status TEXT NOT NULL DEFAULT ''
+                """
+            )
+            # 实体对齐进度（P2）：'' 未跑 / aligning / ready / failed
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS align_status TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS alias_count INT NOT NULL DEFAULT 0
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_entity_count INT NOT NULL DEFAULT 0
+                """
+            )
+            # 建图进度：已完成批 / 总批。前端轮询文件列表就能画出百分比，
+            # 不必另开一条进度接口。
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_batch_done INT NOT NULL DEFAULT 0
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS graph_batch_total INT NOT NULL DEFAULT 0
+                """
+            )
+            # 抽取配置：文档类型（决定注入哪套配置块）与粒度（完整/轻量）。
+            # 存在文件上而不是每次建图现传：重建时不用再问一次，也让
+            # 「这张图是按什么 prompt 抽的」有据可查。空串 = 用全局默认（general）
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS doc_type TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS extract_level TEXT NOT NULL DEFAULT 'full'
+                """
+            )
+            # 管理能力：标签（读侧过滤/展示）与内容指纹（上传去重）
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS content_hash TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_file_hash_idx
+                ON agent_kb_file (content_hash)
+                """
+            )
+            # 向量化完成时记下文本/表格片数，列表标题后面直接展示，
+            # 不用再扫一遍切片表。存量文件从切片回填一次。
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS text_count INT NOT NULL DEFAULT 0
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS table_count INT NOT NULL DEFAULT 0
+                """
+            )
+            # 文件内容描述：让模型通过 kb_list_files 工具判断要查哪几份文件，
+            # 替代原先「目录注入」把文件名塞进对话上下文的做法
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                UPDATE agent_kb_file f
+                SET text_count = s.text_n,
+                    table_count = s.table_n
+                FROM (
+                    SELECT file_id,
+                           count(*) FILTER (WHERE kind = 'text') AS text_n,
+                           count(*) FILTER (WHERE kind = 'table') AS table_n
+                    FROM agent_kb_chunk
+                    GROUP BY file_id
+                ) s
+                WHERE f.id = s.file_id
+                  AND f.text_count = 0 AND f.table_count = 0
+                  AND f.chunk_count > 0
+                """
+            )
             conn.commit()
 
     def close(self) -> None:
         if self._pool is not None:
             self._pool.close()
             self._pool = None
+
+
+def run_migrations() -> None:
+    """通过 Alembic 执行 schema 迁移到最新版本。
+
+    替代 ensure_schema()：schema 变更走版本化迁移，可追溯、可回滚。
+    连接串由 env.py 从 settings.database_url 读取（与运行时同源）。
+    现有库若已由 ensure_schema 建好，alembic 会自动建 alembic_version
+    表并跑 baseline（IF NOT EXISTS 幂等，不会破坏既有数据）；也可预先
+    手动 `alembic stamp head` 标记后跳过 baseline。
+
+    ensure_schema() 保留作回滚锚点：万一迁移出问题，把 lifespan 改回
+    调 store.ensure_schema() 即可恢复旧行为。
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    command.upgrade(cfg, "head")

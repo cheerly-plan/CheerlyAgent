@@ -10,38 +10,13 @@ from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import complete_chat
 from ai_agent.llm.types import ChatEvent
 from ai_agent.memory.store import DEFAULT_SESSION_TITLE, store
+from ai_agent.prompts.tasks import TITLE_SYSTEM
 
 logger = get_logger(__name__)
 
 _TITLE_MAX_LEN = 25
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="session-title")
 _pool_closed = False
-
-TITLE_SYSTEM = """
-你是会话标题摘要器。根据用户问题和助手回答，提取这次对话的核心主题生成标题。
-规则：
-1. 只输出标题本身，不要输出“标题：”等前缀；
-2. 长度8至25个汉字，Node、SSR、CSR这类英文缩写视为一个整体词，不计入汉字数量；
-3. 结合问题和回答的实际内容，简洁关键词化，禁止标点、引号、书名号；
-4. 不能是半截句子，不要直接复述用户整句话；
-5. 禁止回答问题、禁止附加任何解释；
-6. 问题和回答都没有有效主题时（如打招呼、问候、闲聊），输出简短主题词，例如「问候闲聊」；禁止输出“新会话”
-
-示例：
-用户：clinic.js 和 --inspect 有什么区别
-助手：Clinic.js 做性能诊断，--inspect 做断点调试。
-标题：Node性能诊断与调试对比
-
-用户：帮我写一个登录接口
-助手：可以用 JWT 校验账号密码，返回 token。
-标题：登录接口实现需求
-
-用户：SSR 和 CSR 怎么选
-助手：SEO 和首屏用 SSR，强交互后台用 CSR。
-标题：SSR与CSR渲染模式选型对比
-
-仅输出标题，不要任何额外文字。
-"""
 
 
 def normalize_title(raw: str, fallback: str = "", question: str = "") -> str:

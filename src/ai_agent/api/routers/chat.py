@@ -99,7 +99,12 @@ def _close_sync_generator(gen: Iterator[str]) -> None:
 
 
 def chat_sse_events(
-    user_id: str, session_id: str, content: str, use_web_search: bool = True
+    user_id: str,
+    session_id: str,
+    content: str,
+    use_web_search: bool = True,
+    use_kb: bool = False,
+    kb_file_ids: tuple[str, ...] = (),
 ) -> Iterator[str]:
     # 并发槽已在路由处理器里 acquire（超限返回 429）；这里只负责释放
     try:
@@ -110,6 +115,8 @@ def chat_sse_events(
             chat_session_id=session_id,
             finalize_background=True,
             use_web_search=use_web_search,
+            use_kb=use_kb,
+            kb_file_ids=kb_file_ids,
         ):
             if event.get("type") == "text":
                 answer_parts.append(event.get("content") or "")
@@ -123,10 +130,17 @@ def chat_sse_events(
 
 
 def _stream(
-    user_id: str, session_id: str, content: str, use_web_search: bool
+    user_id: str,
+    session_id: str,
+    content: str,
+    use_web_search: bool,
+    use_kb: bool = False,
+    kb_file_ids: tuple[str, ...] = (),
 ) -> StreamingResponse:
     return _stream_response(
-        chat_sse_events(user_id, session_id, content, use_web_search)
+        chat_sse_events(
+            user_id, session_id, content, use_web_search, use_kb, kb_file_ids
+        )
     )
 
 
@@ -159,16 +173,35 @@ def chat(
             raise AgentError("会话查询失败") from e
         if session is None:
             raise HTTPException(status_code=404, detail="会话不存在")
+        try:
+            store.touch_session(user.user_id, req.chat_session_id)
+        except Exception:
+            logger.exception("刷新会话活跃时间失败")
     _acquire_chat_slot()
     if req.regenerate:
         return _stream_regenerate(
-            user.user_id, req.chat_session_id, req.web_search
+            user.user_id,
+            req.chat_session_id,
+            req.web_search,
+            req.use_kb,
+            tuple(req.kb_file_ids),
         )
-    return _stream(user.user_id, req.chat_session_id, req.message, req.web_search)
+    return _stream(
+        user.user_id,
+        req.chat_session_id,
+        req.message,
+        req.web_search,
+        req.use_kb,
+        tuple(req.kb_file_ids),
+    )
 
 
 def _stream_regenerate(
-    user_id: str, session_id: str, use_web_search: bool
+    user_id: str,
+    session_id: str,
+    use_web_search: bool,
+    use_kb: bool = False,
+    kb_file_ids: tuple[str, ...] = (),
 ) -> StreamingResponse:
     """重新生成最后一条回答：不重复保存用户消息，末尾旧回答先从历史剔除。"""
 
@@ -182,6 +215,8 @@ def _stream_regenerate(
                 finalize_background=True,
                 regenerate=True,
                 use_web_search=use_web_search,
+                use_kb=use_kb,
+                kb_file_ids=kb_file_ids,
             ):
                 if event.get("type") == "text":
                     answer_parts.append(event.get("content") or "")

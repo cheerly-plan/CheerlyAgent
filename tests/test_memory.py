@@ -1,3 +1,4 @@
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -55,6 +56,7 @@ def _clear_test_users(store: MemoryStore) -> None:
         store.clear_long_term(user_id=uid)
         store.clear_chat(uid)
         store.clear_sessions(uid)
+        store.clear_checkpoints(uid)
 
 
 @pytest.fixture
@@ -154,6 +156,63 @@ def test_write_episode_keeps_unrelated(mem_store):
     second = mem_store.write_episode("bought a piano yesterday", user_id="a")
     assert first.id != second.id
     assert len(_episode_texts(mem_store, "a")) == 2
+
+
+def _age_episodes(store: MemoryStore, user_id: str, hours: float = 2) -> None:
+    with store._get_pool().connection() as conn:
+        conn.execute(
+            """
+            UPDATE agent_episode
+            SET created_at = now() - (%s * interval '1 hour')
+            WHERE user_id = %s
+            """,
+            (hours, user_id),
+        )
+        conn.commit()
+
+
+def test_search_episode_hides_expired(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    mem_store.write_episode("上周用 pytest 修过登录", user_id="a")
+    assert mem_store.search_episode("pytest", user_id="a")
+    _age_episodes(mem_store, "a")
+    assert mem_store.search_episode("pytest", user_id="a") == []
+
+
+def test_write_episode_does_not_merge_expired(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    _age_episodes(mem_store, "a")
+    second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")
+    assert second.id != first.id
+    assert len(_episode_texts(mem_store, "a")) == 2
+
+
+def test_write_episode_refresh_keeps_active_topic_alive(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    _age_episodes(mem_store, "a", hours=0.5)
+    second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")
+    assert second.id == first.id
+    _age_episodes(mem_store, "a", hours=0.9)
+    assert mem_store.search_episode("nodejs bff", user_id="a")
+
+
+def test_cleanup_expired_episodes(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
+    mem_store.write_episode("old pytest notes", user_id="a")
+    _age_episodes(mem_store, "a")
+    mem_store.write_episode("fresh piano practice", user_id="a")
+    assert mem_store.cleanup_expired_episodes(user_id="a") == 1
+    assert _episode_texts(mem_store, "a") == ["fresh piano practice"]
+
+
+def test_cleanup_expired_episodes_skips_when_ttl_disabled(mem_store, monkeypatch):
+    monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 0)
+    mem_store.write_episode("old pytest notes", user_id="a")
+    _age_episodes(mem_store, "a", hours=100)
+    assert mem_store.cleanup_expired_episodes(user_id="a") == 0
+    assert _episode_texts(mem_store, "a") == ["old pytest notes"]
 
 
 def test_profile_is_listed_without_embedding(mem_store):
@@ -519,9 +578,19 @@ def test_rename_session_overwrites_existing_title(mem_store):
 def test_delete_session_hides_session_and_clears_chat(mem_store):
     session = mem_store.create_session("a", "del-1")
     mem_store.append_chat("a", session.id, [{"role": "user", "content": "你好"}])
+    run_id = str(uuid.uuid4())
+    assert mem_store.create_checkpoint(
+        run_id, "a", session.id, [{"role": "user", "content": "你好"}]
+    )
     assert mem_store.delete_session("a", session.id) is True
     assert mem_store.get_session("a", session.id) is None
     assert mem_store.load_chat("a", session.id) == []
+    with mem_store._get_pool().connection() as conn:
+        leftover = conn.execute(
+            "SELECT 1 FROM agent_checkpoint WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()
+    assert leftover is None
     assert mem_store.delete_session("a", session.id) is False
 
 
@@ -530,6 +599,48 @@ def test_cleanup_keeps_recent_empty_unnamed_sessions(mem_store):
     deleted = mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600)
     assert deleted == 0
     assert mem_store.get_session("a", session.id) is not None
+
+
+def _age_session(store: MemoryStore, session_id: str, seconds: int = 7200) -> None:
+    with store._get_pool().connection() as conn:
+        conn.execute(
+            """
+            UPDATE agent_session
+            SET created_at = now() - (%s * interval '1 second'),
+                updated_at = now() - (%s * interval '1 second')
+            WHERE id::text = %s
+            """,
+            (seconds, seconds, session_id),
+        )
+        conn.commit()
+
+
+def test_cleanup_skips_idle_session_after_touch(mem_store):
+    """聊天开始会刷新 updated_at：即使创建很久了，只要刚用过就不能当空会话删。"""
+    session = mem_store.create_session("a", "stale-then-chat")
+    _age_session(mem_store, session.id)
+    assert mem_store.touch_session("a", session.id) is True
+    assert mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600) == 0
+    assert mem_store.get_session("a", session.id) is not None
+
+
+def test_cleanup_skips_session_with_running_checkpoint(mem_store):
+    session = mem_store.create_session("a", "in-flight")
+    _age_session(mem_store, session.id)
+    assert mem_store.create_checkpoint(
+        str(uuid.uuid4()), "a", session.id, [{"role": "user", "content": "hi"}]
+    )
+    assert mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=0) == 0
+    assert mem_store.get_session("a", session.id) is not None
+
+
+def test_idempotent_create_revives_and_refreshes_idle_session(mem_store):
+    first = mem_store.create_session("a", "reuse-key")
+    _age_session(mem_store, first.id)
+    reused = mem_store.create_session("a", "reuse-key")
+    assert reused.id == first.id
+    assert mem_store.cleanup_empty_unnamed_sessions(max_age_seconds=3600) == 0
+    assert mem_store.get_session("a", first.id) is not None
 
 
 def test_checkpoint_session_mutex_and_cleanup(mem_store):

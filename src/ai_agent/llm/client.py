@@ -2,18 +2,69 @@ import json
 from collections.abc import Iterator
 from typing import Any, Literal
 
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
+from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage, ChatResult, ToolCall
+
+logger = get_logger(__name__)
 
 _client = OpenAI(
     base_url=settings.base_url,
     api_key=settings.api_key,
 )
 
+
+def graph_model() -> str:
+    """实体抽取/对齐用的模型：KB_GRAPH_MODEL，空则跟 MODEL。"""
+    return (settings.kb_graph_model or "").strip() or settings.model
+
+
+def graph_client() -> OpenAI:
+    """实体抽取/对齐用的网关。未配 KB_GRAPH_BASE_URL 时就是主客户端。"""
+    url = (settings.kb_graph_base_url or "").strip() or settings.base_url
+    key = (settings.kb_graph_api_key or "").strip() or settings.api_key
+    if url == settings.base_url and key == settings.api_key:
+        return _client
+    return OpenAI(base_url=url, api_key=key)
+
+# 流式对话专用客户端：显式超时 + 关闭自动重试。
+# 默认客户端 timeout=600s：LLM 挂死时一个并发槽 + SSE 线程被占最长 10 分钟，
+# 并发槽全满后聊天接口整体 429。流式重试还会从断点重复 yield 已发内容，
+# 必须关掉；彻底失败由上层走断点续跑兜底。
+_stream_client = _client.with_options(
+    timeout=settings.llm_stream_timeout_seconds,
+    max_retries=0,
+)
+
 StreamItem = tuple[Literal["text"], str] | tuple[Literal["result"], ChatResult]
+
+# 主对话也必须关思考链：Qwen3 等模型开着会把正文写进 reasoning，
+# delta.content 一直是空，前端就只有光标、没有回答。
+_THINKING_OFF = {
+    "enable_thinking": False,
+    "chat_template_kwargs": {"enable_thinking": False},
+    # Ollama / Qwen3 原生字段；vLLM 会忽略
+    "think": False,
+}
+
+
+def json_response_format(mode: str) -> dict[str, Any] | None:
+    """把配置里的 json_mode 字符串转成 `response_format` 参数。
+
+    "off" 或无法识别的取值一律返回 None（不下发该字段），保证行为与加这个
+    开关之前完全一致。网关不支持 JSON 模式时会抛 LLMError，由调用侧降级。
+    """
+    if (mode or "").strip().lower() == "json_object":
+        return {"type": "json_object"}
+    return None
+
+
+def _status_of(exc: Exception) -> int | None:
+    """取上游 HTTP 状态码，用于上层区分鉴权失败和临时故障。"""
+    return exc.status_code if isinstance(exc, APIStatusError) else None
 
 
 def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
@@ -46,29 +97,45 @@ def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
     return payload
 
 
-def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[StreamItem]:
+def stream_chat(
+    messages: list[ChatMessage],
+    tools: list[dict],
+    tool_choice: str | dict[str, Any] = "auto",
+) -> Iterator[StreamItem]:
     try:
-        stream = _client.chat.completions.create(
+        stream = _stream_client.chat.completions.create(
             model=settings.model,
             messages=_to_openai_messages(messages),
             tools=tools,
-            tool_choice="auto",
+            tool_choice=tool_choice,
             stream=True,
+            extra_body=_THINKING_OFF,
         )
     except Exception as e:
-        raise LLMError(str(e)) from e
+        raise LLMError(str(e), status_code=_status_of(e)) from e
 
     content_parts: list[str] = []
     tool_acc: dict[int, dict[str, str]] = {}
+    leftover = ""
+    reasoning_parts: list[str] = []
 
     for chunk in stream:
         if not chunk.choices:
             continue
-        delta = chunk.choices[0].delta
-        if delta.content:
+        choice = chunk.choices[0]
+        delta = choice.delta
+        if delta and delta.content:
             content_parts.append(delta.content)
             yield ("text", delta.content)
-        for call in delta.tool_calls or []:
+        # 部分网关把整段正文只放在最后一帧的 message 上，delta.content 为空
+        message = getattr(choice, "message", None)
+        piece = getattr(message, "content", None) if message is not None else None
+        if piece:
+            leftover = piece
+        reasoning = _delta_reasoning(delta)
+        if reasoning:
+            reasoning_parts.append(reasoning)
+        for call in (delta.tool_calls if delta else None) or []:
             index = call.index if call.index is not None else 0
             item = tool_acc.setdefault(index, {"id": "", "name": "", "arguments": ""})
             if call.id:
@@ -94,10 +161,38 @@ def stream_chat(messages: list[ChatMessage], tools: list[dict]) -> Iterator[Stre
                 "arguments": arguments,
             }
         )
+    text = "".join(content_parts)
+    if not text and leftover:
+        text = leftover
+        yield ("text", leftover)
+    if not text and reasoning_parts:
+        # 思考链没关干净时，至少把推理正文交给前端，避免气泡全空
+        text = "".join(reasoning_parts)
+        yield ("text", text)
+        logger.warning("stream_chat 正文为空，回退 reasoning 长度=%d", len(text))
+    if not text and not tool_calls:
+        logger.warning("stream_chat 空正文且无工具调用")
     yield (
         "result",
-        {"content": "".join(content_parts), "tool_calls": tool_calls},
+        {"content": text, "tool_calls": tool_calls},
     )
+
+
+def _delta_reasoning(delta: Any) -> str:
+    """取出思考链字段。Qwen3 / 部分网关不走 delta.content。"""
+    if delta is None:
+        return ""
+    for attr in ("reasoning_content", "reasoning"):
+        value = getattr(delta, attr, None)
+        if value:
+            return str(value)
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, dict):
+        for key in ("reasoning_content", "reasoning"):
+            value = extra.get(key)
+            if value:
+                return str(value)
+    return ""
 
 
 def complete_chat(
@@ -107,13 +202,27 @@ def complete_chat(
     max_retries: int | None = None,
     max_tokens: int | None = None,
     extra_body: dict[str, Any] | None = None,
+    temperature: float | None = None,
+    client: OpenAI | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
+    """非流式补全。温度默认不传 → 服务端默认（OpenAI 系为 1.0）。
+
+    `temperature` 必须显式传，不做全局默认：主对话需要一点发散，而图谱抽取/
+    对齐/重排是结构化任务，温度高会让实体数抖动、JSON 偶发写坏、同一批输入
+    两次跑出不同结果（评测失败集合跟着变）。这几处各自从 settings 取值。
+
+    `response_format` 传 None 时不下发该字段，行为与加参数前完全一致。
+    网关不支持（本地小模型、Ollama 之类）会直接 400，因此**降级逻辑放在
+    调用侧**：那里才知道该回退成什么（prompt 约束 + load_llm_json 兜底）。
+    """
     options: dict[str, float | int] = {}
     if timeout is not None:
         options["timeout"] = timeout
     if max_retries is not None:
         options["max_retries"] = max_retries
-    client = _client.with_options(**options) if options else _client
+    base = client or _client
+    client = base.with_options(**options) if options else base
     payload: dict[str, Any] = {
         "model": model or settings.model,
         "messages": _to_openai_messages(messages),
@@ -121,12 +230,16 @@ def complete_chat(
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if response_format is not None:
+        payload["response_format"] = response_format
     if extra_body is not None:
         payload["extra_body"] = extra_body
     try:
         response = client.chat.completions.create(**payload)
     except Exception as e:
-        raise LLMError(str(e)) from e
+        raise LLMError(str(e), status_code=_status_of(e)) from e
     if not response.choices:
         return ""
     return (response.choices[0].message.content or "").strip()

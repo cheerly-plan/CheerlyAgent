@@ -242,6 +242,47 @@ def test_capture_long_term_gate_fail_open_on_error():
     write_episode.assert_called_once()
 
 
+def test_extract_drops_document_qa_recap():
+    raw = (
+        '{"memories":[{"kind":"episode","content":'
+        '"用户询问了2026年第三季度的财务数据，包括营业收入和净利润。"}]}'
+    )
+    with patch("ai_agent.memory.long_term.complete_memory_chat", return_value=raw):
+        assert extract_turn_memories(TURN) == []
+
+
+def test_extract_drops_inferred_company_occupation():
+    raw = (
+        '{"memories":[{"kind":"profile","op":"add","facet":"occupation",'
+        '"content":"现为浙江亚厦装饰股份有限公司股东和湖南南岭民用爆破器材股份有限公司董事长"}]}'
+    )
+    with patch("ai_agent.memory.long_term.complete_memory_chat", return_value=raw):
+        assert extract_turn_memories(TURN) == []
+
+
+def test_extract_drops_topic_as_preference():
+    raw = (
+        '{"memories":[{"kind":"profile","op":"add","facet":"preference",'
+        '"content":"关注公司财务数据和业务状况，特别是毛利率变化"}]}'
+    )
+    with patch("ai_agent.memory.long_term.complete_memory_chat", return_value=raw):
+        assert extract_turn_memories(TURN) == []
+
+
+def test_extract_keeps_first_person_preference():
+    raw = (
+        '{"memories":[{"kind":"profile","op":"add","facet":"preference",'
+        '"content":"喜欢吃葡萄"}]}'
+    )
+    with patch("ai_agent.memory.long_term.complete_memory_chat", return_value=raw):
+        items = extract_turn_memories(TURN)
+    assert items == [
+        ExtractedMemory(
+            kind="profile", content="喜欢吃葡萄", op="add", facet="preference"
+        )
+    ]
+
+
 def test_capture_long_term_gate_passes_high_probability():
     item = ExtractedMemory(kind="episode", content="用户在做 BFF 聚合层")
     with (

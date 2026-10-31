@@ -1,9 +1,11 @@
+from ai_agent.agents import turn as turn_module
 import contextvars
 from unittest.mock import patch
 
 import pytest
 
 from ai_agent.agents.loop import _dedupe_seam, run, run_loop, run_stream
+from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.short_term import SUMMARY_USER_PREFIX, short_term_memory
 from ai_agent.memory.store import MemoryItem
@@ -28,8 +30,8 @@ def _isolate_loop_memory():
         patch("ai_agent.agents.loop.store.update_checkpoint"),
         patch("ai_agent.agents.loop.store.mark_checkpoint"),
         patch("ai_agent.agents.loop.store.delete_checkpoint"),
-        patch("ai_agent.agents.loop.summarize_session", side_effect=_fake_summarize),
-        patch("ai_agent.agents.loop.capture_long_term"),
+        patch("ai_agent.agents.turn.summarize_session", side_effect=_fake_summarize),
+        patch("ai_agent.agents.turn.capture_long_term"),
     ):
         yield
     short_term_memory.clear()
@@ -230,6 +232,26 @@ def test_run_stream_appends_new_messages_only():
     assert appended[1] == ["user", "assistant"]
 
 
+def test_run_stream_followup_persists_user(monkeypatch):
+    """追问落库必须以本轮 user 问句为起点，刷新会话不会丢记录。"""
+    monkeypatch.setattr("ai_agent.agents.loop._rewrite_query", lambda q, prev: q)
+    appended: list[list[dict]] = []
+
+    def fake_append(user_id, chat_session_id, messages):
+        appended.append(list(messages))
+
+    with (
+        patch("ai_agent.agents.loop.store.append_chat", side_effect=fake_append),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
+    ):
+        run("上一问", user_id="u1", chat_session_id="s-followup")
+        run("这一问", user_id="u1", chat_session_id="s-followup")
+
+    assert len(appended) == 2
+    assert any(m.get("role") == "user" and m.get("content") == "上一问" for m in appended[0])
+    assert any(m.get("role") == "user" and m.get("content") == "这一问" for m in appended[1])
+
+
 def test_run_stream_appends_tool_turn():
     calls = {"n": 0}
     appended: list[list[dict]] = []
@@ -338,7 +360,7 @@ def test_run_stream_skips_db_load_when_short_term_exists():
 def test_run_stream_captures_long_term_after_reply():
     with (
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
-        patch("ai_agent.agents.loop.capture_long_term") as capture,
+        patch("ai_agent.agents.turn.capture_long_term") as capture,
     ):
         run("我想用 Koa 做 BFF", user_id="u1", chat_session_id="s-extract")
     capture.assert_called_once()
@@ -482,7 +504,7 @@ def test_regenerate_failure_keeps_old_answer(failing):
             "ai_agent.agents.loop.store.append_chat",
             side_effect=lambda *_a, **_k: appended.append(_a[2]),
         ),
-        patch("ai_agent.agents.loop.capture_long_term") as capture,
+        patch("ai_agent.agents.turn.capture_long_term") as capture,
         patch("ai_agent.agents.loop.stream_chat", side_effect=failing),
     ):
         events = list(
@@ -1049,6 +1071,99 @@ def test_run_loop_use_web_search_false_excludes_tool():
     assert seen_tools[1] == ["get_weather", "web_search", "memory_search"]
 
 
+def test_run_loop_use_kb_false_excludes_kb_search():
+    """「知识库」开关关闭时 kb_search 不挂载；打开则恢复。两者互不干扰。"""
+    fake_schemas = [
+        {"function": {"name": "get_weather"}},
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "kg_search"}},
+        {"function": {"name": "web_search"}},
+    ]
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.store.append_chat"),
+    ):
+        list(run_loop([{"role": "user", "content": "你好"}], use_kb=False))
+        list(run_loop([{"role": "user", "content": "你好"}], use_kb=True))
+        # 两个开关同时关：各剔各的
+        list(
+            run_loop(
+                [{"role": "user", "content": "你好"}],
+                use_kb=False,
+                use_web_search=False,
+            )
+        )
+
+    # kg_search（图谱检索）同属知识库能力，随 kb_search 一起摘掉
+    assert seen_tools[0] == ["get_weather", "web_search"]
+    assert seen_tools[1] == [
+        "get_weather",
+        "kb_search",
+        "kg_search",
+        "web_search",
+    ]
+    assert seen_tools[2] == ["get_weather"]
+
+
+def test_run_stream_resume_restores_use_kb_flag():
+    """断点续跑沿用原 run 的「知识库」开关，与智能搜索同一套机制。"""
+    claimed = {
+        "user_id": "u1",
+        "chat_session_id": "s-resume-kb",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "你好"},
+        ],
+        "use_web_search": True,
+        "use_kb": False,
+    }
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch(
+            "ai_agent.agents.loop.store.claim_resumable_checkpoint",
+            return_value=claimed,
+        ),
+        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch(
+            "ai_agent.agents.loop.store.replace_chat_after_last_user",
+            side_effect=lambda *a: None,
+        ),
+        patch(
+            "ai_agent.agents.loop.tool_schemas",
+            return_value=[
+                {"function": {"name": "kb_search"}},
+                {"function": {"name": "web_search"}},
+            ],
+        ),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+    ):
+        list(
+            run_stream(
+                "",
+                user_id="u1",
+                chat_session_id="whatever",
+                resume_run_id="old-run",
+                use_kb=True,  # 前端现在开着，也要被 checkpoint 里的 False 覆盖
+            )
+        )
+
+    assert seen_tools == [["web_search"]]
+
+
 def test_run_stream_resume_restores_use_web_search_flag():
     """断点续跑沿用原 run 的「智能搜索」开关：checkpoint 里存的 False
     即使在 run_stream 入参默认 True 的情况下也要生效。"""
@@ -1097,3 +1212,433 @@ def test_run_stream_resume_restores_use_web_search_flag():
         )
 
     assert seen_tools == [["get_weather"]]
+
+
+def test_run_loop_budget_exhaustion_forces_final_answer():
+    """预算用尽：不再直接报错，剥掉工具强制模型基于已检索内容收尾。
+
+    旧行为是 yield「已超过最大轮数」——用户手里只有模型说「我即将检索」
+    的半截话，检索已经花了的成本全部白费。收尾必须给最终回答。
+    """
+    from ai_agent.agents.budget import Budget
+
+    tool_args: list[list] = []
+
+    def stream(messages, tools, **kwargs):
+        tool_args.append(list(tools))
+        if tools:  # 正常轮：模型反复请求工具
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{len(messages)}",
+                            "name": "get_weather",
+                            "arguments": {"city": "杭州"},
+                        }
+                    ],
+                },
+            )
+        else:  # 收尾轮：没有工具可用，只能回答
+            yield "text", "根据检索结果，今天晴，20 度。"
+            yield (
+                "result",
+                {"content": "根据检索结果，今天晴，20 度。", "tool_calls": []},
+            )
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", return_value="晴 20 度"),
+    ):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "循环"}],
+                "u1",
+                budget=Budget(max_steps=2),
+            )
+        )
+
+    assert [e for e in events if e["type"] == "error"] == []
+    done = events[-1]
+    assert done["type"] == "done"
+    # 收尾那次调用不再带工具
+    assert tool_args[-1] == []
+    assert any(
+        e.get("type") == "text" and "今天晴" in str(e.get("content"))
+        for e in events
+    )
+
+
+def test_run_loop_retries_when_final_answer_empty():
+    """工具跑完但第二轮正文为空：再逼一轮不带工具，把回答补出来。"""
+    calls = {"n": 0}
+    tool_args: list[list] = []
+
+    def stream(messages, tools, **kwargs):
+        calls["n"] += 1
+        tool_args.append(list(tools))
+        if calls["n"] == 1:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "name": "get_weather",
+                            "arguments": {"city": "杭州"},
+                        }
+                    ],
+                },
+            )
+            return
+        if tools:
+            yield ("result", {"content": "", "tool_calls": []})
+            return
+        yield ("text", "杭州今天晴。")
+        yield ("result", {"content": "杭州今天晴。", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", return_value="晴 20 度"),
+    ):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "杭州天气"}],
+                "u1",
+            )
+        )
+
+    assert [e for e in events if e["type"] == "error"] == []
+    assert events[-1]["type"] == "done"
+    assert tool_args[-1] == []
+    assert any(
+        e.get("type") == "text" and "杭州今天晴" in str(e.get("content"))
+        for e in events
+    )
+    assert calls["n"] == 3
+
+
+def test_run_loop_dedupes_identical_tool_calls():
+    """完全相同的 (工具, 参数) 只执行一次，重复请求收到提示而非结果。
+
+    实测本地模型会原样重发同一个 kg_search 六次，每次都返回相同的
+    实体列表，把预算轮数烧光后没有轮次留给最终回答。
+    """
+    from ai_agent.agents.budget import Budget
+
+    executed: list[str] = []
+
+    def stream(messages, tools, **kwargs):
+        # 模拟真实死循环：模型前两轮原样重发同一个 kg_search，
+        # 收到「已调用过」的提示后才老实作答
+        tool_rounds = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_rounds >= 2:
+            yield "text", "答"
+            yield ("result", {"content": "答", "tool_calls": []})
+        else:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{len(messages)}",
+                            "name": "kg_search",
+                            "arguments": {"query": "同一句话"},
+                        }
+                    ],
+                },
+            )
+
+    def execute(name, arguments):
+        executed.append(arguments["query"])
+        return "命中实体：甲公司"
+
+    messages: list = [{"role": "user", "content": "查"}]
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=execute),
+    ):
+        events = list(run_loop(messages, "u1", budget=Budget(max_steps=4)))
+
+    assert executed == ["同一句话"]  # 第二次同参数调用被短路，没有执行
+    # 上下文里留了提示，模型知道为什么没拿到新结果
+    hints = [
+        m
+        for m in messages
+        if m.get("role") == "tool" and "完全相同的参数" in str(m.get("content"))
+    ]
+    assert len(hints) == 1
+    done = events[-1]
+    assert done["type"] == "done"
+
+
+def test_run_loop_dedupes_call_with_default_args_omitted():
+    """省略默认值的参数与写全默认值的参数算同一次调用。
+
+    实测模型靠 {"query": X} / {"query": X, "top_k": 5} / {"depth": 2, ...}
+    这类写法差异把同一个 kg_search 调了 9 次，把决策轮次烧光。
+    """
+    from ai_agent.agents.budget import Budget
+
+    executed: list[dict] = []
+
+    def stream(messages, tools, **kwargs):
+        tool_rounds = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_rounds >= 2:
+            yield "text", "答"
+            yield ("result", {"content": "答", "tool_calls": []})
+        else:
+            # 第二轮补上 top_k=5（schema 默认值），语义与第一轮完全相同
+            args = {"query": "硝酸铵"} if tool_rounds == 0 else {
+                "query": "硝酸铵",
+                "top_k": 5,
+            }
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {"id": f"c{tool_rounds}", "name": "kg_search", "arguments": args}
+                    ],
+                },
+            )
+
+    def execute(name, arguments):
+        executed.append(arguments)
+        return "命中实体：湖南南岭"
+
+    messages: list = [{"role": "user", "content": "查"}]
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=execute),
+    ):
+        list(run_loop(messages, "u1", budget=Budget(max_steps=4)))
+
+    assert len(executed) == 1  # 补全默认值后判定为重复，第二次没执行
+    assert any(
+        m.get("role") == "tool" and "完全相同的参数" in str(m.get("content"))
+        for m in messages
+    )
+
+
+def test_run_loop_flags_repeated_tool_output():
+    """参数不同但结果一字不差时，追加提示把模型推向换词或收尾。"""
+    from ai_agent.agents.budget import Budget
+
+    def stream(messages, tools, **kwargs):
+        tool_rounds = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_rounds >= 2:
+            yield "text", "答"
+            yield ("result", {"content": "答", "tool_calls": []})
+        else:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{tool_rounds}",
+                            "name": "kg_search",
+                            "arguments": {"query": f"第{tool_rounds}种问法"},
+                        }
+                    ],
+                },
+            )
+
+    def execute(name, arguments):
+        # 图谱写死返回同一个中心实体：换检索词也是这份输出
+        return "命中实体：湖南南岭民用爆破器材股份有限公司"
+
+    messages: list = [{"role": "user", "content": "查"}]
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=execute),
+    ):
+        list(run_loop(messages, "u1", budget=Budget(max_steps=4)))
+
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+    assert "已调用过" not in str(tool_msgs[1].get("content"))  # 参数确实不同
+    assert "返回过完全相同的结果" in str(tool_msgs[1]["content"])
+
+
+def test_run_loop_budget_completion_defaults_to_settings():
+    """不传 budget 时回落到 settings.max_turns，行为与旧版一致。"""
+    with patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream):
+        events = list(run_loop([{"role": "user", "content": "你好"}], "u1"))
+
+    assert events[-1] == {"type": "done"}
+    assert settings.max_turns >= 1
+
+
+
+def test_interrupted_turn_skips_long_term_capture():
+    """中断/失败的半截回答不进长期记忆（完整回合才抽取）。"""
+    from ai_agent.agents.loop import _capture_turn  # noqa: F401  确认可导入
+
+    def failing(messages, tools, **kwargs):
+        yield ("text", "半截")
+        raise LLMError("boom")
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=failing),
+        patch("ai_agent.agents.turn.capture_long_term") as capture,
+    ):
+        events = list(
+            run_stream("问题", user_id="u1", chat_session_id="s-interrupt")
+        )
+
+    assert events[-1]["type"] == "error"
+    capture.assert_not_called()
+
+
+def test_fit_context_drops_oldest_turns_keeps_summary_and_last():
+    """超预算裁剪：丢最旧整轮，保留 system/摘要对/最后一个 turn，原列表不动。"""
+    from ai_agent.agents.loop import _fit_context
+
+    messages = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": SUMMARY_USER_PREFIX + "摘要"},
+        {"role": "assistant", "content": "已了解"},
+        {"role": "user", "content": "A" * 500},
+        {"role": "assistant", "content": "B" * 500},
+        {"role": "user", "content": "C" * 500},
+        {"role": "assistant", "content": "D" * 20},
+    ]
+    import copy
+
+    snapshot = copy.deepcopy(messages)
+
+    # 预算只够容纳 system+摘要+C/D 两轮，A/B 轮被丢
+    fitted = _fit_context(messages, 1100)
+
+    assert messages == snapshot  # 原列表不被修改
+    roles = [m["role"] for m in fitted]
+    assert fitted[0]["content"] == "SYS"
+    assert fitted[1]["content"].startswith(SUMMARY_USER_PREFIX)
+    assert fitted[-1]["content"] == "D" * 20
+    assert "A" * 500 not in [m.get("content") for m in fitted]
+    assert roles.count("user") >= 1  # 至少保留当前回合的 user
+    # 不超预算时原样返回（同一对象，零开销路径）
+    assert _fit_context(messages, 10**9) is messages
+    # budget<=0 关闭功能
+    assert _fit_context(messages, 0) is messages
+
+
+def test_fit_context_never_orphans_tool_messages():
+    """裁剪按整轮丢，assistant(tool_calls) 与 tool 结果不会被拆开。"""
+    from ai_agent.agents.loop import _fit_context
+
+    messages = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "U1" * 400},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "name": "kb_search", "arguments": {"q": "x"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "kb_search", "content": "T" * 400},
+        {"role": "user", "content": "U2"},
+        {"role": "assistant", "content": "A2"},
+    ]
+    fitted = _fit_context(messages, 900)
+
+    tool_msgs = [m for m in fitted if m.get("role") == "tool"]
+    calls = {
+        c["id"]
+        for m in fitted
+        for c in (m.get("tool_calls") or [])
+    }
+    for msg in tool_msgs:
+        assert msg["tool_call_id"] in calls  # 没有孤儿 tool 结果
+    assert fitted[-1]["content"] == "A2"  # 当前回合保留
+
+
+def test_permission_denied_is_not_reported_as_retryable():
+    """403/401 不该提示「稍后重试」——重试永远不会成功，只会让用户反复点。"""
+    from ai_agent.agents.loop import _llm_error_message
+
+    for code in (401, 403):
+        denied = _llm_error_message(LLMError("AccessDenied.Unpurchased", status_code=code))
+        assert "稍后重试" not in denied
+        assert "未开通" in denied or "无权限" in denied
+
+    assert "繁忙" in _llm_error_message(LLMError("429", status_code=429))
+    # 没有状态码（超时、连接断开）仍是可重试的坦白说法
+    assert "稍后重试" in _llm_error_message(LLMError("timeout"))
+
+
+def test_run_loop_emits_permission_message_for_403():
+    """上游 403 时 SSE 下发的是「权限」提示，而不是通用的稍后重试。"""
+
+    def _denied(messages, tools, **kwargs):
+        raise LLMError("Error code: 403 - AccessDenied.Unpurchased", status_code=403)
+        yield  # pragma: no cover
+
+    with patch("ai_agent.agents.loop.stream_chat", _denied):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "hi"}],
+                user_id="u1",
+                run_id="r1",
+                use_web_search=False,
+            )
+        )
+
+    errors = [e for e in events if e.get("type") == "error"]
+    assert len(errors) == 1
+    assert "未开通" in errors[0]["message"] or "无权限" in errors[0]["message"]
+    assert "稍后重试" not in errors[0]["message"]
+
+
+def test_mid_stream_error_is_reported_instead_of_killing_the_stream():
+    """流建立后才出错（非 LLMError）也要转成 error 事件，不能让 SSE 直接断掉。"""
+
+    def _boom(messages, tools, **kwargs):
+        yield ("text", "半截回答")
+        raise ConnectionResetError("peer reset")
+
+    with patch("ai_agent.agents.loop.stream_chat", _boom):
+        events = list(
+            run_loop(
+                [{"role": "user", "content": "hi"}],
+                user_id="u1",
+                run_id="r1",
+                use_web_search=False,
+            )
+        )
+
+    assert {"type": "text", "content": "半截回答"} in events
+    errors = [e for e in events if e.get("type") == "error"]
+    assert len(errors) == 1
+    assert "中断" in errors[0]["message"]
+
+
+def test_execute_tool_clamps_out_of_range_args():
+    """模型传 depth=3（schema 上限 2）时，夹回边界重试，而不是整次失败。"""
+    from ai_agent.tools.registry import _clamp_out_of_range_args
+    from ai_agent.tools.kg_search import KgSearchArgs
+
+    clamped = _clamp_out_of_range_args(
+        KgSearchArgs, {"query": "安克创新", "depth": 3, "top_k": 10}
+    )
+    assert clamped["depth"] == 2
+    assert clamped["top_k"] == 10  # 未越界，保持原值
+
+
+def test_clamp_only_touches_out_of_range_numeric_fields():
+    from ai_agent.tools.registry import _clamp_out_of_range_args
+    from ai_agent.tools.kg_search import KgSearchArgs
+
+    clamped = _clamp_out_of_range_args(
+        KgSearchArgs, {"query": "安克创新", "depth": 0, "top_k": 99}
+    )
+    assert clamped["depth"] == 1
+    assert clamped["top_k"] == 10
+    assert clamped["query"] == "安克创新"  # 非数值字段不动
+

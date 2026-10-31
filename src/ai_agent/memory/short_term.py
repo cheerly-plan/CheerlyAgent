@@ -7,8 +7,13 @@ from time import monotonic
 from ai_agent.core.config import settings
 from ai_agent.llm.types import ChatMessage
 
-SUMMARY_USER_PREFIX = "此前对话摘要：\n"
-SUMMARY_ASSISTANT = "已了解此前对话摘要，会据此继续当前会话。"
+# 摘要伪装成一轮 user/assistant 对话注入上下文。两个常量迁到了
+# prompts.memory，这里 import 进来是为了保持 ai_agent.memory.short_term
+# 这个导入路径继续可用（tests 与 loop 都从这儿取）。
+# SUMMARY_USER_PREFIX 的字面值还被 take_summary() 用来按前缀反解摘要，
+# 改一个字就会静默丢掉全部历史摘要。
+from ai_agent.prompts.memory import SUMMARY_ASSISTANT, SUMMARY_USER_PREFIX
+
 _CRUDE_SUMMARY_MAX_CHARS = 2000
 
 

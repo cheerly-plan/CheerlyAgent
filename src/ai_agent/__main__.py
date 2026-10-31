@@ -74,9 +74,17 @@ def main() -> None:
         help="开发环境代码变更后自动重启；默认关闭，生产环境务必保持关闭",
     )
 
+    # 开发模式：等价于 serve --reload，代码改动后自动重启，是日常开发的默认入口
+    dev_parser = sub.add_parser("dev", help="开发模式启动（等同 serve --reload）")
+    dev_parser.add_argument("--host", default=settings.host)
+    dev_parser.add_argument("--port", type=int, default=settings.port)
+
     args = parser.parse_args()
     if args.command == "chat":
         _chat(" ".join(args.message).strip() or None)
+        return
+    if args.command == "dev":
+        _serve(args.host, args.port, reload=True)
         return
     _serve(args.host, args.port, args.reload)
 

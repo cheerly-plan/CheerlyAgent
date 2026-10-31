@@ -13,6 +13,11 @@ from pydantic import BaseModel, Field
 
 from ai_agent.core import http
 from ai_agent.core.logging import get_logger
+from ai_agent.prompts.tools import (
+    WEATHER_CITY_DESC,
+    WEATHER_DAYS_DESC,
+    WEATHER_DESC,
+)
 from ai_agent.tools.base import Tool
 
 logger = get_logger(__name__)
@@ -54,15 +59,8 @@ _WMO = {
 
 
 class WeatherArgs(BaseModel):
-    city: str = Field(
-        description="城市名称，可用中文。重名城市可带国家或省份，如「剑桥 英国」"
-    )
-    days: int = Field(
-        default=1,
-        ge=1,
-        le=7,
-        description="预报天数：1=只看今天，2=到明天，最多 7 天。用户问周末/未来安排时适当加大",
-    )
+    city: str = Field(description=WEATHER_CITY_DESC)
+    days: int = Field(default=1, ge=1, le=7, description=WEATHER_DAYS_DESC)
 
 
 def _geocode(city: str) -> dict | None:
@@ -135,11 +133,7 @@ def get_weather(city: str, days: int = 1) -> str:
 
 weather_tool = Tool(
     name="get_weather",
-    display_name="天气查询",
-    description=(
-        "查询指定城市的实时天气和每日预报（温度、体感、湿度、风速、降水概率）。"
-        "用户问天气、穿什么、要不要带伞、出行安排时调用。"
-    ),
+    description=WEATHER_DESC,
     func=get_weather,
     args_model=WeatherArgs,
 )

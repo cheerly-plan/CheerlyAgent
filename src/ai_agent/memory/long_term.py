@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
+from ai_agent.llm.client import json_response_format
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.facets import (
-    FACET_WRITE_RULES,
     coalesce_by_facet,
     format_profile_line,
     normalize_facet,
@@ -17,35 +18,18 @@ from ai_agent.memory.gate import jev_noul
 from ai_agent.memory.parse import complete_memory_chat, load_llm_json
 from ai_agent.memory.profile import ProfileAction, apply_profile_action
 from ai_agent.memory.store import store
+from ai_agent.prompts.memory import (
+    EXTRACT_SYSTEM,
+    GATE_INSTRUCTIONS,
+    LABEL_CURRENT_TURN,
+    LABEL_EXISTING_EPISODES,
+    LABEL_EXISTING_EPISODES_EMPTY,
+    LABEL_EXISTING_PROFILE,
+    LABEL_EXISTING_PROFILE_EMPTY,
+    LABEL_SESSION_SUMMARY,
+)
 
 logger = get_logger(__name__)
-
-EXTRACT_SYSTEM = f"""
-你是用户长期记忆抽取器。根据本轮对话，判断是否需要写入跨会话记忆。
-只输出 JSON，不要解释。格式：
-{{"memories":[{{"kind":"episode","content":"..."}},{{"kind":"profile","op":"add"|"update"|"delete","facet":"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}}]}}
-没有可记内容时输出 {{"memories":[]}}
-
-kind:
-- profile: 长期成立的姓名、职业、身份、语言、偏好、约束
-- episode: 当前阶段的任务快照
-
-episode 的 content 必须是可检索的完整近况（约 40～120 字），尽量包含：正在做什么、技术栈或约束、目标、本轮已确认的进展。不要写成「最近在学 X」这种标签。
-
-profile 必须带 op 和 facet。name / occupation / locale / language 同一侧面只输出一条：
-- add: 新的侧面
-- update: 同一侧面事实变化或更完整，content 写成该侧面的完整当前描述
-- delete: 用户明确否定旧事实
-preference / constraint 是累积型：每条独立事实单独输出一个 add，可多条并存，不要 update 合并已有条目；否定某一条时 delete 并在 content 写该条原文。
-{FACET_WRITE_RULES}
-若已有 other 把姓名/职业混在一起，要拆开写入正确 facet，并 delete other。
-已有相同事实、只是换种说法、闲聊、助手单方面建议：不要输出该条。
-
-规则：
-1. 只记用户明确说的，或双方已经确认的技术选择
-2. 身份和近况拆开
-3. 最多 4 条
-"""
 
 
 @dataclass(frozen=True)
@@ -106,17 +90,26 @@ def extract_turn_memories(
     user_content = _build_user_content(
         source, summary, existing_episodes, existing_profile
     )
+    messages = [
+        {"role": "system", "content": EXTRACT_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+    # JSON 模式（MEMORY_EXTRACT_JSON_MODE=json_object）：网关不支持会直接 400，
+    # 这时退回「prompt 约束 + load_llm_json 兜底」再跑一次，不让开关整条链路
+    # 挂掉。默认 off，行为与开启前一致。
+    fmt = json_response_format(settings.memory_extract_json_mode)
     try:
-        raw = complete_memory_chat(
-            [
-                {"role": "system", "content": EXTRACT_SYSTEM},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=384,
-        )
+        raw = complete_memory_chat(messages, max_tokens=384, response_format=fmt)
     except LLMError as e:
-        logger.warning("抽取长期记忆失败: %s", e)
-        return []
+        if fmt is None:
+            logger.warning("抽取长期记忆失败: %s", e)
+            return []
+        logger.warning("JSON 模式抽取失败（网关可能不支持），回退 prompt 约束: %s", e)
+        try:
+            raw = complete_memory_chat(messages, max_tokens=384)
+        except LLMError as e2:
+            logger.warning("抽取长期记忆失败: %s", e2)
+            return []
     items = _parse_memories(raw)
     if items:
         logger.info("长期记忆已抽取 count=%s", len(items))
@@ -134,14 +127,6 @@ def _write_extracted(user_id: str, item: ExtractedMemory) -> None:
             store.write_episode(item.content, user_id=user_id)
     except Exception:
         logger.exception("长期记忆写入失败 kind=%s", item.kind)
-
-
-GATE_INSTRUCTIONS = (
-    "这段对话是否包含值得写入跨会话长期记忆的信息？"
-    "值得记忆：用户明确陈述的姓名、职业、身份、语言、长期偏好或约束，"
-    "双方确认的技术选型，当前阶段任务的实质性进展。"
-    "不值得记忆：日常问答、闲聊、编写代码的过程本身、助手单方面的建议。"
-)
 
 
 def _gate_blocks(turn: list[ChatMessage], summary: str) -> bool:
@@ -175,10 +160,10 @@ def _build_gate_state(turn: list[ChatMessage], summary: str) -> str:
     parts: list[str] = []
     text = summary.strip()
     if text:
-        parts.append(f"会话摘要：{text[:600]}")
+        parts.append(f"{LABEL_SESSION_SUMMARY}{text[:600]}")
     turn_text = _format_turn(turn)[:6000]
     if turn_text:
-        parts.append(f"本轮对话：\n{turn_text}")
+        parts.append(f"{LABEL_CURRENT_TURN}\n{turn_text}")
     return "\n\n".join(parts)
 
 
@@ -191,17 +176,17 @@ def _build_user_content(
     parts: list[str] = []
     text = summary.strip()
     if text:
-        parts.append(f"会话摘要：\n{text}")
+        parts.append(f"{LABEL_SESSION_SUMMARY}\n{text}")
     if existing_profile:
-        parts.append("已有用户画像：\n" + "\n".join(existing_profile))
+        parts.append(LABEL_EXISTING_PROFILE + "\n".join(existing_profile))
     else:
-        parts.append("已有用户画像：无")
+        parts.append(LABEL_EXISTING_PROFILE_EMPTY)
     if existing_episodes:
         lines = "\n".join(f"- {item}" for item in existing_episodes)
-        parts.append(f"已有相近情景记忆：\n{lines}")
+        parts.append(f"{LABEL_EXISTING_EPISODES}\n{lines}")
     else:
-        parts.append("已有相近情景记忆：无")
-    parts.append(f"本轮对话：\n{source}")
+        parts.append(LABEL_EXISTING_EPISODES_EMPTY)
+    parts.append(f"{LABEL_CURRENT_TURN}\n{source}")
     return "\n\n".join(parts)
 
 
@@ -235,6 +220,41 @@ def _line(msg: ChatMessage) -> str:
     return ""
 
 
+# 抽取模型常把本轮问答写成记忆。这些开头几乎一定是对话纪要，不是用户近况。
+_RECAP_HEAD = re.compile(
+    r"^(用户(询问|问了|问的是|讨论|要求|请求|查询|查了|了解到|分析|"
+    r"正在分析|正在查询|确认了|提到|被[告知]|希望获取)"
+    r"|助手(建议|回答|决定|通过|告知)"
+    r"|讨论了|近期讨论)"
+)
+_COMPANY_MARK = re.compile(r"股份有限公司|有限责任公司")
+_DOC_QA = ("kb_search", "kg_search", "招股", "年报披露", "助手")
+_TOPIC_PREF = ("关注公司", "财务数据", "股东信息", "重大工程")
+
+
+def _keep_extracted(item: ExtractedMemory) -> bool:
+    """小模型常把招股书问答写成记忆，这里挡一层确定性噪声。"""
+    text = item.content.strip()
+    if item.kind == "episode":
+        if _RECAP_HEAD.match(text):
+            return False
+        if any(mark in text for mark in _DOC_QA):
+            return False
+        return True
+    if item.op == "delete":
+        return True
+    if _RECAP_HEAD.match(text):
+        return False
+    if item.facet in {"preference", "other", "constraint"}:
+        if any(mark in text for mark in _TOPIC_PREF):
+            return False
+        if any(mark in text for mark in ("招股", "kb_search", "kg_search")):
+            return False
+    if item.facet == "occupation" and len(_COMPANY_MARK.findall(text)) >= 2:
+        return False
+    return True
+
+
 def _parse_memories(raw: str) -> list[ExtractedMemory]:
     data = load_llm_json(raw)
     if data is None:
@@ -247,9 +267,17 @@ def _parse_memories(raw: str) -> list[ExtractedMemory]:
     if not isinstance(rows, list):
         return []
     items: list[ExtractedMemory] = []
-    for row in rows[:4]:
+    for row in rows[:2]:
         item = _memory_from_row(row)
         if item is None:
+            continue
+        if not _keep_extracted(item):
+            logger.info(
+                "丢弃非跨会话记忆 kind=%s facet=%s text=%s",
+                item.kind,
+                item.facet,
+                item.content[:80],
+            )
             continue
         items.append(item)
     return _coalesce_memories(items)

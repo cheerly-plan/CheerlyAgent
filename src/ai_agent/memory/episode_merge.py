@@ -1,17 +1,9 @@
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.memory.parse import complete_memory_chat
+from ai_agent.prompts.memory import MERGE_SYSTEM, build_merge_user
 
 logger = get_logger(__name__)
-
-MERGE_SYSTEM = """
-你是情景记忆合并器。把同一主题的多条近况合成一段完整、可检索的情景记忆。
-规则：
-1. 只输出合并后的正文，不要标题、前缀、解释、列表或引号；
-2. 保留任务、技术栈、目标、进展等不重复关键事实，不要编造；
-3. 去掉重复表述；
-4. 写成 40～120 字的一两句话，不要压成口号。
-"""
 
 
 def _episode_norm(text: str) -> str:
@@ -72,7 +64,7 @@ def compact_episode_texts(parts: list[str]) -> str:
         raw = complete_memory_chat(
             [
                 {"role": "system", "content": MERGE_SYSTEM},
-                {"role": "user", "content": f"请合并这些情景记忆：\n{numbered}"},
+                {"role": "user", "content": build_merge_user(numbered)},
             ],
             max_tokens=256,
         )
