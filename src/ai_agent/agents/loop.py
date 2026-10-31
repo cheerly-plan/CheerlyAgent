@@ -91,11 +91,18 @@ def _profile_prompt(user_id: str) -> str:
     return format_profile_block(items)
 
 
-def _kb_files_block(kb_file_ids: tuple[str, ...] = ()) -> str:
-    """拼接知识库可用文件清单，注入系统提示词供模型显式圈定检索范围。
+# 文件清单内联阈值：超过则折叠为摘要，避免长清单撑爆 system prompt。
+# 主体数量通常远少于文件数（同公司多年报共享一个 subject），所以【知识库主体】
+# 清单始终注入、作为轻量查询入口；文件清单只在小库时全列。
+KB_FILE_LIST_INLINE_LIMIT = 30
 
-    会话已限定文件范围（kb_file_ids）时只列这些；否则列全部就绪文件。
-    读库失败不影响对话——返回空串，files 必填仍由工具 schema 兜底。
+
+def _kb_files_block(kb_file_ids: tuple[str, ...] = ()) -> str:
+    """拼接知识库主体清单 + 可用文件清单，注入系统提示词。
+
+    模型可用主体名（如「中国能源建设」）直接填 files，无需先对着文件清单挑；
+    【知识库可用文件】仍保留作为菜单。会话已限定范围（kb_file_ids）时只列这些；
+    否则列全部就绪文件。读库失败不影响对话——返回空串，files 必填仍由工具 schema 兜底。
     """
     try:
         rows = store.list_kb_files()
@@ -108,19 +115,60 @@ def _kb_files_block(kb_file_ids: tuple[str, ...] = ()) -> str:
         ready = [r for r in ready if str(r.get("file_id")) in want]
     if not ready:
         return ""
-    lines = [
-        "【知识库可用文件】（调用 kb_search / kg_search 前必须先用 files "
-        "指定要查的文档，不可省略）"
-    ]
-    for r in ready:
-        name = str(r.get("filename") or "(未命名)").strip()
-        desc = str(r.get("description") or "").strip()
-        line = f"- {name}"
-        if desc:
-            line += f"：{desc}"
-        lines.append(line)
-    lines.append(f"（共 {len(ready)} 份已就绪）")
+    lines: list[str] = []
+    # 主体清单：新的查询入口，模型可用主体名直接填 files，不必先挑文件
+    subjects = _aggregate_subjects(ready)
+    if subjects:
+        lines.append(
+            "【知识库主体】（可用主体名直接填 files，如「中国能源建设」；"
+            "不要编造清单外的主体名）"
+        )
+        for name, count, periods in subjects:
+            ptext = "、".join(periods)
+            suffix = f"（{count}份" + (f"，{ptext}" if ptext else "") + "）"
+            lines.append(f"- {name}{suffix}")
+    # 文件清单：保留作为菜单；小库全列，大库折叠为摘要避免撑爆上下文
+    if len(ready) <= KB_FILE_LIST_INLINE_LIMIT:
+        lines.append(
+            "【知识库可用文件】（调用 kb_search / kg_search 时可用 files "
+            "指定要查的文档：可填文件名，也可填上方主体名；不填则系统按"
+            "文档摘要自动选定范围）"
+        )
+        for r in ready:
+            name = str(r.get("filename") or "(未命名)").strip()
+            desc = str(r.get("description") or "").strip()
+            line = f"- {name}"
+            if desc:
+                line += f"：{desc}"
+            lines.append(line)
+    else:
+        lines.append(
+            f"【知识库可用文件】共 {len(ready)} 份（较多，未全部列出）。"
+            "请先用上方【知识库主体】按主体名圈定，或调 kb_list 按关键字检索后再填 files。"
+        )
     return "\n".join(lines)
+
+
+def _aggregate_subjects(
+    ready: list[dict],
+) -> list[tuple[str, int, list[str]]]:
+    """从就绪文件聚合主体清单：主体名 -> (份数, 报告期列表)，按份数降序。
+
+    无 subject 的文件（文件名抽不出公司名）不进清单——它们既不能被按主体
+    检索，也不该用空主体占位。
+    """
+    agg: dict[str, dict] = {}
+    for r in ready:
+        subj = str(r.get("subject") or "").strip()
+        if not subj:
+            continue
+        entry = agg.setdefault(subj, {"count": 0, "periods": set()})
+        entry["count"] += 1
+        p = str(r.get("period") or "").strip()
+        if p:
+            entry["periods"].add(p)
+    items = sorted(agg.items(), key=lambda kv: -kv[1]["count"])
+    return [(s, v["count"], sorted(v["periods"])) for s, v in items]
 
 
 def _system_prompt(

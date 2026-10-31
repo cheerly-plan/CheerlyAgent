@@ -281,6 +281,7 @@ def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
     matched: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
     for hint in hints:
+        hint_hit = False
         for item in ready:
             fid = item["file_id"]
             if fid in seen:
@@ -288,9 +289,42 @@ def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
             if _filename_hint_matches(hint, item.get("filename") or ""):
                 seen.add(fid)
                 matched.append(fid)
+                hint_hit = True
+        # 文件名没命中这个提示词，再按元数据维度（subject 列 + 别名）匹配：
+        # 多主体文档（行业研报）文件名里没有「宁德时代」，但它确实是正文主体，
+        # 只有走 subject/别名才能把这种提示词路由到对应文件。
+        if not hint_hit:
+            for item in ready:
+                fid = item["file_id"]
+                if fid in seen:
+                    continue
+                if _subject_token_matches(
+                    hint,
+                    item.get("subject") or "",
+                    item.get("subject_aliases") or [],
+                ):
+                    seen.add(fid)
+                    matched.append(fid)
+                    hint_hit = True
     if not matched or len(matched) == len(ready):
         return None
     return matched
+
+
+def _subject_token_matches(tok: str, subject: str, aliases: list[str]) -> bool:
+    """提示词里的主体 token（可简称）是否命中文件级 subject 或任一别名。
+
+    复用 _query_mentions 的最长公共子串判据，所以「中国能建」既能命中
+    subject「中国能源建设股份有限公司」，也能命中别名「中国能建」；反过来
+    「季度报告」这类与任何主体名无公共子串的噪音不会误命中。
+    """
+    candidates = [subject] + list(aliases or [])
+    for cand in candidates:
+        if not cand:
+            continue
+        if _query_mentions(tok, cand):
+            return True
+    return False
 
 
 def _clean_filename_hint(name: str) -> str:

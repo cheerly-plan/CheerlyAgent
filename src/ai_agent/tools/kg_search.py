@@ -26,6 +26,7 @@ from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
 from ai_agent.prompts.tools import (
     KB_FILES_DESC,
+    KB_FILES_NOT_FOUND_HINT,
     KG_NO_ENTITY_HINT,
     KG_SEARCH_DEPTH_DESC,
     KG_SEARCH_DESC,
@@ -70,7 +71,7 @@ def format_neighborhood(
 
 class KgSearchArgs(BaseModel):
     query: str = Field(..., description=KG_SEARCH_QUERY_DESC)
-    files: list[str] = Field(..., description=KB_FILES_DESC)
+    files: list[str] | None = Field(default=None, description=KB_FILES_DESC)
     depth: int = Field(default=1, ge=1, le=2, description=KG_SEARCH_DEPTH_DESC)
     top_k: int = Field(default=5, ge=1, le=10, description=KG_SEARCH_TOPK_DESC)
 
@@ -100,7 +101,10 @@ def _kg_search(
         return "知识图谱还没有数据（可能文件都在建图中或已关闭抽取），可以先改用 kb_search。"
 
     query = effective_kb_query(query)
-    parsed_ids = resolve_tool_file_ids(files)
+    parsed_ids = resolve_tool_file_ids(files, query=query)
+    # files 明确指定但解析不到（编造的文件名/主体名）→ 明确提示，而非静默退回全库
+    if parsed_ids == []:
+        return KB_FILES_NOT_FOUND_HINT
 
     try:
         embedding = embed_query(query)

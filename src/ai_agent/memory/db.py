@@ -688,6 +688,36 @@ class Database:
                 ON agent_kb_chunk USING gin (meta)
                 """
             )
+            # ——— 文档级摘要：检索前的「路由层」索引 ———
+            # 切片索引回答「哪一段相关」，摘要索引回答「哪一份文件相关」。
+            # 没有它，模型只能对着注入的文件清单猜要查哪几份——文件一多
+            # （几十上百份）清单既撑爆上下文，也选不准。有了文档向量，
+            # 路由在检索层完成，files 不再是模型的负担。
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                f"""
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS summary_embedding vector({dim})
+                """
+            )
+            # '' 未生成 / ready / failed / empty（无可用素材）
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS summary_status TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_file_summary_hnsw
+                ON agent_kb_file USING hnsw (summary_embedding vector_cosine_ops)
+                """
+            )
             conn.commit()
 
     def close(self) -> None:

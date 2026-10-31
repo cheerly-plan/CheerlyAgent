@@ -17,6 +17,7 @@ from ai_agent.prompts.tools import (
     KB_EMPTY_HINT,
     KB_ERROR_HINT,
     KB_FILES_DESC,
+    KB_FILES_NOT_FOUND_HINT,
     KB_NO_HIT_HINT,
     KB_SEARCH_DESC,
     KB_SEARCH_QUERY_DESC,
@@ -33,7 +34,9 @@ _NEIGHBOR_CLIP = 200
 
 class KbSearchArgs(BaseModel):
     query: str = Field(..., description=KB_SEARCH_QUERY_DESC)
-    files: list[str] = Field(..., description=KB_FILES_DESC)
+    # files 可选：不填就由文档路由（按摘要向量）自己选定范围。以前靠
+    # 模型对着文件清单填这一项，文件一多既选不准又占上下文
+    files: list[str] | None = Field(default=None, description=KB_FILES_DESC)
     top_k: int = Field(default=3, ge=1, le=10, description=KB_SEARCH_TOPK_DESC)
 
 
@@ -43,10 +46,13 @@ def _kb_search(
     if not store.has_ready_kb_file():
         return KB_EMPTY_HINT
 
-    # files 已由 schema 强制必填；解析不到且会话也未限定范围时 file_ids=None，
-    # search_knowledge 退化为搜全库（不再按查询自动猜文件范围）
+    # files 没填时由文档路由按摘要向量选文件（files 是模型的可选项，不是
+    # 必答题）；路由也没结果时 file_ids=None，退化为搜全库
     query = effective_kb_query(query)
-    parsed_ids = resolve_tool_file_ids(files)
+    parsed_ids = resolve_tool_file_ids(files, query=query)
+    # files 明确指定但解析不到（编造的文件名/主体名）→ 明确提示，而非静默退回全库
+    if parsed_ids == []:
+        return KB_FILES_NOT_FOUND_HINT
 
     try:
         hits = search_knowledge(query, file_ids=parsed_ids, top_k=top_k)

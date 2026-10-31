@@ -218,6 +218,32 @@ class Settings(BaseSettings):
     # 超出带宽的主体不保底——问一家公司时，别家的头名差 0.3 也硬塞进来
     # 只会稀释上下文。0 = 关掉配额，退回纯按距离取前 N 条。
     kb_subject_quota_band: float = 0.12
+    # ——— 文档级摘要索引 + 语义路由 ———
+    # 每份文件入库后额外生成一段摘要并单独 embedding（见 kb/summary.py），
+    # 检索前先用它把「该查哪几份文件」这个问题解答掉：
+    # 不再依赖模型对着文件清单挑 files，库里有一千份文件也进不了提示词。
+    kb_summary_enabled: bool = True
+    # 摘要总长上限（字符）：够覆盖主体/报告期 + 十几条要点，再长边际收益
+    # 递减，还会把不同僚公司的特征词稀释到同一个向量里
+    kb_summary_max_chars: int = 1200
+    # 摘要里收录的切片首句数与每条截断长度：只取正文开头若干段——财报、
+    # 研报的开篇基本就写清了「谁、什么期间、讲了什么」
+    kb_summary_head_chunks: int = 8
+    kb_summary_head_chars: int = 160
+    # 摘要里补充的图谱实体名上限（按提及频次取）：行业研报正文讲的是宁德
+    # 时代、比亚迪，这些主体只有图谱实体里有。控制在个位数两位——再往下
+    # 就是各类会计科目，它们不加区分度（每份财报都有「营业收入」）
+    kb_summary_entities: int = 12
+    # 文档路由：模型没指定 files 时，按摘要向量自动选出候选文档。
+    # 关掉则退回会话范围 / 全库（旧行为）
+    kb_doc_route_enabled: bool = True
+    # 一次路由选出的文档数上限。给得比实际需要的宽一点，精排除交给
+    # 下面的距离门槛与切片层的重排——路由漏召回是无药可救的
+    kb_doc_route_top_k: int = 6
+    # 摘要向量与查询向量的余弦距离上限：超过就认为这份文件和问题无关。
+    # 文档级摘要比切片更「泛」，同主题不同公司的距离常常只差 0.05，
+    # 这个门槛比 kb_search_max_distance 更严，否则路由等于没做
+    kb_doc_route_max_distance: float = 0.55
 
     database_url: str
     embedding_model: str

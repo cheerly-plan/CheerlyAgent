@@ -119,6 +119,8 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 | `chunking.py` | 按章节/页切块，表格整表成片 |
 | `retrieval.py` | 混合检索（关键词 + 向量 RRF，按主体保底配额）→ LLM 重排 |
 | `meta.py` | 检索元数据：从文件名规则抽取主体 / 报告期，并给多主体文档的切片做主体归属 |
+| `summary.py` | 文档级摘要：把一份文件压成一段「它讲的是什么」，单独 embedding 供路由使用 |
+| `router.py` | 文档路由：问句点名的文件优先命中，其余按摘要向量补齐，自动圈定检索范围 |
 | `graph.py` | 图谱构建入口：跨批合并（实体/关系/提及）与分批落库编排 |
 | `graph_extract.py` | 抽取调用：进批过滤 → 按章节组批 → 单批容错（重问/拆半）→ 并发编排 |
 | `graph_names.py` | 实体名归一化与可用性判据（停用词/谓词/数值/占位词），以及按名字在批内定位 |
@@ -140,7 +142,7 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 1. **鉴权**：`AUTH_TOKEN` 非空时校验 `X-API-Key` / Bearer；否则校验用户 token
 2. **装配上下文**：短期记忆（会话窗口）+ 长期记忆（向量召回 TopK）+ 情景记忆 + 画像
 3. **循环**（上限 `MAX_TURNS`）：LLM 决定直接回答还是调工具 → 执行工具 → 结果拼回上下文
-4. **检索**（走 `kb_search` 时）：混合召回（关键词 + 向量 RRF）→ 重排 → 带引用片段（`files` 必填，模型对照系统提示词里的【知识库可用文件】清单显式圈定文档；不做查询改写与首轮强制检索）。召回名额按主体（公司）保底：够近的主体各先占一个名额，「A 和 B 的营收」这类对比问句两家都出得来
+4. **检索**（走 `kb_search` 时）：没填 `files` 时先由**文档路由**按摘要向量选出候选文档（`kb/router.py`，每份文件入库时生成一份摘要并单独 embedding）；填了则按文件名 / 主体名解析。候选范围内再走混合召回（关键词 + 向量 RRF）→ 重排 → 带引用片段。召回名额按主体（公司）保底：够近的主体各先占一个名额，「A 和 B 的营收」这类对比问句两家都出得来。文件数不再限制这套流程——模型不必对着文件清单挑文件
 5. **输出**：增量 token 流式下发，同时写入消息、更新摘要
 6. **记忆落库**：本轮抽取的事实写入长期记忆（相似条目合并），情景与画像增量更新
 7. **中断恢复**：连接断开后凭 `run_id` 调 `POST /v1/chat/resume` 续跑（`checkpoint_store`）
@@ -200,6 +202,8 @@ uv run alembic upgrade head          # 迁移
 
 # 常用运维脚本（参数见各文件 --help）
 uv run python scripts/kb.py list          # 知识库维护入口
+uv run python scripts/kb.py meta --all    # 存量文件回填主体/报告期（切片跟着刷）
+uv run python scripts/kb.py summary --all # 存量文件补文档摘要索引（文档路由依赖它）
                           # 子命令：list / reparse / graph / reembed / coverage
 uv run python scripts/eval_retrieval.py   # 检索质量回归评测
 uv run python scripts/rebuild_graph.py    # 重建知识图谱

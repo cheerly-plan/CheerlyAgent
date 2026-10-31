@@ -11,6 +11,8 @@
     uv run python scripts/kb.py meta --all --dry-run        # 看存量文件会被抽出什么主体
     uv run python scripts/kb.py meta --all                  # 回填主体/报告期，切片跟着刷
     uv run python scripts/kb.py meta --name 中行 --subject "中国银行" --period 2026Q3
+    uv run python scripts/kb.py summary --all --dry-run --show  # 看文档摘要长什么样
+    uv run python scripts/kb.py summary --all                   # 补文档级摘要索引（路由用）
     uv run python scripts/kb.py coverage --name 中行        # 哪些页没有切片
 
 --file / --name / --all 选文件；--dry-run 只看会动谁；--all 要加 --yes。
@@ -109,6 +111,13 @@ def _parser() -> argparse.ArgumentParser:
     p_meta.add_argument("--subject", help="手动指定主体，覆盖规则抽取")
     p_meta.add_argument("--period", help="手动指定报告期，覆盖规则抽取")
     p_meta.set_defaults(handler=_cmd_meta)
+
+    p_summary = sub.add_parser(
+        "summary", help="生成文档摘要 + 摘要向量（文档路由的索引）"
+    )
+    _add_select(p_summary)
+    p_summary.add_argument("--show", action="store_true", help="打印摘要全文")
+    p_summary.set_defaults(handler=_cmd_summary)
 
     p_cov = sub.add_parser("coverage", help="看哪些页没有切片")
     p_cov.add_argument("--file", help="文件 id（可只给前缀）")
@@ -446,6 +455,62 @@ def _cmd_meta(args: argparse.Namespace) -> int:
         new = f"{meta['subject'] or '(空)'}/{meta['period'] or '(空)'}"
         print(f"  ✓ {rec['filename']}\n      {old} → {new}  切片刷 {chunks} 行")
     print("完成" + ("（dry-run，未写库）" if args.dry_run else ""))
+    return 0
+
+
+def _cmd_summary(args: argparse.Namespace) -> int:
+    """存量文件补摘要索引。
+
+    新文件入库时自动生成（pipeline），这里用于：加了摘要功能之前的存量
+    文件、改过摘要拼装规则之后想重算一次、或者怀疑某份文件被路由漏掉了
+    想看它到底被压成了什么样子。
+
+    只改摘要不改切片，跑几次结果一样，随时可重跑。
+    """
+    from ai_agent.kb.summary import build_file_summary, doc_type_label, index_file_summary
+    from ai_agent.memory.store import store
+
+    files = _require_files(args)
+    if files is None:
+        return 1
+    if not files:
+        return 0
+
+    def preview(rec: dict) -> str:
+        record = store.get_kb_file(rec["id"]) or {}
+        rows = store.list_kb_chunk_inputs(rec["id"])
+        return build_file_summary(
+            filename=record.get("filename") or "",
+            subject=record.get("subject") or "",
+            aliases=list(record.get("subject_aliases") or []),
+            period=record.get("period") or "",
+            doc_type=doc_type_label(record.get("doc_type") or ""),
+            description=record.get("description") or "",
+            entities=store.list_kb_file_entity_names(
+                rec["id"], settings.kb_summary_entities
+            ),
+            chunks=[r["text"] for r in rows if r.get("kind") == "text"],
+        )
+
+    done = 0
+    for rec in files:
+        if args.dry_run:
+            text = preview(rec)
+            print(
+                f"  (dry-run) {rec['filename']}  摘要 {len(text)} 字"
+                + (f"\n----\n{text}\n----" if args.show else "")
+            )
+            continue
+        text = index_file_summary(rec["id"])
+        if not text:
+            print(f"  ✗ {rec['filename']}  摘要为空或向量化失败（见 summary_status）")
+            continue
+        done += 1
+        print(
+            f"  ✓ {rec['filename']}  摘要 {len(text)} 字"
+            + (f"\n----\n{text}\n----" if args.show else "")
+        )
+    print(f"完成 {done} 份" + ("（dry-run，未写库）" if args.dry_run else ""))
     return 0
 
 

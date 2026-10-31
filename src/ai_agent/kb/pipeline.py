@@ -17,6 +17,7 @@ from ai_agent.kb.align import align_file_graph
 from ai_agent.kb.chunking import Chunk, chunk_segments, embedding_input
 from ai_agent.kb.graph import build_file_graph
 from ai_agent.kb.meta import extract_aliases, extract_file_meta, pick_chunk_subject
+from ai_agent.kb.summary import index_file_summary
 from ai_agent.kb.parsing import parse_segments
 from ai_agent.memory.embeddings import embed_texts_parallel
 from ai_agent.memory.store import store
@@ -138,6 +139,11 @@ class KbPipeline:
                 text_count=text_n,
                 table_count=table_n,
             )
+            # 文档摘要 + 摘要向量：切片入库后才有素材。它在检索前回答
+            # 「该查哪几份文件」（见 kb/router.py），失败只让这份文件走
+            # 老路径（模型指定 files），不影响文件本身可用
+            if settings.kb_summary_enabled:
+                index_file_summary(file_id)
             logger.info(
                 "kb 处理完成 file_id=%s chunks=%d text=%d table=%d bytes=%d "
                 "parse=%.1fs embed=%.1fs db=%.1fs",
@@ -211,6 +217,9 @@ class KbPipeline:
             aligned = self._align(file_id)
             # 建图/对齐后才有实体，多主体文档的切片归属放这一步做
             self._attribute_subjects(file_id)
+            # 图谱实体在这之后才有，摘要重算一次把「讲了哪些主体」吸收进去
+            if settings.kb_summary_enabled:
+                index_file_summary(file_id)
             store.update_graph_status(
                 file_id,
                 "ready",

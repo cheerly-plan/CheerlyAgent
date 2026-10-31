@@ -64,7 +64,8 @@ class KbStore:
                        chunk_count, text_count, table_count,
                        graph_status, graph_entity_count,
                        graph_batch_done, graph_batch_total, align_status, tags,
-                       doc_type, extract_level, description, created_at
+                       doc_type, extract_level, description, created_at,
+                       subject, period, subject_aliases
                 FROM agent_kb_file
                 WHERE (%(q)s::text = '' OR filename ILIKE %(q_like)s)
                   AND (%(tag)s::text = '' OR %(tag)s = ANY(tags))
@@ -164,7 +165,8 @@ class KbStore:
         with self._get_pool().connection() as conn:
             return conn.execute(
                 """
-                SELECT id, filename, size_bytes, mime, status, doc_type, extract_level
+                SELECT id, filename, size_bytes, mime, status, doc_type, extract_level,
+                       subject, subject_aliases, period, description
                 FROM agent_kb_file
                 WHERE id = %s
                 """,
@@ -224,6 +226,41 @@ class KbStore:
                     list(subject_aliases),
                     period,
                     Jsonb(meta or {}),
+                    file_id,
+                ),
+            ).fetchone()
+            conn.commit()
+        return row is not None
+
+    def set_kb_file_summary(
+        self,
+        file_id: uuid.UUID,
+        summary: str,
+        embedding: list[float] | None = None,
+        *,
+        status: str = "",
+    ) -> bool:
+        """写入文档摘要与其向量；``embedding`` 为 None 表示只更新文本。
+
+        status 跟着传进来的写：'' 未生成 / ready / failed / empty。摘要与
+        向量放在同一条 UPDATE 里，不出现「文本更新了向量还是旧的」的中间态
+        ——那样路由会按旧主题去召回新文档。
+        """
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE agent_kb_file
+                SET summary = %s,
+                    summary_embedding = COALESCE(%s, summary_embedding),
+                    summary_status = %s,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (
+                    summary,
+                    Vector(embedding) if embedding else None,
+                    status,
                     file_id,
                 ),
             ).fetchone()
@@ -295,6 +332,24 @@ class KbStore:
                 """,
                 (user_id,),
             ).fetchall()
+
+    def list_kb_file_entity_names(self, file_id: uuid.UUID, limit: int = 40) -> list[str]:
+        """本文件图谱里被提及最多的实体名，供文档摘要补充「讲了哪些主体」。
+
+        不限于公司后缀（list_kb_entity_subjects 只取带公司后缀的）：摘要要
+        表达的是「这份文件讲什么」，指标名、项目名称同样有区分度。
+        """
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT name FROM agent_kg_entity
+                WHERE file_id = %s
+                ORDER BY mention_count DESC, name
+                LIMIT %s
+                """,
+                (file_id, max(1, limit)),
+            ).fetchall()
+        return [r["name"] for r in rows if (r["name"] or "").strip()]
 
     def list_kb_entity_subjects(self, file_id: uuid.UUID) -> list[str]:
         """本文件图谱里像「公司主体」的实体名，补充文件级主体词表。
@@ -577,6 +632,44 @@ class KbStore:
                 (text, Vector(vector), chunk_id),
             )
             conn.commit()
+
+    def search_kb_files(
+        self,
+        query_embedding: list[float],
+        *,
+        file_ids: list[uuid.UUID] | None = None,
+        top_k: int = 6,
+        max_distance: float | None = None,
+    ) -> list[dict]:
+        """文档级检索：在摘要向量上找「哪些文件整体上与这个问题相关」。
+
+        与 search_kb_chunks 的分工：它出片段，这里出文件池。file_ids 非空时
+        在这个子集里挑（会话已限定范围时不去摸范围外的文件）；max_distance
+        是路由的门槛，超线的文件连候选都不该进。
+        """
+        emb = Vector(query_embedding)
+        with self._get_pool().connection() as conn:
+            return conn.execute(
+                """
+                SELECT id AS file_id, filename, subject, period, summary,
+                       summary_embedding <=> %(emb)s AS distance
+                FROM agent_kb_file
+                WHERE summary_embedding IS NOT NULL
+                  AND status = 'ready'
+                  AND (%(file_ids)s::uuid[] IS NULL
+                       OR id = ANY(%(file_ids)s::uuid[]))
+                  AND (%(max_distance)s::float8 IS NULL
+                       OR summary_embedding <=> %(emb)s <= %(max_distance)s)
+                ORDER BY distance
+                LIMIT %(top_k)s
+                """,
+                {
+                    "emb": emb,
+                    "file_ids": file_ids or None,
+                    "max_distance": max_distance,
+                    "top_k": top_k,
+                },
+            ).fetchall()
 
     def search_kb_chunks(
         self,
