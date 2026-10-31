@@ -66,7 +66,8 @@ def test_system_prompt_keeps_core_constraints():
     """关键约束一条都不能少，少了模型就会换一种跑法。"""
     prompt = chat.build_system_prompt()
     assert "必须先调用 kb_search" in prompt
-    assert "[文件名" in prompt, "引用格式示例是「带引用」定位的落点"
+    assert "必须在句末或段末标注出处" not in prompt
+    assert "文档里没有提到" in prompt
     assert "严禁编造" in prompt
     assert "kb_search" in prompt and "kg_search" in prompt
     # 专业助理定位：这几条是「简洁 + 结构化 + 带引用」的支柱
