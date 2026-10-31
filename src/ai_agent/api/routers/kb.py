@@ -11,6 +11,8 @@
                                            内容指纹与库内文件相同则 409 拒绝
   GET    /v1/kb/files                      文件列表（所有登录用户；?q= 文件名
                                            模糊 / ?tag= 标签筛选）
+  POST   /v1/kb/search                     检索演示（所有登录用户）：
+                                           file_ids 为空则全库
   PATCH  /v1/kb/files/{id}/tags            全量覆盖设置标签（管理员）
   PATCH  /v1/kb/files/{id}                 重命名（管理员）：DB + 磁盘同步改，
                                            stem 变化触发后台整份重嵌
@@ -38,6 +40,7 @@ from ai_agent.api.schemas import (
     KbChunkEditRequest,
     KbInitRequest,
     KbRenameRequest,
+    KbSearchRequest,
     KbTagsRequest,
 )
 from ai_agent.core.config import settings
@@ -45,6 +48,7 @@ from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import embedding_input
 from ai_agent.kb.parsing import supported, supported_label
 from ai_agent.kb.pipeline import kb_pipeline
+from ai_agent.kb.retrieval import preview_search
 from ai_agent.memory.db import UserRecord
 from ai_agent.memory.embeddings import embed_texts
 from ai_agent.memory.store import store
@@ -255,6 +259,47 @@ def list_files(
     q 按文件名模糊筛选，tag 按标签筛选；两者可叠加。
     """
     return {"files": store.list_kb_files(q=q.strip(), tag=tag.strip())}
+
+
+def _clip_preview(text: str, limit: int = 800) -> str:
+    body = (text or "").strip()
+    if len(body) <= limit:
+        return body
+    cut = body[:limit]
+    nl = cut.rfind("\n")
+    if nl >= 80:
+        cut = cut[:nl]
+    return f"{cut}\n…"
+
+
+@router.post("/search")
+def search_preview(
+    req: KbSearchRequest, _user: UserRecord = Depends(get_current_user)
+):
+    """知识库页的检索演示。不勾选文件时查全库，勾选后只查这些文件。"""
+    file_ids = [_parse_file_id(fid) for fid in req.file_ids] or None
+    try:
+        hits = preview_search(req.query.strip(), file_ids=file_ids, top_k=req.top_k)
+    except Exception as e:
+        logger.exception("知识库检索演示失败")
+        raise HTTPException(status_code=502, detail="检索失败，请稍后重试") from e
+    return {
+        "scoped": file_ids is not None,
+        "hits": [
+            {
+                "file_id": hit.file_id,
+                "filename": hit.filename,
+                "seq": hit.seq,
+                "page": hit.page,
+                "page_end": hit.page_end,
+                "section": hit.section,
+                "kind": hit.kind,
+                "where": hit.where,
+                "text": _clip_preview(hit.text),
+            }
+            for hit in hits
+        ],
+    }
 
 
 @router.patch("/files/{file_id}/tags")

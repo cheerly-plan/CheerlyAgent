@@ -189,6 +189,23 @@ def search_knowledge(
     return _core_search(query, embedding, file_ids=file_ids, top_k=top_k)
 
 
+def preview_search(
+    query: str,
+    *,
+    file_ids: list[uuid.UUID] | None,
+    top_k: int = 5,
+) -> list[Hit]:
+    """知识库页的检索演示。
+
+    ``file_ids`` 为空表示全库。这里不走 ``search_knowledge`` 的文件名收窄：
+    演示要的是「没勾选 = 全部」，不能再被标签推断缩成一部分文件。
+    """
+    embedding = embed_query(query)
+    hits = _core_search(query, embedding, file_ids=file_ids, top_k=top_k)
+    limit = settings.kb_search_max_distance
+    return [hit for hit in hits if hit.distance is None or hit.distance <= limit]
+
+
 def _derive_scope(query: str) -> list[uuid.UUID] | None:
     """范围推导失败不该拖垮检索，退化为全库。"""
     try:

@@ -40,6 +40,14 @@ class KbChunkEditRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class KbSearchRequest(BaseModel):
+    """知识库页检索演示。file_ids 为空表示全库，不按问题推断范围。"""
+
+    query: str = Field(min_length=1, max_length=500)
+    file_ids: list[str] = Field(default_factory=list, max_length=50)
+    top_k: int = Field(default=5, ge=1, le=8)
+
+
 class KgBuildRequest(BaseModel):
     """管理员选文件批量生成图谱。"""
 
