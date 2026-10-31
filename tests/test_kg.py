@@ -178,7 +178,6 @@ def test_merge_by_norm_folds_cross_file_duplicates():
 def test_kg_search_tool_registered():
     assert "kg_search" in TOOLS_MAP
     tool = TOOLS_MAP["kg_search"]
-    assert tool.display_name == "图谱检索"
     schema = tool.schema()
     assert schema["function"]["name"] == "kg_search"
 

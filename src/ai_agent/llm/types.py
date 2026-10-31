@@ -38,7 +38,6 @@ class ChatEvent(TypedDict, total=False):
     type: ChatEventType
     content: str
     name: str
-    label: str
     message: str
     session_id: str
     title: str

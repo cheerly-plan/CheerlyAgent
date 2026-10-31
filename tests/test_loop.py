@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from ai_agent.agents.loop import _dedupe_seam, run, run_loop, run_stream
+from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.short_term import SUMMARY_USER_PREFIX, short_term_memory
 from ai_agent.memory.store import MemoryItem
@@ -1466,8 +1467,6 @@ def test_run_loop_flags_repeated_tool_output():
 
 def test_run_loop_budget_completion_defaults_to_settings():
     """不传 budget 时回落到 settings.max_turns，行为与旧版一致。"""
-    from ai_agent.core.config import settings
-
     with patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream):
         events = list(run_loop([{"role": "user", "content": "你好"}], "u1"))
 
@@ -1642,3 +1641,4 @@ def test_clamp_only_touches_out_of_range_numeric_fields():
     assert clamped["depth"] == 1
     assert clamped["top_k"] == 10
     assert clamped["query"] == "安克创新"  # 非数值字段不动
+

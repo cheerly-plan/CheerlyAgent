@@ -253,7 +253,6 @@ def _citations_of(evidence: list[dict]) -> list[Citation]:
 
 kg_search_tool = Tool(
     name="kg_search",
-    display_name="图谱检索",
     description=KG_SEARCH_DESC,
     func=_kg_search,
     args_model=KgSearchArgs,

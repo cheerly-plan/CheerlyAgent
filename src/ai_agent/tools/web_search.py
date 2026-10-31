@@ -187,7 +187,6 @@ def _format(query: str, name: str, results: list[dict]) -> str:
 
 web_search_tool = Tool(
     name="web_search",
-    display_name="智能搜索",
     description=WEB_SEARCH_DESC,
     func=web_search,
     args_model=WebSearchArgs,

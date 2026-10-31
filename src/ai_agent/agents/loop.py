@@ -28,7 +28,7 @@ from ai_agent.memory.short_term import (
     short_term_memory,
 )
 from ai_agent.memory.store import store, user_scope
-from ai_agent.tools.registry import execute_tool, tool_label, tool_schemas
+from ai_agent.tools.registry import execute_tool, tool_schemas
 
 from ai_agent.agents.messages import (
     _canonical_args,
@@ -67,6 +67,12 @@ _turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-fin
 def shutdown_turn_finalizer(wait: bool = True) -> None:
     """等待在途的记忆抽取/摘要任务完成后再关停，避免重启丢长期记忆。"""
     _turn_finalizer.shutdown(wait=wait, cancel_futures=False)
+
+
+def _attach_sources(messages: list[ChatMessage], turn_sources: list[dict]) -> None:
+    """引用挂在最终回答上。挂在带 tool_calls 的中间消息上，历史回放会跳过。"""
+    if turn_sources and messages and messages[-1].get("role") == "assistant":
+        messages[-1]["meta"] = {"sources": turn_sources}
 
 
 def _llm_error_message(error: LLMError) -> str:
@@ -375,7 +381,7 @@ def run_loop(
             text = str(result.get("content") or streamed or "").strip()
             if not text:
                 # 工具已经跑完但模型没吐正文（本地小模型 / 思考链吃掉 content
-                # 时会出现）。再逼一轮不带工具，避免前端只剩「已调用 xx」。
+                # 时会出现）。再逼一轮不带工具，避免气泡里只有光标。
                 logger.warning("最终回答为空，追加一轮强制作答 run_id=%s", run_id)
                 _drop_empty_assistant(messages)
                 messages.append(
@@ -416,10 +422,7 @@ def run_loop(
                 budget.max_steps,
                 len(str((messages[-1].get("content") if messages else "") or "")),
             )
-            # 引用挂在最终回答上：它是这一轮"给出结论"的那条消息，
-            # 挂在带 tool_calls 的中间消息上，前端历史里会被跳过
-            if turn_sources and messages[-1].get("role") == "assistant":
-                messages[-1]["meta"] = {"sources": turn_sources}
+            _attach_sources(messages, turn_sources)
             done_event: ChatEvent = {"type": "done"}
             if turn_sources:
                 done_event["sources"] = turn_sources
@@ -445,12 +448,8 @@ def run_loop(
                 )
                 continue
             seen_calls.add(dedupe_key)
-            # label 为用户可读展示名，前端「正在调用 xx」直接用它渲染
-            yield {
-                "type": "tool_start",
-                "name": call["name"],
-                "label": tool_label(call["name"]),
-            }
+            # 前端只用来清掉调用前的半截字，展示名不再下发
+            yield {"type": "tool_start", "name": call["name"]}
             # 范围必须在工具执行这一层同栈设置：run_stream 的生成器会被
             # 不同线程轮流 next() 推进，外层设的 contextvar 传不进来
             scope_token = set_kb_scope(kb_file_ids)
@@ -522,8 +521,7 @@ def run_loop(
         if run_id:
             step += 1
             _checkpoint_update(run_id, messages, step)
-        if turn_sources and messages[-1].get("role") == "assistant":
-            messages[-1]["meta"] = {"sources": turn_sources}
+        _attach_sources(messages, turn_sources)
         done_event: ChatEvent = {"type": "done"}
         if turn_sources:
             done_event["sources"] = turn_sources

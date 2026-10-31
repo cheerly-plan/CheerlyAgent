@@ -133,7 +133,6 @@ def get_weather(city: str, days: int = 1) -> str:
 
 weather_tool = Tool(
     name="get_weather",
-    display_name="天气查询",
     description=WEATHER_DESC,
     func=get_weather,
     args_model=WeatherArgs,

@@ -42,7 +42,7 @@ _stream_client = _client.with_options(
 StreamItem = tuple[Literal["text"], str] | tuple[Literal["result"], ChatResult]
 
 # 主对话也必须关思考链：Qwen3 等模型开着会把正文写进 reasoning，
-# delta.content 一直是空，前端就只剩「已调用 xx」没有回答。
+# delta.content 一直是空，前端就只有光标、没有回答。
 _THINKING_OFF = {
     "enable_thinking": False,
     "chat_template_kwargs": {"enable_thinking": False},

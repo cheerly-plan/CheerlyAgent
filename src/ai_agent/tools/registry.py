@@ -28,12 +28,6 @@ def tool_schemas() -> list[dict]:
     return list(_TOOL_SCHEMAS)
 
 
-def tool_label(name: str) -> str:
-    """工具的用户可读展示名（未注册的工具回退为工具名本身）。"""
-    tool = TOOLS_MAP.get(name)
-    return tool.display_name if tool else name
-
-
 def _clamp_out_of_range_args(args_model: type, arguments: dict) -> dict:
     """把越界的数值参数夹回 schema 的合法边界，避免模型偶尔传个 depth=3 就整次失败。
 

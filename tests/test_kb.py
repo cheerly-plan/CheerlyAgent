@@ -30,7 +30,7 @@ from ai_agent.kb.parsing import Segment, parse_segments, supported
 from ai_agent.kb.pipeline import KbPipeline
 from ai_agent.memory.db import UserRecord
 from ai_agent.tools.kb_search import _format_hit
-from ai_agent.tools.registry import TOOLS, tool_label, tool_schemas
+from ai_agent.tools.registry import TOOLS, tool_schemas
 
 
 def _user(username: str) -> UserRecord:
@@ -134,7 +134,6 @@ def test_kb_search_registered():
     names = [item["function"]["name"] for item in tool_schemas()]
     assert "kb_search" in names
     assert "kb_search" in [tool.name for tool in TOOLS]
-    assert tool_label("kb_search") == "知识库检索"
 
 
 def test_format_hit_uses_page_for_pdf():

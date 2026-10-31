@@ -37,7 +37,6 @@ def _kb_list_files(q: str | None = None) -> str:
 
 kb_list_files_tool = Tool(
     name="kb_list_files",
-    display_name="知识库文件清单",
     description=KB_LIST_DESC,
     func=_kb_list_files,
     args_model=KbListArgs,

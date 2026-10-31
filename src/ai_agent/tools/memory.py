@@ -43,7 +43,6 @@ def write_memory(content: str, kind: str = "profile") -> str:
 
 memory_search_tool = Tool(
     name="search_memory",
-    display_name="记忆检索",
     description=MEMORY_SEARCH_DESC,
     func=search_memory,
     args_model=MemorySearchArgs,
@@ -51,7 +50,6 @@ memory_search_tool = Tool(
 
 memory_write_tool = Tool(
     name="write_memory",
-    display_name="记忆写入",
     description=MEMORY_WRITE_DESC,
     func=write_memory,
     args_model=MemoryWriteArgs,

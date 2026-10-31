@@ -169,7 +169,6 @@ def _clip_head(text: str) -> str:
 
 kb_search_tool = Tool(
     name="kb_search",
-    display_name="知识库检索",
     description=KB_SEARCH_DESC,
     func=_kb_search,
     args_model=KbSearchArgs,
