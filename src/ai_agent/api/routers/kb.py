@@ -46,6 +46,7 @@ from ai_agent.api.schemas import (
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import embedding_input
+from ai_agent.kb.otsl import render_otsl
 from ai_agent.kb.parsing import supported, supported_label
 from ai_agent.kb.pipeline import kb_pipeline
 from ai_agent.kb.retrieval import preview_search
@@ -383,7 +384,9 @@ def list_chunks(
         raise HTTPException(status_code=404, detail="文件不存在")
     chunks, total = store.list_kb_chunks(fid, limit=limit, offset=offset)
     # 顺带给最大页码：前端「跳页」控件要显示「共 N 页」，否则得再发一次请求
-    return {"chunks": chunks, "total": total, "page_count": store.kb_chunk_page_count(fid)}
+    # OTSL 标记只在展示时换成表格，库里的原文不动
+    shown = [{**dict(chunk), "text": render_otsl(chunk["text"] or "")} for chunk in chunks]
+    return {"chunks": shown, "total": total, "page_count": store.kb_chunk_page_count(fid)}
 
 
 @router.get("/files/{file_id}/chunks/locate")

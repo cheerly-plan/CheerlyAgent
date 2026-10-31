@@ -112,6 +112,14 @@ VISION_PROMPT = """这是一份文档里的图表或图片。请用中文输出�
 要求：只写图上确实存在的信息；看不清的数值写「无法精确读取」，不要推测、
 不要补全缺失数据。总长度不超过 300 字。"""
 
+# Xiaomi-OCR-0 整页文档抽取。0.8B 模型按这句英文训练，换成中文图表摘要它不会跟。
+OCR_DOCUMENT_PROMPT = (
+    "Extract all information from the main body of the document image and represent it "
+    "in markdown format, ignoring headers and footers. Tables should be expressed in OTSL "
+    "format, formulas in the document should be represented using LATEX format, and the "
+    "parsing should be organized according to the reading order."
+)
+
 # ——— 文档配置块的渲染文案（render_config 用） ———
 #
 # 写成自然语言而不是 JSON：模型对「文档类型：IPO 招股意向书 / 重点实体范围：…」

@@ -27,6 +27,7 @@ from ai_agent.kb.meta import ENTITY_SUFFIX as _ENTITY_SUFFIX
 from ai_agent.kb.meta import EXT_RE as _EXT_RE
 from ai_agent.kb.meta import FILENAME_NOISE as _FILENAME_NOISE
 from ai_agent.kb.meta import NAME_PUNCT as _NAME_PUNCT
+from ai_agent.kb.otsl import render_otsl
 from ai_agent.kb.parsing import FIGURE, TABLE
 from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.memory.embeddings import embed_query
@@ -580,7 +581,7 @@ def _to_hit(row: dict) -> Hit:
         seq=int(row["seq"]),
         page=row.get("page"),
         kind=row.get("kind") or "text",
-        text=row.get("text") or "",
+        text=render_otsl(row.get("text") or ""),
         distance=_vector_distance(row),
         page_end=row.get("page_end"),
         section=row.get("section"),
@@ -615,10 +616,10 @@ def _attach_neighbors(hits: list[Hit]) -> list[Hit]:
         for delta in range(1, radius + 1):
             prev = grouped.get((hit.file_id, hit.seq - delta))
             if prev:
-                before.append((hit.seq - delta, prev[0]["text"]))
+                before.append((hit.seq - delta, render_otsl(prev[0]["text"])))
             nxt = grouped.get((hit.file_id, hit.seq + delta))
             if nxt:
-                after.append((hit.seq + delta, nxt[0]["text"]))
+                after.append((hit.seq + delta, render_otsl(nxt[0]["text"])))
         hit.before = [text for _, text in sorted(before)]
         hit.after = [text for _, text in sorted(after)]
     return hits
@@ -638,7 +639,7 @@ def _rerank(query: str, rows: list[dict], top_k: int) -> list[dict]:
     cached = _rerank_cache.get(cache_key)
     if cached is None:
         listing = "\n\n".join(
-            f"[{i + 1}] {row.get('filename') or ''} · {_where(row)}\n{_clip(row.get('text') or '')}"
+            f"[{i + 1}] {row.get('filename') or ''} · {_where(row)}\n{_clip(render_otsl(row.get('text') or ''))}"
             for i, row in enumerate(rows)
         )
         prompt = build_rerank_user(query, listing, min(top_k, len(rows)))

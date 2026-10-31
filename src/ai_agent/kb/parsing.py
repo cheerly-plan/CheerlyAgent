@@ -81,6 +81,14 @@ def parse_segments(path: Path) -> list[Segment]:
 
 
 def _parse_pdf(path: Path) -> list[Segment]:
+    # 开启整页 OCR 时，文字层和图表视觉都不再跑：页图已经含正文和图表。
+    # 一页都没识别出来（模型没拉、熔断）则退回下面的文字层，避免上传直接失败。
+    from ai_agent.kb.ocr import ocr_pdf
+
+    ocr_segments = ocr_pdf(path)
+    if ocr_segments:
+        return ocr_segments
+
     segments, text_lens = _pdf_text(path)
     if not segments:
         # pymupdf 不可用 / 无文本层：退回整页抽取（无章节、无页眉剔除），

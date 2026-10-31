@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
 from ai_agent.kb.citations import Citation, add_citations
+from ai_agent.kb.otsl import render_otsl
 from ai_agent.kb.retrieval import format_where
 from ai_agent.kb.scope import effective_kb_query, resolve_tool_file_ids
 from ai_agent.memory.embeddings import embed_query
@@ -133,7 +134,8 @@ def _kg_search(
         lines.append("原文依据：")
         for item in evidence:
             lines.append(
-                f"[{item['filename']} · {_evidence_where(item)}]\n{item['text']}"
+                f"[{item['filename']} · {_evidence_where(item)}]\n"
+                f"{render_otsl(item.get('text') or '')}"
             )
     # 引用旁路：图谱证据同样可以在前端点开核对（与 kb_search 同一套机制）
     add_citations(_citations_of(evidence))
@@ -247,7 +249,7 @@ def _citations_of(evidence: list[dict]) -> list[Citation]:
                     filename=filename,
                     mime=item.get("mime") or "",
                 ),
-                text=item.get("text") or "",
+                text=render_otsl(item.get("text") or ""),
                 page_end=page_end,
                 section=item.get("section"),
             )

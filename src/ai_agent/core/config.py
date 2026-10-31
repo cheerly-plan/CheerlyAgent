@@ -121,6 +121,20 @@ class Settings(BaseSettings):
     # 位图占页面面积的比例下限：页眉 logo、装饰线、水印都远小于该值
     kb_vision_min_image_ratio: float = 0.06
 
+    # 整页 OCR（Xiaomi-OCR-0 的 page 模式）：PDF 逐页渲染成图，用官方
+    # 文档抽取提示词交给视觉模型。模型名为空则关闭，PDF 仍走文字层。
+    # 官方 MCP 只接受 127.0.0.1，这里直接打 BASE_URL，局域网 Ollama 也能用。
+    kb_ocr_model: str = ""
+    # 0 = 不截断页数。整页识别按页计时，长文档先设一个上限再放开。
+    kb_ocr_max_pages: int = 0
+    kb_ocr_dpi: int = 150
+    # 长边像素上限，对齐官方 fit_image（超过会降采样，避免视觉 token 爆上下文）
+    kb_ocr_max_edge: int = 2048
+    kb_ocr_concurrency: int = 2
+    kb_ocr_max_tokens: int = 4096
+    kb_ocr_timeout_seconds: float = 180.0
+    kb_ocr_max_failures: int = 2
+
     # 知识图谱（P2）：切片入库后异步抽取实体关系（每批 = 一次 LLM 调用）。
     # 默认开启；关闭后新上传的文件不再生成图谱，已有图谱保留、仍可检索。
     # 抽取失败只影响图谱（graph_status=failed），文件本身仍是 ready、照常检索。
