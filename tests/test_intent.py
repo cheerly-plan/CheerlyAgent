@@ -1,51 +1,17 @@
 """意图识别模块的测试。
 
-覆盖：标签解析、关键词兜底、模型主路径（含同义词）、模型失败/失效退回兜底、
-路由提示文案、以及与 loop._system_prompt 的集成。
+覆盖：关键词判定、开关关闭退回 None、路由提示文案、与 loop._system_prompt 的集成。
+（此前的小模型分类主路径已移除——天气/闲聊用确定性关键词识别，不发起任何 LLM 调用。）
 """
-
-import pytest
 
 from ai_agent.agents import loop as loop_mod
 from ai_agent.agents.intent import (
     Intent,
     _keyword_fallback,
-    _parse_label,
     classify_intent,
     intent_hint,
 )
 from ai_agent.core.config import settings
-
-
-# ——— _parse_label ———
-
-
-def test_parse_label_exact_value():
-    assert _parse_label("kb_fact") is Intent.KB_FACT
-    assert _parse_label("kg_relation") is Intent.KG_RELATION
-    assert _parse_label("web") is Intent.WEB
-    assert _parse_label("weather") is Intent.WEATHER
-    assert _parse_label("chitchat") is Intent.CHITCHAT
-    assert _parse_label("general") is Intent.GENERAL
-
-
-def test_parse_label_tolerates_noise():
-    assert _parse_label("意图：weather") is Intent.WEATHER
-    assert _parse_label("WEB\n") is Intent.WEB
-    assert _parse_label("Kb_Fact") is Intent.KB_FACT  # 大小写不敏感
-
-
-def test_parse_label_chinese_synonym():
-    assert _parse_label("查下今天的天气") is Intent.WEATHER
-    assert _parse_label("帮我看看上下游产业链") is Intent.KG_RELATION
-    assert _parse_label("最新新闻有哪些") is Intent.WEB
-    assert _parse_label("随便聊聊") is Intent.CHITCHAT
-
-
-def test_parse_label_garbage_returns_none():
-    assert _parse_label("") is None
-    assert _parse_label(None) is None
-    assert _parse_label("这是一段无关的回答文本，没有任何标签") is None
 
 
 # ——— _keyword_fallback ———
@@ -74,44 +40,23 @@ def test_classify_disabled_returns_none(monkeypatch):
     assert classify_intent("今天天气怎么样") is None
 
 
-def test_classify_model_path(monkeypatch):
+def test_classify_weather_keyword(monkeypatch):
     monkeypatch.setattr(settings, "intent_enabled", True)
-
-    def fake(messages, **kwargs):
-        return "weather"
-
-    monkeypatch.setattr("ai_agent.agents.intent.complete_chat", fake)
     assert classify_intent("深圳今天气温多少") is Intent.WEATHER
-
-    def fake2(messages, **kwargs):
-        return "kg_relation"
-
-    monkeypatch.setattr("ai_agent.agents.intent.complete_chat", fake2)
-    assert classify_intent("它和哪些公司有关") is Intent.KG_RELATION
-
-
-def test_classify_model_raises_falls_back_to_keyword(monkeypatch):
-    monkeypatch.setattr(settings, "intent_enabled", True)
-
-    def boom(messages, **kwargs):
-        raise RuntimeError("gateway down")
-
-    monkeypatch.setattr("ai_agent.agents.intent.complete_chat", boom)
-    # 含天气关键词 → 兜底命中
     assert classify_intent("明天会下雨吗") is Intent.WEATHER
-    # 无关键词 → 兜底 GENERAL，绝不抛异常
-    assert classify_intent("解释一下 TCP 握手") is Intent.GENERAL
 
 
-def test_classify_model_junk_falls_back(monkeypatch):
+def test_classify_chitchat_keyword(monkeypatch):
     monkeypatch.setattr(settings, "intent_enabled", True)
+    assert classify_intent("你好，在吗") is Intent.CHITCHAT
+    assert classify_intent("谢谢你") is Intent.CHITCHAT
 
-    def fake(messages, **kwargs):
-        return "模型跑题了，给了无关文本"
 
-    monkeypatch.setattr("ai_agent.agents.intent.complete_chat", fake)
-    # 解析不出标签 → 关键词兜底：这句含天气词则命中
-    assert classify_intent("今天天气真好") is Intent.WEATHER
+def test_classify_general_no_llm_call(monkeypatch):
+    # 纯关键词判定，绝不发起 LLM 调用；无关键词命中即退回 GENERAL。
+    # 此处不打 complete_chat 的桩——若实现误发起调用会直接报错暴露回归。
+    monkeypatch.setattr(settings, "intent_enabled", True)
+    assert classify_intent("解释一下 TCP 握手") is Intent.GENERAL
     assert classify_intent("讲讲量子计算") is Intent.GENERAL
 
 
@@ -126,8 +71,8 @@ def test_intent_hint_offtopic_nonempty():
 
 
 def test_intent_hint_others_empty():
-    for intent in (Intent.KB_FACT, Intent.KG_RELATION, Intent.WEB, Intent.GENERAL):
-        assert intent_hint(intent) == ""
+    # 仅天气/闲聊给强提示，其余（含 None）空串，不干扰主模型自由裁量
+    assert intent_hint(Intent.GENERAL) == ""
     assert intent_hint(None) == ""
 
 
@@ -140,8 +85,9 @@ def test_system_prompt_includes_hint_for_offtopic():
     assert "天气" in prompt
 
 
-def test_system_prompt_no_hint_for_kb_intent():
-    prompt = loop_mod._system_prompt("u", use_kb=True, intent=Intent.KB_FACT)
+def test_system_prompt_no_hint_for_general():
+    # 非天气/闲聊意图不追加"别查知识库"提示，保留主模型自由裁量
+    prompt = loop_mod._system_prompt("u", use_kb=True, intent=Intent.GENERAL)
     assert "【意图提示】" not in prompt
 
 
