@@ -264,6 +264,18 @@ class Settings(BaseSettings):
     # 链路 400。先在支持 JSON 模式的网关上实测后再打开。
     memory_extract_json_mode: str = "off"
 
+    # 意图识别（对话路由）：每轮用一次小模型把用户问题分成 6 类，给主模型一个
+    # 显式的路由提示——尤其「天气/闲聊」这类与知识库无关的问题，明确别去调
+    # kb_search/kg_search。替代早年散落在 rewrite/retrieval 里的关键词/正则启发式：
+    # 模型判定 + 关键词兜底，任一失败都退回关键词，绝不挡住回答。
+    # 默认开启；关掉即退回「主模型自行决定」（迁移前的行为），且不产生任何额外调用。
+    intent_enabled: bool = True
+    # 空 = 用 small_model（或回落主模型）。分类是极短任务，不需要大模型
+    intent_model: str = ""
+    intent_temperature: float = 0.0
+    # 分类提示词很短、只回一个词，2 秒足够；超时即退回关键词兜底
+    intent_timeout_seconds: float = 2.0
+
     def resolve_llm(self, business_model: str = "") -> str:
         return business_model or self.small_model or self.model
 
