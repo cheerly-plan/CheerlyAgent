@@ -204,20 +204,6 @@ class Settings(BaseSettings):
     # 实体，猜错代价大——正是最需要硬约束的地方，所以和记忆抽取一起试点。
     # 默认 off，理由同上：先实测网关支持度。
     kb_align_json_mode: str = "off"
-    # 对话改写：多轮对话里，当前这句省略了主体/语境（上轮在问「中国能源
-    # 建设」、这轮问「股东持股情况」），结合上一轮对话把这句改写/扩写成
-    # 自包含的检索词。改写结果写入本轮目录消息，模型若仍用用户原话调工具
-    # 则服务端自动换成改写词。第一问无上文时跳过；失败/超时退回原话。
-    kb_rewrite_enabled: bool = True
-    # 空 = 用 small_model（或回落主模型）。改写是短任务，不需要大模型
-    kb_rewrite_model: str = ""
-    # 改写是「同一句话补主体」，不该每次补出不同措辞：不同措辞会引出不同的
-    # 召回集合，让「重排坏了」和「改写抖了」分不清
-    kb_rewrite_temperature: float = 0.0
-    kb_rewrite_timeout_seconds: float = 6.0
-    # 改写喂给模型的最近几轮「完整对话（user 问句 + assistant 最终回答）」：
-    # 主体（公司名）可能出现在更早那轮、中间隔了无主体的追问，取 2 轮更稳。
-    kb_rewrite_history_turns: int = 2
     # 命中切片前后各带几段一起给模型：跨段落的答案常常被切片边界切断
     kb_neighbor_expand: int = 1
     # 混合检索：关键词直查 + 向量召回做 RRF 融合。向量对制度编号、
@@ -227,11 +213,6 @@ class Settings(BaseSettings):
     kb_hybrid_keywords: int = 6
     # 关键词路的召回条数：与向量路同量级，融合后一起去重/重排
     kb_hybrid_candidates: int = 12
-    # 标签预过滤：查询关键词命中文件标签时先收窄到这批文件再检索，
-    # 少了别的文件的干扰项（如 FAQ），重排输入更干净。
-    # 代价是可能判窄，所以调用方必须带弱召回兜底（见 tools/kb_search）。
-    # 提取关键词用的是已有逻辑，没有新增 LLM 调用
-    kb_tag_scope_enabled: bool = True
 
     database_url: str
     embedding_model: str

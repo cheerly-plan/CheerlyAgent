@@ -70,7 +70,7 @@ def format_neighborhood(
 
 class KgSearchArgs(BaseModel):
     query: str = Field(..., description=KG_SEARCH_QUERY_DESC)
-    files: list[str] | None = Field(default=None, description=KB_FILES_DESC)
+    files: list[str] = Field(..., description=KB_FILES_DESC)
     depth: int = Field(default=1, ge=1, le=2, description=KG_SEARCH_DEPTH_DESC)
     top_k: int = Field(default=5, ge=1, le=10, description=KG_SEARCH_TOPK_DESC)
 

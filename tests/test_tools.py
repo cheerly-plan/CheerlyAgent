@@ -1,8 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from ai_agent.tools.registry import execute_tool, tool_schemas
 from ai_agent.tools import weather as wt
+from ai_agent.tools.kb_search import KbSearchArgs
+from ai_agent.tools.kg_search import KgSearchArgs
 
 
 def _fake_geocode(name="北京"):
@@ -140,3 +144,27 @@ def test_search_memory_uses_episode_store():
         result = execute_tool("search_memory", {"query": "登录"})
     assert "上周修过登录" in result
     search.assert_called_once_with("登录")
+
+
+# ——— kb_search / kg_search 的 files 必填（去掉隐式预检索后由模型显式圈定）———
+
+
+def test_kb_search_requires_files():
+    # files 必填：缺省应直接被 schema 拦下，不再由系统偷偷按查询猜文件范围
+    with pytest.raises(Exception):
+        KbSearchArgs(query="中国能建三季报怎么样")
+    args = KbSearchArgs(query="中国能建三季报怎么样", files=["中国能建三季报.pdf"])
+    assert args.files == ["中国能建三季报.pdf"]
+
+
+def test_kg_search_requires_files():
+    with pytest.raises(Exception):
+        KgSearchArgs(query="中国能建 关联方")
+    args = KgSearchArgs(query="中国能建 关联方", files=["中国能建三季报.pdf"])
+    assert args.files == ["中国能建三季报.pdf"]
+
+
+def test_execute_kb_search_missing_files():
+    # 与 test_execute_missing_city 同理：必填项缺失应走 ERROR 兜底，不静默搜全库
+    result = execute_tool("kb_search", {"query": "中国能建三季报怎么样"})
+    assert result.startswith("ERROR:")

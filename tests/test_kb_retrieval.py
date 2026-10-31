@@ -239,26 +239,6 @@ def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
     assert seen["file_ids"] is None
 
 
-def test_kb_search_uses_rewritten_query_when_model_echoes_user(monkeypatch):
-    from ai_agent.kb.scope import reset_kb_query_hint, set_kb_query_hint
-    from ai_agent.tools import kb_search as kb_tool
-
-    queries: list[str] = []
-
-    def fake_search(query, *, file_ids=None, top_k=3):
-        queries.append(query)
-        return []
-
-    monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", fake_search)
-    token = set_kb_query_hint("股东持股情况", "中国能建 股东持股情况")
-    try:
-        kb_tool._kb_search("股东持股情况")
-        kb_tool._kb_search("前十大股东持股比例")
-    finally:
-        reset_kb_query_hint(token)
-
-    assert queries == ["中国能建 股东持股情况", "前十大股东持股比例"]
 
 
 def test_kb_search_schema_exposes_files_not_ids():

@@ -97,7 +97,7 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 | 目录 | 职责 |
 |---|---|
 | `api/` | FastAPI 应用、中间件（request_id / 鉴权 / 限流）、路由、请求响应模型 |
-| `agents/` | Agent 主循环与周边：`loop.py` 主流程、`rewrite.py` 查询改写、`messages.py` 上下文裁剪与断点缝合、`turn.py` 持久化与收尾、`prompts.py`、`budget.py` |
+| `agents/` | Agent 主循环与周边：`loop.py` 主流程、`messages.py` 上下文裁剪与断点缝合、`turn.py` 持久化与收尾、`intent.py` 意图路由（关键词兜底）、`budget.py` |
 | `llm/` | OpenAI 兼容客户端，流式输出与超时控制 |
 | `tools/` | 工具定义与注册：`kb_search`、`kg_search`、`memory_search`、`memory_write`、`web_search`、`weather` |
 | `kb/` | 知识库：解析、切片、嵌入、检索、图谱、引用溯源、视觉识别 |

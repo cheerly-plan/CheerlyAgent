@@ -171,21 +171,12 @@ def search_knowledge(
 ) -> list[Hit]:
     """知识库检索主入口。检索词向量化失败会抛异常，由调用方转成友好文案。
 
-    `file_ids` 为空时先按查询推断候选文件范围（标签、文件名主体），再把
-    收窄结果用全库结果补位。收窄是"猜"出来的，可能判窄，所以绝不能拿
-    召回率换精度——见 `_pad_from_full`。
-
-    范围推导放在这一层而不是工具层：模型不传 files 时，kb_search / kg_search
-    都走这里；放在工具层等于主路径白丢一次提纯候选的机会。
+    `file_ids` 为空表示搜全库——检索范围完全由调用方决定（工具层传入模型
+    指定的 files，或会话级 kb_scope），本层不再根据查询内容自动推断文件范围。
+    这样文件范围由模型/用户显式圈定，检索行为透明、可解释，不会出现「系统
+    替你选了哪几份」的隐式预检索；范围为空时退化为搜全库，安全但不偷偷猜。
     """
     embedding = embed_query(query)
-    if file_ids is None:
-        scope_ids = _derive_scope(query)
-        if scope_ids:
-            hits = _core_search(query, embedding, file_ids=scope_ids, top_k=top_k)
-            if len(hits) >= top_k:
-                return hits
-            return _pad_from_full(query, embedding, hits, top_k)
     return _core_search(query, embedding, file_ids=file_ids, top_k=top_k)
 
 
@@ -204,34 +195,6 @@ def preview_search(
     hits = _core_search(query, embedding, file_ids=file_ids, top_k=top_k)
     limit = settings.kb_search_max_distance
     return [hit for hit in hits if hit.distance is None or hit.distance <= limit]
-
-
-def _derive_scope(query: str) -> list[uuid.UUID] | None:
-    """范围推导失败不该拖垮检索，退化为全库。"""
-    try:
-        return tag_file_scope(query)
-    except Exception:
-        logger.warning("kb 范围推导失败，走全库检索", exc_info=True)
-        return None
-
-
-def _pad_from_full(
-    query: str,
-    embedding: list[float],
-    hits: list[Hit],
-    top_k: int,
-) -> list[Hit]:
-    """收窄后召回不足 top_k：用全库结果补位，收窄结果仍排前面。
-
-    只多花一次候选查询（embedding 已算好，不重复向量化），换的是
-    "标签判窄也不会漏召回"。
-    """
-    seen = {(hit.file_id, hit.seq) for hit in hits}
-    for extra in _core_search(query, embedding, file_ids=None, top_k=top_k):
-        if (extra.file_id, extra.seq) not in seen:
-            hits.append(extra)
-            seen.add((extra.file_id, extra.seq))
-    return hits[:top_k]
 
 
 def _core_search(
@@ -369,60 +332,6 @@ def _filename_hint_matches(hint: str, filename: str) -> bool:
         ):
             return True
     return _query_mentions(hint, _file_subject(filename))
-
-
-def tag_file_scope(query: str) -> list[uuid.UUID] | None:
-    """按查询关键词推导一个候选文件范围。
-
-    「先圈定范围再搜」的廉价实现：复用关键词提取（jieba + 编号 token，
-    没有新增 LLM 调用），命中来源有两处——
-    1. 文件标签：关键词与标签互为子串即算命中（"考勤" 命中 "考勤制度"）；
-    2. 文件名主体：库里文件常常一个标签都没打，只认 tags 时这层收窄永远
-       返回 None，等于白写；文件名是必然存在的信号，拿来兜底。
-
-    返回 None 表示不值得收窄：没提取到关键词、或全员命中（没有区分度）。
-    调用方必须自带弱召回兜底——标签判窄了不能变成漏召回。
-    """
-    if not settings.kb_tag_scope_enabled:
-        return None
-    keywords = _extract_keywords(query)
-    if not keywords:
-        return None
-    try:
-        files = store.list_kb_files()
-    except Exception:
-        logger.warning("kb 标签范围推导拿文件列表失败，跳过预过滤", exc_info=True)
-        return None
-    # 只有 ready 的文件才有切片可检索
-    candidates = [f for f in files if f.get("status") == "ready"]
-    return _tag_scope_ids(keywords, candidates, query)
-
-
-def _tag_scope_ids(
-    keywords: list[str], files: list[dict], query: str = ""
-) -> list[uuid.UUID] | None:
-    """纯函数：关键词 × (标签 | 文件名主体) 匹配，命中部分文件才收窄。
-
-    主体匹配用 query 原文而不是 keywords：jieba 会把「中国能建前三季度」
-    切成「能建前」，主体名被切碎后再去对文件名，一个字都对不上。
-    """
-    probe = query or " ".join(keywords)
-    matched: list[uuid.UUID] = []
-    for item in files:
-        tags = [str(t).strip().lower() for t in (item.get("tags") or []) if str(t).strip()]
-        hit = any(
-            kwl in tag or tag in kwl
-            for kwl in (k.lower() for k in keywords)
-            for tag in tags
-        )
-        if not hit:
-            subject = _file_subject(item.get("filename") or "")
-            hit = _query_mentions(probe, subject)
-        if hit:
-            matched.append(item["file_id"])
-    if not matched or len(matched) == len(files):
-        return None
-    return matched
 
 
 def _file_subject(filename: str) -> str:

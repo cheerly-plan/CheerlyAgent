@@ -232,9 +232,8 @@ def test_run_stream_appends_new_messages_only():
     assert appended[1] == ["user", "assistant"]
 
 
-def test_run_stream_followup_persists_user(monkeypatch):
+def test_run_stream_followup_persists_user():
     """追问落库必须以本轮 user 问句为起点，刷新会话不会丢记录。"""
-    monkeypatch.setattr("ai_agent.agents.loop._rewrite_query", lambda q, prev: q)
     appended: list[list[dict]] = []
 
     def fake_append(user_id, chat_session_id, messages):
@@ -1392,8 +1391,9 @@ def test_run_loop_dedupes_call_with_default_args_omitted():
             yield ("result", {"content": "答", "tool_calls": []})
         else:
             # 第二轮补上 top_k=5（schema 默认值），语义与第一轮完全相同
-            args = {"query": "硝酸铵"} if tool_rounds == 0 else {
+            args = {"query": "硝酸铵", "files": ["硝酸铵相关.pdf"]} if tool_rounds == 0 else {
                 "query": "硝酸铵",
+                "files": ["硝酸铵相关.pdf"],
                 "top_k": 5,
             }
             yield (

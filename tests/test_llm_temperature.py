@@ -1,20 +1,19 @@
 """温度参数的下传链路。
 
 背景：`complete_chat` 早期不传 temperature，走服务端默认（OpenAI 系 1.0）。
-结构化任务（图谱抽取 / 实体对齐 / 重排 / 改写）在 1.0 下的症状是
+结构化任务（图谱抽取 / 实体对齐 / 重排）在 1.0 下的症状是
 「同一批输入两次跑出不同结果」——实体数差 ±20、JSON 偶发裸词坏输出、
 评测失败集合每次换一批。修法不是靠重试补救，而是把这几个任务钉在 0 温。
 
 这些用例盯两件事：
 1. `complete_chat` 只在显式传值时下发 `temperature`（主对话不受影响）；
-2. 四个结构化调用点确实把 settings 里的值传下去了——参数漏传是最容易
+2. 三个结构化调用点确实把 settings 里的值传下去了——参数漏传是最容易
    复发的一类改动，且线上完全看不出来（只是"结果又抖了"）。
 """
 
 import json
 from types import SimpleNamespace
 
-from ai_agent.agents import loop, rewrite
 from ai_agent.core.config import settings
 from ai_agent.kb import align, graph, graph_extract, retrieval
 from ai_agent.kb.chunking import Chunk
@@ -125,16 +124,3 @@ def test_rerank_forwards_temperature(monkeypatch):
     monkeypatch.setattr(settings, "kb_rerank_temperature", 0.1)
     retrieval.complete_chat_once("把下面几条排序")
     assert seen["temperature"] == 0.1
-
-
-def test_rewrite_forwards_temperature(monkeypatch):
-    seen: dict = {}
-
-    def fake(messages, **kwargs):
-        seen.update(kwargs)
-        return "中国能建 2026 年三季度营业收入"
-
-    monkeypatch.setattr(rewrite, "complete_chat", fake)
-    monkeypatch.setattr(settings, "kb_rewrite_temperature", 0.2)
-    loop._rewrite_query("它的营业收入呢", ["中国能建三季报怎么样"])
-    assert seen["temperature"] == 0.2

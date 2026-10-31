@@ -16,9 +16,7 @@ from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import collect_citations, merge_sources
 from ai_agent.kb.scope import (
-    reset_kb_query_hint,
     reset_kb_scope,
-    set_kb_query_hint,
     set_kb_scope,
 )
 from ai_agent.llm.client import stream_chat
@@ -39,10 +37,8 @@ from ai_agent.agents.messages import (
     _keep_prefill_tail,
     _output_digest,
     _pop_incomplete_assistant,
-    _previous_turns,
     _stash_partial_assistant,
 )
-from ai_agent.agents.rewrite import _rewrite_query
 from ai_agent.agents.turn import (
     _capture_turn,
     _checkpoint_create,
@@ -53,10 +49,6 @@ from ai_agent.agents.turn import (
     _replace_last_turn,
     _session_state,
 )
-
-logger = get_logger(__name__)
-
-
 
 logger = get_logger(__name__)
 
@@ -99,7 +91,41 @@ def _profile_prompt(user_id: str) -> str:
     return format_profile_block(items)
 
 
-def _system_prompt(user_id: str, *, use_kb: bool = True, intent=None) -> str:
+def _kb_files_block(kb_file_ids: tuple[str, ...] = ()) -> str:
+    """拼接知识库可用文件清单，注入系统提示词供模型显式圈定检索范围。
+
+    会话已限定文件范围（kb_file_ids）时只列这些；否则列全部就绪文件。
+    读库失败不影响对话——返回空串，files 必填仍由工具 schema 兜底。
+    """
+    try:
+        rows = store.list_kb_files()
+    except Exception:
+        logger.exception("知识库文件清单读取失败")
+        return ""
+    ready = [r for r in rows if r.get("status") == "ready"]
+    if kb_file_ids:
+        want = {str(f) for f in kb_file_ids}
+        ready = [r for r in ready if str(r.get("file_id")) in want]
+    if not ready:
+        return ""
+    lines = [
+        "【知识库可用文件】（调用 kb_search / kg_search 前必须先用 files "
+        "指定要查的文档，不可省略）"
+    ]
+    for r in ready:
+        name = str(r.get("filename") or "(未命名)").strip()
+        desc = str(r.get("description") or "").strip()
+        line = f"- {name}"
+        if desc:
+            line += f"：{desc}"
+        lines.append(line)
+    lines.append(f"（共 {len(ready)} 份已就绪）")
+    return "\n".join(lines)
+
+
+def _system_prompt(
+    user_id: str, *, use_kb: bool = True, intent=None, kb_file_ids: tuple[str, ...] = ()
+) -> str:
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
@@ -108,10 +134,14 @@ def _system_prompt(user_id: str, *, use_kb: bool = True, intent=None) -> str:
     # intent 为 None（未启用/无法判定）时不追加，退回主模型自由裁量。
     hint = intent_hint(intent) if (use_kb and intent) else ""
     core = f"{base}\n\n{hint}" if hint else base
+    # 知识库可用文件清单：直接注入系统提示词，让模型对照着用 files 参数
+    # 显式圈定要查的文档（必填），不再由系统偷偷按查询猜文件范围。
     block = _profile_prompt(user_id)
-    if not block:
+    files_block = _kb_files_block(kb_file_ids) if use_kb else ""
+    tail = "\n\n".join(p for p in (block, files_block) if p)
+    if not tail:
         return core
-    return f"{core}\n\n{block}"
+    return f"{core}\n\n{tail}"
 
 
 def run_stream(
@@ -191,13 +221,13 @@ def run_stream(
             user_input = str(recent[-1].get("content") or "")
             intent = classify_intent(user_input)
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, intent=intent), summary, recent
+                _system_prompt(user_id, use_kb=use_kb, intent=intent, kb_file_ids=kb_file_ids), summary, recent
             )
             persisted = len(messages)
         else:
             intent = classify_intent(user_input)
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, intent=intent), summary, recent
+                _system_prompt(user_id, use_kb=use_kb, intent=intent, kb_file_ids=kb_file_ids), summary, recent
             )
             persisted = len(messages)
             turn_anchor = {"role": "user", "content": user_input}
@@ -316,16 +346,6 @@ def run_loop(
     # 已经走到头了（图谱永远返回同一个中心实体、向量库永远空结果）。
     # 只在下次重复时追加一句系统提示，不阻断调用
     seen_outputs: dict[tuple[str, str], int] = {}
-    # 目录 + 改写：只在新一轮提问的入口做（最后一条是 user）。断点续跑
-    # 中断在工具轮时，目录已在 checkpoint 快照里，最后一条是 assistant/tool，
-    # 不会重复注入。改写词留给后面工具执行时替换「原话 query」。
-    original_query = ""
-    rewritten_query = ""
-    if use_kb and messages and messages[-1].get("role") == "user":
-        original_query = str(messages[-1].get("content") or "").strip()
-        rewritten_query = _rewrite_query(
-            original_query, _previous_turns(messages)
-        )
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
@@ -464,13 +484,11 @@ def run_loop(
             # 范围必须在工具执行这一层同栈设置：run_stream 的生成器会被
             # 不同线程轮流 next() 推进，外层设的 contextvar 传不进来
             scope_token = set_kb_scope(kb_file_ids)
-            hint_token = set_kb_query_hint(original_query, rewritten_query)
             try:
                 with collect_citations() as cited:
                     with user_scope(user_id):
                         output = execute_tool(call["name"], call["arguments"])
             finally:
-                reset_kb_query_hint(hint_token)
                 reset_kb_scope(scope_token)
             turn_sources = merge_sources(turn_sources, cited)
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，

@@ -319,47 +319,7 @@ def test_kg_search_reports_empty_graph(monkeypatch):
     assert "知识图谱还没有数据" in kg_search._kg_search("任何问题")
 
 
-# ---------- 标签预过滤 ----------
-
-
-def _kb_file(fid, tags, status="ready", filename=""):
-    return {"file_id": fid, "tags": tags, "status": status, "filename": filename}
-
-
-def test_tag_scope_narrows_to_tagged_match():
-    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    files = [_kb_file(a, ["考勤制度"]), _kb_file(b, ["FAQ"]), _kb_file(c, ["薪酬"])]
-    assert retrieval._tag_scope_ids(["考勤"], files) == [a]
-
-
-def test_tag_scope_falls_back_to_filename_when_tags_empty():
-    """文件一个标签都没打时，靠文件名主体收窄——否则这层逻辑永远不生效。"""
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [
-        _kb_file(a, [], filename="顺丰控股股份有限公司2026 年第三季度报告"),
-        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
-    ]
-    assert retrieval._tag_scope_ids(["顺丰控股"], files) == [a]
-
-
-def test_tag_scope_matches_abbreviated_subject():
-    """简称与全称差字，子串对不上，靠二元组重合判定同一主体。"""
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [
-        _kb_file(a, [], filename="中国能源建设股份有限公司2026 年第三季度报告"),
-        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
-    ]
-    assert retrieval._tag_scope_ids(["中国能建"], files) == [a]
-
-
-def test_tag_scope_ignores_unrelated_subject():
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [
-        _kb_file(a, [], filename="顺丰控股股份有限公司2026 年第三季度报告"),
-        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
-    ]
-    # 库外的主体不该把范围收到任何一份文件上
-    assert retrieval._tag_scope_ids(["宁德时代"], files) is None
+# ---------- 文件名解析与范围定位（files 必填前的文件名→id 解析） ----------
 
 
 def test_file_subject_strips_year_and_report_type():
@@ -484,24 +444,6 @@ def test_fuse_falls_back_to_vector_when_all_keywords_are_ubiquitous(monkeypatch)
     assert retrieval._fuse_with_keywords("营收多少", rows, None) is rows
 
 
-def test_tag_scope_none_when_no_discrimination():
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [_kb_file(a, ["考勤"]), _kb_file(b, ["考勤制度"])]
-    assert retrieval._tag_scope_ids(["考勤"], files) is None  # 全员命中
-    assert retrieval._tag_scope_ids(["报销"], files) is None  # 全员未命中
-
-
-def test_tag_scope_matches_bidirectional_substring_case_insensitive():
-    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    files = [_kb_file(a, ["OT-01 考勤"]), _kb_file(b, ["薪酬"]), _kb_file(c, ["FAQ"])]
-    assert retrieval._tag_scope_ids(["ot-01"], files) == [a]  # 大小写不敏感
-    # 方向一：关键词是标签的子串，"考勤" 命中复合标签 "OT-01 考勤"
-    assert retrieval._tag_scope_ids(["考勤"], files) == [a]
-    # 方向二：标签是关键词的子串，"考勤" 命中 "考勤处罚规定"
-    files2 = [_kb_file(a, ["考勤"]), _kb_file(b, ["薪酬"])]
-    assert retrieval._tag_scope_ids(["考勤处罚规定"], files2) == [a]
-
-
 def _hit(fid, seq):
     from ai_agent.kb.retrieval import Hit
 
@@ -511,54 +453,12 @@ def _hit(fid, seq):
     )
 
 
-def test_search_knowledge_narrows_then_pads_from_full(monkeypatch):
-    """收窄后召回不足 top_k：用全库补位，收窄结果仍排前面。"""
-    from ai_agent.kb import retrieval
-
-    scoped, other = uuid.uuid4(), uuid.uuid4()
-    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-    monkeypatch.setattr(retrieval, "tag_file_scope", lambda q: [scoped])
-
-    calls = []
-
-    def fake_core(query, embedding, *, file_ids, top_k):
-        calls.append(file_ids)
-        if file_ids:  # 收窄那一搜只有 1 条：弱召回
-            return [_hit(scoped, 0)]
-        return [_hit(scoped, 0), _hit(other, 1), _hit(other, 2)]
-
-    monkeypatch.setattr(retrieval, "_core_search", fake_core)
-    hits = retrieval.search_knowledge("考勤怎么算", top_k=3)
-    assert calls == [[scoped], None]  # 先收窄，兜底走全库
-    assert len(hits) == 3
-    assert (hits[0].file_id, hits[0].seq) == (str(scoped), 0)  # 收窄结果排前
-
-
-def test_search_knowledge_skips_scope_when_none(monkeypatch):
-    from ai_agent.kb import retrieval
-
-    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-    monkeypatch.setattr(retrieval, "tag_file_scope", lambda q: None)
-    calls = []
-
-    def fake_core(query, embedding, *, file_ids, top_k):
-        calls.append(file_ids)
-        return []
-
-    monkeypatch.setattr(retrieval, "_core_search", fake_core)
-    retrieval.search_knowledge("随便问", top_k=3)
-    assert calls == [None]  # 没有可用范围：只搜一次全库
-
-
-def test_search_knowledge_skips_scope_when_file_ids_given(monkeypatch):
-    """模型/前端已显式圈定文件时不该再猜范围。"""
+def test_search_knowledge_forwards_explicit_file_ids(monkeypatch):
+    """模型/前端已显式圈定文件时，file_ids 原样下传给 _core_search，不再猜范围。"""
     from ai_agent.kb import retrieval
 
     pinned = [uuid.uuid4()]
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-    monkeypatch.setattr(
-        retrieval, "tag_file_scope", lambda q: pytest.fail("显式范围下不该推导")
-    )
     calls = []
 
     def fake_core(query, embedding, *, file_ids, top_k):
@@ -570,16 +470,11 @@ def test_search_knowledge_skips_scope_when_file_ids_given(monkeypatch):
     assert calls == [pinned]
 
 
-def test_search_knowledge_survives_scope_failure(monkeypatch):
-    """范围推导抛异常时退回全库，不能把检索拖挂。"""
+def test_search_knowledge_defaults_to_whole_library(monkeypatch):
+    """不传 file_ids 时不再自动按查询猜范围，file_ids=None 透传给核心检索（搜全库）。"""
     from ai_agent.kb import retrieval
 
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-
-    def boom(q):
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(retrieval, "tag_file_scope", boom)
     calls = []
 
     def fake_core(query, embedding, *, file_ids, top_k):
@@ -587,8 +482,24 @@ def test_search_knowledge_survives_scope_failure(monkeypatch):
         return []
 
     monkeypatch.setattr(retrieval, "_core_search", fake_core)
-    retrieval.search_knowledge("考勤怎么算", top_k=3)
+    retrieval.search_knowledge("随便问", top_k=3)
     assert calls == [None]
+
+
+def test_search_knowledge_forwards_top_k(monkeypatch):
+    """top_k 透传给核心检索，圈定文件与全库共用同一参数。"""
+    from ai_agent.kb import retrieval
+
+    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
+    seen = {}
+
+    def fake_core(query, embedding, *, file_ids, top_k):
+        seen["top_k"] = top_k
+        return []
+
+    monkeypatch.setattr(retrieval, "_core_search", fake_core)
+    retrieval.search_knowledge("随便问", top_k=5)
+    assert seen["top_k"] == 5
 
 
 # ---------- 图谱抽取并行化 ----------

@@ -8,7 +8,7 @@
 - 小模型抽风误判，反而可能在 false-positive 时让主模型跳过本该查的库。
 
 知识库开关（use_kb）与意图完全解耦：本模块**永远不关闭检索工具**，只追加软提示，
-最终工具调用仍由主模型在 function calling 里决定。早期散落在 rewrite/retrieval 里的
+最终工具调用仍由主模型在 function calling 里决定。早期散落在 retrieval 里的
 关键词/正则启发式（_KB_OFFTOPIC / _KB_CHITCHAT，已在 bb47db6 删除）以关键词形式收编回来。
 """
 

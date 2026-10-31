@@ -33,7 +33,7 @@ _NEIGHBOR_CLIP = 200
 
 class KbSearchArgs(BaseModel):
     query: str = Field(..., description=KB_SEARCH_QUERY_DESC)
-    files: list[str] | None = Field(default=None, description=KB_FILES_DESC)
+    files: list[str] = Field(..., description=KB_FILES_DESC)
     top_k: int = Field(default=3, ge=1, le=10, description=KB_SEARCH_TOPK_DESC)
 
 
@@ -43,12 +43,12 @@ def _kb_search(
     if not store.has_ready_kb_file():
         return KB_EMPTY_HINT
 
+    # files 已由 schema 强制必填；解析不到且会话也未限定范围时 file_ids=None，
+    # search_knowledge 退化为搜全库（不再按查询自动猜文件范围）
     query = effective_kb_query(query)
     parsed_ids = resolve_tool_file_ids(files)
 
     try:
-        # 未指定文件时，search_knowledge 内部会按标签/文件名主体推断范围，
-        # 并用全库结果兜底（见 kb/retrieval.py）
         hits = search_knowledge(query, file_ids=parsed_ids, top_k=top_k)
     except Exception:
         logger.exception("知识库检索失败 query=%s", query[:80])

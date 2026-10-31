@@ -101,3 +101,69 @@ def test_system_prompt_no_hint_when_intent_none():
     # 未启用/无法判定：与重构前逐字一致（只差画像块，由 _profile_prompt 决定）
     prompt = loop_mod._system_prompt("u", use_kb=True, intent=None)
     assert "【意图提示】" not in prompt
+
+
+# ——— 知识库可用文件清单注入（去掉隐式预检索后，模型对照清单显式圈定 files）———
+
+
+def test_kb_files_block_injects_ready_files(monkeypatch):
+    """可用文件清单注入系统提示词，且只列 ready 状态的文件。"""
+    monkeypatch.setattr(
+        loop_mod.store,
+        "list_kb_files",
+        lambda **k: [
+            {
+                "file_id": "a",
+                "filename": "中国能建三季报.pdf",
+                "status": "ready",
+                "description": "能源基建",
+            },
+            {
+                "file_id": "b",
+                "filename": "安克创新三季报.pdf",
+                "status": "processing",
+                "description": "",
+            },
+        ],
+    )
+    block = loop_mod._kb_files_block()
+    assert "【知识库可用文件】" in block
+    assert "中国能建三季报.pdf" in block
+    assert "能源基建" in block
+    # 还在处理的文件不进清单
+    assert "安克创新三季报.pdf" not in block
+
+
+def test_kb_files_block_filters_to_session_scope(monkeypatch):
+    """会话限定文件范围时，清单只列那些文件。"""
+    monkeypatch.setattr(
+        loop_mod.store,
+        "list_kb_files",
+        lambda **k: [
+            {"file_id": "a", "filename": "A.pdf", "status": "ready", "description": ""},
+            {"file_id": "b", "filename": "B.pdf", "status": "ready", "description": ""},
+        ],
+    )
+    block = loop_mod._kb_files_block(("b",))
+    assert "B.pdf" in block
+    assert "A.pdf" not in block
+
+
+def test_kb_files_block_empty_when_no_ready(monkeypatch):
+    monkeypatch.setattr(loop_mod.store, "list_kb_files", lambda **k: [])
+    assert loop_mod._kb_files_block() == ""
+
+
+def test_system_prompt_includes_kb_files_block(monkeypatch):
+    """use_kb 时系统提示词注入可用文件清单；关闭知识库时不注入。"""
+    monkeypatch.setattr(
+        loop_mod.store,
+        "list_kb_files",
+        lambda **k: [
+            {"file_id": "a", "filename": "财报.pdf", "status": "ready", "description": ""}
+        ],
+    )
+    with_kb = loop_mod._system_prompt("u", use_kb=True)
+    assert "财报.pdf" in with_kb
+    without_kb = loop_mod._system_prompt("u", use_kb=False)
+    assert "财报.pdf" not in without_kb
