@@ -28,6 +28,8 @@
     uv run python scripts/eval_retrieval.py --dump     # 列出库内切片，便于编写用例
     uv run python scripts/eval_retrieval.py --top-k 10 # 调大观察窗口
     uv run python scripts/eval_retrieval.py --stability --rerank   # 同一 query 跑 N 次，量化同问稳定性
+    uv run python scripts/eval_retrieval.py --stability --rerank --no-cache   # 每次清缓存，逼出重排/嵌入真实抖动
+
 
 退出码：0 通过；1 hit@3 低于阈值（默认 0.85）；2 用例失效（语料已变）。
 """
@@ -229,11 +231,35 @@ def order_agreement(a: list[str], b: list[str]) -> float:
     return 1.0 - sum(diffs) / (max_diff * len(common))
 
 
-def evaluate_stability(cases: list[dict], top_k: int, rerank: bool, runs: int) -> int:
+def _clear_retrieval_caches() -> None:
+    """测真实抖动时，每次运行前清掉缓存，让 embedding / 重排都走冷调用。
+
+    否则进程内 lru_cache（embed_query）与 _rerank_cache 会在同进程重复运行
+    时掩盖 LLM / 向量底座的非确定输出，使分数恒为 1.0、测不出真实抖动。
+    """
+    from ai_agent.kb import retrieval
+    from ai_agent.memory.embeddings import _cached_query_vector
+
+    try:
+        retrieval._rerank_cache.clear()
+    except Exception:
+        pass
+    try:
+        _cached_query_vector.cache_clear()
+    except Exception:
+        pass
+
+
+def evaluate_stability(
+    cases: list[dict], top_k: int, rerank: bool, runs: int, no_cache: bool = False
+) -> int:
     """稳定性评测：同一 query 重复运行 runs 次，量化 top-k 结果是否一致。
 
     对应「同问每次结果不同」这一不稳定表现。关重排时纯 SQL 链路确定，
     分数应≈1.0；开 --rerank 后<1.0 即暴露重排/嵌入抖动的来源。
+
+    no_cache=True 时每次运行前清掉 embed / rerank 缓存，逼出真实冷调用抖动；
+    默认 False 则复现「同进程重复同问」的生产缓存表现——两者要分开看。
     """
     from ai_agent.kb import retrieval
 
@@ -253,6 +279,9 @@ def evaluate_stability(cases: list[dict], top_k: int, rerank: bool, runs: int) -
         runs_keys: list[list[str]] = []
         last_hits = None
         for _ in range(runs):
+            if no_cache:
+                # 每次走冷调用：embed / 重排都重新请求，暴露真实抖动
+                _clear_retrieval_caches()
             last_hits = retrieval.search_knowledge(case["query"], top_k=window)
             runs_keys.append([f"{h.filename}#{h.seq}" for h in last_hits])
         base = runs_keys[0]
@@ -275,7 +304,11 @@ def evaluate_stability(cases: list[dict], top_k: int, rerank: bool, runs: int) -
         f"平均稳定性(集合) {sset_sum / total:.3f} | 平均稳定性(顺序) "
         f"{sord_sum / total:.3f} | hit@3 {n3}/{total} ({n3 / total:.0%})"
     )
-    print("解读：关重排应≈1.0（纯SQL确定）；开 --rerank 后<1.0 即暴露重排/嵌入抖动")
+    if no_cache:
+        print("解读(--no-cache)：每次清缓存走冷调用，分数<1.0 即真实暴露重排/嵌入抖动")
+    else:
+        print("解读：关重排应≈1.0（纯SQL确定）；开 --rerank 后<1.0 即暴露重排/嵌入抖动。"
+              "注：未加 --no-cache 时同进程重复命中 _rerank 缓存，可能掩盖抖动")
     return 0
 
 
@@ -290,6 +323,11 @@ def main() -> int:
         "--stability",
         action="store_true",
         help="同一 query 重复运行度量 top-k 稳定性（配合 --rerank 暴露抖动）",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="--stability 下每次运行前清掉 embed/rerank 缓存，逼出真实冷调用抖动",
     )
     parser.add_argument("--runs", type=int, default=3, help="--stability 重复运行次数")
     args = parser.parse_args()
@@ -320,7 +358,7 @@ def main() -> int:
         return 0
 
     if args.stability:
-        return evaluate_stability(cases, args.top_k, args.rerank, args.runs)
+        return evaluate_stability(cases, args.top_k, args.rerank, args.runs, args.no_cache)
 
     return evaluate(cases, args.top_k, args.rerank)
 
