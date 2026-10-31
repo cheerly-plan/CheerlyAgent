@@ -283,6 +283,18 @@ def test_resolve_tool_file_ids_prefers_explicit_files(monkeypatch):
     assert scope.resolve_tool_file_ids(["中国能建"], query="营收") == [fid]
 
 
+def test_resolve_tool_file_ids_single_ready_file_not_treated_as_not_found(monkeypatch):
+    """回归：库里只有一份就绪文件、模型点名命中时，不应被误判为「文件不存在」。
+
+    原实现 `len(matched) == len(ready)` 在 ready==1 时把合法命中短路成 None，
+    上层再统一转成 []，导致 kb_search 返回「未找到」、检索被停。
+    """
+    fid = uuid.uuid4()
+    rows = [_file(fid, "中国银行2026年第三季度报告.pdf", subject="中国银行", aliases=["中行"])]
+    monkeypatch.setattr(memory_store.store, "list_kb_files", lambda **k: rows)
+    assert scope.resolve_tool_file_ids(["中国银行"]) == [fid]
+
+
 # ---------- 检索 SQL：文档层而不是片段层 ----------
 
 

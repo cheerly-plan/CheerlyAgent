@@ -371,9 +371,33 @@ def test_resolve_files_by_name_matches_abbreviation_and_full_name(monkeypatch):
         nengjian,
         anker,
     ]
-    # 命中全部就绪文件 = 没圈范围
+    # 命中全部就绪文件 = 没圈范围，退回全库（库里文件名都含「季度报告」子串）
     assert retrieval.resolve_files_by_name(["季度报告"]) is None
     assert retrieval.resolve_files_by_name([]) is None
+
+
+def test_resolve_files_by_name_single_ready_file_not_short_circuited(monkeypatch):
+    """库里只有一份就绪文件时，模型点名命中它应返回该文件 id，而非被短路成 None。
+
+    回归：原 `len(matched) == len(ready)` 在 ready==1 时把合法命中误判为
+    「没圈范围」返回 None，上层再误当「文件不存在」。
+    """
+    only = uuid.uuid4()
+    monkeypatch.setattr(
+        retrieval.store,
+        "list_kb_files",
+        lambda **k: [
+            {
+                "file_id": only,
+                "filename": "中国银行2026年第三季度报告.pdf",
+                "status": "ready",
+            },
+        ],
+    )
+    assert retrieval.resolve_files_by_name(["中国银行"]) == [only]
+    assert retrieval.resolve_files_by_name(
+        ["中国银行2026年第三季度报告.pdf"]
+    ) == [only]
 
 
 def test_query_mentions_allows_abbreviation_but_not_other_company():

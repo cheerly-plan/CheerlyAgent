@@ -307,8 +307,12 @@ def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
                     seen.add(fid)
                     matched.append(fid)
                     hint_hit = True
-    if not matched or len(matched) == len(ready):
-        return None
+    if not matched:
+        return []  # 点名但一个都解析不到 → 上层按「未找到」处理
+    # 仅在就绪文件多于 1 份时，「命中覆盖全部」才等于没缩小范围；
+    # 单文件库（ready==1）命中那唯一一份就是成功圈定，不可短路。
+    if len(ready) > 1 and len(matched) == len(ready):
+        return None  # 点名无缩小意义 → 上层退回全库
     return matched
 
 

@@ -65,12 +65,11 @@ def resolve_tool_file_ids(
     from ai_agent.kb.retrieval import resolve_files_by_name
 
     if files:
-        named = resolve_files_by_name(files)
-        if named:
-            return named
-        # files 传了但一个都解析不到：明确返回空列表，让工具层拒绝并引导，
-        # 不要静默退回全库（那会把无关内容当答案，又回到隐式全库扫描的老问题）。
-        return []
+        # resolve_files_by_name 已区分三种语义：
+        #   非空 list → 圈定成功；[] → 点名解析不到（未找到）；
+        #   None → 命中覆盖全部、无缩小意义（退回全库）。
+        # 直接透传，不再把 None 误判成「未找到」。
+        return resolve_files_by_name(files)
     routed = _route(query)
     if routed:
         return routed
