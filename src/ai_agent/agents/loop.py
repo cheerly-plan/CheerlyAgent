@@ -52,6 +52,10 @@ from ai_agent.agents.turn import (
 
 logger = get_logger(__name__)
 
+# 问句点名了库内主体时，第一步只留这两个工具并强制调用。
+# 天气、记忆、联网留在后面的轮次，避免模型用它们应付「必须调一个工具」。
+_KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
+
 # 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
 # 不再阻塞 SSE 尾部延迟；进程退出时由 lifespan 调 shutdown_turn_finalizer 等待。
 _turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-finalize")
@@ -406,6 +410,67 @@ def run_stream(
                 _compress_and_cache(user_id, chat_session_id, messages, summary)
 
 
+def _latest_user_text(messages: list[ChatMessage]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return str(msg.get("content") or "")
+    return ""
+
+
+def _question_already_retrieved(messages: list[ChatMessage]) -> bool:
+    """当前这句问话之后已经有工具结果，就不再强制检索。"""
+    for msg in reversed(messages):
+        role = msg.get("role")
+        if role == "tool":
+            return True
+        if role == "user":
+            return False
+    return False
+
+
+def _must_call_kb_tool(
+    messages: list[ChatMessage],
+    tools: list[dict],
+    kb_file_ids: tuple[str, ...] = (),
+) -> bool:
+    """问句点名了已就绪主体时，这一步必须调用知识库工具。
+
+    只看当前这句用户消息。上一轮查过别的公司不算数；这句之后已经有
+    工具结果（续跑、检索完准备作答）也不再强制。读库失败则放行，
+    对话退回模型自己决定。
+    """
+    names = {t.get("function", {}).get("name") for t in tools}
+    if not (_KB_RETRIEVAL_TOOLS & names):
+        return False
+    if _question_already_retrieved(messages):
+        return False
+    text = _latest_user_text(messages).strip()
+    if not text:
+        return False
+    from ai_agent.kb.retrieval import mentioned_subjects
+
+    file_ids: list[uuid.UUID] | None = None
+    if kb_file_ids:
+        parsed: list[uuid.UUID] = []
+        for raw in kb_file_ids:
+            try:
+                parsed.append(uuid.UUID(str(raw)))
+            except ValueError:
+                continue
+        file_ids = parsed or None
+    try:
+        subjects = mentioned_subjects(text, file_ids=file_ids)
+    except Exception:
+        logger.exception("主体提及检测失败")
+        return False
+    if subjects:
+        logger.info(
+            "问句点名知识库主体，强制调用工具 subjects=%s",
+            "、".join(sorted(subjects)),
+        )
+    return bool(subjects)
+
+
 def run_loop(
     messages: list[ChatMessage],
     user_id: str = "default",
@@ -444,11 +509,19 @@ def run_loop(
         result: ChatResult | None = None
         streamed = ""
         tool_choice: str | dict = "auto"
+        step_tools = tools
+        # 点名了库内主体、而这句还没查过：这一步必须调 kb_search 或 kg_search。
+        # 工具返回后的下一步不再强制，模型可以继续查，也可以写答案。
+        if _must_call_kb_tool(messages, tools, kb_file_ids):
+            tool_choice = "required"
+            step_tools = [
+                s for s in tools if s["function"]["name"] in _KB_RETRIEVAL_TOOLS
+            ]
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
             context = _fit_context(messages, settings.llm_context_char_budget)
             for kind, payload in stream_chat(
-                context, tools, tool_choice=tool_choice
+                context, step_tools, tool_choice=tool_choice
             ):
                 if kind == "text":
                     streamed += payload

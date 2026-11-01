@@ -1112,6 +1112,165 @@ def test_run_loop_use_kb_false_excludes_kb_search():
     assert seen_tools[2] == ["get_weather"]
 
 
+def test_run_loop_requires_kb_tool_when_question_names_subject():
+    """问句点名库内主体时，第一步只留知识库工具并强制调用；查完再放开。"""
+    fake_schemas = [
+        {"function": {"name": "get_weather"}},
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "kg_search"}},
+        {"function": {"name": "web_search"}},
+    ]
+    seen: list[tuple[str, list[str]]] = []
+
+    def capture(messages, tools, tool_choice="auto"):
+        seen.append((tool_choice, [t["function"]["name"] for t in tools]))
+        if tool_choice == "required":
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "name": "kb_search",
+                            "arguments": {"query": "变动原因"},
+                        }
+                    ],
+                },
+            )
+            return
+        yield ("text", "根据报告")
+        yield ("result", {"content": "根据报告", "tool_calls": []})
+
+    def subjects(query, file_ids=None):
+        if "长安汽车" in query:
+            return {"长安汽车", "中国黄金"}
+        return set()
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.execute_tool", return_value="报告原文"),
+        patch("ai_agent.kb.retrieval.mentioned_subjects", side_effect=subjects),
+    ):
+        events = list(
+            run_loop(
+                [
+                    {
+                        "role": "user",
+                        "content": "长安汽车和中国黄金的主要会计数据变动原因",
+                    }
+                ]
+            )
+        )
+
+    assert seen[0] == ("required", ["kb_search", "kg_search"])
+    assert seen[1][0] == "auto"
+    assert seen[1][1] == ["get_weather", "kb_search", "kg_search", "web_search"]
+    assert events[-1]["type"] == "done"
+    assert any(e.get("type") == "tool_start" for e in events)
+
+
+def test_run_loop_leaves_tool_choice_auto_without_subject():
+    """没点名主体的追问不强制检索，工具列表保持完整。"""
+    fake_schemas = [
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "web_search"}},
+    ]
+    seen: list[tuple[str, list[str]]] = []
+
+    def capture(messages, tools, tool_choice="auto"):
+        seen.append((tool_choice, [t["function"]["name"] for t in tools]))
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch(
+            "ai_agent.kb.retrieval.mentioned_subjects",
+            return_value=set(),
+        ),
+    ):
+        list(
+            run_loop(
+                [
+                    {"role": "user", "content": "中国银行营业额"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "old",
+                                "name": "kb_search",
+                                "arguments": {"query": "营业收入"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "old",
+                        "name": "kb_search",
+                        "content": "营业收入 1",
+                    },
+                    {"role": "assistant", "content": "1"},
+                    {"role": "user", "content": "净利润分别是多少"},
+                ]
+            )
+        )
+
+    assert seen == [("auto", ["kb_search", "web_search"])]
+
+
+def test_run_loop_does_not_force_tool_after_this_question_was_retrieved():
+    """这句问话已经有工具结果时不再强制，避免续跑时没法写答案。"""
+    fake_schemas = [
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "kg_search"}},
+    ]
+    seen: list[str] = []
+
+    def capture(messages, tools, tool_choice="auto"):
+        seen.append(tool_choice)
+        yield ("text", "根据报告")
+        yield ("result", {"content": "根据报告", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch(
+            "ai_agent.kb.retrieval.mentioned_subjects",
+            return_value={"长安汽车"},
+        ),
+    ):
+        list(
+            run_loop(
+                [
+                    {"role": "user", "content": "长安汽车的变动原因"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "name": "kb_search",
+                                "arguments": {"query": "变动原因"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "c1",
+                        "name": "kb_search",
+                        "content": "报告原文",
+                    },
+                ]
+            )
+        )
+
+    assert seen == ["auto"]
+
+
 def test_run_stream_resume_restores_use_kb_flag():
     """断点续跑沿用原 run 的「知识库」开关，与智能搜索同一套机制。"""
     claimed = {
