@@ -9,7 +9,9 @@
 - text：上面的常规策略
 - table：整表成一片，超长时按**行组**切并**每片重复表头 / 表题 / 单位**，
   「其中：」子项和合计行不拆开，否则行与列名脱节，检索命中后无法还原
-  "哪一年的营收、单位是百万还是元"
+  "哪一年的营收、单位是百万还是元"。正文里的 HTML `<table>` 整张单独成片，
+  kind 记成 table。相邻两页的表列数相同就接成一张，续页重复的表头丢掉，
+  page_end 记到最后一页。
 - figure：图像描述本身很短，直接沿用常规策略（一般不触发切分）
 
 两级栅栏，谁窄听谁的：
@@ -48,6 +50,11 @@ _TOC_RESIDUE = re.compile(r"^目\s*录$|^contents$", re.IGNORECASE)
 _SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
 # Markdown 表格的分隔行：|---|---|
 _MD_SEPARATOR = re.compile(r"^\|[\s:\-|]+\|$")
+# 整页 OCR 的表是一整段 HTML。按 500 字硬切会切断 </td>，所以整表抽出。
+_HTML_TABLE = re.compile(r"<table\b[^>]*>[\s\S]*?</table>", re.IGNORECASE)
+_HTML_ROW = re.compile(r"<tr\b[^>]*>[\s\S]*?</tr>", re.IGNORECASE)
+_HTML_CELL = re.compile(r"<td\b([^>]*)>([\s\S]*?)</td>", re.IGNORECASE)
+_HTML_COLSPAN = re.compile(r"""colspan=["'](\d+)["']""", re.IGNORECASE)
 # 嵌套子行：紧跟上一行，不能单独切到下一片
 _TABLE_SUB = re.compile(r"^(其中[:：]?|[（(]其中[）)]|[—–\-•·]\s*|[加减][:：])")
 # 金融工具三个计量类别是同一组，即使没写「其中：」也不能拆
@@ -86,6 +93,7 @@ def chunk_segments(
     """
     chunks: list[Chunk] = []
     flow: list[Segment] = []
+    plain: list[Segment] = []
 
     def flush_flow() -> None:
         if flow:
@@ -94,9 +102,17 @@ def chunk_segments(
             )
             flow.clear()
 
+    def flush_plain() -> None:
+        if plain:
+            chunks.extend(
+                _chunk_plain_pages(plain, max_chars=max_chars, overlap=overlap)
+            )
+            plain.clear()
+
     for seg in _drop_noise(segments):
         if seg.kind == TABLE:
             # 表必须整表成片（超长时重复表头），不能揉进正文流
+            flush_plain()
             flush_flow()
             chunks.extend(
                 Chunk(
@@ -110,29 +126,22 @@ def chunk_segments(
                 for piece in _chunk_table(seg.text, max_chars=max_chars)
             )
         elif seg.section is None:
-            # 无章节信息：保持「一段一世界」，段与段之间不合并
+            # 无章节信息：页与页的正文不合并。紧挨着的 HTML 表在
+            # _chunk_plain_pages 里按列数接成一张，并记上 page_end。
             flush_flow()
-            chunks.extend(
-                Chunk(
-                    text=piece,
-                    page=seg.page,
-                    kind=seg.kind,
-                    page_end=seg.page,
-                )
-                for piece in chunk_text(
-                    seg.text, max_chars=max_chars, overlap=overlap
-                )
-            )
+            plain.append(seg)
         else:
             # 两条栅栏：换节必断；开了单页栅栏时换页也断。
             # 断点处不保留重叠——重叠只发生在同一片流内部（超长段落二次
             # 切分时），所以重叠永远不会跨节、跨页（when within_page）。
+            flush_plain()
             if flow and (
                 flow[0].section != seg.section
                 or (within_page and flow[-1].page != seg.page)
             ):
                 flush_flow()
             flow.append(seg)
+    flush_plain()
     flush_flow()
     return chunks
 
@@ -189,28 +198,40 @@ def _chunk_flow(
             para = para.strip()
             if not para:
                 continue
-            if len(para) > max_chars:
-                # 超长段落先收掉已聚合的内容，再单独二次切分
-                flush()
-                out.extend(
-                    Chunk(
-                        text=piece,
-                        page=seg.page,
-                        kind=kind,
-                        page_end=seg.page,
-                        section=section,
+            for piece_kind, piece in _html_pieces(para):
+                if piece_kind == "table":
+                    flush()
+                    out.append(
+                        Chunk(
+                            text=piece,
+                            page=seg.page,
+                            kind=TABLE,
+                            page_end=seg.page,
+                            section=section,
+                        )
                     )
-                    for piece in _split_long(para, max_chars, overlap)
-                )
-                continue
-            if length + len(para) > max_chars and buf:
-                flush()
-            buf.append(para)
-            if seg.page is not None:
-                pages.append(seg.page)
-            # 拼接用的换行符也占长度：漏算会让切片实际超出上限
-            # （原实现中位 511 字、13% 超过 550，就是这个原因）
-            length += len(para) + 1
+                    continue
+                if len(piece) > max_chars:
+                    flush()
+                    out.extend(
+                        Chunk(
+                            text=part,
+                            page=seg.page,
+                            kind=kind,
+                            page_end=seg.page,
+                            section=section,
+                        )
+                        for part in _split_long(piece, max_chars, overlap)
+                    )
+                    continue
+                if length + len(piece) > max_chars and buf:
+                    flush()
+                buf.append(piece)
+                if seg.page is not None:
+                    pages.append(seg.page)
+                # 拼接用的换行符也占长度：漏算会让切片实际超出上限
+                # （原实现中位 511 字、13% 超过 550，就是这个原因）
+                length += len(piece) + 1
     flush()
     return out
 
@@ -227,19 +248,25 @@ def chunk_text(text: str, *, max_chars: int = 500, overlap: int = 50) -> list[st
         para = para.strip()
         if not para:
             continue
-        if len(para) > max_chars:
-            # 超长段落先收掉已聚合的内容，再单独二次切分
-            if current:
+        for piece_kind, piece in _html_pieces(para):
+            if piece_kind == "table":
+                if current:
+                    chunks.append("\n".join(current))
+                    current, length = [], 0
+                chunks.append(piece)
+                continue
+            if len(piece) > max_chars:
+                if current:
+                    chunks.append("\n".join(current))
+                    current, length = [], 0
+                chunks.extend(_split_long(piece, max_chars, overlap))
+                continue
+            if length + len(piece) > max_chars and current:
                 chunks.append("\n".join(current))
                 current, length = [], 0
-            chunks.extend(_split_long(para, max_chars, overlap))
-            continue
-        if length + len(para) > max_chars and current:
-            chunks.append("\n".join(current))
-            current, length = [], 0
-        current.append(para)
-        # 换行符也算长度（与 _chunk_flow 一致），否则切片会悄悄超标
-        length += len(para) + 1
+            current.append(piece)
+            # 换行符也算长度（与 _chunk_flow 一致），否则切片会悄悄超标
+            length += len(piece) + 1
     if current:
         chunks.append("\n".join(current))
     return [c.strip() for c in chunks if c.strip()]
@@ -247,6 +274,105 @@ def chunk_text(text: str, *, max_chars: int = 500, overlap: int = 50) -> list[st
 
 def _normalize(text: str) -> str:
     return text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _html_chunk_kind(seg_kind: str, text: str) -> str:
+    """整段就是一张 HTML 表时，切片类型记成 table。"""
+    if _HTML_TABLE.fullmatch(text.strip()):
+        return TABLE
+    return seg_kind
+
+
+def _chunk_plain_pages(
+    segments: list[Segment], *, max_chars: int, overlap: int
+) -> list[Chunk]:
+    """无章节的页各自切片。上一页以表结尾、下一页以表开头且列数相同，则接成一张。"""
+    out: list[Chunk] = []
+    for seg in segments:
+        pieces = [
+            Chunk(
+                text=piece,
+                page=seg.page,
+                kind=_html_chunk_kind(seg.kind, piece),
+                page_end=seg.page,
+            )
+            for piece in chunk_text(seg.text, max_chars=max_chars, overlap=overlap)
+        ]
+        if out and pieces and _can_merge_html_tables(out[-1], pieces[0]):
+            out[-1] = Chunk(
+                text=_merge_html_tables(out[-1].text, pieces[0].text),
+                page=out[-1].page,
+                kind=TABLE,
+                page_end=pieces[0].page,
+            )
+            out.extend(pieces[1:])
+        else:
+            out.extend(pieces)
+    return out
+
+
+def _table_rows(table: str) -> list[str]:
+    return _HTML_ROW.findall(table)
+
+
+def _row_width(row: str) -> int:
+    width = 0
+    for match in _HTML_CELL.finditer(row):
+        span = _HTML_COLSPAN.search(match.group(1) or "")
+        width += int(span.group(1)) if span else 1
+    return width
+
+
+def _row_texts(row: str) -> list[str]:
+    return [
+        re.sub(r"\s+", "", match.group(2))
+        for match in _HTML_CELL.finditer(row)
+    ]
+
+
+def _can_merge_html_tables(prev: Chunk, nxt: Chunk) -> bool:
+    if prev.kind != TABLE or nxt.kind != TABLE:
+        return False
+    if prev.page_end is None or nxt.page is None or nxt.page != prev.page_end + 1:
+        return False
+    rows_a = _table_rows(prev.text)
+    rows_b = _table_rows(nxt.text)
+    if not rows_a or not rows_b:
+        return False
+    width = _row_width(rows_a[0])
+    return width > 0 and width == _row_width(rows_b[0])
+
+
+def _merge_html_tables(first: str, second: str) -> str:
+    """接上续页的数据行。续页若把表头又印了一遍，这几行丢掉。"""
+    rows_a = _table_rows(first)
+    rows_b = _table_rows(second)
+    copied = 0
+    limit = min(3, len(rows_a), len(rows_b))
+    while copied < limit:
+        left = _row_texts(rows_a[copied])
+        if not any(left) or left != _row_texts(rows_b[copied]):
+            break
+        copied += 1
+    return "<table>" + "".join(rows_a + rows_b[copied:]) + "</table>"
+
+
+def _html_pieces(para: str) -> list[tuple[str, str]]:
+    """把一段里的 HTML 表抽出来。表不参与后面的 500 字聚合。"""
+    if not _HTML_TABLE.search(para):
+        return [("text", para)]
+    pieces: list[tuple[str, str]] = []
+    last = 0
+    for match in _HTML_TABLE.finditer(para):
+        before = para[last : match.start()].strip()
+        if before:
+            pieces.append(("text", before))
+        pieces.append(("table", match.group(0)))
+        last = match.end()
+    after = para[last:].strip()
+    if after:
+        pieces.append(("text", after))
+    return pieces or [("text", para)]
 
 
 def _chunk_table(text: str, *, max_chars: int) -> list[str]:

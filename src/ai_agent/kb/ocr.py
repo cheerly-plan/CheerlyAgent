@@ -25,7 +25,7 @@ from openai import (
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.otsl import render_otsl
+from ai_agent.kb.otsl import finalize_document
 from ai_agent.kb.parsing import TEXT, Segment
 from ai_agent.prompts.kb import OCR_DOCUMENT_PROMPT
 
@@ -118,7 +118,7 @@ def _recognize(png: bytes) -> str | None:
             timeout=settings.kb_ocr_timeout_seconds,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        text = render_otsl((resp.choices[0].message.content or "").strip())
+        text = finalize_document((resp.choices[0].message.content or "").strip())
         _consecutive_failures = 0
     except (NotFoundError, AuthenticationError, PermissionDeniedError) as e:
         _disable(

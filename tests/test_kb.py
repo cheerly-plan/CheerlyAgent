@@ -225,6 +225,71 @@ def test_xlsx_supported_suffix():
     assert not supported(".xls")
 
 
+def test_html_table_stays_one_chunk():
+    rows = "".join(
+        f"<tr><td>项目{i}</td><td>{i * 1000}.00</td></tr>" for i in range(40)
+    )
+    table = f"<table><tr><td>项目</td><td>本期</td></tr>{rows}</table>"
+    text = f"单位：元\n\n{table}\n\n以上为合并口径。"
+    chunks = chunk_text(text, max_chars=180, overlap=50)
+    assert chunks == ["单位：元", table, "以上为合并口径。"]
+
+
+def test_html_table_chunk_kind_is_table():
+    table = "<table><tr><td>营业收入</td><td>1</td></tr></table>"
+    text = f"前文说明。\n\n{table}\n\n后文。"
+    chunks = chunk_segments([Segment(text, 4)], max_chars=500, overlap=50)
+    assert [(c.kind, c.text) for c in chunks] == [
+        ("text", "前文说明。"),
+        ("table", table),
+        ("text", "后文。"),
+    ]
+    assert chunks[1].page == 4
+
+
+def test_cross_page_html_tables_merge_and_drop_repeated_header():
+    header = "<tr><td>项目</td><td>本期金额</td></tr>"
+    page4 = (
+        "单位：元\n\n"
+        f"<table>{header}<tr><td>营业收入</td><td>1</td></tr></table>"
+    )
+    page5 = (
+        f"<table>{header}<tr><td>净利润</td><td>2</td></tr></table>\n\n"
+        "以上为合并口径。"
+    )
+    chunks = chunk_segments(
+        [Segment(page4, 4), Segment(page5, 5)],
+        max_chars=500,
+        overlap=0,
+    )
+    assert [(c.kind, c.page, c.page_end) for c in chunks] == [
+        ("text", 4, 4),
+        ("table", 4, 5),
+        ("text", 5, 5),
+    ]
+    table = chunks[1].text
+    assert table.count(header) == 1
+    assert "营业收入" in table
+    assert "净利润" in table
+
+
+def test_cross_page_tables_stay_apart_when_columns_differ():
+    page4 = "<table><tr><td>项目</td><td>本期</td></tr><tr><td>收入</td><td>1</td></tr></table>"
+    page5 = "<table><tr><td>甲</td><td>乙</td><td>丙</td></tr></table>"
+    chunks = chunk_segments(
+        [Segment(page4, 4), Segment(page5, 5)],
+        max_chars=500,
+        overlap=0,
+    )
+    assert [(c.page, c.page_end) for c in chunks] == [(4, 4), (5, 5)]
+
+
+def test_short_html_table_not_merged_into_prose():
+    table = "<table><tr><td>营业收入</td><td>1</td></tr></table>"
+    text = f"前文说明。\n\n{table}\n\n后文。"
+    assert chunk_text(text, max_chars=500, overlap=50) == ["前文说明。", table, "后文。"]
+
+
 def test_chunk_table_kept_whole_when_short():
     text = "| 年份 | 营收 |\n|---|---|\n| 2024 | 142 |"
     chunks = chunk_segments([Segment(text, 1, "table")], max_chars=500)

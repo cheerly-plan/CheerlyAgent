@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -23,6 +24,10 @@ _EXCERPT_CLIP = 600
 # 表格按行切过，整表才渲染得出来；600 字会切到半行，竖线对不上列。
 # 上限放宽，超了也按完整行截，避免 Markdown 表格残缺。
 _TABLE_EXCERPT_CLIP = 2500
+# 整页 OCR 的 HTML 表单独成片，预览和引用要把整表交给前端。
+# 按 800 字硬切会落在 </td> 中间，页面只能把标签当正文。
+_HTML_DISPLAY_MAX = 12000
+_HTML_TABLE_RE = re.compile(r"<table\b[^>]*>[\s\S]*?</table>", re.IGNORECASE)
 
 # 一条回答最多记这么多条引用：工具循环可能被反复调用，超过这个数量
 # 说明检索在发散，前端列表也放不下
@@ -33,9 +38,40 @@ _COLLECTOR: ContextVar[list[Citation] | None] = ContextVar(
 )
 
 
+def clip_visible(text: str, limit: int) -> str:
+    """给页面看的摘录。完整 HTML 表整段保留；超长时停在 </tr> 并补上 </table>。"""
+    body = (text or "").strip()
+    if not body:
+        return ""
+    if _HTML_TABLE_RE.search(body):
+        if len(body) <= _HTML_DISPLAY_MAX:
+            return body
+        return _clip_html_rows(body, _HTML_DISPLAY_MAX)
+    if len(body) <= limit:
+        return body
+    cut = body[:limit]
+    nl = cut.rfind("\n")
+    if nl >= 80:
+        cut = cut[:nl]
+    return f"{cut}\n…"
+
+
+def _clip_html_rows(body: str, limit: int) -> str:
+    cut = body[:limit]
+    row = cut.lower().rfind("</tr>")
+    if row == -1:
+        return f"{cut}…"
+    closed = cut[: row + len("</tr>")]
+    if "</table>" not in closed.lower():
+        closed += "</table>"
+    return f"{closed}\n…"
+
+
 def _clip_excerpt(text: str, *, kind: str) -> str:
     body = (text or "").strip()
     limit = _TABLE_EXCERPT_CLIP if kind == "table" else _EXCERPT_CLIP
+    if "<table" in body.lower():
+        return clip_visible(body, limit)
     if len(body) <= limit:
         return body
     if kind == "table":

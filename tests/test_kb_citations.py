@@ -10,6 +10,7 @@ from ai_agent.kb.citations import (
     MAX_SOURCES,
     Citation,
     add_citations,
+    clip_visible,
     collect_citations,
     merge_sources,
 )
@@ -358,3 +359,12 @@ def test_citation_payload_falls_back_to_page_for_single_page_chunk():
     payload = citation.payload()
     assert payload["page_start"] == payload["page_end"] == 12
     assert payload["section"] is None
+
+
+def test_clip_visible_keeps_whole_html_table():
+    row = "<tr><td>非经常性损益项目</td><td>本期金额</td></tr>"
+    table = "<table>" + row * 30 + "</table>"
+    assert len(table) > 800
+    shown = clip_visible(table, 800)
+    assert shown == table
+    assert shown.endswith("</table>")
