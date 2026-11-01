@@ -41,7 +41,7 @@ dev = [
 # 可选：本地 cross-encoder 重排后端（kb_rerank_backend=local_ce）。体积较大
 # （拉 torch + transformers），默认不安装；启用 local_ce 时再 uv add --group rerank。
 rerank = [
-    "FlagEmbedding>=1.3.0",
+    "flagembedding>=1.3.0",
 ]
 
 [tool.ruff]

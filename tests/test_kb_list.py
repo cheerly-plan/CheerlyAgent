@@ -27,16 +27,90 @@ def test_kb_list_empty(monkeypatch):
 
 
 def test_kb_list_q_filters_filename(monkeypatch):
-    def fake(q="", tag=""):
-        files = [
+    monkeypatch.setattr(
+        kb_list.store,
+        "list_kb_files",
+        lambda q="", tag="": [
             {"filename": "中国银行2024年报.pdf", "status": "ready", "description": "财务"},
             {"filename": "考勤制度.docx", "status": "ready", "description": ""},
-        ]
-        if q:
-            files = [f for f in files if q in f["filename"]]
-        return files
-
-    monkeypatch.setattr(kb_list.store, "list_kb_files", fake)
+        ],
+    )
     out = _kb_list_files("银行")
     assert "中国银行2024年报.pdf" in out
     assert "考勤制度.docx" not in out
+
+
+def test_kb_list_q_matches_subject_and_description(monkeypatch):
+    monkeypatch.setattr(
+        kb_list.store,
+        "list_kb_files",
+        lambda q="", tag="": [
+            {
+                "filename": "2026三季报.pdf",
+                "status": "ready",
+                "subject": "中国能源建设股份有限公司",
+                "subject_aliases": ["中国能建"],
+                "description": "",
+            },
+            {
+                "filename": "notes.txt",
+                "status": "ready",
+                "subject": "",
+                "subject_aliases": [],
+                "description": "考勤与休假制度",
+            },
+            {
+                "filename": "其他.pdf",
+                "status": "ready",
+                "subject": "顺丰控股",
+                "description": "",
+            },
+        ],
+    )
+    by_alias = _kb_list_files("中国能建")
+    assert "2026三季报.pdf" in by_alias
+    assert "其他.pdf" not in by_alias
+    by_desc = _kb_list_files("考勤")
+    assert "notes.txt" in by_desc
+    assert "2026三季报.pdf" not in by_desc
+
+
+def test_kb_list_empty_query_over_limit_returns_count_only(monkeypatch):
+    files = [
+        {"filename": f"公司{i}报告.pdf", "status": "ready", "description": ""}
+        for i in range(31)
+    ]
+    monkeypatch.setattr(kb_list.store, "list_kb_files", lambda q="", tag="": files)
+    out = _kb_list_files()
+    assert "31 份" in out
+    assert "公司0报告.pdf" not in out
+    assert "请用 q" in out
+
+
+def test_kb_list_query_caps_at_limit(monkeypatch):
+    files = [
+        {
+            "filename": f"银行{i}.pdf",
+            "status": "ready",
+            "subject": "银行股份",
+            "description": "",
+        }
+        for i in range(40)
+    ]
+    monkeypatch.setattr(kb_list.store, "list_kb_files", lambda q="", tag="": files)
+    out = _kb_list_files("银行")
+    assert out.count("\n- ") == 30
+    assert "还有 10 份未列出" in out
+
+
+def test_kb_list_query_miss_is_not_empty_library(monkeypatch):
+    monkeypatch.setattr(
+        kb_list.store,
+        "list_kb_files",
+        lambda q="", tag="": [
+            {"filename": "考勤制度.docx", "status": "ready", "description": ""},
+        ],
+    )
+    out = _kb_list_files("银行")
+    assert "没有处理完成" not in out
+    assert "没有文件名、主体或描述匹配" in out

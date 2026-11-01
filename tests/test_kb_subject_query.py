@@ -185,3 +185,4 @@ def test_kb_files_block_large_library_folds_file_list(monkeypatch):
     # 大库：文件清单折叠，不再逐条列出全部文件名
     assert "公司39报告.pdf" not in block
     assert "共 40 份" in block
+    assert "kb_list_files" in block

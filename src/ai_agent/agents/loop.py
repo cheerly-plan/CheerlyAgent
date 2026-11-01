@@ -14,6 +14,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import collect_citations, merge_sources
+from ai_agent.kb.doc_profiles import resolve_profile
 from ai_agent.kb.scope import (
     reset_kb_scope,
     set_kb_scope,
@@ -143,8 +144,59 @@ def _kb_files_block(kb_file_ids: tuple[str, ...] = ()) -> str:
     else:
         lines.append(
             f"【知识库可用文件】共 {len(ready)} 份（较多，未全部列出）。"
-            "请先用上方【知识库主体】按主体名圈定，或调 kb_list 按关键字检索后再填 files。"
+            "请先用上方【知识库主体】按主体名圈定，或调 kb_list_files，"
+            "用 q 传公司名、报告期或文件名关键字后再填 files。"
         )
+    return "\n".join(lines)
+
+
+def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
+    """拼接知识库能力声明，注入系统提示词。
+
+    静态提示词只讲「怎么选工具」（关系→kg_search、数字→kb_search），具体
+    图谱覆盖哪些实体/关系由本块按库内实际文档类型动态生成——加公告、年报
+    等新类型时无需改提示词，只要 doc_profiles 里配好即可，提示词不再只针对季报。
+    这样模型按问题选对应类型的关系，而不是被硬编码的季报语义带偏。
+    """
+    try:
+        rows = store.list_kb_files()
+    except Exception:
+        logger.exception("知识库文件清单读取失败")
+        return ""
+    ready = [r for r in rows if r.get("status") == "ready"]
+    if kb_file_ids:
+        want = {str(f) for f in kb_file_ids}
+        ready = [r for r in ready if str(r.get("file_id")) in want]
+    if not ready:
+        return ""
+
+    # 按 doc_type 分组；空 doc_type 回落到 general（恰好能暴露漏标类型的问题）
+    groups: dict[str, list[dict]] = {}
+    for r in ready:
+        dt = str(r.get("doc_type") or "general").strip() or "general"
+        groups.setdefault(dt, []).append(r)
+
+    lines = [
+        "【知识库能力】知识库图谱存的是实体之间的关系（「谁和谁有什么关系」）。"
+        "各文档类型在图谱中覆盖的实体与关系如下，不在其中的关系请走 kb_search 读原文：",
+    ]
+    for dt, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        profile = resolve_profile(dt)
+        subjects = sorted(
+            {str(m.get("subject") or "").strip() for m in members if (m.get("subject") or "").strip()}
+        )
+        names = "、".join(subjects[:8]) + ("等" if len(subjects) > 8 else "")
+        scope = "、".join(profile.entity_scope) if profile.entity_scope else "（通用抽取，无限定范围）"
+        preds = "、".join(profile.predicates) if profile.predicates else "（通用抽取，无限定谓词）"
+        count = len(members)
+        head = f"- {profile.label}（{count} 份：{names}）" if names else f"- {profile.label}（{count} 份）"
+        lines.append(head)
+        lines.append(f"  实体范围={scope}")
+        lines.append(f"  关系={preds}")
+    lines.append(
+        "注：具体数字、报表科目、原文表述不在图谱里，请用 kb_search 查；"
+        "关系题同时需要某个科目金额时，kg_search 与 kb_search 两个都调。"
+    )
     return "\n".join(lines)
 
 
@@ -181,7 +233,8 @@ def _system_prompt(
     # 显式圈定要查的文档（必填），不再由系统偷偷按查询猜文件范围。
     block = _profile_prompt(user_id)
     files_block = _kb_files_block(kb_file_ids) if use_kb else ""
-    tail = "\n\n".join(p for p in (block, files_block) if p)
+    cap_block = _kb_capability_block(kb_file_ids) if use_kb else ""
+    tail = "\n\n".join(p for p in (block, files_block, cap_block) if p)
     if not tail:
         return core
     return f"{core}\n\n{tail}"

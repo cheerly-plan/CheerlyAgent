@@ -91,6 +91,16 @@ def _parser() -> argparse.ArgumentParser:
 
     p_graph = sub.add_parser("graph", help="只重建图谱，不重新解析")
     _add_select(p_graph)
+    p_graph.add_argument(
+        "--doc-type",
+        default="",
+        help="重建前写入的文档类型（空=沿用已存配置），决定注入哪套抽取配置块",
+    )
+    p_graph.add_argument(
+        "--level",
+        default="",
+        help="抽取粒度 full/light（空=沿用已存配置）",
+    )
     p_graph.set_defaults(handler=_cmd_graph)
 
     p_reembed = sub.add_parser("reembed", help="正文没变，只按当前策略重算向量")
@@ -252,14 +262,27 @@ def _reparse_one(rec: dict, dry_run: bool) -> bool:
     return row["status"] == "ready"
 
 
-def _graph_one(rec: dict, dry_run: bool) -> None:
+def _graph_one(
+    rec: dict, dry_run: bool, doc_type: str = "", level: str = ""
+) -> None:
     from ai_agent.kb.pipeline import kb_pipeline
     from ai_agent.memory.store import store
 
-    print(f"  {rec['filename']}  切片 {rec['chunk_count']}  图谱 {rec['graph_status']}")
+    print(
+        f"  {rec['filename']}  切片 {rec['chunk_count']}  图谱 {rec['graph_status']}"
+        + (f"  写入 doc_type={doc_type}" if doc_type else "")
+    )
     if rec.get("graph_status") == "building":
         print("    正在建图，跳过")
         return
+    if doc_type:
+        if dry_run:
+            print(f"    (dry-run) 将写入 doc_type={doc_type} level={level or 'full'}")
+        else:
+            store.set_kb_extract_config(
+                rec["id"], doc_type=doc_type, level=level or "full"
+            )
+            print(f"    ✓ 已写入 doc_type={doc_type}（建图时按此配置抽）")
     if dry_run:
         print("    (dry-run) 未改动")
         return
@@ -327,7 +350,7 @@ def _cmd_graph(args: argparse.Namespace) -> int:
     if not files:
         return 0
     for rec in files:
-        _graph_one(rec, args.dry_run)
+        _graph_one(rec, args.dry_run, args.doc_type, args.level)
     return 0
 
 

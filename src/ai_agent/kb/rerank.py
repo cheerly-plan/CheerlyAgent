@@ -52,6 +52,14 @@ class CrossEncoderReranker(Reranker):
     @property
     def ranker(self):
         if CrossEncoderReranker._shared is None:
+            import os
+
+            # 权重已缓存到本地（首次经 HF_ENDPOINT=https://hf-mirror.com 拉取）。
+            # 受限网络下 huggingface.co 的元数据校验可能长时间挂起而非秒回错误，
+            # 导致整个重排请求卡死。强制离线加载：只读本地缓存、绝不触网，从根上
+            # 消除网络挂起；若本地确实无权重则快速抛错，由 _rerank 的 try/except 兜底。
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             try:
                 from FlagEmbedding import FlagReranker
             except ImportError as e:  # 依赖可选，缺了给清晰报错
