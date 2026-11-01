@@ -195,6 +195,107 @@ def search_knowledge(
     return hits
 
 
+def search_knowledge_multi(
+    queries: list[str],
+    *,
+    file_ids: list[uuid.UUID] | None = None,
+    top_k: int = 3,
+    filters: dict | None = None,
+) -> list[Hit]:
+    """多查询检索并融合（multi-query RRF）。
+
+    把多条改写变体分别检索后，按 (file_id, seq) 去重并跨查询累加 RRF 分数
+    （score = Σ 1/(60+rank)），再统一重排、截断、邻接。单条查询时退化为
+    search_knowledge，保证行为一致。任一变体向量化失败仅跳过该变体。
+    """
+    queries = [q.strip() for q in queries if q and q.strip()]
+    if not queries:
+        return []
+    if len(queries) == 1:
+        return search_knowledge(
+            queries[0], file_ids=file_ids, top_k=top_k, filters=filters
+        )
+    merged: dict[tuple[str, int], dict] = {}
+    scores: dict[tuple[str, int], float] = {}
+    for q in queries:
+        try:
+            embedding = embed_query(q)
+        except Exception:
+            logger.exception("multi-query 向量化失败，跳过变体：%s", q[:60])
+            continue
+        rows = _retrieve_candidates(
+            q, embedding, file_ids=file_ids, top_k=top_k, filters=filters
+        )
+        if not rows and filters:
+            rows = _retrieve_candidates(
+                q, embedding, file_ids=file_ids, top_k=top_k, filters=None
+            )
+        for rank, row in enumerate(rows):
+            key = (str(row["file_id"]), int(row["seq"]))
+            if key not in merged:
+                merged[key] = dict(row)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank + 1)
+    if not merged:
+        return []
+    ranked = sorted(
+        merged.values(),
+        key=lambda r: scores[(str(r["file_id"]), int(r["seq"]))],
+        reverse=True,
+    )
+    if settings.kb_rerank_enabled and len(ranked) > top_k:
+        # 重排用主查询（queries[0]，即改写后的原始问句）做排序
+        head = ranked[:_RERANK_LIMIT]
+        ranked = _rerank(queries[0], head, top_k) + ranked[_RERANK_LIMIT:]
+    hits = [_to_hit(row) for row in ranked[:top_k]]
+    return _attach_neighbors(hits)
+
+
+def search_knowledge_subqueries(
+    sub_queries: list[str],
+    *,
+    file_ids: list[uuid.UUID] | None = None,
+    top_k: int = 3,
+    filters: dict | None = None,
+) -> list[Hit]:
+    """子问题分解检索：每条子问题独立走完整检索链，轮转交织合并。
+
+    多主体对比问句拆成单主体子问题后，各自 search_knowledge（向量 + 关键词 +
+    重排 + 邻接）得到「该主体最相关的片段」；轮转交织（sub0[0], sub1[0],
+    sub0[1], …）保证每个主体至少一条命中进结果，再按 (file_id, seq) 去重、
+    截断到 top_k，输出量不膨胀。单条子问题时退化为 search_knowledge。
+    """
+    subs = [s.strip() for s in sub_queries if s and s.strip()]
+    if not subs:
+        return []
+    if len(subs) == 1:
+        return search_knowledge(
+            subs[0], file_ids=file_ids, top_k=top_k, filters=filters
+        )
+    per: list[list[Hit]] = []
+    for s in subs:
+        try:
+            per.append(
+                search_knowledge(s, file_ids=file_ids, top_k=top_k, filters=filters)
+            )
+        except Exception:
+            # 某条子问题向量化失败不应拖垮整轮，跳过即可
+            logger.warning("kb 子问题检索失败，跳过：%s", s[:60])
+            per.append([])
+    merged: list[Hit] = []
+    seen: set[tuple[str, int]] = set()
+    for i in range(top_k):
+        for hits in per:
+            if i < len(hits):
+                h = hits[i]
+                key = (h.file_id, h.seq)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(h)
+                if len(merged) >= top_k:
+                    return merged
+    return merged
+
+
 def preview_search(
     query: str,
     *,
@@ -212,18 +313,17 @@ def preview_search(
     return [hit for hit in hits if hit.distance is None or hit.distance <= limit]
 
 
-def _core_search(
+def _retrieve_candidates(
     query: str,
     embedding: list[float],
     *,
     file_ids: list[uuid.UUID] | None,
     top_k: int,
     filters: dict | None = None,
-) -> list[Hit]:
-    """真正的一轮检索：召回 → 融合 → 去冗余 → 重排 → 邻接。
+) -> list[dict]:
+    """一轮检索的候选召回：召回 → 关键词融合 → 口径偏好 → 去重（不含重排/截断/邻接）。
 
-    embedding 由调用方传入：范围推导会搜两次（收窄 + 兜底），共用一份
-    查询向量，不必为同一条 query 付两次向量化。
+    供 search_knowledge（单 query）与 search_knowledge_multi（多 query 融合）共用。
     """
     candidates = max(top_k, settings.kb_search_candidates)
     rows = store.search_kb_chunks(
@@ -239,14 +339,29 @@ def _core_search(
     # 口径偏好放在去冗余与重排之前：它改的是「谁先被看到」，重排是从
     # 这 12 条候选里挑，候选顺序本身会影响模型的注意力
     rows = _apply_scope_preference(query, rows)
+    return _dedupe(rows)
 
-    kept = _dedupe(rows)
-    if settings.kb_rerank_enabled and len(kept) > top_k:
+
+def _core_search(
+    query: str,
+    embedding: list[float],
+    *,
+    file_ids: list[uuid.UUID] | None,
+    top_k: int,
+    filters: dict | None = None,
+) -> list[Hit]:
+    """真正的一轮检索：候选召回 → 重排 → 邻接。"""
+    rows = _retrieve_candidates(
+        query, embedding, file_ids=file_ids, top_k=top_k, filters=filters
+    )
+    if not rows:
+        return []
+    if settings.kb_rerank_enabled and len(rows) > top_k:
         # 只把前 _RERANK_LIMIT 条交给模型：候选再多，提示词变长、延迟也变高，
         # 而排在第 13 名之外的本来也进不了 top_k
-        head = kept[:_RERANK_LIMIT]
-        kept = _rerank(query, head, top_k) + kept[_RERANK_LIMIT:]
-    hits = [_to_hit(row) for row in kept[:top_k]]
+        head = rows[:_RERANK_LIMIT]
+        rows = _rerank(query, head, top_k) + rows[_RERANK_LIMIT:]
+    hits = [_to_hit(row) for row in rows[:top_k]]
     return _attach_neighbors(hits)
 
 
@@ -455,6 +570,40 @@ def _query_mentions(query: str, subject: str) -> bool:
         match.size >= _SUBJECT_MIN_COMMON
         and match.size >= len(core) * _SUBJECT_MIN_RATIO
     )
+
+
+def mentioned_subjects(
+    query: str, file_ids: list[uuid.UUID] | None = None
+) -> set[str]:
+    """query 里点名的文件主体（subject 核心名）集合。
+
+    供子问题分解做确定性前置：只有 query 真的点名了 ≥2 个不同主体，才有拆成
+    「各主体子问题」的价值。判定复用 _query_mentions 的最长公共子串判据
+    （允许简称），主体权威来源是文件级 subject，别名与文件名去噪作兜底。
+    """
+    text = (query or "").strip()
+    if not text:
+        return set()
+    try:
+        files = store.list_kb_files()
+    except Exception:
+        logger.warning("kb 主体提及检测拿文件列表失败", exc_info=True)
+        return set()
+    ready = [item for item in files if item.get("status") == "ready"]
+    if file_ids:
+        want = {str(fid) for fid in file_ids}
+        ready = [item for item in ready if str(item.get("file_id")) in want]
+    subjects: set[str] = set()
+    for item in ready:
+        names = [item.get("subject") or ""]
+        names.extend(alias for alias in (item.get("subject_aliases") or []) if alias)
+        names.append(_file_subject(item.get("filename") or ""))
+        for name in names:
+            if name and _query_mentions(text, name):
+                core = _subject_core(name)
+                subjects.add(core or name)
+                break
+    return subjects
 
 
 def _fuse_with_keywords(

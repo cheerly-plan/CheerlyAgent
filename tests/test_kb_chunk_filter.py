@@ -65,11 +65,11 @@ def test_chunk_meta_where_empty():
 def _patch_kb_search(monkeypatch):
     captured: dict = {}
 
-    def fake_search(query, *, file_ids=None, top_k=3, filters=None):
+    def fake_search(queries, *, file_ids=None, top_k=3, filters=None):
         captured["filters"] = filters
         return []
 
-    monkeypatch.setattr(kb_search, "search_knowledge", fake_search)
+    monkeypatch.setattr(kb_search, "search_knowledge_multi", fake_search)
     monkeypatch.setattr(kb_search.store, "has_ready_kb_file", lambda: True)
     # 返回一个虚拟 file_id，让 _kb_search 越过「未指定文件」早退、走到 search_knowledge
     monkeypatch.setattr(

@@ -98,3 +98,30 @@ def get_reranker() -> Reranker:
     if _reranker is None:
         _reranker = LlmReranker()
     return _reranker
+
+
+def probe_reranker() -> dict:
+    """启动时探测当前重排后端是否真正可用，并打出明确日志。
+
+    默认 `local_ce`：若环境未装 FlagEmbedding / 权重未缓存，会在此显式告警
+    并确认退回 LLM，而不是等到第一次用户检索时才静默失败。返回状态字典，
+    供健康检查或测试读取。
+
+    探测会触发一次真实后端构造（local_ce 会加载权重，可能耗时数秒），属一次性
+    预热；加载失败时由 `get_reranker` 的 try/except 兜底退回 LLM，不阻塞启动。
+    """
+    backend = (settings.kb_rerank_backend or "llm").lower()
+    try:
+        reranker = get_reranker()
+    except Exception:  # get_reranker 已吞加载异常，这里再兜一层
+        logger.error("重排后端探测异常: %s", backend, exc_info=True)
+        return {"configured": backend, "active": None, "ok": False}
+    active = "local_ce" if isinstance(reranker, CrossEncoderReranker) else "llm"
+    if active == backend:
+        logger.info("重排后端就绪: %s", active)
+    else:
+        logger.warning(
+            "重排后端配置为 %s，但实际退回 %s（本地重排不可用，见上方异常）",
+            backend, active,
+        )
+    return {"configured": backend, "active": active, "ok": True}

@@ -264,7 +264,7 @@ def test_kb_search_without_files_hits_summary_index(monkeypatch):
 
     monkeypatch.setattr(memory_store.store, "search_kb_files", fake_files)
     monkeypatch.setattr(
-        "ai_agent.tools.kb_search.search_knowledge",
+        "ai_agent.tools.kb_search.search_knowledge_multi",
         lambda query, *, file_ids=None, top_k=3, filters=None: seen.setdefault("file_ids", file_ids)
         and [],
     )

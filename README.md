@@ -206,6 +206,8 @@ uv run python scripts/kb.py meta --all    # 存量文件回填主体/报告期�
 uv run python scripts/kb.py summary --all # 存量文件补文档摘要索引（文档路由依赖它）
                           # 子命令：list / reparse / graph / reembed / coverage
 uv run python scripts/eval_retrieval.py   # 检索质量回归评测
+uv run python scripts/eval_memory.py      # 长期记忆抽取评测（会调记忆模型）
+uv run python scripts/eval_memory.py --recall   # 情景记忆召回评测（写入后检索，用完删除）
 uv run python scripts/rebuild_graph.py    # 重建知识图谱
 ```
 

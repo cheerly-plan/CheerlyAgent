@@ -69,22 +69,40 @@ def test_dedupe_drops_near_duplicate_chunks():
     assert [row["seq"] for row in kept] == [0, 2]
 
 
+class _FakeReranker:
+    """可插拔重排后端的测试桩：_rerank 现在走 get_reranker().rerank()。"""
+
+    def __init__(self, scores):
+        self._scores = scores
+
+    def rerank(self, query: str, docs: list[str]) -> list[float]:
+        return self._scores
+
+
 def test_rerank_follows_model_order_and_keeps_unlisted(monkeypatch):
     rows = [_row(0, "甲"), _row(1, "乙"), _row(2, "丙")]
-    monkeypatch.setattr(retrieval, "complete_chat_once", lambda prompt: "[3,1]")
+    # 分数制：rank 越高分越高；这里让丙(2)最相关、甲(0)次之、乙(1)最低
+    fake = _FakeReranker([1.0, 0.0, 2.0])
+    monkeypatch.setattr(retrieval, "get_reranker", lambda: fake)
     ordered = retrieval._rerank("问题", rows, top_k=2)
     assert [row["seq"] for row in ordered] == [2, 0, 1]
 
 
 def test_rerank_falls_back_on_garbage_or_error(monkeypatch):
     rows = [_row(0, "甲"), _row(1, "乙")]
-    monkeypatch.setattr(retrieval, "complete_chat_once", lambda prompt: "我觉得第2条更好")
+
+    # 分数数量不符（garbage）→ 退回向量顺序
+    fake = _FakeReranker([1.0])  # 只有 1 个分数，候选有 2 条
+    monkeypatch.setattr(retrieval, "get_reranker", lambda: fake)
     assert retrieval._rerank("问题", rows, top_k=2) == rows
 
-    def boom(prompt):
+    # 后端抛错 → 退回向量顺序，绝不丢候选
+    def boom(query, docs):
         raise RuntimeError("模型超时")
 
-    monkeypatch.setattr(retrieval, "complete_chat_once", boom)
+    fake_err = _FakeReranker([])
+    fake_err.rerank = boom
+    monkeypatch.setattr(retrieval, "get_reranker", lambda: fake_err)
     assert retrieval._rerank("问题", rows, top_k=2) == rows
 
 
@@ -195,12 +213,12 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     seen: dict = {}
 
-    def fake_search(query, *, file_ids=None, top_k=3, filters=None):
+    def fake_search(queries, *, file_ids=None, top_k=3, filters=None):
         seen["file_ids"] = file_ids
         return []
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", fake_search)
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", fake_search)
 
     token = set_kb_scope([str(FILE_ID)])
     try:

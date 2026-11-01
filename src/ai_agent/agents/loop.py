@@ -16,8 +16,11 @@ from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import collect_citations, merge_sources
 from ai_agent.kb.doc_profiles import resolve_profile
 from ai_agent.kb.scope import (
+    extract_prev_turn,
     reset_kb_scope,
+    reset_rewrite_context,
     set_kb_scope,
+    set_rewrite_context,
 )
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
@@ -648,15 +651,19 @@ def run_loop(
             seen_calls.add(dedupe_key)
             # 前端只用来清掉调用前的半截字，展示名不再下发
             yield {"type": "tool_start", "name": call["name"]}
-            # 范围必须在工具执行这一层同栈设置：run_stream 的生成器会被
-            # 不同线程轮流 next() 推进，外层设的 contextvar 传不进来
+            # 范围与查询改写上下文必须在工具执行这一层同栈设置：run_stream 的
+            # 生成器会被不同线程轮流 next() 推进，外层设的 contextvar 传不进来
             scope_token = set_kb_scope(kb_file_ids)
+            rewrite_token = set_rewrite_context(
+                extract_prev_turn(messages, settings.kb_rewrite_history_turns)
+            )
             try:
                 with collect_citations() as cited:
                     with user_scope(user_id):
                         output = execute_tool(call["name"], call["arguments"])
             finally:
                 reset_kb_scope(scope_token)
+                reset_rewrite_context(rewrite_token)
             turn_sources = merge_sources(turn_sources, cited)
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
             # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾

@@ -17,11 +17,17 @@ from ai_agent.kb.citations import Citation, add_citations
 from ai_agent.kb.retrieval import (
     Hit,
     format_where,
-    search_knowledge,
+    search_knowledge_multi,
+    search_knowledge_subqueries,
     _PARENT_INTENT,
     SCOPE_PARENT,
 )
-from ai_agent.kb.scope import effective_kb_query, resolve_tool_file_ids
+from ai_agent.kb.scope import (
+    decompose_queries,
+    effective_kb_query,
+    expand_queries,
+    resolve_tool_file_ids,
+)
 from ai_agent.memory.store import store
 from ai_agent.prompts.tools import (
     KB_EMPTY_HINT,
@@ -151,9 +157,25 @@ def _kb_search(
     if _PARENT_INTENT.search(retrieval_query):
         filters["scopes"] = [SCOPE_PARENT]
 
+    # 子问题分解（sub-question）优先于 multi-query：多主体对比问句（「A 和 B 的
+    # 营收」）拆成单主体子问题各自独立检索、轮转合并，保证每个主体至少一条命中。
+    # multi-query 的同义改写对这类问句无效（实测反而放大第一主体优势），二者互斥：
+    # 拆出多条走 subqueries，拆不出再退回 multi-query / 单次检索。两条链都带
+    # 降级，失败退回 [retrieval_query]，等价于原单次检索，不引入额外失败面。
+    subs = decompose_queries(retrieval_query, file_ids=parsed_ids)
+    if len(subs) > 1:
+        search_fn = search_knowledge_subqueries
+        queries = subs
+    else:
+        queries = (
+            expand_queries(retrieval_query)
+            if settings.kb_multiquery_enabled
+            else [retrieval_query]
+        )
+        search_fn = search_knowledge_multi
     try:
-        hits = search_knowledge(
-            retrieval_query,
+        hits = search_fn(
+            queries,
             file_ids=parsed_ids,
             top_k=top_k,
             filters=filters or None,

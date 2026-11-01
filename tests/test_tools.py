@@ -190,7 +190,7 @@ def test_kb_search_without_files_uses_doc_route(monkeypatch):
         "ai_agent.kb.router.route_files", lambda query, **kwargs: [fid]
     )
     monkeypatch.setattr(
-        "ai_agent.tools.kb_search.search_knowledge",
+        "ai_agent.tools.kb_search.search_knowledge_multi",
         lambda query, *, file_ids=None, top_k=3, filters=None: seen.setdefault("file_ids", file_ids)
         and [],
     )

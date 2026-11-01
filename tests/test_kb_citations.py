@@ -47,7 +47,7 @@ def test_kb_search_records_citations_with_position(monkeypatch):
     from ai_agent.tools import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", lambda *a, **kw: [_hit()])
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [_hit()])
 
     with collect_citations() as cited:
         text = kb_tool._kb_search("迟到怎么处理")
@@ -118,7 +118,7 @@ def test_citations_without_collector_are_silently_dropped(monkeypatch):
     from ai_agent.tools import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", lambda *a, **kw: [_hit()])
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [_hit()])
 
     text = kb_tool._kb_search("迟到怎么处理")
     assert "考勤制度" in text
@@ -183,7 +183,7 @@ def test_kb_search_returns_no_hit_when_all_hits_irrelevant(monkeypatch):
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(
         kb_tool,
-        "search_knowledge",
+        "search_knowledge_multi",
         lambda *a, **kw: [_hit(distance=0.85), _hit(seq=7, distance=0.91)],
     )
     with collect_citations() as cited:
@@ -200,7 +200,7 @@ def test_kb_search_keeps_only_relevant_hits(monkeypatch):
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(
         kb_tool,
-        "search_knowledge",
+        "search_knowledge_multi",
         lambda *a, **kw: [_hit(distance=0.2), _hit(seq=7, distance=0.9)],
     )
     with collect_citations() as cited:

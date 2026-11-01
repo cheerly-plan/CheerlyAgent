@@ -215,10 +215,12 @@ class Settings(BaseSettings):
     # 每次排出同一个顺序，否则评测结果会随采样抖动，改动好坏无法归因
     kb_rerank_temperature: float = 0.0
     kb_rerank_timeout_seconds: float = 30.0
-    # 重排后端：llm（沿用大模型重排，默认兼容）/ local_ce（本地 bge-reranker-v2-m3，
-    # 便宜 1-2 个数量级、完全确定、财报文本不出网）。local_ce 需 FlagEmbedding 依赖
-    # （uv add --group rerank FlagEmbedding）；加载失败自动退回 llm。
-    kb_rerank_backend: str = "llm"
+    # 重排后端：local_ce（本地 bge-reranker-v2-m3，便宜 1-2 个数量级、完全确定、
+    # 财报文本不出网，默认）/ llm（沿用大模型重排，仅作兜底）。local_ce 需
+    # FlagEmbedding 依赖（uv add --group rerank FlagEmbedding）且首次需拉取权重
+    # （HF_ENDPOINT=https://hf-mirror.com）；加载失败自动退回 llm。应用启动时
+    # lifespan 会探测后端并打印就绪/退回日志，便于确认实际生效的是哪个。
+    kb_rerank_backend: str = "local_ce"
     # local_ce 使用的 cross-encoder 模型
     kb_rerank_local_model: str = "BAAI/bge-reranker-v2-m3"
     # 实体对齐是否要求模型输出 JSON（response_format），取值与
@@ -241,6 +243,33 @@ class Settings(BaseSettings):
     # 超出带宽的主体不保底——问一家公司时，别家的头名差 0.3 也硬塞进来
     # 只会稀释上下文。0 = 关掉配额，退回纯按距离取前 N 条。
     kb_subject_quota_band: float = 0.12
+    # ——— 查询改写（多轮对话补全 + 检索增强）———
+    # 多轮对话改写：结合上一轮对话把当前追问补全/指代消解成自包含检索词
+    # （如「那它去年呢？」补全公司名）。关闭/无上文/失败一律退回原话。
+    kb_rewrite_enabled: bool = True
+    # 空 = 跟随 resolve_llm()（小模型优先，短文本判别不需要大模型）
+    kb_rewrite_model: str = ""
+    kb_rewrite_timeout_seconds: float = 3.0
+    kb_rewrite_history_turns: int = 2
+    # 检索增强改写（multi-query）：把一条查询扩写成多条变体分别检索后 RRF 融合，
+    # 提升对比/口语长问句召回。默认关闭——开启会显著增加检索次数与延迟，
+    # 请先用评测验证效果与延迟可接受再用于生产。
+    kb_multiquery_enabled: bool = False
+    kb_multiquery_model: str = ""
+    kb_multiquery_count: int = 3
+    kb_multiquery_timeout_seconds: float = 3.0
+    # 子问题分解（sub-question）：多主体对比问句（「A 和 B 的营收」）拆成
+    # 「A 的营收」「B 的营收」各自独立检索后轮转合并，保证每个主体至少一条
+    # 命中——multi-query 的同义改写对这类问句无效（实测反而放大第一主体优势），
+    # 拆主体才是正解。默认关闭：会按子问题数量翻倍检索 / 重排次数，
+    # 请先用评测验证效果与延迟可接受再用于生产。
+    kb_decompose_enabled: bool = False
+    # 空 = 跟随 resolve_llm()（小模型优先，短文本拆解不需要大模型）
+    kb_decompose_model: str = ""
+    kb_decompose_timeout_seconds: float = 3.0
+    # 一次拆出的子问题上限：对比问句一般是 2~3 家，设上限防止模型拆出
+    # 一长串、把检索次数拖爆
+    kb_decompose_max: int = 4
     # ——— 文档级摘要索引 + 语义路由 ———
     # 每份文件入库后额外生成一段摘要并单独 embedding（见 kb/summary.py），
     # 检索前先用它把「该查哪几份文件」这个问题解答掉：
