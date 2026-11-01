@@ -86,6 +86,80 @@ def test_rrf_merge_keyword_only_rows_carry_no_distance():
     assert retrieval._to_hit(merged[0]).distance is None
 
 
+def test_rrf_merge_full_keyword_hit_outranks_low_vector_ranks():
+    """全关键词命中的封面切片应压过向量低名次、进入重排候选窗。
+
+    复现「中国银行证券代码是多少」答偏：封面「证券代码：600916」只在关键词
+    路命中、且命中了全部查询词，但不在向量 16 条内。原统一 0.5 权重下其分
+    =0.5/61≈0.0082，低于向量第 16 名 1/76≈0.0132，被排到第 17、砍在
+    RERANK_LIMIT 门外。改为全命中恢复 1.0 后其分=1/61≈0.0164 > 向量第 2~16
+    名，应稳定落在前 12。
+    """
+    # 16 条向量结果（rank 1..16），分数 1/61 .. 1/76
+    vector_rows = [_row(FILE_ID, seq, f"向量第 {seq} 段") for seq in range(16)]
+    cover = {
+        "id": uuid.uuid4(),
+        "file_id": FILE_ID,
+        "filename": "中国银行2024年报.pdf",
+        "seq": 99,
+        "page": 1,
+        "kind": "text",
+        "text": "证券代码：600916",
+        "keyword_score": 2,  # 命中「证券」「代码」两个查询词 = 全命中
+    }
+    merged = retrieval._rrf_merge(vector_rows, [cover], n_keywords=2)
+    seqs = [row["seq"] for row in merged]
+    cover_pos = seqs.index(99)
+    worst_vector_pos = seqs.index(15)  # 向量第 16 名
+    # 封面压过向量第 16 名，且进入重排候选窗（前 _RERANK_LIMIT）
+    assert cover_pos < worst_vector_pos
+    assert cover_pos < retrieval._RERANK_LIMIT
+
+
+def test_rrf_merge_partial_keyword_hit_stays_discounted():
+    """只命中部分查询词的目录/页眉仍保持 0.5 折扣，不抢占数据切片。"""
+    first = _row(FILE_ID, 10, "向量第一名（带数据）")
+    kw_only = {
+        "id": uuid.uuid4(),
+        "file_id": OTHER_ID,
+        "filename": "目录.docx",
+        "seq": 20,
+        "page": 1,
+        "kind": "text",
+        "text": "只命中了公司名",
+        "keyword_score": 1,  # 仅命中 2 个查询词中的 1 个 = 部分命中
+    }
+    merged = retrieval._rrf_merge([first], [kw_only], n_keywords=2)
+    assert [row["seq"] for row in merged] == [10, 20]
+
+
+def test_fuse_full_keyword_hit_reaches_rerank_window(monkeypatch):
+    """`_fuse_with_keywords` 把查询词数透传给 RRF，全命中封面进入前 12。"""
+    monkeypatch.setattr(settings, "kb_hybrid_enabled", True)
+    monkeypatch.setattr(retrieval, "_extract_keywords", lambda q: ["证券", "代码"])
+    monkeypatch.setattr(
+        retrieval, "_keep_distinctive_keywords", lambda kws, *a, **k: kws
+    )
+    vector_rows = [_row(FILE_ID, seq, f"向量第 {seq} 段") for seq in range(16)]
+    cover = {
+        "id": uuid.uuid4(),
+        "file_id": FILE_ID,
+        "filename": "中国银行2024年报.pdf",
+        "seq": 99,
+        "page": 1,
+        "kind": "text",
+        "text": "证券代码：600916",
+        "keyword_score": 2,
+    }
+    monkeypatch.setattr(
+        retrieval.store, "search_kb_chunks_keyword", lambda *a, **k: [cover]
+    )
+    merged = retrieval._fuse_with_keywords("证券代码是多少", vector_rows, None)
+    seqs = [row["seq"] for row in merged]
+    assert seqs.index(99) < seqs.index(15)
+    assert seqs.index(99) < retrieval._RERANK_LIMIT
+
+
 def test_fuse_disabled_returns_vector_rows_untouched(monkeypatch):
     monkeypatch.setattr(settings, "kb_hybrid_enabled", False)
     vector_rows = [_row(FILE_ID, 0, "甲")]

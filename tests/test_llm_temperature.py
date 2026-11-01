@@ -65,6 +65,18 @@ def test_graph_client_falls_back_to_main(monkeypatch):
     assert client.graph_client() is client._client
 
 
+def test_local_llm_falls_back_to_main(monkeypatch):
+    monkeypatch.setattr(settings, "local_base_url", "")
+    monkeypatch.setattr(settings, "local_api_key", "")
+    assert settings.local_llm() == (settings.base_url, settings.api_key)
+
+
+def test_local_llm_uses_dedicated_endpoint(monkeypatch):
+    monkeypatch.setattr(settings, "local_base_url", "http://127.0.0.1:11434/v1")
+    monkeypatch.setattr(settings, "local_api_key", "ollama")
+    assert settings.local_llm() == ("http://127.0.0.1:11434/v1", "ollama")
+
+
 def test_complete_chat_omits_temperature_by_default(monkeypatch):
     """不传就不下发：主对话/摘要这类需要一点发散的任务仍走服务端默认。"""
     sink: list[dict] = []

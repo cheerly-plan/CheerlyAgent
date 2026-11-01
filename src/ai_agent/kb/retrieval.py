@@ -33,6 +33,7 @@ from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
 from ai_agent.prompts.kb import build_rerank_user
+from ai_agent.kb.rerank import get_reranker
 
 logger = get_logger(__name__)
 
@@ -50,6 +51,14 @@ _RRF_K = 60
 # 权重 1.0（两路同权）时，这种片段能和向量第一名打平，把真正带数据的
 # 切片挤下去；降到 0.5 后它只算「补充证据」，压不过向量路的高名次。
 _RRF_KEYWORD_WEIGHT = 0.5
+# 关键词「全命中」（一条切片命中了本次检索的全部查询词，见 `_rrf_merge`
+# 的 `n_keywords`）时恢复权重到 1.0。这类切片基本就是用户要的字面答案
+# （如封面「证券代码：600916」同时含「证券」和「代码」）：原统一 0.5 会把
+# 它压在向量第 16 名之下、被 RERANK_LIMIT 砍掉，于是「证券代码是多少」
+# 答到其他地方。要压过向量第 16 名需 w/61 > 1/76 → w > 0.803，故取整值
+# 1.0。只有「全命中」才恢复，部分命中的目录/页眉仍保持 0.5 折扣，以防
+# 字面噪声挤掉真正带数据的切片。
+_RRF_KEYWORD_WEIGHT_FULL = 1.0
 
 # ——— 报表口径偏好 ———
 # 同一指标在合并报表与母公司报表里各有一份数，值可能差几十倍（能建期末
@@ -464,7 +473,7 @@ def _fuse_with_keywords(
         return vector_rows
     if not keyword_rows:
         return vector_rows
-    return _rrf_merge(vector_rows, keyword_rows)
+    return _rrf_merge(vector_rows, keyword_rows, n_keywords=len(keywords))
 
 
 def _keep_distinctive_keywords(
@@ -495,11 +504,19 @@ def _keep_distinctive_keywords(
     return kept
 
 
-def _rrf_merge(vector_rows: list[dict], keyword_rows: list[dict]) -> list[dict]:
+def _rrf_merge(
+    vector_rows: list[dict],
+    keyword_rows: list[dict],
+    n_keywords: int | None = None,
+) -> list[dict]:
     """两路召回按名次做 RRF 融合：score = Σ 权重/(60+名次)，双路命中叠加。
 
-    关键词路带 `_RRF_KEYWORD_WEIGHT` 的折扣：它只数「命中了几个词」，
-    不像向量路衡量语义相关性，同权会盖过真正带数据的切片。
+    关键词路默认带 `_RRF_KEYWORD_WEIGHT` 的折扣：它只数「命中了几个词」，
+    不像向量路衡量语义相关性，同权会盖过真正带数据的切片。但「全命中」
+    （一条切片命中了本次检索的全部查询词，即 `keyword_score == n_keywords`）
+    是强字面信号，基本就是用户要的字面答案，此时恢复 `_RRF_KEYWORD_WEIGHT_FULL`
+    权重，让其压过向量路中低名次、进入重排候选。`n_keywords` 为 None 时
+    （旧调用方/离线用例）一律走 0.5 折扣，保持原行为。
 
     关键词独有片段没有 distance（向量化这条路没走过），保持缺失；
     _to_hit 写成 None，不能填 0。融合结果按分数降序返回。
@@ -514,7 +531,13 @@ def _rrf_merge(vector_rows: list[dict], keyword_rows: list[dict]) -> list[dict]:
         key = (str(row["file_id"]), int(row["seq"]))
         if key not in merged:
             merged[key] = dict(row)
-        scores[key] = scores.get(key, 0.0) + _RRF_KEYWORD_WEIGHT / (_RRF_K + rank + 1)
+        kw_score = row.get("keyword_score")
+        weight = (
+            _RRF_KEYWORD_WEIGHT_FULL
+            if n_keywords and kw_score == n_keywords
+            else _RRF_KEYWORD_WEIGHT
+        )
+        scores[key] = scores.get(key, 0.0) + weight / (_RRF_K + rank + 1)
     ranked = sorted(merged.items(), key=lambda item: scores[item[0]], reverse=True)
     # 分数留在行上：口径偏好要按分数比例加权，只改名次会破坏 RRF 的相对差距
     fused = []
@@ -629,39 +652,68 @@ def _attach_neighbors(hits: list[Hit]) -> list[Hit]:
     return hits
 
 
-_rerank_cache: dict[tuple, list[int]] = {}
+_RERANK_CACHE_MAX = 1024
+_rerank_cache: dict[tuple, list[float]] = {}
+
+
+def _candidate_text(row: dict) -> str:
+    """喂给重排器的候选文本：文件名 + 位置 + 截断正文，与旧 LLM 重排看到的一致。"""
+    return (
+        f"{row.get('filename') or ''} · {_where(row)}\n"
+        f"{_clip(render_otsl(row.get('text') or ''))}"
+    )
+
+
+def _llm_rerank_scores(query: str, docs: list[str]) -> list[float]:
+    """LLM 重排：让模型对候选编号排序，折算成分数（名次越靠前分越高）。
+
+    仅作为 cross-encoder 不可用时的兜底；分数制与 cross-encoder 后端输出同构，
+    `_rerank` 无需感知具体后端。
+    """
+    listing = "\n\n".join(f"[{i + 1}] {doc}" for i, doc in enumerate(docs))
+    prompt = build_rerank_user(query, listing, len(docs))
+    try:
+        answer = complete_chat_once(prompt)
+    except Exception:
+        logger.warning("kb LLM 重排调用失败", exc_info=True)
+        raise
+    order = _parse_order(answer, len(docs))
+    if not order:
+        raise ValueError("kb LLM 重排未解析出有效顺序")
+    n = len(docs)
+    scores = [0.0] * n
+    for rank, idx in enumerate(order):
+        if 1 <= idx <= n:
+            scores[idx - 1] = float(n - rank)
+    return scores
 
 
 def _rerank(query: str, rows: list[dict], top_k: int) -> list[dict]:
-    """LLM 重排：只输出候选编号顺序，解析失败就退回向量顺序。
+    """重排：调用可插拔 Reranker 对候选打分，按分数降序返回。
 
-    同 (query, 候选序列) 直接复用首次重排结果：LLM 编号输出非确定，缓存可
-    消除「同问不同序」，也省一次重排调用。候选序列用 file_id#seq 签名，
-    重排候选变了（范围/阈值不同）即失效，不会串味。
+    候选序列用 file_id#seq 签名，重排候选变了（范围/阈值不同）即失效，不会串味。
+    后端由 settings.kb_rerank_backend 决定（见 ai_agent.kb.rerank）。失败或分数
+    数量不符时退回向量顺序，绝不丢候选。
     """
-    cache_key = (query, tuple((r.get("file_id"), r.get("seq")) for r in rows))
-    cached = _rerank_cache.get(cache_key)
-    if cached is None:
-        listing = "\n\n".join(
-            f"[{i + 1}] {row.get('filename') or ''} · {_where(row)}\n{_clip(render_otsl(row.get('text') or ''))}"
-            for i, row in enumerate(rows)
-        )
-        prompt = build_rerank_user(query, listing, min(top_k, len(rows)))
+    sig = tuple((r.get("file_id"), r.get("seq")) for r in rows)
+    cache_key = (query, sig)
+    scores = _rerank_cache.get(cache_key)
+    if scores is None:
+        docs = [_candidate_text(r) for r in rows]
         try:
-            answer = complete_chat_once(prompt)
+            scores = get_reranker().rerank(query, docs)
         except Exception:
             logger.warning("kb 重排调用失败，退回向量顺序", exc_info=True)
             return rows
-        order = _parse_order(answer, len(rows))
-        if not order:
+        if len(scores) != len(rows):
+            logger.warning("kb 重排返回分数数量与候选不符，退回向量顺序")
             return rows
-        _rerank_cache[cache_key] = order
-    else:
-        order = cached
-    # 重排结果里没提到的候选按原顺序补在后面：宁可多给一条，也别丢候选
-    ordered = [rows[i - 1] for i in order]
-    ordered.extend(row for i, row in enumerate(rows, start=1) if i not in set(order))
-    return ordered
+        _rerank_cache[cache_key] = scores
+        if len(_rerank_cache) > _RERANK_CACHE_MAX:
+            # dict 保插入序，弹出最旧一项，避免进程内无限增长（修复旧实现无淘汰）
+            _rerank_cache.pop(next(iter(_rerank_cache)))
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    return [rows[i] for i in order]
 
 
 def complete_chat_once(prompt: str) -> str:

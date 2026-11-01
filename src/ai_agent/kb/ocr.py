@@ -3,7 +3,7 @@
 官方 MCP（ocr_pdf 的 page 模式）做的就是这件事：150 DPI 渲页、长边压到
 2048、固定英文抽取提示词、temperature=0、关掉 thinking。它的 stdio 服务
 拒绝非 127.0.0.1 的推理地址，而这里的 Ollama 在局域网上，所以同一套
-page 流程直接打 BASE_URL，不另起 MCP 进程。
+page 流程直接打本地网关（LOCAL_BASE_URL，未配则 BASE_URL），不另起 MCP 进程。
 
 模型名为空则整体关闭，PDF 仍走文字层。识别一页都没有时也退回文字层，
 避免模型没拉下来时上传直接失败。
@@ -31,9 +31,10 @@ from ai_agent.prompts.kb import OCR_DOCUMENT_PROMPT
 
 logger = get_logger(__name__)
 
+_local_url, _local_key = settings.local_llm()
 _client = OpenAI(
-    base_url=settings.base_url,
-    api_key=settings.api_key,
+    base_url=_local_url,
+    api_key=_local_key,
     timeout=settings.kb_ocr_timeout_seconds,
     max_retries=0,
 )

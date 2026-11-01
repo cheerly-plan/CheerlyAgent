@@ -9,9 +9,10 @@ from openai import OpenAI
 
 logger = get_logger(__name__)
 
+_local_url, _local_key = settings.local_llm()
 _client = OpenAI(
-    base_url=settings.base_url,
-    api_key=settings.api_key,
+    base_url=_local_url,
+    api_key=_local_key,
 )
 
 
@@ -39,7 +40,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
                 logger.warning("embed 第 %d 次失败，重试: %s", attempt + 1, e)
                 continue
             raise LLMError(
-                f"Embed text failed ({settings.embedding_model} @ {settings.base_url}): {e}"
+                f"Embed text failed ({settings.embedding_model} @ {_local_url}): {e}"
             ) from e
     items = sorted(resp.data, key=lambda x: x.index)
     vectors = [item.embedding for item in items]

@@ -3,7 +3,6 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 from ai_agent.agents.budget import Budget
-from ai_agent.agents.intent import classify_intent, intent_hint
 from ai_agent.prompts.chat import (
     RUNTIME_BUDGET_EXHAUSTED,
     RUNTIME_DUP_CALL,
@@ -172,16 +171,12 @@ def _aggregate_subjects(
 
 
 def _system_prompt(
-    user_id: str, *, use_kb: bool = True, intent=None, kb_file_ids: tuple[str, ...] = ()
+    user_id: str, *, use_kb: bool = True, kb_file_ids: tuple[str, ...] = ()
 ) -> str:
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
-    base = build_system_prompt(use_kb=use_kb)
-    # 意图信号：只在对知识库明显无关（天气/闲聊）时追加强提示，避免过指令化。
-    # intent 为 None（未启用/无法判定）时不追加，退回主模型自由裁量。
-    hint = intent_hint(intent) if (use_kb and intent) else ""
-    core = f"{base}\n\n{hint}" if hint else base
+    core = build_system_prompt(use_kb=use_kb)
     # 知识库可用文件清单：直接注入系统提示词，让模型对照着用 files 参数
     # 显式圈定要查的文档（必填），不再由系统偷偷按查询猜文件范围。
     block = _profile_prompt(user_id)
@@ -267,15 +262,13 @@ def run_stream(
                 return
             replacing = True
             user_input = str(recent[-1].get("content") or "")
-            intent = classify_intent(user_input)
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, intent=intent, kb_file_ids=kb_file_ids), summary, recent
+                _system_prompt(user_id, use_kb=use_kb, kb_file_ids=kb_file_ids), summary, recent
             )
             persisted = len(messages)
         else:
-            intent = classify_intent(user_input)
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, intent=intent, kb_file_ids=kb_file_ids), summary, recent
+                _system_prompt(user_id, use_kb=use_kb, kb_file_ids=kb_file_ids), summary, recent
             )
             persisted = len(messages)
             turn_anchor = {"role": "user", "content": user_input}

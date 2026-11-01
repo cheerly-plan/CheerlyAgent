@@ -14,6 +14,11 @@ class Settings(BaseSettings):
 
     base_url: str
     api_key: str
+    # 向量和整页 OCR 专用网关。空则跟随 BASE_URL / API_KEY。
+    # 对话、重排、视觉、图谱走线上时，这里填本地 Ollama，避免嵌入和 OCR
+    # 被一起带到线上（换嵌入模型等于整库重嵌，小米 OCR 也只在本地）。
+    local_base_url: str = ""
+    local_api_key: str = ""
     model: str
     small_model: str = ""
     max_turns: int = 10
@@ -139,10 +144,9 @@ class Settings(BaseSettings):
     # 默认开启；关闭后新上传的文件不再生成图谱，已有图谱保留、仍可检索。
     # 抽取失败只影响图谱（graph_status=failed），文件本身仍是 ready、照常检索。
     kb_graph_enabled: bool = True
-    # 空 = 跟随 MODEL。对话/嵌入走本地时，这里填线上模型名，并配
-    # kb_graph_base_url，实体抽取才不会打到 Ollama 上 404。
+    # 空 = 跟随 MODEL。只有抽取要换模型或换网关时才填下面三项。
     kb_graph_model: str = ""
-    # 抽取专用网关。空 = 跟 BASE_URL。对话用 Ollama、抽实体用线上时填这个。
+    # 抽取专用网关。空 = 跟 BASE_URL。
     kb_graph_base_url: str = ""
     # 抽取专用 key。空 = 跟 API_KEY。
     kb_graph_api_key: str = ""
@@ -164,8 +168,7 @@ class Settings(BaseSettings):
     # 单批抽取的超时：云端模型 45s 够，但本地 7B 模型产出 4k token 的 JSON
     # 常要 60~150s，给足余量（超时 = 丢一批，宁可慢也别丢）
     kb_graph_timeout_seconds: float = 180
-    # 检索时取多少个种子实体、向前端返回的图最大节点数
-    kb_graph_top_k: int = 6
+    # 向前端返回的图最大节点数。种子实体条数由检索请求的 top_k 决定。
     kb_graph_max_nodes: int = 200
     # 没有名称/关键词依据的候选，向量相似度必须过这条线。
     # 向量模型对无关词也会给 0.45~0.52 的基线，低于 0.55 基本只是话题沾边；
@@ -212,6 +215,12 @@ class Settings(BaseSettings):
     # 每次排出同一个顺序，否则评测结果会随采样抖动，改动好坏无法归因
     kb_rerank_temperature: float = 0.0
     kb_rerank_timeout_seconds: float = 30.0
+    # 重排后端：llm（沿用大模型重排，默认兼容）/ local_ce（本地 bge-reranker-v2-m3，
+    # 便宜 1-2 个数量级、完全确定、财报文本不出网）。local_ce 需 FlagEmbedding 依赖
+    # （uv add --group rerank FlagEmbedding）；加载失败自动退回 llm。
+    kb_rerank_backend: str = "llm"
+    # local_ce 使用的 cross-encoder 模型
+    kb_rerank_local_model: str = "BAAI/bge-reranker-v2-m3"
     # 实体对齐是否要求模型输出 JSON（response_format），取值与
     # memory_extract_json_mode 相同（off / json_object）。
     # 对齐的输出形状最简单（{"same":[1,0,1]}），但裁决结果会被直接拿去合并
@@ -290,12 +299,11 @@ class Settings(BaseSettings):
     # 链路 400。先在支持 JSON 模式的网关上实测后再打开。
     memory_extract_json_mode: str = "off"
 
-    # 意图软提示（对话路由）：用纯关键词判定用户问题是否为「天气 / 闲聊」这类
-    # 与知识库无关的内容，给主模型一个显式但软性的路由提示（明确别去调
-    # kb_search/kg_search）。不做小模型分类——那两类关键词就能确定性识别，
-    # 没必要每轮多一次 LLM 调用；且小模型误判反而可能跳过本该查的库。
-    # 本开关只控制「是否追加提示」，永不关闭检索工具；关掉即退回主模型自行决定。
-    intent_enabled: bool = True
+    def local_llm(self) -> tuple[str, str]:
+        """向量和整页 OCR 的网关。未单独配置时跟主网关。"""
+        url = (self.local_base_url or "").strip() or self.base_url
+        key = (self.local_api_key or "").strip() or self.api_key
+        return url, key
 
     def resolve_llm(self, business_model: str = "") -> str:
         return business_model or self.small_model or self.model
