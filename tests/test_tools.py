@@ -191,7 +191,7 @@ def test_kb_search_without_files_uses_doc_route(monkeypatch):
     )
     monkeypatch.setattr(
         "ai_agent.tools.kb_search.search_knowledge",
-        lambda query, *, file_ids=None, top_k=3: seen.setdefault("file_ids", file_ids)
+        lambda query, *, file_ids=None, top_k=3, filters=None: seen.setdefault("file_ids", file_ids)
         and [],
     )
     _kb_search("中国能建营收是多少")

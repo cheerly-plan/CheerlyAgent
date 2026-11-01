@@ -284,6 +284,58 @@ def test_cross_page_tables_stay_apart_when_columns_differ():
     assert [(c.page, c.page_end) for c in chunks] == [(4, 4), (5, 5)]
 
 
+def test_long_html_table_splits_by_row_and_repeats_header():
+    from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
+
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = "".join(
+        "<tr><td>科目"
+        f"{i:02d}名称比较长用来撑开这一行</td><td>{i},234,567.89</td>"
+        f"<td>{i},876,543.21</td></tr>"
+        for i in range(25)
+    )
+    table = f"<table>{header}{rows}</table>"
+    chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=50)
+    assert len(chunks) > 1
+    assert all(c.kind == "table" and c.page == 8 for c in chunks)
+    assert all(header in c.text for c in chunks)
+    joined = "".join(c.text for c in chunks)
+    for i in range(25):
+        assert f"科目{i:02d}" in joined
+    for chunk in chunks:
+        plain = html_table_plain(chunk.text)
+        lines = [line for line in plain.splitlines() if line.strip()]
+        if len(lines) > 2:
+            assert len(plain) <= TABLE_GROUP_CHARS
+
+
+def test_html_table_section_row_starts_a_new_group():
+    header = "<tr><td>项目</td><td>期末</td></tr>"
+    body = "".join(
+        "<tr><td>流动项"
+        f"{i:02d}的名字比较长用来把这一组撑过上限</td><td>{i},000,000.00</td></tr>"
+        for i in range(24)
+    )
+    section = "<tr><td colspan=\"2\">非流动资产：</td></tr>"
+    tail = "<tr><td>投资性房地产</td><td>2,578,854.37</td></tr>"
+    table = f"<table>{header}{body}{section}{tail}</table>"
+    chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=0)
+    assert len(chunks) > 1
+    host = next(c for c in chunks if "非流动资产" in c.text)
+    assert "投资性房地产" in host.text
+    assert "流动项00" not in host.text
+
+
+def test_html_table_one_long_row_stays_with_header():
+    header = "<tr><td>项目</td><td>说明</td></tr>"
+    long = "甲" * 900
+    table = f"<table>{header}<tr><td>备注</td><td>{long}</td></tr></table>"
+    chunks = chunk_segments([Segment(table, 1)], max_chars=500, overlap=0)
+    assert len(chunks) == 1
+    assert chunks[0].kind == "table"
+    assert long in chunks[0].text
+
+
 def test_short_html_table_not_merged_into_prose():
     table = "<table><tr><td>营业收入</td><td>1</td></tr></table>"
     text = f"前文说明。\n\n{table}\n\n后文。"

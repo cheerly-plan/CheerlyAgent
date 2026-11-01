@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
 from ai_agent.kb.meta import ENTITY_SUFFIX as _ENTITY_SUFFIX
 from ai_agent.kb.meta import EXT_RE as _EXT_RE
 from ai_agent.kb.meta import FILENAME_NOISE as _FILENAME_NOISE
@@ -39,8 +40,9 @@ logger = get_logger(__name__)
 
 # 与已保留片段的三字组 Jaccard 超过这个值就当成重复（overlap 造成的近似片）
 _DUP_THRESHOLD = 0.72
-# 送重排时单段文本截断长度：重排只看相关性，不需要读完整段
-_RERANK_CLIP = 300
+# 送重排的正文上限，与 HTML 表行组是同一个字数：一组表重排能看完，
+# 不会停在表头。正文切片本来就短于这个上限，放宽后整段也能读完。
+_RERANK_CLIP = TABLE_GROUP_CHARS
 # 送重排的候选上限：再多提示词就太长，而且第 13 名之后本来就进不了 top_k
 _RERANK_LIMIT = 12
 # RRF 融合平滑项（业界惯用 60）：排名越靠前贡献越大，两路都命中会叠加
@@ -671,11 +673,12 @@ _rerank_cache: dict[tuple, list[float]] = {}
 
 
 def _candidate_text(row: dict) -> str:
-    """喂给重排器的候选文本：文件名 + 位置 + 截断正文，与旧 LLM 重排看到的一致。"""
-    return (
-        f"{row.get('filename') or ''} · {_where(row)}\n"
-        f"{_clip(render_otsl(row.get('text') or ''))}"
-    )
+    """喂给重排器的候选文本：文件名 + 位置 + 单元格文字。
+
+    HTML 标签先去掉再截断。否则 800 字窗口全花在 `<td>` 上，表身还是看不见。
+    """
+    body = html_table_plain(render_otsl(row.get("text") or ""))
+    return f"{row.get('filename') or ''} · {_where(row)}\n{_clip(body)}"
 
 
 def _llm_rerank_scores(query: str, docs: list[str]) -> list[float]:

@@ -41,6 +41,22 @@ def test_embedding_input_prefixes_context_but_keeps_body():
     )
 
 
+def test_embedding_and_rerank_read_table_cells_not_tags():
+    html = (
+        "<table><tr><td>项目</td><td>期末</td></tr>"
+        "<tr><td>货币资金</td><td>634,706,310.18</td></tr></table>"
+    )
+    embedded = embedding_input(html, filename="季报.pdf", page=8, kind="table")
+    assert "<td>" not in embedded
+    assert "货币资金 | 634,706,310.18" in embedded
+    shown = retrieval._candidate_text(
+        {"filename": "季报.pdf", "kind": "table", "page": 8, "seq": 1, "text": html}
+    )
+    assert "<td>" not in shown
+    assert "货币资金 | 634,706,310.18" in shown
+    assert retrieval._RERANK_CLIP == 800
+
+
 def test_dedupe_drops_near_duplicate_chunks():
     """切片 overlap 会让相邻片高度重合，只保留信息量最大的那条。"""
     body = "2026 年 HBM 市场规模约 546 亿美元，同比增速 58%，产能供不应求。" * 3
@@ -179,7 +195,7 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     seen: dict = {}
 
-    def fake_search(query, *, file_ids=None, top_k=3):
+    def fake_search(query, *, file_ids=None, top_k=3, filters=None):
         seen["file_ids"] = file_ids
         return []
 

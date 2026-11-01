@@ -9,9 +9,10 @@
 - text：上面的常规策略
 - table：整表成一片，超长时按**行组**切并**每片重复表头 / 表题 / 单位**，
   「其中：」子项和合计行不拆开，否则行与列名脱节，检索命中后无法还原
-  "哪一年的营收、单位是百万还是元"。正文里的 HTML `<table>` 整张单独成片，
+  "哪一年的营收、单位是百万还是元"。正文里的 HTML `<table>` 先整张抽出，
   kind 记成 table。相邻两页的表列数相同就接成一张，续页重复的表头丢掉，
-  page_end 记到最后一页。
+  page_end 记到最后一页。接完之后若去掉标签仍超过一行组上限，再按行切开，
+  每片重复表头。向量和重排读的是单元格文字，不读标签。
 - figure：图像描述本身很短，直接沿用常规策略（一般不触发切分）
 
 两级栅栏，谁窄听谁的：
@@ -25,8 +26,9 @@
 携带自己的页码区间与类型（PDF 页码、Excel sheet 序号、或 None）。
 """
 
+import html
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ai_agent.kb.parsing import FIGURE, TABLE, TEXT, Segment
@@ -51,10 +53,15 @@ _SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
 # Markdown 表格的分隔行：|---|---|
 _MD_SEPARATOR = re.compile(r"^\|[\s:\-|]+\|$")
 # 整页 OCR 的表是一整段 HTML。按 500 字硬切会切断 </td>，所以整表抽出。
+# 抽出、跨页接上之后，再按「去掉标签的字数」拆成行组。这一上限和重排窗口
+# 是同一个数：重排读得完这一组，向量也只覆盖这一组，不会把整张资产负债表
+# 压成一个点。
+TABLE_GROUP_CHARS = 800
 _HTML_TABLE = re.compile(r"<table\b[^>]*>[\s\S]*?</table>", re.IGNORECASE)
 _HTML_ROW = re.compile(r"<tr\b[^>]*>[\s\S]*?</tr>", re.IGNORECASE)
-_HTML_CELL = re.compile(r"<td\b([^>]*)>([\s\S]*?)</td>", re.IGNORECASE)
+_HTML_CELL = re.compile(r"<t[dh]\b([^>]*)>([\s\S]*?)</t[dh]>", re.IGNORECASE)
 _HTML_COLSPAN = re.compile(r"""colspan=["'](\d+)["']""", re.IGNORECASE)
+_HTML_ROWSPAN = re.compile(r"""rowspan=["'](\d+)["']""", re.IGNORECASE)
 # 嵌套子行：紧跟上一行，不能单独切到下一片
 _TABLE_SUB = re.compile(r"^(其中[:：]?|[（(]其中[）)]|[—–\-•·]\s*|[加减][:：])")
 # 金融工具三个计量类别是同一组，即使没写「其中：」也不能拆
@@ -143,7 +150,7 @@ def chunk_segments(
             flow.append(seg)
     flush_plain()
     flush_flow()
-    return chunks
+    return _expand_long_html_tables(chunks)
 
 
 def _drop_noise(segments: list[Segment]) -> list[Segment]:
@@ -375,6 +382,103 @@ def _html_pieces(para: str) -> list[tuple[str, str]]:
     return pieces or [("text", para)]
 
 
+def _cell_plain(raw: str) -> str:
+    text = re.sub(r"<[^>]+>", "", raw or "")
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def _row_plain_line(row: str) -> str:
+    return " | ".join(_cell_plain(match.group(2)) for match in _HTML_CELL.finditer(row))
+
+
+def html_table_plain(text: str) -> str:
+    """HTML 表换成「单元格 | 单元格」的行。标签不进向量，也不进重排。"""
+    if not text or not _HTML_TABLE.search(text):
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        lines = [_row_plain_line(row) for row in _table_rows(match.group(0))]
+        return "\n".join(line for line in lines if line.strip())
+
+    return _HTML_TABLE.sub(repl, text).strip()
+
+
+def _rows_plain_len(rows: list[str]) -> int:
+    return len("\n".join(_row_plain_line(row) for row in rows))
+
+
+def _html_header_row_count(rows: list[str]) -> int:
+    """表头占几行：第一行的 rowspan 盖住的都算表头，每片都要重复。"""
+    if not rows:
+        return 0
+    span = 1
+    for match in _HTML_CELL.finditer(rows[0]):
+        found = _HTML_ROWSPAN.search(match.group(1) or "")
+        if found:
+            span = max(span, int(found.group(1)))
+    return min(max(span, 1), len(rows))
+
+
+def _is_html_section_row(row: str) -> bool:
+    """「流动资产：」这种分组标题，跟在它后面的科目走，不留在上一组末尾。"""
+    cells = [_cell_plain(match.group(2)) for match in _HTML_CELL.finditer(row)]
+    filled = [cell for cell in cells if cell]
+    return len(filled) == 1 and filled[0].endswith(("：", ":"))
+
+
+def _split_html_table(table: str, limit: int = TABLE_GROUP_CHARS) -> list[str]:
+    """长 HTML 表按行组切开。每片重复表头；单行超长时整行留下，不从格子中间切。"""
+    rows = _table_rows(table)
+    if not rows or _rows_plain_len(rows) <= limit:
+        return [table]
+    head_n = _html_header_row_count(rows)
+    header, data = rows[:head_n], rows[head_n:]
+    if not data:
+        return [table]
+    groups: list[list[str]] = []
+    buf = list(header)
+
+    def flush() -> None:
+        nonlocal buf
+        if len(buf) > head_n:
+            groups.append(buf)
+        buf = list(header)
+
+    for row in data:
+        first = _row_plain_line(row).split(" | ", 1)[0].strip()
+        if _is_html_section_row(row) and len(buf) > head_n:
+            flush()
+        sticky = _is_sub_row(first) or _is_total_row(first)
+        if (
+            not sticky
+            and len(buf) > head_n
+            and _rows_plain_len(buf + [row]) > limit
+        ):
+            flush()
+        buf.append(row)
+    if len(buf) > head_n:
+        groups.append(buf)
+    if not groups:
+        return [table]
+    return ["<table>" + "".join(group) + "</table>" for group in groups]
+
+
+def _expand_long_html_tables(chunks: list[Chunk]) -> list[Chunk]:
+    """跨页接完之后再拆。先拆再接会把续页表头当成另一张表。"""
+    out: list[Chunk] = []
+    for chunk in chunks:
+        text = chunk.text.strip()
+        if chunk.kind != TABLE or not _HTML_TABLE.fullmatch(text):
+            out.append(chunk)
+            continue
+        parts = _split_html_table(text)
+        if len(parts) == 1:
+            out.append(chunk)
+            continue
+        out.extend(replace(chunk, text=part, kind=TABLE) for part in parts)
+    return out
+
+
 def _chunk_table(text: str, *, max_chars: int) -> list[str]:
     """表格切片：短表整片保留；长表按行组切，每片重复表头（含工作表名）。
 
@@ -548,8 +652,12 @@ def embedding_input(
     章节用完整标签（一级 + 二级）：试过只取一级，MRR 从 0.879 掉到 0.869
     ——二级标题里的「非经常性损益」「股东信息」恰恰是把数字表区分开的那几个
     字，砍掉反而更难找。
+
+    HTML 表先换成单元格文字再嵌入。标签占掉的向量维度不区分「货币资金」
+    和「应收账款」，整张表合成一个点时更是把要找的那一行稀释掉。
     """
-    return f"{context_prefix(filename, page=page, kind=kind, section=section)}\n{text}"
+    body = html_table_plain(text)
+    return f"{context_prefix(filename, page=page, kind=kind, section=section)}\n{body}"
 
 
 def _split_long(paragraph: str, max_chars: int, overlap: int) -> list[str]:
