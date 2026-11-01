@@ -116,7 +116,7 @@ def chunk_segments(
             )
             plain.clear()
 
-    for seg in _drop_noise(segments):
+    for seg in _carry_html_page_headers(_drop_noise(segments)):
         if seg.kind == TABLE:
             # 表必须整表成片（超长时重复表头），不能揉进正文流
             flush_plain()
@@ -337,6 +337,97 @@ def _row_texts(row: str) -> list[str]:
     ]
 
 
+def _html_row_is_data(row: str) -> bool:
+    """至少一个格子是纯数字。列名行里的「2026年1-9月」不算。"""
+    return any(cell and _NUM_ONLY_CELL.match(cell) for cell in _row_texts(row))
+
+
+def _html_row_is_header(row: str) -> bool:
+    cells = [cell for cell in _row_texts(row) if cell]
+    if len(cells) < 2 or _html_row_is_data(row):
+        return False
+    return any(re.search(r"[\u4e00-\u9fff]", cell) for cell in cells)
+
+
+def _html_header_to_carry(rows: list[str]) -> list[str] | None:
+    """续表要继承的列名。
+
+    页中途换过列名（「合并资产负债表项目」下面又印「合并利润表项目」）时，
+    带过去的是最后一组列名，不是表头第一行。开头连续的列名行一起带上。
+    """
+    last: int | None = None
+    first_data: int | None = None
+    for index, row in enumerate(rows):
+        if _html_row_is_header(row):
+            last = index
+        elif first_data is None and _html_row_is_data(row):
+            first_data = index
+    if last is None:
+        return None
+    if first_data is None or last < first_data:
+        end = 0
+        while end < len(rows) and _html_row_is_header(rows[end]):
+            end += 1
+        return rows[:end] or None
+    return [rows[last]]
+
+
+def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
+    """跨页续表补列名，并顺着后面每一页传下去。
+
+    财报排到页底时，后面几页都不再印「项目 | 本期 | 上期」，第一行就是科目。
+    补过的那一页自己再被切断时，同一组列名继续往下页带。只在四件事同时成立时补：
+    上一页以这张表结束、这一页的表排在最前、列数相同、首行是数据。
+    中途印了新列名就改带新的。表后面还有正文，这一路停下。
+    """
+    pending: list[str] | None = None
+    pending_page: int | None = None
+    pending_width = 0
+    seen_pages: set[int] = set()
+    out: list[Segment] = []
+    for seg in segments:
+        page = seg.page
+        if seg.kind != TABLE:
+            if page is not None and page == pending_page:
+                pending = None
+            if page is not None:
+                seen_pages.add(page)
+            out.append(seg)
+            continue
+        match = _HTML_TABLE.search(seg.text or "")
+        rows = _table_rows(match.group(0)) if match else []
+        # 表后面的正文要在补表头之前量。补完再量，旧的结束位置会落在新表头上。
+        tail = seg.text[match.end() :].strip() if match else ""
+        starts_page = page is not None and page not in seen_pages
+        if (
+            match
+            and rows
+            and pending
+            and pending_page is not None
+            and page == pending_page + 1
+            and starts_page
+            and _row_width(rows[0]) == pending_width
+            and _html_row_is_data(rows[0])
+            and not _html_row_is_header(rows[0])
+        ):
+            html_table = "<table>" + "".join(pending) + "".join(rows) + "</table>"
+            text = seg.text[: match.start()] + html_table + seg.text[match.end() :]
+            seg = replace(seg, text=text)
+            rows = [*pending, *rows]
+        out.append(seg)
+        if page is not None:
+            seen_pages.add(page)
+        # 表后面还有正文，说明这张表在页中就结束了，不是被分页切断的
+        header = _html_header_to_carry(rows) if rows and not tail else None
+        if header and page is not None:
+            pending = header
+            pending_page = page
+            pending_width = _row_width(header[0])
+        else:
+            pending = None
+    return out
+
+
 def _can_merge_html_tables(prev: Chunk, nxt: Chunk) -> bool:
     if prev.kind != TABLE or nxt.kind != TABLE:
         return False
@@ -479,6 +570,19 @@ def _expand_long_html_tables(chunks: list[Chunk]) -> list[Chunk]:
     return out
 
 
+def _chunk_html_table(text: str) -> list[str] | None:
+    """表题加一张 HTML 表时按行切开，每片重复表题。不是这种形态就返回 None。"""
+    matches = list(_HTML_TABLE.finditer(text))
+    if len(matches) != 1 or text[matches[0].end() :].strip():
+        return None
+    match = matches[0]
+    caption = text[: match.start()].strip()
+    parts = _split_html_table(match.group(0))
+    if not caption:
+        return parts
+    return [f"{caption}\n{part}" for part in parts]
+
+
 def _chunk_table(text: str, *, max_chars: int) -> list[str]:
     """表格切片：短表整片保留；长表按行组切，每片重复表头（含工作表名）。
 
@@ -495,6 +599,11 @@ def _chunk_table(text: str, *, max_chars: int) -> list[str]:
         return []
     if len(text) <= max_chars:
         return [text]
+
+    # HTML 表没有竖线。不走下面的 Markdown 切法，否则表题会被单独算成一张表。
+    html_parts = _chunk_html_table(text)
+    if html_parts is not None:
+        return html_parts
 
     caption: list[str] = []
     while lines and "|" not in lines[0]:

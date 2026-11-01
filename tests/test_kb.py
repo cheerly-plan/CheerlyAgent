@@ -284,6 +284,151 @@ def test_cross_page_tables_stay_apart_when_columns_differ():
     assert [(c.page, c.page_end) for c in chunks] == [(4, 4), (5, 5)]
 
 
+def test_cross_page_html_table_copies_header_onto_continuation():
+    header = "<tr><td>项目</td><td>2026年前三季度</td><td>2025年前三季度</td></tr>"
+    page1 = (
+        f"合并利润表\n单位：元\n<table>{header}"
+        "<tr><td>营业收入</td><td>30,439.00</td><td>45,763.00</td></tr></table>"
+    )
+    page2 = (
+        "<table><tr><td>资产减值损失</td><td>-507.00</td><td>3.00</td></tr></table>"
+    )
+    chunks = chunk_segments(
+        [
+            Segment(page1, 11, "table", "四、财务报表", scope="consolidated"),
+            Segment(page2, 12, "table", "四、财务报表", scope="consolidated"),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    assert chunks[1].text.startswith("<table>" + header)
+    assert "资产减值损失" in chunks[1].text
+    assert chunks[1].page == 12
+    assert chunks[1].scope == "consolidated"
+
+
+def test_header_keeps_moving_across_later_pages():
+    header = "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
+    first = (
+        f"<table>{header}"
+        "<tr><td>货币资金</td><td>100</td><td>90</td></tr></table>"
+    )
+    later = [
+        "<table><tr><td>长期股权投资</td><td>20</td><td>18</td></tr></table>",
+        "<table><tr><td>应交税费</td><td>6</td><td>8</td></tr></table>",
+        "<table><tr><td>盈余公积</td><td>4</td><td>4</td></tr></table>",
+    ]
+    chunks = chunk_segments(
+        [Segment(first, 5, "table"), *[Segment(text, 6 + i, "table") for i, text in enumerate(later)]],
+        max_chars=500,
+        overlap=0,
+    )
+    assert [c.page for c in chunks] == [5, 6, 7, 8]
+    assert all(header in c.text for c in chunks)
+    assert chunks[3].text.index("项目") < chunks[3].text.index("盈余公积")
+
+
+def test_new_statement_header_replaces_the_carried_one():
+    old = "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
+    new = "<tr><td>项目</td><td>本期发生额</td><td>上期发生额</td></tr>"
+    chunks = chunk_segments(
+        [
+            Segment(
+                f"<table>{old}<tr><td>货币资金</td><td>100</td><td>90</td></tr></table>",
+                8,
+                "table",
+            ),
+            Segment(
+                f"合并利润表\n<table>{new}"
+                "<tr><td>营业收入</td><td>101</td><td>114</td></tr></table>",
+                9,
+                "table",
+            ),
+            Segment(
+                "<table><tr><td>营业利润</td><td>-510</td><td>2,398</td></tr></table>",
+                10,
+                "table",
+            ),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    assert old not in chunks[2].text
+    assert new in chunks[2].text
+    assert "营业利润" in chunks[2].text
+
+
+def test_cross_page_html_table_copies_the_latest_header():
+    # 页中换了列名，续表沿用最后一组，不把资产负债表的列名安到财务费用上
+    page1 = (
+        "<table>"
+        "<tr><td>合并资产负债表项目</td><td>2026年9月30日</td><td>变动比例</td></tr>"
+        "<tr><td>货币资金</td><td>35,914.00</td><td>-33.52%</td></tr>"
+        "<tr><td>合并利润表项目</td><td>2026年1-9月</td><td>变动比例</td></tr>"
+        "<tr><td>税金及附加</td><td>1,420.00</td><td>-45.20%</td></tr>"
+        "</table>"
+    )
+    page2 = "<table><tr><td>财务费用</td><td>647.00</td><td>131.33%</td></tr></table>"
+    chunks = chunk_segments(
+        [Segment(page1, 2, "table"), Segment(page2, 3, "table")],
+        max_chars=500,
+        overlap=0,
+    )
+    assert "合并利润表项目" in chunks[1].text
+    assert "合并资产负债表项目" not in chunks[1].text
+    assert chunks[1].text.index("合并利润表项目") < chunks[1].text.index("财务费用")
+
+
+def test_cross_page_html_table_does_not_copy_header_after_prose():
+    page1 = (
+        "<table><tr><td>项目</td><td>本期</td></tr>"
+        "<tr><td>营业收入</td><td>100</td></tr></table>"
+    )
+    page2 = "<table><tr><td>净利润</td><td>18</td></tr></table>"
+    chunks = chunk_segments(
+        [
+            Segment(page1, 2, "table"),
+            Segment("标的公司产权清晰，不存在抵押。", 2, "text"),
+            Segment(page2, 3, "table"),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    assert "项目" not in chunks[-1].text
+    assert chunks[-1].text.startswith("<table><tr><td>净利润</td>")
+
+
+def test_captioned_html_table_does_not_count_caption_as_table():
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = "".join(
+        "<tr><td>科目"
+        f"{i:02d}名称比较长用来撑开这一行</td><td>{i},234,567.89</td>"
+        f"<td>{i},876,543.21</td></tr>"
+        for i in range(25)
+    )
+    table = f"<table>{header}{rows}</table>"
+    chunks = chunk_segments(
+        [
+            Segment("报表前的说明文字。", 8, "text", "第十节 财务报告"),
+            Segment(
+                f"母公司利润表\n{table}",
+                8,
+                "table",
+                "第十节 财务报告",
+                scope="parent",
+            ),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    texts = [c for c in chunks if c.kind == "text"]
+    tables = [c for c in chunks if c.kind == "table"]
+    assert [c.text for c in texts] == ["报表前的说明文字。"]
+    assert len(tables) > 1
+    assert all(c.text.startswith("母公司利润表\n<table>") for c in tables)
+    assert all(c.scope == "parent" for c in tables)
+
+
 def test_long_html_table_splits_by_row_and_repeats_header():
     from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
 
