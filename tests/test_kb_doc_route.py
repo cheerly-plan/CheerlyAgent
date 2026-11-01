@@ -265,7 +265,7 @@ def test_kb_search_without_files_hits_summary_index(monkeypatch):
     monkeypatch.setattr(memory_store.store, "search_kb_files", fake_files)
     monkeypatch.setattr(
         "ai_agent.tools.kb_search.search_knowledge",
-        lambda query, *, file_ids=None, top_k=3: seen.setdefault("file_ids", file_ids)
+        lambda query, *, file_ids=None, top_k=3, filters=None: seen.setdefault("file_ids", file_ids)
         and [],
     )
     _kb_search("甲公司第三季度的净利润是多少")

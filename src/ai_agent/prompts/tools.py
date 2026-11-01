@@ -82,6 +82,8 @@ KB_SEARCH_QUERY_DESC = (
     "检索问题或关键词，用自然语言描述要找的内容。"
     "当 files 已指定公司或文档时，query 只写要查的字段，不要重复 files 里的"
     "公司名/文件名（如 files 填了「中化装备…报告」，query 写「营业收入」即可）。"
+    "问题明确指向表格数据时，用 kinds=[\"table\"] 只检索表格切片、跳过正文；"
+    "想限定章节时用 sections 传章节关键词（如 [\"管理层讨论\"]），配合 files 进一步缩小范围。"
 )
 # kb_search 与 kg_search 的 files 参数说明完全一致，共用一份避免漂移
 KB_FILES_DESC = (

@@ -27,6 +27,51 @@ from pgvector import Vector
 _SUBJECT_BUCKET = "COALESCE(NULLIF(subject, ''), '')"
 
 
+def _chunk_meta_where(
+    *,
+    kinds: list[str] | None,
+    subjects: list[str] | None,
+    periods: list[str] | None,
+    scopes: list[str] | None,
+    sections: list[str] | None,
+    params: dict,
+) -> str:
+    """生成 chunk 元数据过滤的 SQL 片段（前导 AND 连接），并把参数写入 params。
+
+    列名全部硬编码（kind/subject/period/scope/section），值走参数化，无注入面。
+    空列表 / None 退化为不过滤（与 file_ids 现有「空列表退化为 NULL」一致）。语义：
+    - kinds / periods / scopes：精确 = ANY（枚举 / 标准格式，安全）
+    - subjects：ILIKE 模糊，兼容「中国银行」缩写匹配「中国银行股份有限公司」
+    - sections：ILIKE 模糊，章节名写法多（「第十节 管理层讨论」vs「十、管理层讨论」）
+    """
+
+    clauses: list[str] = []
+    if kinds:
+        clauses.append("AND c.kind = ANY(%(kinds)s)")
+        params["kinds"] = list(kinds)
+    if subjects:
+        sub = " OR ".join(
+            f"c.subject ILIKE %(subject{i})s" for i in range(len(subjects))
+        )
+        clauses.append(f"AND ({sub})")
+        for i, s in enumerate(subjects):
+            params[f"subject{i}"] = f"%{s}%"
+    if periods:
+        clauses.append("AND c.period = ANY(%(periods)s)")
+        params["periods"] = list(periods)
+    if scopes:
+        clauses.append("AND c.scope = ANY(%(scopes)s)")
+        params["scopes"] = list(scopes)
+    if sections:
+        sub = " OR ".join(
+            f"c.section ILIKE %(section{i})s" for i in range(len(sections))
+        )
+        clauses.append(f"AND ({sub})")
+        for i, s in enumerate(sections):
+            params[f"section{i}"] = f"%{s}%"
+    return " ".join(clauses)
+
+
 class KbStore:
     def create_kb_file(
         self,
@@ -678,6 +723,11 @@ class KbStore:
         file_ids: list[uuid.UUID] | None = None,
         top_k: int = 3,
         max_distance: float | None = None,
+        kinds: list[str] | None = None,
+        subjects: list[str] | None = None,
+        periods: list[str] | None = None,
+        scopes: list[str] | None = None,
+        sections: list[str] | None = None,
     ) -> list[dict]:
         """全库检索（共享语义，不按 user_id 过滤）。
 
@@ -694,6 +744,24 @@ class KbStore:
         # 查询向量必须包成 Vector：裸 list 会被 psycopg 适配成
         # double precision[]，与 vector 的 <=> 运算符类型不匹配直接报错
         emb = Vector(query_embedding)
+        params = {
+            "emb": emb,
+            # 空列表退化为 NULL（= 不过滤）：否则 ANY('{}') 恒假，
+            # 调用方误传空列表会静默返回 0 条
+            "file_ids": file_ids or None,
+            "max_distance": max_distance,
+            "top_k": top_k,
+            "band": settings.kb_subject_quota_band,
+        }
+        # chunk 元数据过滤：列名硬编码、值参数化，无注入面；空列表/NULL 退化为不过滤
+        meta_where = _chunk_meta_where(
+            kinds=kinds,
+            subjects=subjects,
+            periods=periods,
+            scopes=scopes,
+            sections=sections,
+            params=params,
+        )
         with self._get_pool().connection() as conn:
             return conn.execute(
                 f"""
@@ -707,6 +775,7 @@ class KbStore:
                            OR c.file_id = ANY(%(file_ids)s::uuid[]))
                       AND (%(max_distance)s::float8 IS NULL
                            OR c.embedding <=> %(emb)s <= %(max_distance)s)
+                      {meta_where}
                 ),
                 ranked AS (
                     SELECT hit.*,
@@ -725,15 +794,7 @@ class KbStore:
                          distance
                 LIMIT %(top_k)s
                 """,
-                {
-                    "emb": emb,
-                    # 空列表退化为 NULL（= 不过滤）：否则 ANY('{}') 恒假，
-                    # 调用方误传空列表会静默返回 0 条
-                    "file_ids": file_ids or None,
-                    "max_distance": max_distance,
-                    "top_k": top_k,
-                    "band": settings.kb_subject_quota_band,
-                },
+                params,
             ).fetchall()
 
     def search_kb_chunks_keyword(
@@ -742,6 +803,11 @@ class KbStore:
         *,
         file_ids: list[uuid.UUID] | None = None,
         top_k: int = 12,
+        kinds: list[str] | None = None,
+        subjects: list[str] | None = None,
+        periods: list[str] | None = None,
+        scopes: list[str] | None = None,
+        sections: list[str] | None = None,
     ) -> list[dict]:
         """关键词直查（混合检索的第二路召回）。
 
@@ -770,6 +836,15 @@ class KbStore:
         }
         for i, kw in enumerate(keywords):
             params[f"kw{i}"] = f"%{kw}%"
+        # chunk 元数据过滤：列名硬编码、值参数化，无注入面；空列表/NULL 退化为不过滤
+        meta_where = _chunk_meta_where(
+            kinds=kinds,
+            subjects=subjects,
+            periods=periods,
+            scopes=scopes,
+            sections=sections,
+            params=params,
+        )
         with self._get_pool().connection() as conn:
             return conn.execute(
                 f"""
@@ -782,6 +857,7 @@ class KbStore:
                     WHERE (%(file_ids)s::uuid[] IS NULL
                            OR c.file_id = ANY(%(file_ids)s::uuid[]))
                       AND ({score_sql}) > 0
+                      {meta_where}
                 ),
                 ranked AS (
                     SELECT hit.*,

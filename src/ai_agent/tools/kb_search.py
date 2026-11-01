@@ -7,13 +7,20 @@
 
 import os
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import Citation, add_citations
-from ai_agent.kb.retrieval import Hit, format_where, search_knowledge
+from ai_agent.kb.retrieval import (
+    Hit,
+    format_where,
+    search_knowledge,
+    _PARENT_INTENT,
+    SCOPE_PARENT,
+)
 from ai_agent.kb.scope import effective_kb_query, resolve_tool_file_ids
 from ai_agent.memory.store import store
 from ai_agent.prompts.tools import (
@@ -87,10 +94,30 @@ class KbSearchArgs(BaseModel):
     # 模型对着文件清单填这一项，文件一多既选不准又占上下文
     files: list[str] | None = Field(default=None, description=KB_FILES_DESC)
     top_k: int = Field(default=3, ge=1, le=10, description=KB_SEARCH_TOPK_DESC)
+    # 元数据过滤（双轨）：kinds/sections 由模型显式指定；scope 由 query 意图推断
+    kinds: list[Literal["text", "table", "figure"]] | None = Field(
+        default=None,
+        description=(
+            "选填。只检索指定类型的切片：table=表格、figure=图表、text=正文。"
+            "问题明确指向表格数据（如「各公司营业收入」）就传 [\"table\"]，"
+            "能跳过正文、直击数值行。"
+        ),
+    )
+    sections: list[str] | None = Field(
+        default=None,
+        description=(
+            "选填。只检索指定章节的切片（模糊匹配，章节名写法多，尽量用关键词），"
+            "如 [\"管理层讨论\"]。配合 files 一起用，进一步缩小范围。"
+        ),
+    )
 
 
 def _kb_search(
-    query: str, files: list[str] | None = None, top_k: int = 3
+    query: str,
+    files: list[str] | None = None,
+    top_k: int = 3,
+    kinds: list[str] | None = None,
+    sections: list[str] | None = None,
 ) -> str:
     if not store.has_ready_kb_file():
         return KB_EMPTY_HINT
@@ -113,8 +140,24 @@ def _kb_search(
         else query
     )
 
+    # 双轨元数据过滤：scope 仅当用户明确提及母公司/单体口径时才硬过滤（合并为默认，
+    # 沿用 _apply_scope_preference 的软偏好，避免无关口径的查询被砍成只剩合并切片）；
+    # kinds/sections 由模型显式指定，缩小检索范围、直击目标切片类型/章节
+    filters: dict = {}
+    if kinds:
+        filters["kinds"] = kinds
+    if sections:
+        filters["sections"] = sections
+    if _PARENT_INTENT.search(retrieval_query):
+        filters["scopes"] = [SCOPE_PARENT]
+
     try:
-        hits = search_knowledge(retrieval_query, file_ids=parsed_ids, top_k=top_k)
+        hits = search_knowledge(
+            retrieval_query,
+            file_ids=parsed_ids,
+            top_k=top_k,
+            filters=filters or None,
+        )
     except Exception:
         logger.exception("知识库检索失败 query=%s", query[:80])
         return KB_ERROR_HINT

@@ -559,7 +559,7 @@ def test_search_knowledge_forwards_explicit_file_ids(monkeypatch):
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
     calls = []
 
-    def fake_core(query, embedding, *, file_ids, top_k):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None):
         calls.append(file_ids)
         return []
 
@@ -575,7 +575,7 @@ def test_search_knowledge_defaults_to_whole_library(monkeypatch):
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
     calls = []
 
-    def fake_core(query, embedding, *, file_ids, top_k):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None):
         calls.append(file_ids)
         return []
 
@@ -591,7 +591,7 @@ def test_search_knowledge_forwards_top_k(monkeypatch):
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
     seen = {}
 
-    def fake_core(query, embedding, *, file_ids, top_k):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None):
         seen["top_k"] = top_k
         return []
 

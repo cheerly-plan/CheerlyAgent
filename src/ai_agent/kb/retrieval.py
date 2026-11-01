@@ -172,16 +172,25 @@ def search_knowledge(
     *,
     file_ids: list[uuid.UUID] | None = None,
     top_k: int = 3,
+    filters: dict | None = None,
 ) -> list[Hit]:
     """知识库检索主入口。检索词向量化失败会抛异常，由调用方转成友好文案。
 
     `file_ids` 为空表示搜全库——检索范围完全由调用方决定（工具层传入模型
     指定的 files，或会话级 kb_scope），本层不再根据查询内容自动推断文件范围。
-    这样文件范围由模型/用户显式圈定，检索行为透明、可解释，不会出现「系统
-    替你选了哪几份」的隐式预检索；范围为空时退化为搜全库，安全但不偷偷猜。
+    `filters`（可选）是 chunk 元数据过滤（kinds/subjects/periods/scopes/
+    sections），由调用方（工具层）构造后传入：scope 从 query 意图推断、
+    kinds/sections 由模型显式指定。带过滤召回为空时自动回退「不过滤」再查
+    一次，避免过滤过窄直接挂空。
     """
     embedding = embed_query(query)
-    return _core_search(query, embedding, file_ids=file_ids, top_k=top_k)
+    hits = _core_search(query, embedding, file_ids=file_ids, top_k=top_k, filters=filters)
+    if not hits and filters:
+        # 元数据过滤后召回为空，多半是约束过窄（如 scope 强约束把母公司切片
+        # 全排除了），回退不过滤再查一次，保证至少有结果而非直接挂空
+        logger.info("kb 元数据过滤后召回为空，回退不过滤重查: %s", filters)
+        hits = _core_search(query, embedding, file_ids=file_ids, top_k=top_k, filters=None)
+    return hits
 
 
 def preview_search(
@@ -207,6 +216,7 @@ def _core_search(
     *,
     file_ids: list[uuid.UUID] | None,
     top_k: int,
+    filters: dict | None = None,
 ) -> list[Hit]:
     """真正的一轮检索：召回 → 融合 → 去冗余 → 重排 → 邻接。
 
@@ -219,8 +229,9 @@ def _core_search(
         file_ids=file_ids,
         top_k=candidates,
         max_distance=settings.kb_search_max_distance,
+        **(filters or {}),
     )
-    rows = _fuse_with_keywords(query, rows, file_ids)
+    rows = _fuse_with_keywords(query, rows, file_ids, filters=filters)
     if not rows:
         return []
     # 口径偏好放在去冗余与重排之前：它改的是「谁先被看到」，重排是从
@@ -448,6 +459,8 @@ def _fuse_with_keywords(
     query: str,
     vector_rows: list[dict],
     file_ids: list[uuid.UUID] | None,
+    *,
+    filters: dict | None = None,
 ) -> list[dict]:
     """混合检索：向量召回 + 关键词召回做 RRF 融合。
 
@@ -467,6 +480,7 @@ def _fuse_with_keywords(
             keywords,
             file_ids=file_ids,
             top_k=settings.kb_hybrid_candidates,
+            **(filters or {}),
         )
     except Exception:
         logger.warning("kb 关键词召回失败，退回纯向量", exc_info=True)
