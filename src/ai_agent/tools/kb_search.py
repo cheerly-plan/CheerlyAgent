@@ -5,6 +5,9 @@
 的语义区分：记忆是当前用户的对话沉淀，这里是共享文档原文。
 """
 
+import os
+import re
+
 from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
@@ -31,6 +34,52 @@ logger = get_logger(__name__)
 # 邻接片段只给开头/结尾一小段：够接上下文，又不至于把命中片淹掉
 _NEIGHBOR_CLIP = 200
 
+# 剥离主体名后若只剩这些语气/疑问助词，视为「问的就是全称本身」，回退原句
+_PARTICLE_RE = re.compile(r"^[的是]+|[的是]+$")
+
+
+def _strip_scope_subject(query: str, file_ids: list) -> str:
+    """files 已指定时，从检索 query 里确定性地剥掉被点名文件的主体名/文件名。
+
+    query 在 files 提供时有双重职责：选文件（已由 resolve_tool_file_ids 用
+    filenames 完成）+ 检索信号（向量嵌入 + 关键词抽词）。主体名对检索是纯噪声——
+    它把嵌入拉向反复出现公司名的页眉页、并占掉关键词 6 个名额挤出真正要找的字段
+    词（如「证券代码」「营业收入」）。这里用解析后的文件自身元数据
+    （subject / 别名 / 文件名）做剥离，不靠模型原文硬删（模型可能用缩写）。
+
+    剥完若只剩不到 2 个有效字（问的就是「全称是什么」），回退原句，避免把真正的
+    问题也删没了。files 未提供（路由模式）时调用方不应走到这里。
+    """
+    names: list[str] = []
+    for fid in file_ids:
+        f = store.get_kb_file(fid)
+        if not f:
+            continue
+        if f.get("subject"):
+            names.append(f["subject"])
+        for alias in (f.get("subject_aliases") or []):
+            if alias:
+                names.append(alias)
+        if f.get("filename"):
+            # 去掉扩展名再剥，避免「.pdf」这类被当成分隔残留
+            names.append(os.path.splitext(f["filename"])[0])
+    if not names:
+        return query
+    # 长名先剥，避免短别名先把长名拆断后长名匹配不上
+    names.sort(key=len, reverse=True)
+    stripped = query
+    for name in names:
+        if len(name) >= 2:  # 太短的词不剥，避免误删问题里的通用片段
+            stripped = stripped.replace(name, "")
+    stripped = _PARTICLE_RE.sub("", stripped)
+    stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+    # 剥完几乎没剩（问的就是全称本身），回退原句，别把真问题删没了
+    if len(stripped) < 2:
+        return query
+    if stripped != query:
+        logger.debug("kb_search 检索 query 去主体化: %r → %r", query, stripped)
+    return stripped
+
 
 class KbSearchArgs(BaseModel):
     query: str = Field(..., description=KB_SEARCH_QUERY_DESC)
@@ -54,8 +103,18 @@ def _kb_search(
     if parsed_ids == []:
         return KB_FILES_NOT_FOUND_HINT
 
+    # files 已指定时，选文件这步已完成，检索 query 里再带主体名纯属噪声：会把嵌入
+    # 拉向反复出现公司名的页眉页、并挤占关键词名额。确定性剥掉（用解析后文件自身的
+    # subject/别名/文件名），向量与关键词两路共用同一句剥完的话。files 未提供
+    # （路由模式）则原句不动——那时主体还得用来选文件。
+    retrieval_query = (
+        _strip_scope_subject(query, parsed_ids)
+        if files is not None and parsed_ids
+        else query
+    )
+
     try:
-        hits = search_knowledge(query, file_ids=parsed_ids, top_k=top_k)
+        hits = search_knowledge(retrieval_query, file_ids=parsed_ids, top_k=top_k)
     except Exception:
         logger.exception("知识库检索失败 query=%s", query[:80])
         return KB_ERROR_HINT
