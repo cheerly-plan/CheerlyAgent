@@ -403,6 +403,60 @@ def test_cross_page_html_table_copies_the_latest_header():
     assert "合并资产负债表项目" not in tax.text
 
 
+def test_clipped_header_is_replaced_by_previous_page_header():
+    """页顶第一列空着的残头不是新表头，换成上一页的列名。"""
+    header = (
+        "<tr><td>股东名称</td><td>股东性质</td><td>持股数量</td>"
+        "<td>持股比例(%)</td></tr>"
+    )
+    page3 = (
+        f"<table>{header}"
+        "<tr><td colspan=\"4\">前10名股东持股情况</td></tr></table>"
+    )
+    remnant = (
+        "<tr><td></td><td></td><td>(%)</td><td>份数量</td></tr>"
+    )
+    page4 = (
+        f"<table>{remnant}"
+        "<tr><td>苏州翌流明光电科技有限公司</td><td>境内非国有法人</td>"
+        "<td>37,800,963</td><td>11.75</td></tr>"
+        "<tr><td>深圳市创新投资集团有限公司</td><td>国有法人</td>"
+        "<td>8,929,927</td><td>2.78</td></tr></table>"
+    )
+    chunks = chunk_segments(
+        [Segment(page3, 3, "table"), Segment(page4, 4, "table")],
+        max_chars=500,
+        overlap=0,
+    )
+    holders = [c for c in chunks if c.page == 4]
+    assert holders
+    assert all("股东名称" in c.text and "持股比例(%)" in c.text for c in holders)
+    assert all("份数量" not in c.text for c in holders)
+    first = next(c for c in holders if "翌流明" in c.text)
+    assert "11.75" in first.text
+    assert first.text.index("股东名称") < first.text.index("翌流明")
+
+
+def test_clipped_header_is_dropped_when_previous_page_has_no_header():
+    """上一页没有可继承的列名时，残头也不再当成表头重复。"""
+    remnant = "<tr><td></td><td></td><td>(%)</td><td>份数量</td></tr>"
+    table = (
+        f"<table>{remnant}"
+        "<tr><td>苏州翌流明光电科技有限公司</td><td>境内非国有法人</td>"
+        "<td>37,800,963</td><td>11.75</td></tr>"
+        "<tr><td>深圳市创新投资集团有限公司</td><td>国有法人</td>"
+        "<td>8,929,927</td><td>2.78</td></tr></table>"
+    )
+    chunks = chunk_segments(
+        [Segment(table, 4, "table")],
+        max_chars=80,
+        overlap=0,
+    )
+    assert chunks
+    assert all("份数量" not in c.text for c in chunks)
+    assert any("翌流明" in c.text and "11.75" in c.text for c in chunks)
+
+
 def test_cross_page_html_table_does_not_copy_header_after_prose():
     page1 = (
         "<table><tr><td>项目</td><td>本期</td></tr>"

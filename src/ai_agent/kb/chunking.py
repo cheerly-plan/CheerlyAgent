@@ -372,12 +372,25 @@ def _html_row_is_item(row: str) -> bool:
 
 
 def _html_row_is_header(row: str) -> bool:
+    if _html_row_is_clipped_header(row):
+        return False
     cells = [cell for cell in _row_texts(row) if cell]
     if len(cells) < 2 or _html_row_is_data(row):
         return False
     if any(_NOT_HEADER_CELL.match(cell) for cell in cells):
         return False
     return any(re.search(r"[\u4e00-\u9fff]", cell) for cell in cells)
+
+
+def _html_row_is_clipped_header(row: str) -> bool:
+    """跨页被页眉切掉的表头：第一列以及紧挨着的格子都空，剩下「(%)」「份数量」。
+
+    新的一行第一列不会空。只空左上角、第二格已经是「期末余额」的，是正常表头。
+    """
+    texts = _row_texts(row)
+    if len(texts) < 2 or texts[0] or texts[1] or _html_row_is_data(row):
+        return False
+    return any(texts)
 
 
 def _rowspan_continuations(rows: list[str]) -> set[int]:
@@ -475,24 +488,38 @@ def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
         tail = seg.text[match.end() :].strip() if match else ""
         starts_page = page is not None and page not in seen_pages
         carried = False
+        # 页顶第一行第一列空着，是被页眉切掉的表头，不是新的一行。先丢掉，
+        # 再用上一页的列名接上后面的股东行。
+        body = list(rows)
+        while body and _html_row_is_clipped_header(body[0]):
+            body = body[1:]
+        # 去掉残头之后，股东行第二列是「境内非国有法人」，不是纯数字，
+        # 套不上科目行，但第一列已经有名字，就是上一张表的续行。
+        continues = bool(body) and (
+            _html_row_is_item(body[0])
+            or (
+                len(body) < len(rows)
+                and _html_row_is_data(body[0])
+                and bool(_row_texts(body[0])[0])
+            )
+        )
         if (
             match
-            and rows
+            and continues
             and pending
             and pending_page is not None
             and page == pending_page + 1
             and starts_page
-            and _row_width(rows[0]) == pending_width
-            and _html_row_is_item(rows[0])
+            and _row_width(body[0]) == pending_width
         ):
             prefix = seg.text[: match.start()].strip()
             if not prefix and pending_caption:
                 prefix = pending_caption
-            html_table = "<table>" + "".join(pending) + "".join(rows) + "</table>"
+            html_table = "<table>" + "".join(pending) + "".join(body) + "</table>"
             suffix = seg.text[match.end() :]
             text = f"{prefix}\n{html_table}" if prefix else html_table
             seg = replace(seg, text=text + suffix)
-            rows = [*pending, *rows]
+            rows = [*pending, *body]
             carried = True
         out.append(seg)
         if page is not None:
@@ -791,7 +818,21 @@ def _split_html_table(
     rows = _table_rows(table)
     if not rows:
         return [table]
+    clipped = 0
+    while clipped < len(rows) and _html_row_is_clipped_header(rows[clipped]):
+        clipped += 1
+    if clipped:
+        rows = rows[clipped:]
+        if not rows:
+            return [table]
     head_n = _html_header_row_count(rows)
+    # 残头后面直接是股东行时，不能把第一位股东再当成列名复制到每一片。
+    if (
+        clipped
+        and _html_row_is_data(rows[0])
+        and not _html_row_is_header(rows[0])
+    ):
+        head_n = 0
     header, data = rows[:head_n], rows[head_n:]
     if len(data) <= 1:
         return _html_tables_from_groups([rows]) if rows else [table]
