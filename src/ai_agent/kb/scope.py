@@ -123,6 +123,9 @@ def _narrow_by_period(
     指定了季度或年份就只留那一期；没提时期时，同一主体只留最新一期。
     同比、历年不收窄。点了两个年份又指定季度时，同一主体的这一季都留下，
     路由只命中其中一年也会把另一年补进来。显式点名的文件如果被收成空，保留原范围。
+
+    没写时期时，如果问句精确点到的实体只存在于被「最新一期」砍掉的文件里，
+    改查那些文件。实体在留下的文件里还有一份时，范围不动。
     """
     from ai_agent.kb.meta import period_matches, period_rank, query_period_policy
     from ai_agent.memory.store import store
@@ -186,8 +189,59 @@ def _narrow_by_period(
             if period_matches(str(row.get("period") or ""), policy, token)
         ]
     if not kept:
-        return file_ids if explicit else []
-    return _parse_file_ids(kept) or (file_ids if explicit else [])
+        narrowed: list[uuid.UUID] | None = file_ids if explicit else []
+    else:
+        narrowed = _parse_file_ids(kept) or (file_ids if explicit else [])
+    if policy != "latest":
+        return narrowed
+    return _prefer_exact_entity(
+        query, narrowed, ready_all, explicit=explicit, before=file_ids
+    )
+
+
+def _prefer_exact_entity(
+    query: str | None,
+    narrowed: list[uuid.UUID] | None,
+    ready_rows: list[dict],
+    *,
+    explicit: bool,
+    before: list[uuid.UUID] | None,
+) -> list[uuid.UUID] | None:
+    """精确实体被「只留最新一期」砍掉时，改用它实际所在的文件。
+
+    问句写了年份或季度时不插手。留下的文件里已经有这个实体，也不改。
+    用户点名的文件里本来没有它，同样不把范围扩到别的文件。
+    """
+    if not query or narrowed is None:
+        return narrowed
+    ready_ids = {str(row.get("file_id")) for row in ready_rows}
+    try:
+        from ai_agent.memory.store import store
+
+        hits = store.exact_entity_files(query)
+    except Exception:
+        logger.warning("精确实体查文件失败，保持期收窄结果", exc_info=True)
+        return narrowed
+    kept_hits: list[uuid.UUID] = []
+    seen: set[str] = set()
+    for fid in hits:
+        key = str(fid)
+        if key not in ready_ids or key in seen:
+            continue
+        seen.add(key)
+        kept_hits.append(fid)
+    if not kept_hits:
+        return narrowed
+    narrowed_ids = {str(fid) for fid in narrowed}
+    if any(str(fid) in narrowed_ids for fid in kept_hits):
+        return narrowed
+    if explicit:
+        before_ids = {str(fid) for fid in (before or [])}
+        kept_hits = [fid for fid in kept_hits if str(fid) in before_ids]
+        if not kept_hits:
+            return narrowed
+    logger.info("精确实体不在最新一期，改查它所在的文件")
+    return kept_hits
 
 
 def _parse_file_ids(rows: list[dict]) -> list[uuid.UUID]:
