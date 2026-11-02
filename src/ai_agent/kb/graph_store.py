@@ -29,6 +29,70 @@ from ai_agent.kb.kg_match import (
 class KgStore:
     # ——— 查询 ———
 
+    def query_mentions_entity(
+        self,
+        query: str,
+        *,
+        file_ids: list[uuid.UUID] | None = None,
+    ) -> list[str]:
+        """问句里整段出现的实体名或别名。
+
+        用 norm 后的子串匹配，不做简称模糊（「中国能建」对不上全称，那条
+        走文件主体）。短于 2 个字的名字不参与，避免单字撞上整句。
+        """
+        text = _norm_text(query)
+        if len(text) < 2:
+            return []
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT name FROM (
+                    SELECT e.name AS name
+                    FROM agent_kg_entity e
+                    WHERE char_length(e.norm_name) >= 2
+                      AND char_length(e.norm_name) <= char_length(%(q)s)
+                      AND strpos(%(q)s, e.norm_name) > 0
+                      AND (%(file_ids)s::uuid[] IS NULL
+                           OR e.file_id = ANY(%(file_ids)s::uuid[]))
+                    UNION
+                    SELECT a.alias_name AS name
+                    FROM agent_kg_alias a
+                    WHERE char_length(a.alias_norm) >= 2
+                      AND char_length(a.alias_norm) <= char_length(%(q)s)
+                      AND strpos(%(q)s, a.alias_norm) > 0
+                      AND (%(file_ids)s::uuid[] IS NULL
+                           OR a.file_id = ANY(%(file_ids)s::uuid[]))
+                ) hits
+                LIMIT 8
+                """,
+                {"q": text, "file_ids": file_ids or None},
+            ).fetchall()
+        return [str(row["name"]) for row in rows if row.get("name")]
+
+    def list_aligned_aliases(self, file_id: uuid.UUID, subject: str) -> list[str]:
+        """这份文件里、属于该主体的对齐别名。"""
+        from ai_agent.kb.meta import subject_core
+
+        norms = [
+            item
+            for item in {_norm_text(subject), _norm_text(subject_core(subject))}
+            if len(item) >= 2
+        ]
+        if not norms:
+            return []
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT a.alias_name
+                FROM agent_kg_alias a
+                JOIN agent_kg_entity e ON e.id = a.entity_id
+                WHERE a.file_id = %s
+                  AND e.norm_name = ANY(%s)
+                """,
+                (file_id, norms),
+            ).fetchall()
+        return [str(row["alias_name"]) for row in rows if row.get("alias_name")]
+
 
     # ——— 实体对齐（图谱质量 P2） ———
 

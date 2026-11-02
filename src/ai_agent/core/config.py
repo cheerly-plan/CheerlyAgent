@@ -258,18 +258,6 @@ class Settings(BaseSettings):
     kb_multiquery_model: str = ""
     kb_multiquery_count: int = 3
     kb_multiquery_timeout_seconds: float = 3.0
-    # 子问题分解（sub-question）：多主体对比问句（「A 和 B 的营收」）拆成
-    # 「A 的营收」「B 的营收」各自独立检索后轮转合并，保证每个主体至少一条
-    # 命中——multi-query 的同义改写对这类问句无效（实测反而放大第一主体优势），
-    # 拆主体才是正解。默认关闭：会按子问题数量翻倍检索 / 重排次数，
-    # 请先用评测验证效果与延迟可接受再用于生产。
-    kb_decompose_enabled: bool = False
-    # 空 = 跟随 resolve_llm()（小模型优先，短文本拆解不需要大模型）
-    kb_decompose_model: str = ""
-    kb_decompose_timeout_seconds: float = 3.0
-    # 一次拆出的子问题上限：对比问句一般是 2~3 家，设上限防止模型拆出
-    # 一长串、把检索次数拖爆
-    kb_decompose_max: int = 4
     # ——— 文档级摘要索引 + 语义路由 ———
     # 每份文件入库后额外生成一段摘要并单独 embedding（见 kb/summary.py），
     # 检索前先用它把「该查哪几份文件」这个问题解答掉：

@@ -13,7 +13,6 @@ prefetch 被移除（185fa6e/bb47db6）后连带丢失，effective_kb_query 退�
 from ai_agent.core.config import settings
 from ai_agent.kb import scope
 from ai_agent.kb.scope import (
-    decompose_queries,
     effective_kb_query,
     expand_queries,
     extract_prev_turn,
@@ -280,130 +279,6 @@ def test_search_knowledge_multi_skips_failed_embedding(monkeypatch):
     assert calls == ["好变体"]
 
 
-# ——— C 子问题分解（sub-question）———
-
-
-def test_decompose_queries_disabled_returns_single(monkeypatch):
-    """开关关闭时直接退回原话，不碰 LLM。"""
-    monkeypatch.setattr(settings, "kb_decompose_enabled", False)
-    called = {"n": 0}
-
-    def fake_chat(messages, **kwargs):
-        called["n"] += 1
-        return ""
-
-    monkeypatch.setattr(scope, "complete_chat", fake_chat)
-    assert decompose_queries("中国银行和长安汽车营收") == ["中国银行和长安汽车营收"]
-    assert called["n"] == 0
-
-
-def test_decompose_queries_no_signal_returns_single(monkeypatch):
-    """无并列/对比信号词时不拆、不碰 LLM（如单主体单指标）。"""
-    monkeypatch.setattr(settings, "kb_decompose_enabled", True)
-    called = {"n": 0}
-
-    def fake_chat(messages, **kwargs):
-        called["n"] += 1
-        return ""
-
-    monkeypatch.setattr(scope, "complete_chat", fake_chat)
-    assert decompose_queries("中国银行前三季度营业收入") == ["中国银行前三季度营业收入"]
-    assert called["n"] == 0
-
-
-def test_decompose_queries_single_subject_returns_single(monkeypatch):
-    """有信号词但只点名一个主体（「营收和净利润」）→ 不拆、不碰 LLM。"""
-    from ai_agent.kb import retrieval
-
-    monkeypatch.setattr(settings, "kb_decompose_enabled", True)
-    called = {"n": 0}
-
-    def fake_chat(messages, **kwargs):
-        called["n"] += 1
-        return ""
-
-    monkeypatch.setattr(scope, "complete_chat", fake_chat)
-    monkeypatch.setattr(
-        retrieval, "mentioned_subjects", lambda q, file_ids=None: {"中国银行"}
-    )
-    assert decompose_queries("中国银行的营收和净利润") == ["中国银行的营收和净利润"]
-    assert called["n"] == 0
-
-
-def test_decompose_queries_splits_multi_subject(monkeypatch):
-    """多主体对比问句拆成单主体子问题，逐条返回。"""
-    from ai_agent.kb import retrieval
-
-    monkeypatch.setattr(settings, "kb_decompose_enabled", True)
-    monkeypatch.setattr(settings, "kb_decompose_max", 4)
-    monkeypatch.setattr(
-        retrieval, "mentioned_subjects",
-        lambda q, file_ids=None: {"中国银行", "长安汽车"},
-    )
-    monkeypatch.setattr(
-        scope,
-        "complete_chat",
-        lambda m, **k: "中国银行前三季度营业收入\n长安汽车前三季度营业收入",
-    )
-    out = decompose_queries("中国银行和长安汽车的前三季度营业收入分别是多少")
-    assert out == ["中国银行前三季度营业收入", "长安汽车前三季度营业收入"]
-
-
-def test_decompose_queries_under_split_returns_single(monkeypatch):
-    """模型只返回一条（没拆开）时退回原话，避免单条子问题顶替整问。"""
-    from ai_agent.kb import retrieval
-
-    monkeypatch.setattr(settings, "kb_decompose_enabled", True)
-    monkeypatch.setattr(
-        retrieval, "mentioned_subjects",
-        lambda q, file_ids=None: {"中国银行", "长安汽车"},
-    )
-    monkeypatch.setattr(
-        scope, "complete_chat", lambda m, **k: "中国银行和长安汽车营业收入"
-    )
-    assert decompose_queries("中国银行和长安汽车营业收入") == [
-        "中国银行和长安汽车营业收入"
-    ]
-
-
-def test_decompose_queries_falls_back_on_failure(monkeypatch):
-    """LLM 抛错时退回原话，不向上抛。"""
-    from ai_agent.kb import retrieval
-
-    monkeypatch.setattr(settings, "kb_decompose_enabled", True)
-    monkeypatch.setattr(
-        retrieval, "mentioned_subjects",
-        lambda q, file_ids=None: {"中国银行", "长安汽车"},
-    )
-
-    def boom(messages, **kwargs):
-        raise RuntimeError("llm down")
-
-    monkeypatch.setattr(scope, "complete_chat", boom)
-    assert decompose_queries("中国银行和长安汽车营收") == ["中国银行和长安汽车营收"]
-
-
-def test_decompose_queries_caps_and_dedupes(monkeypatch):
-    """子问题去重 + 截到 kb_decompose_max 上限。"""
-    from ai_agent.kb import retrieval
-
-    monkeypatch.setattr(settings, "kb_decompose_enabled", True)
-    monkeypatch.setattr(settings, "kb_decompose_max", 2)
-    monkeypatch.setattr(
-        retrieval, "mentioned_subjects", lambda q, file_ids=None: {"A", "B", "C"}
-    )
-    monkeypatch.setattr(
-        scope, "complete_chat",
-        lambda m, **k: "A的营收\nB的营收\nA的营收\nC的营收",
-    )
-    assert decompose_queries("A和B和C的营收") == ["A的营收", "B的营收"]
-
-
-def test_decompose_queries_empty_returns_empty():
-    assert decompose_queries("") == []
-    assert decompose_queries("   ") == []
-
-
 # ——— mentioned_subjects ———
 
 
@@ -473,80 +348,27 @@ def test_mentioned_subjects_respects_file_ids(monkeypatch):
     assert subjects == {"中国银行"}
 
 
-# ——— search_knowledge_subqueries 轮转合并 ———
-
-
-def _hit(fid, seq):
+def test_mentioned_entities_reads_graph_names(monkeypatch):
+    """图谱里的人名整段出现在问句里时返回该名字。"""
     from ai_agent.kb import retrieval
 
-    return retrieval.Hit(
-        file_id=fid, filename="f", seq=seq, page=1, kind="text",
-        text="t", distance=0.1,
-    )
+    seen = {}
+
+    def fake(query, file_ids=None):
+        seen["query"] = query
+        seen["file_ids"] = file_ids
+        return ["金仙"]
+
+    monkeypatch.setattr(retrieval.store, "query_mentions_entity", fake)
+    assert retrieval.mentioned_entities("金仙的任职", file_ids=None) == ["金仙"]
+    assert seen["query"] == "金仙的任职"
 
 
-def test_search_knowledge_subqueries_single_delegates(monkeypatch):
-    """单条子问题退化为 search_knowledge。"""
+def test_mentioned_entities_swallows_store_errors(monkeypatch):
     from ai_agent.kb import retrieval
 
-    def fake_single(query, *, file_ids=None, top_k=3, filters=None):
-        assert query == "唯一子问题"
-        return ["hit"]
+    def boom(query, file_ids=None):
+        raise RuntimeError("db down")
 
-    monkeypatch.setattr(retrieval, "search_knowledge", fake_single)
-    assert retrieval.search_knowledge_subqueries(["唯一子问题"], top_k=3) == ["hit"]
-
-
-def test_search_knowledge_subqueries_round_robin_merge(monkeypatch):
-    """轮转交织：A0, B0, A1 → 每主体至少一条，共 top_k 条。"""
-    from ai_agent.kb import retrieval
-
-    results = {
-        "A营收": [_hit("a", 1), _hit("a", 2), _hit("a", 3)],
-        "B营收": [_hit("b", 1), _hit("b", 2)],
-    }
-    monkeypatch.setattr(
-        retrieval,
-        "search_knowledge",
-        lambda query, *, file_ids=None, top_k=3, filters=None: results[query],
-    )
-    hits = retrieval.search_knowledge_subqueries(["A营收", "B营收"], top_k=3)
-    assert [(h.file_id, h.seq) for h in hits] == [("a", 1), ("b", 1), ("a", 2)]
-
-
-def test_search_knowledge_subqueries_dedupes(monkeypatch):
-    """两个子问题命中同一片段时去重，不重复占位。"""
-    from ai_agent.kb import retrieval
-
-    results = {
-        "A营收": [_hit("a", 1)],
-        "B营收": [_hit("a", 1), _hit("b", 1)],
-    }
-    monkeypatch.setattr(
-        retrieval,
-        "search_knowledge",
-        lambda query, *, file_ids=None, top_k=3, filters=None: results[query],
-    )
-    hits = retrieval.search_knowledge_subqueries(["A营收", "B营收"], top_k=3)
-    assert [(h.file_id, h.seq) for h in hits] == [("a", 1), ("b", 1)]
-
-
-def test_search_knowledge_subqueries_skips_failed(monkeypatch):
-    """某条子问题检索失败只跳过，不影响其余。"""
-    from ai_agent.kb import retrieval
-
-    def fake_single(query, *, file_ids=None, top_k=3, filters=None):
-        if query == "坏":
-            raise RuntimeError("boom")
-        return [_hit("a", 1)]
-
-    monkeypatch.setattr(retrieval, "search_knowledge", fake_single)
-    hits = retrieval.search_knowledge_subqueries(["坏", "好"], top_k=3)
-    assert [(h.file_id, h.seq) for h in hits] == [("a", 1)]
-
-
-def test_search_knowledge_subqueries_empty():
-    from ai_agent.kb import retrieval
-
-    assert retrieval.search_knowledge_subqueries([]) == []
-    assert retrieval.search_knowledge_subqueries(["  "]) == []
+    monkeypatch.setattr(retrieval.store, "query_mentions_entity", boom)
+    assert retrieval.mentioned_entities("金仙的任职") == []

@@ -11,13 +11,10 @@ Tool.func 的签名干净。模型用文件名圈定范围（tools 的 files 参
   对话改写成自包含检索词；无上下文或降级时退回原话。
 - expand_queries：检索增强改写（multi-query），把一条查询扩写成多个同义 /
   不同角度的变体，分别检索后由检索层做 RRF 融合，提升对比 / 口语长问句召回。
-- decompose_queries：子问题分解（sub-question），把「A 和 B 的 X」这类多主体
-  对比问句拆成「A 的 X」「B 的 X」各自独立检索，保证每个主体至少一条命中
-  （multi-query 的同义改写对这类问句无效，拆主体才是正解）。
-三路都带完整降级链，失败一律退回原 query，不挡主流程。
+两路都带完整降级链，失败一律退回原 query，不挡主流程。
+多主体对比不在这里拆开：文件范围圈定后，在同一批文件里查一次字段。
 """
 
-import re
 import uuid
 from collections.abc import Iterable
 from contextvars import ContextVar, Token
@@ -100,16 +97,84 @@ def resolve_tool_file_ids(
     """
     from ai_agent.kb.retrieval import resolve_files_by_name
 
+    explicit = bool(files)
     if files:
         # resolve_files_by_name 已区分三种语义：
         #   非空 list → 圈定成功；[] → 点名解析不到（未找到）；
         #   None → 命中覆盖全部、无缩小意义（退回全库）。
         # 直接透传，不再把 None 误判成「未找到」。
-        return resolve_files_by_name(files)
-    routed = _route(query)
-    if routed:
-        return routed
-    return parse_scope_uuids(kb_scope())
+        chosen = resolve_files_by_name(files)
+        if chosen == []:
+            return []
+    else:
+        routed = _route(query)
+        chosen = routed or parse_scope_uuids(kb_scope())
+    return _narrow_by_period(query, chosen, explicit=explicit)
+
+
+def _narrow_by_period(
+    query: str | None,
+    file_ids: list[uuid.UUID] | None,
+    *,
+    explicit: bool,
+) -> list[uuid.UUID] | None:
+    """按问句里的报告期收窄文件。
+
+    指定了季度或年份就只留那一期；没提时期时，同一主体只留最新一期。
+    同比、历年、两个年份不收窄。显式点名的文件如果被收成空，保留原范围。
+    """
+    from ai_agent.kb.meta import period_matches, period_rank, query_period_policy
+    from ai_agent.memory.store import store
+
+    policy, token = query_period_policy(query or "")
+    if policy == "all":
+        return file_ids
+    try:
+        rows = store.list_kb_files()
+    except Exception:
+        logger.warning("按报告期收窄失败，保持原范围", exc_info=True)
+        return file_ids
+    ready = [row for row in rows if row.get("status") == "ready"]
+    if file_ids is not None:
+        want = {str(fid) for fid in file_ids}
+        ready = [row for row in ready if str(row.get("file_id")) in want]
+    # 目录里对不上这些 id（或库是空的）时无法判断报告期，保持调用方已经解析出的范围
+    if not ready:
+        return file_ids
+    if policy == "latest":
+        best: dict[str, tuple[int, int]] = {}
+        for row in ready:
+            subject = str(row.get("subject") or "").strip()
+            rank = period_rank(str(row.get("period") or ""))
+            if not subject or rank == (0, 0):
+                continue
+            if subject not in best or rank > best[subject]:
+                best[subject] = rank
+        kept = []
+        for row in ready:
+            subject = str(row.get("subject") or "").strip()
+            rank = period_rank(str(row.get("period") or ""))
+            if not subject or rank == (0, 0) or rank == best.get(subject):
+                kept.append(row)
+    else:
+        kept = [
+            row
+            for row in ready
+            if period_matches(str(row.get("period") or ""), policy, token)
+        ]
+    if not kept:
+        return file_ids if explicit else []
+    parsed: list[uuid.UUID] = []
+    for row in kept:
+        raw = row.get("file_id")
+        if isinstance(raw, uuid.UUID):
+            parsed.append(raw)
+        else:
+            try:
+                parsed.append(uuid.UUID(str(raw)))
+            except ValueError:
+                continue
+    return parsed or (file_ids if explicit else [])
 
 
 def _route(query: str | None) -> list[uuid.UUID]:
@@ -254,89 +319,6 @@ def expand_queries(query: str, count: int | None = None) -> list[str]:
             result.append(v)
         if len(result) >= n:
             break
-    return result
-
-
-# ——— 子问题分解（sub-question）———
-
-# 并列 / 对比信号词：命中才考虑拆。多主体检测（mentioned_subjects）会再卡一道，
-# 双重前置把 LLM 调用压缩到「真的多主体对比问句」这一小撮上
-_DECOMPOSE_SIGNAL = re.compile(r"和|与|及|以及|、|对比|比较|相比|分别|vs", re.IGNORECASE)
-
-_DECOMPOSE_SYSTEM = (
-    "你是检索子问题分解助手。用户一条问句里如果同时问了多个主体（多家公司/多份"
-    "文件）的同一指标，比如「中国银行和长安汽车的营业收入分别是多少」，请把它拆成"
-    "若干条只问单个主体的独立检索词，每条自包含、可独立完成检索。\n"
-    "要求：\n"
-    "1. 只拆「多主体并列/对比」的问句；单主体问句（哪怕含多个指标，如「中国银行的"
-    "营收和净利润」）不要拆，原样输出；\n"
-    "2. 每条子问题必须完整保留原问句里的指标、数字、时间、口径等关键约束，只把主体"
-    "拆开，不要丢约束；\n"
-    "3. 每个主体对应一条子问题，主体名用原问句里的写法，不要另起别称；\n"
-    "4. 每条子问题输出成紧凑的检索词「主体+指标+时间」（如「中国银行前三季度营业"
-    "收入」），去掉「是多少」「分别」「请问」等疑问词与语气词，不要疑问句、不要解释；\n"
-    "5. 输出若干条，每条一行，不要编号、不要任何额外文字。"
-)
-
-
-def decompose_queries(
-    query: str, file_ids: list[uuid.UUID] | None = None
-) -> list[str]:
-    """多主体对比问句 → 单主体子问题列表（sub-question decomposition）。
-
-    只对「A 和 B 的 X」这类多主体并列/对比问句生效：拆成「A 的 X」「B 的 X」
-    分别独立检索，再由检索层轮转合并，保证每个主体至少一条命中（multi-query
-    的同义改写对这类问句无效，实测反而放大第一主体优势）。关闭 / 无并列信号 /
-    非多主体 / 失败 / 拆不出多条时一律退回 [query]。
-    """
-    q = (query or "").strip()
-    if not q:
-        return [q] if q else []
-    if not settings.kb_decompose_enabled:
-        return [q]
-    if not _DECOMPOSE_SIGNAL.search(q):
-        return [q]
-    # 确定性前置：query 得真的点名了 ≥2 个不同文件主体，才值得多付一次 LLM 调用
-    from ai_agent.kb.retrieval import mentioned_subjects
-
-    if len(mentioned_subjects(q, file_ids=file_ids)) < 2:
-        return [q]
-    try:
-        out = complete_chat(
-            [
-                {"role": "system", "content": _DECOMPOSE_SYSTEM},
-                {"role": "user", "content": f"请拆解下面这条问句：\n{q}"},
-            ],
-            model=settings.kb_decompose_model or settings.resolve_llm(),
-            timeout=settings.kb_decompose_timeout_seconds,
-            max_retries=0,
-            max_tokens=256,
-            # 拆解是结构化任务，温度取 0 保证同一问句每次拆出同样的子问题，
-            # 否则评测结果会随采样抖动、改动好坏无法归因
-            temperature=0.0,
-            extra_body={
-                "enable_thinking": False,
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-        )
-    except Exception:
-        logger.warning("kb 子问题分解失败，退回原 query：%s", q[:60])
-        return [q]
-    subs = [s.strip().strip("\"'“”‘’") for s in (out or "").splitlines()]
-    subs = [s for s in subs if s and s != q]
-    if len(subs) < 2:
-        return [q]
-    seen: set[str] = set()
-    result: list[str] = []
-    for s in subs:
-        if s not in seen:
-            seen.add(s)
-            result.append(s)
-        if len(result) >= settings.kb_decompose_max:
-            break
-    if len(result) < 2:
-        return [q]
-    logger.info("kb 子问题分解：%r -> %s", q, result)
     return result
 
 

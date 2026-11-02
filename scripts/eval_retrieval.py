@@ -32,8 +32,6 @@
     uv run python scripts/eval_retrieval.py --compare-filters     # 过滤关/开各跑一轮，对照 hit@k/MRR@10
     uv run python scripts/eval_retrieval.py --stability --rerank   # 同一 query 跑 N 次，量化同问稳定性
     uv run python scripts/eval_retrieval.py --stability --rerank --no-cache   # 每次清缓存，逼出重排/嵌入真实抖动
-    uv run python scripts/eval_retrieval.py --decompose           # 开启子问题分解（多主体对比问句拆主体检索）
-    uv run python scripts/eval_retrieval.py --compare-decompose   # 子问题分解关/开各跑一轮，对照 hit@k/MRR@10
 
 
 退出码：0 通过；1 hit@3 低于阈值（默认 0.85）；2 用例失效（语料已变）。
@@ -183,14 +181,12 @@ def run_evaluation(
     top_k: int,
     rerank: bool,
     filters_on: bool = False,
-    decompose: bool = False,
 ) -> tuple[dict, list[tuple]]:
     """执行一轮评测，返回 (指标字典, 逐条明细)。
 
-    抽成独立函数以便「过滤关/开」「子问题分解关/开」各跑一轮做对照。关重排时
-    关掉 rerank 评纯检索；打开时预热避免首例冷启动。窗口至少 10 以计算
-    recall@10/MRR@10。查询向量走进程内 lru_cache，对照时「开」轮不会重复付
-    embedding。
+    抽成独立函数以便「过滤关/开」各跑一轮做对照。关重排时关掉 rerank 评纯
+    检索；打开时预热避免首例冷启动。窗口至少 10 以计算 recall@10/MRR@10。
+    查询向量走进程内 lru_cache，对照时「开」轮不会重复付 embedding。
     """
     from ai_agent.kb import retrieval
     from ai_agent.memory.embeddings import embed_texts
@@ -199,13 +195,6 @@ def run_evaluation(
         settings.kb_rerank_enabled = False
     else:
         embed_texts(["预热"])
-
-    if decompose:
-        # 子问题分解依赖 LLM 拆解，需显式打开开关（生产默认关）
-        from ai_agent.kb.scope import decompose_queries
-
-    # 显式对齐开关：对照跑 off/on 两轮时，避免上一轮遗留的 True 串味到下一轮
-    settings.kb_decompose_enabled = decompose
 
     window = max(top_k, 10)
     n1 = n3 = nk = n10 = 0
@@ -216,20 +205,9 @@ def run_evaluation(
         filters = infer_filters(case["query"], case) if filters_on else None
         if filters:
             applied += 1
-        if decompose:
-            subs = decompose_queries(case["query"])
-            if len(subs) > 1:
-                hits = retrieval.search_knowledge_subqueries(
-                    subs, top_k=window, filters=filters
-                )
-            else:
-                hits = retrieval.search_knowledge(
-                    case["query"], top_k=window, filters=filters
-                )
-        else:
-            hits = retrieval.search_knowledge(
-                case["query"], top_k=window, filters=filters
-            )
+        hits = retrieval.search_knowledge(
+            case["query"], top_k=window, filters=filters
+        )
         rank = hit_rank(hits, case["expect"])
         at1 = rank == 1
         at3 = rank is not None and rank <= 3
@@ -256,11 +234,10 @@ def evaluate(
     top_k: int,
     rerank: bool,
     filters_on: bool = False,
-    decompose: bool = False,
 ) -> int:
     # 延迟导入：--validate / --dump 不需要碰 embedding/LLM
     metrics, detail = run_evaluation(
-        cases, top_k, rerank, filters_on=filters_on, decompose=decompose
+        cases, top_k, rerank, filters_on=filters_on
     )
     n1 = metrics["n1"]; n3 = metrics["n3"]; nk = metrics["nk"]; n10 = metrics["n10"]
     total = metrics["total"]
@@ -334,55 +311,6 @@ def compare_filters(cases: list[dict], top_k: int, rerank: bool) -> int:
         print(f"结论：过滤开未降低 hit@3 / recall@10（不丢召回）{lift}")
     else:
         print("⚠️ 过滤开导致 hit@3 / recall@10 下降，需排查过滤是否过窄")
-    return 0
-
-
-def compare_decompose(cases: list[dict], top_k: int, rerank: bool) -> int:
-    """子问题分解关 vs 开 对照：hit@k / MRR@10 与逐条名次差。
-
-    子问题分解针对多主体对比问句（「A 和 B 的营收」）：拆成单主体子问题各自
-    检索、轮转合并，保证每个主体至少一条命中。对照时分别跑 decompose 关/开两轮，
-    输出指标差异与名次变化，定位增益来自哪条对比问句、是否误伤单主体问句。
-    """
-    off_m, off_d = run_evaluation(cases, top_k, rerank, decompose=False)
-    on_m, on_d = run_evaluation(cases, top_k, rerank, decompose=True)
-    t = off_m["total"]
-    print(f"子问题分解对照（top_k={top_k}, 用例={t}）")
-    print(f"{'指标':<12}{'关':>12}{'开':>12}{'Δ':>10}")
-    print("-" * 46)
-    rows = [
-        ("hit@1", off_m["hit1"], on_m["hit1"]),
-        ("hit@3", off_m["hit3"], on_m["hit3"]),
-        (f"hit@{top_k}", off_m["hitk"], on_m["hitk"]),
-        ("recall@10", off_m["recall10"], on_m["recall10"]),
-        ("MRR@10", off_m["mrr"], on_m["mrr"]),
-    ]
-    for name, a, b in rows:
-        delta = b - a
-        dstr = f"{delta:+.0%}" if name != "MRR@10" else f"{delta:+.3f}"
-        print(f"{name:<12}{a:>11.0%}{b:>11.0%}{dstr:>10}")
-    changed = []
-    for (qo, ro, _, _), (q1, r1, _, _) in zip(off_d, on_d):
-        if ro != r1:
-            changed.append((qo, ro, r1))
-    print("-" * 46)
-    if changed:
-        print(f"名次变化的用例（{len(changed)}/{t}）：")
-        for q, ro, r1 in changed:
-            so = f"#{ro}" if ro is not None else "miss"
-            s1 = f"#{r1}" if r1 is not None else "miss"
-            print(f"  {q[:26]:<28} {so:>6} → {s1:<6}")
-    else:
-        print("子问题分解开/关名次完全一致")
-    if on_m["hit3"] >= off_m["hit3"] and on_m["recall10"] >= off_m["recall10"]:
-        lift = (
-            "；MRR/hit@k 有提升"
-            if (on_m["mrr"] > off_m["mrr"] or on_m["hit1"] > off_m["hit1"])
-            else "；精度持平"
-        )
-        print(f"结论：子问题分解未降低 hit@3 / recall@10（不丢召回）{lift}")
-    else:
-        print("⚠️ 子问题分解导致 hit@3 / recall@10 下降，需排查是否误拆单主体问句")
     return 0
 
 
@@ -524,16 +452,6 @@ def main() -> int:
         help="同一 query 重复运行度量 top-k 稳定性（配合 --rerank 暴露抖动）",
     )
     parser.add_argument(
-        "--decompose",
-        action="store_true",
-        help="开启子问题分解（多主体对比问句拆成单主体各自检索）",
-    )
-    parser.add_argument(
-        "--compare-decompose",
-        action="store_true",
-        help="子问题分解关/开各跑一轮，对照 hit@k/MRR@10 与逐条名次变化",
-    )
-    parser.add_argument(
         "--no-cache",
         action="store_true",
         help="--stability 下每次运行前清掉 embed/rerank 缓存，逼出真实冷调用抖动",
@@ -569,14 +487,11 @@ def main() -> int:
     if args.compare_filters:
         return compare_filters(cases, args.top_k, args.rerank)
 
-    if args.compare_decompose:
-        return compare_decompose(cases, args.top_k, args.rerank)
-
     if args.stability:
         return evaluate_stability(cases, args.top_k, args.rerank, args.runs, args.no_cache)
 
     return evaluate(
-        cases, args.top_k, args.rerank, filters_on=args.filters, decompose=args.decompose
+        cases, args.top_k, args.rerank, filters_on=args.filters
     )
 
 

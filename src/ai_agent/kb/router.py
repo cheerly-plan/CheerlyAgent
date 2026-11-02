@@ -27,8 +27,8 @@ logger = get_logger(__name__)
 def mentioned_file_ids(query: str) -> list[uuid.UUID]:
     """问句直接点名的文件（按文件名 / 主体名 / 别名匹配），按文件清单顺序。
 
-    复用文件名解析那一套判据（见 kb/retrieval.py），所以「中国能建」这种
-    简称能命中全称，「季度报告」这种噪音不会误命中。
+    复用文件名解析那一套判据（见 kb/retrieval.py）。简称只认别名表里的整词，
+    「季度报告」这种噪音不会误命中。
     """
     from ai_agent.kb.retrieval import (
         _filename_hint_matches,

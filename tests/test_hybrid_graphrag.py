@@ -432,7 +432,9 @@ def test_resolve_files_by_name_matches_abbreviation_and_full_name(monkeypatch):
             },
         ],
     )
-    assert retrieval.resolve_files_by_name(["中国能建"]) == [nengjian]
+    # 简称不再靠和全称的公共子串命中；核心名整段出现在文件名里仍然命中
+    assert retrieval.resolve_files_by_name(["中国能建"]) == []
+    assert retrieval.resolve_files_by_name(["中国能源建设"]) == [nengjian]
     assert retrieval.resolve_files_by_name(
         ["中国能源建设股份有限公司2026年第三季度报告.pdf"]
     ) == [nengjian]
@@ -441,7 +443,7 @@ def test_resolve_files_by_name_matches_abbreviation_and_full_name(monkeypatch):
     ) == [nengjian]
     assert retrieval.resolve_files_by_name(["安克创新"]) == [anker]
     # 两个提示都能命中 → 两份都纳入
-    assert retrieval.resolve_files_by_name(["中国能建", "安克创新"]) == [
+    assert retrieval.resolve_files_by_name(["中国能源建设", "安克创新"]) == [
         nengjian,
         anker,
     ]
@@ -474,15 +476,16 @@ def test_resolve_files_by_name_single_ready_file_not_short_circuited(monkeypatch
     ) == [only]
 
 
-def test_query_mentions_allows_abbreviation_but_not_other_company():
+def test_name_in_text_requires_whole_alias_not_shared_prefix():
+    from ai_agent.kb.meta import name_in_text
+
     full = "中国能源建设股份有限公司"
-    # 简称与全称只共享「中国能」，但足以判定是同一主体
-    assert retrieval._query_mentions("中国能建前三季度营收", full)
-    assert retrieval._query_mentions("中国能源建设营收", full)
-    # 库外的公司一个连续字都对不上，不能收窄
-    assert not retrieval._query_mentions("宁德时代营收", full)
-    # 少于 3 字的重合不足以判定（"公司" 这类通用后缀不算）
-    assert not retrieval._query_mentions("公司营收", full)
+    # 核心名整段出现才算；「中国能建」和全称只共享前三个字，不再算命中
+    assert name_in_text("中国能源建设营收", full)
+    assert not name_in_text("中国能建前三季度营收", full)
+    assert not name_in_text("宁德时代营收", full)
+    assert not name_in_text("公司营收", full)
+    assert name_in_text("中国能建前三季度营收", "中国能建")
 
 
 def test_keep_distinctive_keywords_drops_ubiquitous_terms(monkeypatch):

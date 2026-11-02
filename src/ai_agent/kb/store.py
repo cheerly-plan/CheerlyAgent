@@ -312,6 +312,19 @@ class KbStore:
             conn.commit()
         return row is not None
 
+    def set_kb_subject_aliases(self, file_id: uuid.UUID, aliases: list[str]) -> None:
+        """只更新主体别名，不动报告期和其它元数据。"""
+        with self._get_pool().connection() as conn:
+            conn.execute(
+                """
+                UPDATE agent_kb_file
+                SET subject_aliases = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (list(aliases), file_id),
+            )
+            conn.commit()
+
     def backfill_file_meta(
         self,
         file_id: uuid.UUID,
@@ -497,6 +510,7 @@ class KbStore:
         *,
         subject: str = "",
         period: str = "",
+        subjects: list[str] | None = None,
     ) -> int:
         """写入切片，并把文件的主体/报告期冗余到每一行。
 
@@ -517,7 +531,7 @@ class KbStore:
                 chunk.scope,
                 chunk.text,
                 Vector(vector),
-                subject,
+                subjects[i] if subjects is not None else subject,
                 period,
             )
             for i, (chunk, vector) in enumerate(zip(chunks, vectors))
@@ -788,7 +802,7 @@ class KbStore:
                     FROM hit
                 )
                 SELECT id, file_id, seq, page, page_end, section,
-                       kind, scope, text, filename, distance
+                       kind, scope, text, filename, subject, distance
                 FROM ranked
                 ORDER BY (rn = 1 AND subject_best <= global_best + %(band)s) DESC,
                          distance
@@ -871,7 +885,7 @@ class KbStore:
                     FROM hit
                 )
                 SELECT id, file_id, seq, page, page_end, section,
-                       kind, scope, text, filename, keyword_score
+                       kind, scope, text, filename, subject, keyword_score
                 FROM ranked
                 ORDER BY (rn = 1 AND subject_best >= global_best - %(band)s) DESC,
                          keyword_score DESC, file_id, seq

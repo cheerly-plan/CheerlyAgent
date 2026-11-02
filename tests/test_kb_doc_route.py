@@ -238,8 +238,9 @@ def test_resolve_tool_file_ids_uses_route_when_no_files(monkeypatch):
 
 
 def test_resolve_tool_file_ids_falls_back_to_none_without_route(monkeypatch):
-    """路由也没结果，才退回会话范围 / 全库（与旧行为一致）。"""
+    """路由也没结果、库里又没有可收窄的文件时，退回会话范围 / 全库。"""
     monkeypatch.setattr(scope, "_route", lambda q: [])
+    monkeypatch.setattr(memory_store.store, "list_kb_files", lambda **k: [])
     assert scope.resolve_tool_file_ids(None, query="随便问点什么") is None
 
 

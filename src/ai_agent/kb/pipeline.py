@@ -16,7 +16,12 @@ from ai_agent.core.logging import get_logger
 from ai_agent.kb.align import align_file_graph
 from ai_agent.kb.chunking import Chunk, chunk_segments, embedding_input
 from ai_agent.kb.graph import build_file_graph
-from ai_agent.kb.meta import extract_aliases, extract_file_meta, pick_chunk_subject
+from ai_agent.kb.meta import (
+    assign_chunk_subjects,
+    extract_aliases,
+    pick_chunk_subject,
+    resolve_file_identity,
+)
 from ai_agent.kb.summary import index_file_summary
 from ai_agent.kb.parsing import parse_segments
 from ai_agent.memory.embeddings import embed_texts_parallel
@@ -90,11 +95,16 @@ class KbPipeline:
             # 嵌入时带上「文档名 + 页码/表号」的语境前缀（见 chunking.context_prefix）：
             # 存储的正文不变，只是送进向量模型的那份文本更有辨识度。
             # 批间并行（EMBEDDING_CONCURRENCY），结果顺序与切片一致
-            filename = (store.get_kb_file(file_id) or {}).get("filename") or path.name
-            # 检索元数据：主体/报告期从文件名规则抽取（见 kb/meta.py）。
-            # 写进文件行是给管理页和后续回填看的；切片再冗余一份，检索分桶
-            # 用的就是切片上那份（PARTITION BY subject 必须在单表上做）。
-            file_meta = extract_file_meta(filename)
+            record = store.get_kb_file(file_id) or {}
+            filename = record.get("filename") or path.name
+            # 文件名规则优先；封面补公司名和报告期。doc_type 只在还没人工指定时写入。
+            file_meta = resolve_file_identity(filename, _cover_text(segments))
+            if not (record.get("doc_type") or "").strip() and file_meta["doc_type"]:
+                store.set_kb_extract_config(
+                    file_id,
+                    doc_type=file_meta["doc_type"],
+                    level=(record.get("extract_level") or "").strip() or "full",
+                )
             store.set_kb_file_meta(
                 file_id,
                 subject=file_meta["subject"],
@@ -118,6 +128,15 @@ class KbPipeline:
             )
             embed_seconds = time.perf_counter() - embed_stage
             db_stage = time.perf_counter()
+            library = [
+                (row["subject"], list(row["subject_aliases"] or []))
+                for row in store.list_kb_subjects(user_id)
+            ]
+            chunk_subjects = assign_chunk_subjects(
+                [chunk.text for chunk in chunks],
+                file_meta["subject"],
+                library,
+            )
             done = 0
             batch = settings.kb_embedding_batch
             for seq_start in range(0, len(chunks), batch):
@@ -129,6 +148,7 @@ class KbPipeline:
                     seq_start,
                     subject=file_meta["subject"],
                     period=file_meta["period"],
+                    subjects=chunk_subjects[seq_start : seq_start + batch],
                 )
             text_n = sum(1 for c in chunks if c.kind == "text")
             table_n = sum(1 for c in chunks if c.kind == "table")
@@ -250,6 +270,7 @@ class KbPipeline:
                 alias_count=counts["merged"],
                 entity_count=counts["entities"] - counts["merged"],
             )
+            _write_back_subject_aliases(file_id)
             return counts["entities"] - counts["merged"]
         except Exception:
             logger.exception("kb 实体对齐失败 file_id=%s", file_id)
@@ -332,6 +353,48 @@ class KbPipeline:
             logger.info("kb 改名重嵌完成 file_id=%s chunks=%d", file_id, done)
         except Exception:
             logger.exception("kb 改名重嵌失败 file_id=%s", file_id)
+
+
+_GENERIC_ALIAS = {"公司", "集团", "股份", "控股", "银行", "证券", "保险", "基金"}
+
+
+def _cover_text(segments, pages: int = 2) -> str:
+    """取前两页正文，供文件名里没有的公司名和报告期补缺。"""
+    if not any(getattr(seg, "page", None) for seg in segments):
+        return "\n".join(seg.text or "" for seg in segments)[:4000]
+    seen: list[int] = []
+    parts: list[str] = []
+    for seg in segments:
+        page = seg.page
+        if not page:
+            continue
+        if page not in seen:
+            if len(seen) >= pages:
+                continue
+            seen.append(page)
+        if page in seen:
+            parts.append(seg.text or "")
+    return "\n".join(parts)[:4000]
+
+
+def _write_back_subject_aliases(file_id: uuid.UUID) -> None:
+    """把对齐得到的主体简称写回文件别名，检索按整词命中。"""
+    record = store.get_kb_file(file_id) or {}
+    subject = str(record.get("subject") or "").strip()
+    if not subject:
+        return
+    try:
+        aligned = store.list_aligned_aliases(file_id, subject)
+    except Exception:
+        logger.warning("主体别名回写失败 file_id=%s", file_id, exc_info=True)
+        return
+    merged = extract_aliases(subject)
+    for name in list(record.get("subject_aliases") or []) + list(aligned):
+        name = str(name or "").strip()
+        if not name or name in merged or name in _GENERIC_ALIAS or len(name) < 2:
+            continue
+        merged.append(name)
+    store.set_kb_subject_aliases(file_id, merged)
 
 
 kb_pipeline = KbPipeline(

@@ -35,7 +35,6 @@ _YEAR_RE = re.compile(r"(?:19|20)\d{2}\s*年?")
 _QUARTER_RE = re.compile(r"第([一二三四])季度")
 _QUARTER_MAP = {"一": 1, "二": 2, "三": 3, "四": 4}
 _HALF_RE = re.compile(r"半年度|中期")
-_REPORT_KIND_RE = re.compile(r"季度报告|半年度报告|年度报告")
 
 
 def normalize_name(name: str) -> str:
@@ -78,8 +77,8 @@ def extract_period(filename: str) -> str:
 def extract_aliases(subject: str) -> list[str]:
     """主体的可匹配写法：全称、去组织形式后缀的核心名，及两者的归一化形。
 
-    简称（「中国能源建设」→「中国能建」）无法由规则推导，靠检索侧的
-    n-gram 重合判定（见 ``retrieval._query_mentions``），不在这里硬凑。
+    简称（「中国能源建设」→「中国能建」）无法由规则推导。图谱对齐产出的
+    别名在建图结束后写回文件，检索按整词命中，不在这里硬凑。
     """
     if not subject:
         return []
@@ -91,11 +90,179 @@ def extract_aliases(subject: str) -> list[str]:
     return out
 
 
-def extract_report_kind(filename: str) -> str:
-    """报告种类，进 meta JSONB（长尾，不单独成列）。"""
+def looks_like_company(name: str) -> bool:
+    """文件名剩下来的字是不是公司，而不是「员工考勤制度」这种标题。"""
+    return bool(COMPANY_SUFFIX.search(name or ""))
+
+
+def infer_doc_type(filename: str) -> str:
+    """从文件名推断文档类型。推断不出返回空串，调用方保留人工指定的值。
+
+    「半年度报告」里含「年度报告」，必须先判半年报和季报。
+    """
     stem = EXT_RE.sub("", filename or "")
-    m = _REPORT_KIND_RE.search(stem)
-    return m.group(0) if m else ""
+    if re.search(r"招股意向书|招股说明书", stem):
+        return "prospectus"
+    if "法律意见书" in stem:
+        return "legal_opinion"
+    if "尽职调查" in stem:
+        return "due_diligence"
+    if re.search(r"季度报告|半年度报告|中期报告", stem):
+        return "quarterly_report"
+    if "年度报告" in stem:
+        return "annual_report"
+    if "公告" in stem:
+        return "announcement"
+    return ""
+
+
+# 封面上的公司名：后缀前最多 24 个字，避免把整段导语吞进来
+_COVER_COMPANY = re.compile(
+    r"[\u4e00-\u9fffA-Za-z0-9]{2,24}"
+    r"(?:股份有限公司|有限责任公司|有限公司|集团公司|银行|证券|保险|基金)"
+)
+
+
+def dominant_company(text: str) -> str:
+    """封面文本里出现最多的公司名。次数相同取更长的那个。"""
+    counts: dict[str, int] = {}
+    for match in _COVER_COMPANY.finditer(text or ""):
+        name = match.group(0)
+        counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return ""
+    return max(counts, key=lambda name: (counts[name], len(name)))
+
+
+def name_in_text(text: str, name: str, *, min_len: int = 2) -> bool:
+    """名称或去掉组织形式后的核心名，整段出现在文本里。
+
+    不做最长公共子串。「中国能建」不会因为和全称共享「中国能」而命中，
+    必须别名表里真有这四个字。
+    """
+    hay = normalize_name(text)
+    if not hay:
+        return False
+    for token in (normalize_name(name), normalize_name(subject_core(name))):
+        if len(token) >= min_len and token in hay:
+            return True
+    return False
+
+
+_PERIOD_RE = re.compile(r"^((?:19|20)\d{2})(?:Q([1-4])|H1)?$")
+_QUERY_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_QUERY_QUARTER_RE = re.compile(r"第?([一二三四1-4])季度")
+_QUERY_HALF_RE = re.compile(r"半年度|半年报|中期")
+_MULTI_PERIOD_RE = re.compile(r"同比|环比|历年|各季度|各期|近[一二三四五六七八九十\d]+年")
+_QUARTER_DIGIT = {"一": "1", "二": "2", "三": "3", "四": "4", "1": "1", "2": "2", "3": "3", "4": "4"}
+
+
+def period_rank(period: str) -> tuple[int, int]:
+    """报告期的新旧。年报排在同年季报之后（年报发布更晚）；无法解析的排最后。"""
+    match = _PERIOD_RE.match(period or "")
+    if not match:
+        return (0, 0)
+    year = int(match.group(1))
+    if match.group(2):
+        return (year, int(match.group(2)))
+    if (period or "").endswith("H1"):
+        return (year, 2)
+    return (year, 9)
+
+
+def query_period_policy(query: str, *, today=None) -> tuple[str, str]:
+    """问句要收成哪一期。
+
+    返回 (策略, 令牌)：
+    - all / ""：同比、历年、两个年份，不收窄
+    - exact / 2026Q3：指定了季度或半年
+    - year / 2025：只给了年份，或「去年」「今年」
+    - latest / ""：没提时期，同一主体只留最新一期
+    """
+    from datetime import date
+
+    text = query or ""
+    if not text.strip() or _MULTI_PERIOD_RE.search(text):
+        return ("all", "")
+    years = list(dict.fromkeys(_QUERY_YEAR_RE.findall(text)))
+    if len(years) >= 2:
+        return ("all", "")
+    anchor = today or date.today()
+    year = ""
+    if years:
+        year = years[0]
+    elif "前年" in text:
+        year = str(anchor.year - 2)
+    elif "去年" in text:
+        year = str(anchor.year - 1)
+    elif "今年" in text:
+        year = str(anchor.year)
+    quarter = _QUERY_QUARTER_RE.search(text)
+    if quarter:
+        # 「三季度营收」没写年份时，按当前年理解
+        pinned = year or str(anchor.year)
+        return ("exact", f"{pinned}Q{_QUARTER_DIGIT[quarter.group(1)]}")
+    if _QUERY_HALF_RE.search(text):
+        pinned = year or str(anchor.year)
+        return ("exact", f"{pinned}H1")
+    if year:
+        return ("year", year)
+    return ("latest", "")
+
+
+def period_matches(period: str, policy: str, token: str) -> bool:
+    if policy == "exact":
+        return period == token
+    if policy == "year":
+        return (period or "").startswith(token)
+    return True
+
+
+def resolve_file_identity(filename: str, cover: str = "") -> dict:
+    """文件名规则优先，封面只补文件名里没有的公司名和报告期。"""
+    meta = extract_file_meta(filename)
+    if not looks_like_company(meta["subject"]):
+        found = dominant_company(cover)
+        if found:
+            meta["subject"] = found
+            meta["subject_aliases"] = extract_aliases(found)
+    if not meta["period"]:
+        meta["period"] = extract_period(cover)
+    meta["doc_type"] = infer_doc_type(filename) or infer_doc_type(cover)
+    return meta
+
+
+def assign_chunk_subjects(
+    texts: list[str],
+    default: str,
+    library: list[tuple[str, list[str]]],
+) -> list[str]:
+    """正文里出现至少两家公司时，按提及次数给每片定主体。否则整份继承文件主体。"""
+    if not texts:
+        return []
+    blob = "\n".join(texts)
+    candidates: list[tuple[str, list[str]]] = []
+    known: set[str] = set()
+    for subject, aliases in library:
+        subject = (subject or "").strip()
+        if not subject or subject in known:
+            continue
+        known.add(subject)
+        candidates.append((subject, list(aliases or []) or extract_aliases(subject)))
+    for name in _COVER_COMPANY.findall(blob):
+        if name not in known:
+            known.add(name)
+            candidates.append((name, extract_aliases(name)))
+    appearing = [
+        (subject, forms)
+        for subject, forms in candidates
+        if count_mentions(blob, forms) > 0
+    ]
+    if len(appearing) < 2:
+        return [default] * len(texts)
+    return [
+        pick_chunk_subject(text, appearing, default=default) for text in texts
+    ]
 
 
 # 像「公司主体」的实体名后缀：多主体文档（行业研报）里靠它挑候选主体
@@ -155,10 +322,9 @@ def extract_file_meta(filename: str) -> dict:
     「不分桶」的原行为，不会因此查不到东西。
     """
     subject = extract_subject(filename)
-    kind = extract_report_kind(filename)
     return {
         "subject": subject,
         "subject_aliases": extract_aliases(subject),
         "period": extract_period(filename),
-        "meta": {"report_kind": kind} if kind else {},
+        "meta": {},
     }

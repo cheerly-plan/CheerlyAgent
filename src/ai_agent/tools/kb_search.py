@@ -18,12 +18,10 @@ from ai_agent.kb.retrieval import (
     Hit,
     format_where,
     search_knowledge_multi,
-    search_knowledge_subqueries,
     _PARENT_INTENT,
     SCOPE_PARENT,
 )
 from ai_agent.kb.scope import (
-    decompose_queries,
     effective_kb_query,
     expand_queries,
     resolve_tool_file_ids,
@@ -134,7 +132,10 @@ def _kb_search(
     parsed_ids = resolve_tool_file_ids(files, query=query)
     # files 明确指定但解析不到（编造的文件名/主体名）→ 明确提示，而非静默退回全库
     if parsed_ids == []:
-        return KB_FILES_NOT_FOUND_HINT
+        # 模型点了不存在的文件，和「问句里的报告期库里没有」不是同一件事
+        if files:
+            return KB_FILES_NOT_FOUND_HINT
+        return KB_NO_HIT_HINT
 
     # files 已指定时，选文件这步已完成，检索 query 里再带主体名纯属噪声：会把嵌入
     # 拉向反复出现公司名的页眉页、并挤占关键词名额。确定性剥掉（用解析后文件自身的
@@ -157,24 +158,16 @@ def _kb_search(
     if _PARENT_INTENT.search(retrieval_query):
         filters["scopes"] = [SCOPE_PARENT]
 
-    # 子问题分解（sub-question）优先于 multi-query：多主体对比问句（「A 和 B 的
-    # 营收」）拆成单主体子问题各自独立检索、轮转合并，保证每个主体至少一条命中。
-    # multi-query 的同义改写对这类问句无效（实测反而放大第一主体优势），二者互斥：
-    # 拆出多条走 subqueries，拆不出再退回 multi-query / 单次检索。两条链都带
-    # 降级，失败退回 [retrieval_query]，等价于原单次检索，不引入额外失败面。
-    subs = decompose_queries(retrieval_query, file_ids=parsed_ids)
-    if len(subs) > 1:
-        search_fn = search_knowledge_subqueries
-        queries = subs
-    else:
-        queries = (
-            expand_queries(retrieval_query)
-            if settings.kb_multiquery_enabled
-            else [retrieval_query]
-        )
-        search_fn = search_knowledge_multi
+    # 多主体问句不拆开检索：files 或文档路由已经把 A、B 的文件圈进同一范围，
+    # 在这批文件里查一次字段（如「营业收入」）。融合和重排各做一遍，重排后再
+    # 按主体留名额。multi-query 只是同义变体，变体之间再做一次 RRF。
+    queries = (
+        expand_queries(retrieval_query)
+        if settings.kb_multiquery_enabled
+        else [retrieval_query]
+    )
     try:
-        hits = search_fn(
+        hits = search_knowledge_multi(
             queries,
             file_ids=parsed_ids,
             top_k=top_k,

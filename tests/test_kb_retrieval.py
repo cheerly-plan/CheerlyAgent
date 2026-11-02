@@ -88,6 +88,31 @@ def test_rerank_follows_model_order_and_keeps_unlisted(monkeypatch):
     assert [row["seq"] for row in ordered] == [2, 0, 1]
 
 
+def test_diversify_by_subject_keeps_second_company_after_rerank(monkeypatch):
+    """重排把一家排满 top_k 时，带宽内的另一家头名仍要留下。"""
+    monkeypatch.setattr(settings, "kb_subject_quota_band", 0.12)
+    rows = [
+        {**_row(0, "甲营收", distance=0.20), "subject": "甲公司"},
+        {**_row(1, "甲利润", distance=0.21), "subject": "甲公司"},
+        {**_row(2, "甲现金", distance=0.22), "subject": "甲公司"},
+        {**_row(3, "乙营收", distance=0.30), "subject": "乙公司"},
+    ]
+    picked = retrieval._diversify_by_subject(rows, top_k=3)
+    assert [row["seq"] for row in picked] == [0, 1, 3]
+
+
+def test_diversify_by_subject_skips_far_company(monkeypatch):
+    monkeypatch.setattr(settings, "kb_subject_quota_band", 0.12)
+    rows = [
+        {**_row(0, "甲营收", distance=0.20), "subject": "甲公司"},
+        {**_row(1, "甲利润", distance=0.21), "subject": "甲公司"},
+        {**_row(2, "甲现金", distance=0.22), "subject": "甲公司"},
+        {**_row(3, "乙无关", distance=0.50), "subject": "乙公司"},
+    ]
+    picked = retrieval._diversify_by_subject(rows, top_k=3)
+    assert [row["seq"] for row in picked] == [0, 1, 2]
+
+
 def test_rerank_falls_back_on_garbage_or_error(monkeypatch):
     rows = [_row(0, "甲"), _row(1, "乙")]
 
@@ -219,6 +244,29 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(kb_tool, "search_knowledge_multi", fake_search)
+    monkeypatch.setattr("ai_agent.kb.scope._route", lambda q: [])
+    latest = uuid.uuid4()
+    monkeypatch.setattr(
+        "ai_agent.memory.store.store.list_kb_files",
+        lambda **k: [
+            {
+                "file_id": uuid.uuid4(),
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2025",
+                "filename": "甲公司2025年年度报告.pdf",
+                "subject_aliases": [],
+            },
+            {
+                "file_id": latest,
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2026Q3",
+                "filename": "甲公司2026年第三季度报告.pdf",
+                "subject_aliases": [],
+            },
+        ],
+    )
 
     token = set_kb_scope([str(FILE_ID)])
     try:
@@ -240,9 +288,9 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
         reset_kb_scope(token)
     assert seen["file_ids"] == [other]
 
-    # 无范围 = 全库（None，不加过滤）
+    # 没圈范围、问句也没写时期：同一主体只留最新一期，不再把年报和季报一起搜
     kb_tool._kb_search("问题")
-    assert seen["file_ids"] is None
+    assert seen["file_ids"] == [latest]
 
 
 def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
@@ -254,6 +302,29 @@ def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     monkeypatch.setattr(kg_tool.store, "graph_stats", lambda **k: {"entities": 3})
     monkeypatch.setattr(kg_tool, "embed_query", lambda q: [0.1])
+    monkeypatch.setattr("ai_agent.kb.scope._route", lambda q: [])
+    latest = uuid.uuid4()
+    monkeypatch.setattr(
+        "ai_agent.memory.store.store.list_kb_files",
+        lambda **k: [
+            {
+                "file_id": uuid.uuid4(),
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2025",
+                "filename": "甲公司2025年年度报告.pdf",
+                "subject_aliases": [],
+            },
+            {
+                "file_id": latest,
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2026Q3",
+                "filename": "甲公司2026年第三季度报告.pdf",
+                "subject_aliases": [],
+            },
+        ],
+    )
 
     def fake_entities(embedding, *, query="", top_k=5, file_ids=None, min_score=0.0):
         seen["file_ids"] = file_ids
@@ -270,7 +341,7 @@ def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
     assert seen["file_ids"] == [FILE_ID]
 
     kg_tool._kg_search("问题和谁有关")
-    assert seen["file_ids"] is None
+    assert seen["file_ids"] == [latest]
 
 
 

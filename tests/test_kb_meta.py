@@ -47,7 +47,7 @@ def test_extract_file_meta_keys_match_columns():
     assert set(out) == {"subject", "subject_aliases", "period", "meta"}
     assert out["subject"] == "安克创新科技股份有限公司"
     assert out["period"] == "2026Q3"
-    assert out["meta"]["report_kind"] == "季度报告"
+    assert out["meta"] == {}
 
 
 def test_count_mentions_sums_surface_forms():
@@ -252,3 +252,66 @@ def test_backfill_file_meta_honours_manual_override(monkeypatch):
     assert out["subject"] == "中国银行股份有限公司"
     assert "中国银行" in out["subject_aliases"]
     assert out["period"] == "2026Q3"
+
+
+def test_infer_doc_type_checks_half_year_before_annual():
+    assert meta.infer_doc_type("甲公司2026年半年度报告.pdf") == "quarterly_report"
+    assert meta.infer_doc_type("甲公司2026年第三季度报告.pdf") == "quarterly_report"
+    assert meta.infer_doc_type("甲公司2026年年度报告.pdf") == "annual_report"
+    assert meta.infer_doc_type("甲公司招股说明书.pdf") == "prospectus"
+    assert meta.infer_doc_type("员工考勤制度.docx") == ""
+
+
+def test_resolve_file_identity_fills_company_and_period_from_cover():
+    cover = "中国能源建设股份有限公司\n中国能源建设股份有限公司2026年第三季度报告"
+    out = meta.resolve_file_identity("扫描件.pdf", cover)
+    assert out["subject"] == "中国能源建设股份有限公司"
+    assert out["period"] == "2026Q3"
+    assert out["doc_type"] == "quarterly_report"
+    assert out["meta"] == {}
+
+
+def test_name_in_text_is_whole_string_not_shared_prefix():
+    full = "中国能源建设股份有限公司"
+    assert meta.name_in_text("中国能源建设的营业收入", full)
+    assert not meta.name_in_text("中国能建前三季度营收", full)
+    assert not meta.name_in_text("公司营收", full)
+    assert meta.name_in_text("中国能建前三季度营收", "中国能建")
+
+
+def test_period_rank_annual_is_later_than_same_year_quarter():
+    assert meta.period_rank("2026") > meta.period_rank("2026Q3")
+    assert meta.period_rank("2026Q3") > meta.period_rank("2025")
+    assert meta.period_rank("2026H1") == (2026, 2)
+    assert meta.period_rank("") == (0, 0)
+
+
+def test_query_period_policy():
+    from datetime import date
+
+    today = date(2026, 11, 2)
+    assert meta.query_period_policy("营业收入", today=today) == ("latest", "")
+    assert meta.query_period_policy("", today=today) == ("all", "")
+    assert meta.query_period_policy("营收同比", today=today) == ("all", "")
+    assert meta.query_period_policy("2025年和2026年营收", today=today) == ("all", "")
+    assert meta.query_period_policy("2025年营收", today=today) == ("year", "2025")
+    assert meta.query_period_policy("去年营收", today=today) == ("year", "2025")
+    assert meta.query_period_policy("2026年三季度营收", today=today) == ("exact", "2026Q3")
+    assert meta.query_period_policy("三季度营收", today=today) == ("exact", "2026Q3")
+    assert meta.query_period_policy("半年报营收", today=today) == ("exact", "2026H1")
+
+
+def test_assign_chunk_subjects_splits_only_when_two_companies_appear():
+    a = "中国能源建设股份有限公司营业收入 12 亿元。"
+    b = "顺丰控股股份有限公司营业收入 8 亿元。"
+    library = [
+        ("中国能源建设股份有限公司", ["中国能源建设股份有限公司", "中国能源建设"]),
+        ("顺丰控股股份有限公司", ["顺丰控股股份有限公司", "顺丰控股"]),
+    ]
+    assert meta.assign_chunk_subjects([a, b], "中国能源建设股份有限公司", library) == [
+        "中国能源建设股份有限公司",
+        "顺丰控股股份有限公司",
+    ]
+    assert meta.assign_chunk_subjects(
+        [a, a], "中国能源建设股份有限公司", library
+    ) == ["中国能源建设股份有限公司", "中国能源建设股份有限公司"]

@@ -55,7 +55,7 @@ from ai_agent.agents.turn import (
 
 logger = get_logger(__name__)
 
-# 问句点名了库内主体时，第一步只留这两个工具并强制调用。
+# 问句点名了库内主体或图谱实体时，第一步只留这两个工具并强制调用。
 # 天气、记忆、联网留在后面的轮次，避免模型用它们应付「必须调一个工具」。
 _KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
 
@@ -98,65 +98,6 @@ def _profile_prompt(user_id: str) -> str:
     return format_profile_block(items)
 
 
-# 文件清单内联阈值：超过则折叠为摘要，避免长清单撑爆 system prompt。
-# 主体数量通常远少于文件数（同公司多年报共享一个 subject），所以【知识库主体】
-# 清单始终注入、作为轻量查询入口；文件清单只在小库时全列。
-KB_FILE_LIST_INLINE_LIMIT = 30
-
-
-def _kb_files_block(kb_file_ids: tuple[str, ...] = ()) -> str:
-    """拼接知识库主体清单 + 可用文件清单，注入系统提示词。
-
-    模型可用主体名（如「中国能源建设」）直接填 files，无需先对着文件清单挑；
-    【知识库可用文件】仍保留作为菜单。会话已限定范围（kb_file_ids）时只列这些；
-    否则列全部就绪文件。读库失败不影响对话——返回空串，files 必填仍由工具 schema 兜底。
-    """
-    try:
-        rows = store.list_kb_files()
-    except Exception:
-        logger.exception("知识库文件清单读取失败")
-        return ""
-    ready = [r for r in rows if r.get("status") == "ready"]
-    if kb_file_ids:
-        want = {str(f) for f in kb_file_ids}
-        ready = [r for r in ready if str(r.get("file_id")) in want]
-    if not ready:
-        return ""
-    lines: list[str] = []
-    # 主体清单：新的查询入口，模型可用主体名直接填 files，不必先挑文件
-    subjects = _aggregate_subjects(ready)
-    if subjects:
-        lines.append(
-            "【知识库主体】（可用主体名直接填 files，如「中国能源建设」；"
-            "不要编造清单外的主体名）"
-        )
-        for name, count, periods in subjects:
-            ptext = "、".join(periods)
-            suffix = f"（{count}份" + (f"，{ptext}" if ptext else "") + "）"
-            lines.append(f"- {name}{suffix}")
-    # 文件清单：保留作为菜单；小库全列，大库折叠为摘要避免撑爆上下文
-    if len(ready) <= KB_FILE_LIST_INLINE_LIMIT:
-        lines.append(
-            "【知识库可用文件】（调用 kb_search / kg_search 时可用 files "
-            "指定要查的文档：可填文件名，也可填上方主体名；不填则系统按"
-            "文档摘要自动选定范围）"
-        )
-        for r in ready:
-            name = str(r.get("filename") or "(未命名)").strip()
-            desc = str(r.get("description") or "").strip()
-            line = f"- {name}"
-            if desc:
-                line += f"：{desc}"
-            lines.append(line)
-    else:
-        lines.append(
-            f"【知识库可用文件】共 {len(ready)} 份（较多，未全部列出）。"
-            "请先用上方【知识库主体】按主体名圈定，或调 kb_list_files，"
-            "用 q 传公司名、报告期或文件名关键字后再填 files。"
-        )
-    return "\n".join(lines)
-
-
 def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
     """拼接知识库能力声明，注入系统提示词。
 
@@ -189,15 +130,10 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
     ]
     for dt, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         profile = resolve_profile(dt)
-        subjects = sorted(
-            {str(m.get("subject") or "").strip() for m in members if (m.get("subject") or "").strip()}
-        )
-        names = "、".join(subjects[:8]) + ("等" if len(subjects) > 8 else "")
         scope = "、".join(profile.entity_scope) if profile.entity_scope else "（通用抽取，无限定范围）"
         preds = "、".join(profile.predicates) if profile.predicates else "（通用抽取，无限定谓词）"
         count = len(members)
-        head = f"- {profile.label}（{count} 份：{names}）" if names else f"- {profile.label}（{count} 份）"
-        lines.append(head)
+        lines.append(f"- {profile.label}（{count} 份）")
         lines.append(f"  实体范围={scope}")
         lines.append(f"  关系={preds}")
     lines.append(
@@ -207,28 +143,6 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
     return "\n".join(lines)
 
 
-def _aggregate_subjects(
-    ready: list[dict],
-) -> list[tuple[str, int, list[str]]]:
-    """从就绪文件聚合主体清单：主体名 -> (份数, 报告期列表)，按份数降序。
-
-    无 subject 的文件（文件名抽不出公司名）不进清单——它们既不能被按主体
-    检索，也不该用空主体占位。
-    """
-    agg: dict[str, dict] = {}
-    for r in ready:
-        subj = str(r.get("subject") or "").strip()
-        if not subj:
-            continue
-        entry = agg.setdefault(subj, {"count": 0, "periods": set()})
-        entry["count"] += 1
-        p = str(r.get("period") or "").strip()
-        if p:
-            entry["periods"].add(p)
-    items = sorted(agg.items(), key=lambda kv: -kv[1]["count"])
-    return [(s, v["count"], sorted(v["periods"])) for s, v in items]
-
-
 def _system_prompt(
     user_id: str, *, use_kb: bool = True, kb_file_ids: tuple[str, ...] = ()
 ) -> str:
@@ -236,12 +150,11 @@ def _system_prompt(
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
     core = build_system_prompt(use_kb=use_kb)
-    # 知识库可用文件清单：直接注入系统提示词，让模型对照着用 files 参数
-    # 显式圈定要查的文档（必填），不再由系统偷偷按查询猜文件范围。
+    # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
+    # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。
     block = _profile_prompt(user_id)
-    files_block = _kb_files_block(kb_file_ids) if use_kb else ""
     cap_block = _kb_capability_block(kb_file_ids) if use_kb else ""
-    tail = "\n\n".join(p for p in (block, files_block, cap_block) if p)
+    tail = "\n\n".join(p for p in (block, cap_block) if p)
     if not tail:
         return core
     return f"{core}\n\n{tail}"
@@ -436,11 +349,12 @@ def _must_call_kb_tool(
     tools: list[dict],
     kb_file_ids: tuple[str, ...] = (),
 ) -> bool:
-    """问句点名了已就绪主体时，这一步必须调用知识库工具。
+    """问句点名了文件主体或图谱实体时，这一步必须调用知识库工具。
 
-    只看当前这句用户消息。上一轮查过别的公司不算数；这句之后已经有
-    工具结果（续跑、检索完准备作答）也不再强制。读库失败则放行，
-    对话退回模型自己决定。
+    主体（公司名、简称）和图谱实体（人名、子公司、产品）都会触发。
+    只强制「必须查」，选 kb_search 还是 kg_search 仍由模型按【知识库能力】决定。
+    只看当前这句用户消息。上一轮查过别的对象不算数；这句之后已经有
+    工具结果（续跑、检索完准备作答）也不再强制。读库失败则放行。
     """
     names = {t.get("function", {}).get("name") for t in tools}
     if not (_KB_RETRIEVAL_TOOLS & names):
@@ -450,7 +364,7 @@ def _must_call_kb_tool(
     text = _latest_user_text(messages).strip()
     if not text:
         return False
-    from ai_agent.kb.retrieval import mentioned_subjects
+    from ai_agent.kb.retrieval import mentioned_entities, mentioned_subjects
 
     file_ids: list[uuid.UUID] | None = None
     if kb_file_ids:
@@ -465,13 +379,17 @@ def _must_call_kb_tool(
         subjects = mentioned_subjects(text, file_ids=file_ids)
     except Exception:
         logger.exception("主体提及检测失败")
-        return False
-    if subjects:
+        subjects = set()
+    entities: list[str] = []
+    if not subjects:
+        entities = mentioned_entities(text, file_ids=file_ids)
+    if subjects or entities:
         logger.info(
-            "问句点名知识库主体，强制调用工具 subjects=%s",
+            "问句命中知识库，强制调用工具 subjects=%s entities=%s",
             "、".join(sorted(subjects)),
+            "、".join(entities),
         )
-    return bool(subjects)
+    return bool(subjects or entities)
 
 
 def run_loop(

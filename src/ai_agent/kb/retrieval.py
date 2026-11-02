@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 import re
 import uuid
@@ -24,6 +23,7 @@ from pathlib import Path
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
+from ai_agent.kb.meta import name_in_text
 from ai_agent.kb.meta import ENTITY_SUFFIX as _ENTITY_SUFFIX
 from ai_agent.kb.meta import EXT_RE as _EXT_RE
 from ai_agent.kb.meta import FILENAME_NOISE as _FILENAME_NOISE
@@ -87,14 +87,6 @@ _STOPWORDS = {
 _JSON_ARRAY = re.compile(r"\[[^\[\]]*\]")
 # Excel 的 page 是工作表序号；PDF/Word 的 page 是页码。展示名不能混用「表N」。
 _SHEET_EXTS = {".xlsx", ".xlsm", ".xls", ".csv"}
-
-# ——— 文件名主体收窄（tags 为空时的兜底信号） ———
-# 查询与文件主体的最长公共子串至少有 3 个字、且占主体核心名 40% 以上，
-# 才认定「这一问在问这家公司」。实测「中国能建」×「中国能源建设」= 3/6，
-# 「顺丰控股」×全称 = 4/4；库里没被问到的公司一律 0。
-_SUBJECT_MIN_COMMON = 3
-_SUBJECT_MIN_RATIO = 0.4
-
 
 def is_sheet_file(filename: str = "", mime: str = "") -> bool:
     suffix = Path(filename or "").suffix.lower()
@@ -246,54 +238,9 @@ def search_knowledge_multi(
         # 重排用主查询（queries[0]，即改写后的原始问句）做排序
         head = ranked[:_RERANK_LIMIT]
         ranked = _rerank(queries[0], head, top_k) + ranked[_RERANK_LIMIT:]
+    ranked = _diversify_by_subject(ranked, top_k)
     hits = [_to_hit(row) for row in ranked[:top_k]]
     return _attach_neighbors(hits)
-
-
-def search_knowledge_subqueries(
-    sub_queries: list[str],
-    *,
-    file_ids: list[uuid.UUID] | None = None,
-    top_k: int = 3,
-    filters: dict | None = None,
-) -> list[Hit]:
-    """子问题分解检索：每条子问题独立走完整检索链，轮转交织合并。
-
-    多主体对比问句拆成单主体子问题后，各自 search_knowledge（向量 + 关键词 +
-    重排 + 邻接）得到「该主体最相关的片段」；轮转交织（sub0[0], sub1[0],
-    sub0[1], …）保证每个主体至少一条命中进结果，再按 (file_id, seq) 去重、
-    截断到 top_k，输出量不膨胀。单条子问题时退化为 search_knowledge。
-    """
-    subs = [s.strip() for s in sub_queries if s and s.strip()]
-    if not subs:
-        return []
-    if len(subs) == 1:
-        return search_knowledge(
-            subs[0], file_ids=file_ids, top_k=top_k, filters=filters
-        )
-    per: list[list[Hit]] = []
-    for s in subs:
-        try:
-            per.append(
-                search_knowledge(s, file_ids=file_ids, top_k=top_k, filters=filters)
-            )
-        except Exception:
-            # 某条子问题向量化失败不应拖垮整轮，跳过即可
-            logger.warning("kb 子问题检索失败，跳过：%s", s[:60])
-            per.append([])
-    merged: list[Hit] = []
-    seen: set[tuple[str, int]] = set()
-    for i in range(top_k):
-        for hits in per:
-            if i < len(hits):
-                h = hits[i]
-                key = (h.file_id, h.seq)
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(h)
-                if len(merged) >= top_k:
-                    return merged
-    return merged
 
 
 def preview_search(
@@ -361,6 +308,7 @@ def _core_search(
         # 而排在第 13 名之外的本来也进不了 top_k
         head = rows[:_RERANK_LIMIT]
         rows = _rerank(query, head, top_k) + rows[_RERANK_LIMIT:]
+    rows = _diversify_by_subject(rows, top_k)
     hits = [_to_hit(row) for row in rows[:top_k]]
     return _attach_neighbors(hits)
 
@@ -454,17 +402,12 @@ def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
 
 
 def _subject_token_matches(tok: str, subject: str, aliases: list[str]) -> bool:
-    """提示词里的主体 token（可简称）是否命中文件级 subject 或任一别名。
+    """提示词里的主体是否整段出现在文件 subject 或别名里。
 
-    复用 _query_mentions 的最长公共子串判据，所以「中国能建」既能命中
-    subject「中国能源建设股份有限公司」，也能命中别名「中国能建」；反过来
-    「季度报告」这类与任何主体名无公共子串的噪音不会误命中。
+    「中国能建」只在别名表有这四个字时命中，不再和全称做最长公共子串。
     """
-    candidates = [subject] + list(aliases or [])
-    for cand in candidates:
-        if not cand:
-            continue
-        if _query_mentions(tok, cand):
+    for cand in [subject, *list(aliases or [])]:
+        if cand and name_in_text(tok, cand):
             return True
     return False
 
@@ -501,7 +444,7 @@ def _filename_hint_matches(hint: str, filename: str) -> bool:
             hint_norm in name_norm or name_norm in hint_norm
         ):
             return True
-    return _query_mentions(hint, _file_subject(filename))
+    return name_in_text(hint, _file_subject(filename))
 
 
 def _file_subject(filename: str) -> str:
@@ -541,7 +484,7 @@ def query_looks_on_topic(
         want = {str(fid) for fid in file_ids}
         ready = [item for item in ready if str(item.get("file_id")) in want]
     for item in ready:
-        if _query_mentions(probe, _file_subject(item.get("filename") or "")):
+        if name_in_text(probe, _file_subject(item.get("filename") or "")):
             return True
         for tag in item.get("tags") or []:
             text = str(tag).strip()
@@ -550,36 +493,12 @@ def query_looks_on_topic(
     return False
 
 
-def _query_mentions(query: str, subject: str) -> bool:
-    """查询里是否提到了这个主体（允许简称）。
-
-    判据是最长公共子串而不是整体相似度：query 里除主体名外还带着一长串
-    提问内容，"中国能建…同比是增长还是下降"与全称的整体重合率会被稀释到
-    0.15 以下，但最长公共子串始终是「中国能」这 3 个字，足以判定。
-    """
-    core = _subject_core(subject)
-    if len(core) < 2:
-        return False
-    text = _NAME_PUNCT.sub("", (query or "").lower())
-    if not text:
-        return False
-    match = difflib.SequenceMatcher(None, text, core).find_longest_match(
-        0, len(text), 0, len(core)
-    )
-    return (
-        match.size >= _SUBJECT_MIN_COMMON
-        and match.size >= len(core) * _SUBJECT_MIN_RATIO
-    )
-
-
 def mentioned_subjects(
     query: str, file_ids: list[uuid.UUID] | None = None
 ) -> set[str]:
     """query 里点名的文件主体（subject 核心名）集合。
 
-    供子问题分解做确定性前置：只有 query 真的点名了 ≥2 个不同主体，才有拆成
-    「各主体子问题」的价值。判定复用 _query_mentions 的最长公共子串判据
-    （允许简称），主体权威来源是文件级 subject，别名与文件名去噪作兜底。
+    主体、别名、文件名去噪后的名字都必须整段出现。简称只认别名表里的写法。
     """
     text = (query or "").strip()
     if not text:
@@ -599,11 +518,31 @@ def mentioned_subjects(
         names.extend(alias for alias in (item.get("subject_aliases") or []) if alias)
         names.append(_file_subject(item.get("filename") or ""))
         for name in names:
-            if name and _query_mentions(text, name):
+            if name and name_in_text(text, name):
                 core = _subject_core(name)
                 subjects.add(core or name)
                 break
     return subjects
+
+
+def mentioned_entities(
+    query: str, file_ids: list[uuid.UUID] | None = None
+) -> list[str]:
+    """问句里按字面出现的图谱实体名或别名。
+
+    文件主体的简称由 mentioned_subjects 负责。这里补人名、子公司、产品
+    这类不在文件 subject 上的名字：实体名或别名整段出现在问句里才算命中。
+    读库失败返回空，调用方退回「不强制检索」。
+    """
+    text = (query or "").strip()
+    if len(text) < 2:
+        return []
+    try:
+        names = store.query_mentions_entity(text, file_ids=file_ids)
+    except Exception:
+        logger.warning("kb 实体提及检测失败", exc_info=True)
+        return []
+    return [name for name in names if name]
 
 
 def _fuse_with_keywords(
@@ -751,6 +690,62 @@ def _apply_scope_preference(query: str, rows: list[dict]) -> list[dict]:
     # 同分时保持原顺序（rank 升序），不让口径规则把并列项搅乱
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [row for _, _, row in scored]
+
+
+def _diversify_by_subject(rows: list[dict], top_k: int) -> list[dict]:
+    """重排之后按主体留名额：够近的主体至少一条进 top_k。
+
+    召回阶段的主体配额只保证候选里有第二家，cross-encoder 仍可能把名额
+    全给分数更高的那家。这里在最终截断前，把带宽内每个主体的重排头名
+    换进结果，其余位置仍按重排顺序填。带宽为 0 时关闭。没有主体、或只有
+    一个主体时原样截断。
+    """
+    if top_k <= 0 or len(rows) <= top_k:
+        return rows[:top_k]
+    band = settings.kb_subject_quota_band
+    if band <= 0:
+        return rows[:top_k]
+
+    def distance_of(row: dict) -> float | None:
+        raw = row.get("distance")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    known = [dist for dist in (distance_of(row) for row in rows) if dist is not None]
+    best = min(known) if known else None
+
+    def within_band(row: dict) -> bool:
+        dist = distance_of(row)
+        if dist is None or best is None:
+            return True
+        return dist <= best + band
+
+    head_at: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        subject = str(row.get("subject") or "").strip()
+        if not subject or subject in head_at:
+            continue
+        if within_band(row):
+            head_at[subject] = index
+    if len(head_at) <= 1:
+        return rows[:top_k]
+
+    chosen = set(sorted(head_at.values())[:top_k])
+    for index in range(len(rows)):
+        if len(chosen) >= top_k:
+            break
+        chosen.add(index)
+    picked = [rows[index] for index in sorted(chosen)]
+    if {id(row) for row in picked} != {id(row) for row in rows[:top_k]}:
+        logger.info(
+            "kb 重排后按主体留名额：%s",
+            "、".join(sorted(head_at)),
+        )
+    return picked
 
 
 def _dedupe(rows: list[dict]) -> list[dict]:

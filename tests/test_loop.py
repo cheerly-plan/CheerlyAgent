@@ -1191,6 +1191,7 @@ def test_run_loop_leaves_tool_choice_auto_without_subject():
             "ai_agent.kb.retrieval.mentioned_subjects",
             return_value=set(),
         ),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
     ):
         list(
             run_loop(
@@ -1220,6 +1221,49 @@ def test_run_loop_leaves_tool_choice_auto_without_subject():
         )
 
     assert seen == [("auto", ["kb_search", "web_search"])]
+
+
+def test_run_loop_requires_kb_tool_when_question_names_entity():
+    """问句点名图谱实体（不是文件主体）时，同样强制调用知识库工具。"""
+    fake_schemas = [
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "kg_search"}},
+        {"function": {"name": "web_search"}},
+    ]
+    seen: list[tuple[str, list[str]]] = []
+
+    def capture(messages, tools, tool_choice="auto"):
+        seen.append((tool_choice, [t["function"]["name"] for t in tools]))
+        if tool_choice == "required":
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "name": "kg_search",
+                            "arguments": {"query": "金仙"},
+                        }
+                    ],
+                },
+            )
+            return
+        yield ("text", "金仙任董事")
+        yield ("result", {"content": "金仙任董事", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.execute_tool", return_value="命中实体：金仙"),
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value=set()),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=["金仙"]),
+    ):
+        events = list(run_loop([{"role": "user", "content": "金仙的任职"}]))
+
+    assert seen[0] == ("required", ["kb_search", "kg_search"])
+    assert seen[1][0] == "auto"
+    assert events[-1]["type"] == "done"
 
 
 def test_run_loop_does_not_force_tool_after_this_question_was_retrieved():

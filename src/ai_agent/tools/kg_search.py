@@ -105,7 +105,9 @@ def _kg_search(
     parsed_ids = resolve_tool_file_ids(files, query=query)
     # files 明确指定但解析不到（编造的文件名/主体名）→ 明确提示，而非静默退回全库
     if parsed_ids == []:
-        return KB_FILES_NOT_FOUND_HINT
+        if files:
+            return KB_FILES_NOT_FOUND_HINT
+        return "没有对应报告期的文档，可以换个时期，或改用 kb_search。"
 
     try:
         embedding = embed_query(query)

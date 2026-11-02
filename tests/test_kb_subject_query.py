@@ -126,12 +126,43 @@ def test_no_subject_falls_back_to_filename(monkeypatch):
             _ready(uuid.uuid4(), "某无关文件.pdf", subject=""),
         ],
     )
-    # 无 subject 时，文件名路径仍能命中（从文件名抽主体）
-    assert resolve_tool_file_ids(["中国能建"]) == [a]
+    # 文件名里的核心名仍能命中；简称不在别名表里就对不上
+    assert resolve_tool_file_ids(["中国能源建设"]) == [a]
+    assert resolve_tool_file_ids(["中国能建"]) == []
 
 
-def test_kb_files_block_injects_subject_list(monkeypatch):
-    """主体清单作为新的查询入口被注入；无 subject 的文件不进主体清单。"""
+def test_period_narrows_to_latest_named_year_or_keeps_both(monkeypatch):
+    """没写时期只留最新一期；写了年份或同比按问句处理；不带 query 不收窄。"""
+    a = uuid.uuid4()
+    b = uuid.uuid4()
+    rows = [
+        _ready(
+            a,
+            "中国能源建设股份有限公司2026年第三季度报告.pdf",
+            "中国能源建设股份有限公司",
+            ["中国能源建设", "中国能建"],
+            "2026Q3",
+        ),
+        _ready(
+            b,
+            "中国能源建设股份有限公司2025年年度报告.pdf",
+            "中国能源建设股份有限公司",
+            ["中国能源建设", "中国能建"],
+            "2025",
+        ),
+        _ready(uuid.uuid4(), "某无关文件.pdf", "无关公司", [], "2026"),
+    ]
+    monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
+    assert set(resolve_tool_file_ids(["中国能源建设"])) == {a, b}
+    assert resolve_tool_file_ids(["中国能源建设"], query="营业收入") == [a]
+    assert resolve_tool_file_ids(["中国能源建设"], query="2025年营收") == [b]
+    assert set(resolve_tool_file_ids(["中国能源建设"], query="营收同比")) == {a, b}
+    # 点名的文件被时期滤空时保留原范围，避免一份明确点到的文件被丢掉
+    assert set(resolve_tool_file_ids(["中国能源建设"], query="2020年营收")) == {a, b}
+
+
+def test_capability_block_lists_doc_types_not_file_inventory(monkeypatch):
+    """提示词只声明文档类型的实体和关系，不注入公司名单和文件清单。"""
     monkeypatch.setattr(
         loop_mod.store,
         "list_kb_files",
@@ -140,7 +171,8 @@ def test_kb_files_block_injects_subject_list(monkeypatch):
                 "file_id": "a",
                 "filename": "中国能源建设2026三季报.pdf",
                 "status": "ready",
-                "description": "",
+                "description": "三季报",
+                "doc_type": "quarterly_report",
                 "subject": "中国能源建设股份有限公司",
                 "period": "2026Q3",
                 "subject_aliases": ["中国能建"],
@@ -150,39 +182,19 @@ def test_kb_files_block_injects_subject_list(monkeypatch):
                 "filename": "顺丰2026三季报.pdf",
                 "status": "ready",
                 "description": "",
+                "doc_type": "quarterly_report",
                 "subject": "顺丰控股股份有限公司",
                 "period": "2026Q3",
                 "subject_aliases": ["顺丰"],
             },
         ],
     )
-    block = loop_mod._kb_files_block()
-    assert "【知识库主体】" in block
-    assert "中国能源建设股份有限公司" in block
-    assert "顺丰控股股份有限公司" in block
-    # 小库：文件清单仍全列，且含原【知识库可用文件】标题（菜单保留）
-    assert "【知识库可用文件】" in block
-    assert "中国能源建设2026三季报.pdf" in block
-
-
-def test_kb_files_block_large_library_folds_file_list(monkeypatch):
-    """文件很多时，文件清单折叠为摘要，但主体清单仍注入（避免撑爆上下文）。"""
-    files = [
-        {
-            "file_id": str(i),
-            "filename": f"公司{i}报告.pdf",
-            "status": "ready",
-            "description": "",
-            "subject": f"公司{i}股份有限公司",
-            "period": "2026Q3",
-            "subject_aliases": [],
-        }
-        for i in range(40)
-    ]
-    monkeypatch.setattr(loop_mod.store, "list_kb_files", lambda **k: files)
-    block = loop_mod._kb_files_block()
-    assert "【知识库主体】" in block
-    # 大库：文件清单折叠，不再逐条列出全部文件名
-    assert "公司39报告.pdf" not in block
-    assert "共 40 份" in block
-    assert "kb_list_files" in block
+    block = loop_mod._kb_capability_block()
+    assert "【知识库能力】" in block
+    assert "上市公司季报" in block
+    assert "实体范围=" in block
+    assert "关系=" in block
+    assert "中国能源建设股份有限公司" not in block
+    assert "中国能源建设2026三季报.pdf" not in block
+    assert "【知识库主体】" not in block
+    assert "【知识库可用文件】" not in block
