@@ -66,6 +66,12 @@ _TABLE_IFRS_SUB = re.compile(r"^以(公允价值|摊余成本)计量")
 # 汇总行必须跟本片明细走，禁止单独成片
 _TABLE_TOTAL = re.compile(r"(合计|小计|总计)$")
 _NUM_ONLY_CELL = re.compile(r"^[\d.,%+\-]+$")
+# 「利润总额 | 不适用」「研发占比 | 减少5.75个百分点」是数据，不是列名。
+# 当成列名会从这里把表切开，起始行上的 rowspan 还留在上一片，
+# 后面的行被当成新表头，最后一行还会因为「没有科目」被丢掉。
+_NOT_HEADER_CELL = re.compile(
+    r"^不适用$|^(?:增加|减少)[\d.,]+个百分点$"
+)
 # 第一列里不是行项目的字：表头、单位、纯数字、分组标题（「流动资产：」）
 _INDICATOR_NUM = re.compile(r"^[\d.,，%％+\-－—()（）/\s]+$")
 _INDICATOR_HEADER = re.compile(
@@ -369,7 +375,50 @@ def _html_row_is_header(row: str) -> bool:
     cells = [cell for cell in _row_texts(row) if cell]
     if len(cells) < 2 or _html_row_is_data(row):
         return False
+    if any(_NOT_HEADER_CELL.match(cell) for cell in cells):
+        return False
     return any(re.search(r"[\u4e00-\u9fff]", cell) for cell in cells)
+
+
+def _rowspan_continuations(rows: list[str]) -> set[int]:
+    """被上面某一行的 rowspan 盖住的行号。这些行必须和起始行留在同一片。"""
+    covered: set[int] = set()
+    for index, row in enumerate(rows):
+        for match in _HTML_CELL.finditer(row):
+            span = _span_attr(_HTML_ROWSPAN, match.group(1) or "")
+            for down in range(1, span):
+                covered.add(index + down)
+    return covered
+
+
+def _clamp_rowspans(rows: list[str]) -> list[str]:
+    """rowspan 不能超出这一片实际剩下的行，否则展示会补出空行。"""
+    total = len(rows)
+    clamped: list[str] = []
+    for index, row in enumerate(rows):
+        room = total - index
+
+        def repl(match: re.Match[str], room: int = room) -> str:
+            attrs = match.group(1) or ""
+            span = _span_attr(_HTML_ROWSPAN, attrs)
+            if span <= room:
+                return match.group(0)
+            if room <= 1:
+                attrs = _HTML_ROWSPAN.sub("", attrs)
+            else:
+                attrs = _HTML_ROWSPAN.sub(f' rowspan="{room}"', attrs)
+            open_tag = re.match(r"<\s*(t[dh])", match.group(0), re.IGNORECASE)
+            name = open_tag.group(1) if open_tag else "td"
+            return f"<{name}{attrs}>{match.group(2)}</{name}>"
+
+        clamped.append(_HTML_CELL.sub(repl, row))
+    return clamped
+
+
+def _html_tables_from_groups(groups: list[list[str]]) -> list[str]:
+    return [
+        "<table>" + "".join(_clamp_rowspans(group)) + "</table>" for group in groups
+    ]
 
 
 def _html_header_to_carry(rows: list[str]) -> list[str] | None:
@@ -675,6 +724,10 @@ def _expand_html_grid(rows: list[str]) -> list[list[str]]:
             text = _cell_plain(match.group(2))
             section = section_row and colspan > 1
             for down in range(rowspan):
+                # 切片把合并格切断后，rowspan 可能比这一片剩下的行多。
+                # 只铺已经存在的行，不能为了凑 rowspan 补出空行。
+                if row_index + down >= len(rows):
+                    break
                 while len(grid) <= row_index + down:
                     grid.append([])
                 target = grid[row_index + down]
@@ -728,6 +781,8 @@ def _split_html_table(
     """HTML 表按行项目切开。每片重复表头和当前分组标题。
 
     「其中：」、加减行、合计跟所属科目留在同一片。单行再长也不从格子中间切。
+    被 rowspan 盖住的续行跟起始行留在同一片，避免合并格的文字留在上一片、
+    下面的项目名被当成新表头。
 
     group_mode="row"（默认）：每个行项目单独成片，自解释最强但切片数多。
     group_mode="section"：语义感知滑动窗口（见 _split_html_table_grouped），
@@ -739,9 +794,10 @@ def _split_html_table(
     head_n = _html_header_row_count(rows)
     header, data = rows[:head_n], rows[head_n:]
     if len(data) <= 1:
-        return [table]
+        return _html_tables_from_groups([rows]) if rows else [table]
+    covered = _rowspan_continuations(rows)
     if group_mode == "section":
-        return _split_html_table_grouped(header, data, max_chars)
+        return _split_html_table_grouped(header, data, max_chars, covered, head_n)
     groups: list[list[str]] = []
     section: list[str] = []
     buf = list(header)
@@ -752,7 +808,10 @@ def _split_html_table(
             groups.append(buf)
         buf = [*header, *extra]
 
-    for row in data:
+    for offset, row in enumerate(data):
+        if head_n + offset in covered:
+            buf.append(row)
+            continue
         first = _row_plain_line(row).split(" | ", 1)[0].strip()
         # 同一张表中途换列名（资产负债表下面又印利润表）时，后面的科目跟新列名。
         if _html_row_is_header(row):
@@ -778,7 +837,7 @@ def _split_html_table(
         groups.append(buf)
     if not groups:
         return [table]
-    return ["<table>" + "".join(group) + "</table>" for group in groups]
+    return _html_tables_from_groups(groups)
 
 
 def _rows_len(rows: list[str]) -> int:
@@ -787,7 +846,11 @@ def _rows_len(rows: list[str]) -> int:
 
 
 def _split_html_table_grouped(
-    header: list[str], data: list[str], max_chars: int
+    header: list[str],
+    data: list[str],
+    max_chars: int,
+    covered: set[int] | None = None,
+    head_n: int = 0,
 ) -> list[str]:
     """section 模式：语义感知滑动窗口，替代固定行数切分。
 
@@ -809,7 +872,11 @@ def _split_html_table_grouped(
         buf = [*header, *section]
         cur_len = _rows_len(buf)
 
-    for row in data:
+    for offset, row in enumerate(data):
+        if head_n + offset in (covered or ()):
+            buf.append(row)
+            cur_len += len(_row_plain_line(row)) + 1
+            continue
         first = _row_plain_line(row).split(" | ", 1)[0].strip()
         if _html_row_is_header(row):
             # 中途换列名：保留原分支语义
@@ -844,8 +911,8 @@ def _split_html_table_grouped(
     if _buf_has_account(buf, len(header)):
         groups.append(buf)
     if not groups:
-        return ["<table>" + "".join(header + data) + "</table>"]
-    return ["<table>" + "".join(group) + "</table>" for group in groups]
+        return _html_tables_from_groups([header + data])
+    return _html_tables_from_groups(groups)
 
 
 def _expand_long_html_tables(

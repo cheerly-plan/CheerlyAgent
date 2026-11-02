@@ -696,6 +696,40 @@ def test_table_group_mode_section_slides_plain_table():
     assert all(header in c.text for c in sec_chunks)
 
 
+def test_rowspan_reason_stays_with_following_rows():
+    """变动原因表的合并格不能被「不适用」行切开，也不能丢掉最后一行。"""
+    table = (
+        "<table>"
+        "<tr><td>项目名称</td><td>变动比例(%)</td><td>主要原因</td></tr>"
+        "<tr><td>营业收入_本报告期</td><td>43.30</td>"
+        '<td rowspan="2">营收增长</td></tr>'
+        "<tr><td>营业收入_年初至报告期末</td><td>47.92</td></tr>"
+        "<tr><td>利润总额_本报告期</td><td>-76.60</td>"
+        '<td rowspan="3">利润波动</td></tr>'
+        "<tr><td>利润总额_年初至报告期末</td><td>不适用</td></tr>"
+        "<tr><td>归属于上市公司股东的净利润_本报告期</td><td>-77.33</td></tr>"
+        "<tr><td>研发投入_年初至报告期末</td><td>31.32</td>"
+        '<td rowspan="2">研发增长</td></tr>'
+        "<tr><td>研发投入占营业收入的比例_本报告期</td><td>减少5.75个百分点</td></tr>"
+        "</table>"
+    )
+    chunks = chunk_segments(
+        [Segment(table, 3, "table")],
+        max_chars=80,
+        overlap=0,
+        table_group_mode="section",
+    )
+    profit = next(c for c in chunks if "利润波动" in c.text)
+    assert "利润总额_年初至报告期末" in profit.text
+    assert "净利润_本报告期" in profit.text
+    assert 'rowspan="3"' in profit.text
+    revenue = next(c for c in chunks if "营收增长" in c.text)
+    assert "营业收入_年初至报告期末" in revenue.text
+    joined = "\n".join(c.text for c in chunks)
+    assert "研发投入占营业收入的比例_本报告期" in joined
+    assert "研发增长" in next(c for c in chunks if "研发投入_年初至报告期末" in c.text).text
+
+
 def test_table_group_mode_section_keeps_subtotal_with_parent():
     """section 模式下合计/加减行仍跟所属科目走，不单独成片。"""
     header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
