@@ -262,6 +262,22 @@ def test_infer_doc_type_checks_half_year_before_annual():
     assert meta.infer_doc_type("员工考勤制度.docx") == ""
 
 
+def test_cover_company_prefers_heading_and_keeps_parentheses():
+    assert meta.cover_company(
+        "证券代码：000625\n# 重庆长安汽车股份有限公司\n2026年第三季度报告"
+    ) == "重庆长安汽车股份有限公司"
+    assert meta.cover_company(
+        "证券代码：600579 证券简称：中化装备\n# 中化装备科技（青岛）股份有限公司"
+    ) == "中化装备科技（青岛）股份有限公司"
+    # 括号把字面截断后，不能把剩下的「股份有限公司」当成公司名
+    assert meta.cover_company("中化装备科技（青岛）股份有限公司") == (
+        "中化装备科技（青岛）股份有限公司"
+    )
+    assert meta.cover_company("股份有限公司") == ""
+    assert meta.cover_company("") == ""
+    assert meta.cover_company("重要内容提示：本公司董事会保证真实") == ""
+
+
 def test_resolve_file_identity_fills_company_and_period_from_cover():
     cover = "中国能源建设股份有限公司\n中国能源建设股份有限公司2026年第三季度报告"
     out = meta.resolve_file_identity("扫描件.pdf", cover)

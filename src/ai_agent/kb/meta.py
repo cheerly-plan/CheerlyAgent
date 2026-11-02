@@ -134,6 +134,71 @@ def dominant_company(text: str) -> str:
     return max(counts, key=lambda name: (counts[name], len(name)))
 
 
+# 最长的组织形式先匹配，避免「股份有限公司」被拆成「股份」+「有限公司」
+_LEGAL_SUFFIXES = ("股份有限公司", "有限责任公司", "有限公司")
+_LEGAL_NAME_CHARS = set(
+    "（）()·・"
+    "0123456789"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+
+
+def cover_company(text: str) -> str:
+    """封面上的上市公司全称。
+
+    优先取单独成行的标题（「# 重庆长安汽车股份有限公司」）。
+    标题里没有时，取出现最多的全称，次数相同取更长的。
+    括号会把名字截断，「中化装备科技（青岛）股份有限公司」仍保持整段。
+    封面没有公司全称时返回空串，调用方再回退到文件名。
+    """
+    raw = text or ""
+    if not raw.strip():
+        return ""
+    names = _legal_names(raw)
+    if not names:
+        return ""
+    known = set(names)
+    for line in raw.splitlines():
+        heading = re.match(r"^#{1,6}\s*(.+?)\s*$", line.strip())
+        if heading and heading.group(1).strip() in known:
+            return heading.group(1).strip()
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    return max(counts, key=lambda name: (counts[name], len(name)))
+
+
+def _legal_names(text: str) -> list[str]:
+    """文本里的公司全称。组织形式前面至少还有两个字，光秃的后缀不算。"""
+    hits: list[tuple[int, int, str]] = []
+    occupied: list[tuple[int, int]] = []
+    for suffix in _LEGAL_SUFFIXES:
+        start = 0
+        while True:
+            index = text.find(suffix, start)
+            if index < 0:
+                break
+            end = index + len(suffix)
+            if any(span_start < end and index < span_end for span_start, span_end in occupied):
+                start = index + 1
+                continue
+            # 先占住这段后缀。否则光秃的「股份有限公司」会被再拆成「股份」+「有限公司」
+            occupied.append((index, end))
+            cursor = index
+            while cursor > 0 and _is_legal_name_char(text[cursor - 1]):
+                cursor -= 1
+            core = re.sub(r"[（）()·・]", "", text[cursor:index])
+            if len(core) >= 2:
+                hits.append((cursor, end, text[cursor:end]))
+            start = end
+    hits.sort(key=lambda item: item[0])
+    return [name for _, _, name in hits]
+
+
+def _is_legal_name_char(char: str) -> bool:
+    return "\u4e00" <= char <= "\u9fff" or char in _LEGAL_NAME_CHARS
+
+
 def name_in_text(text: str, name: str, *, min_len: int = 2) -> bool:
     """名称或去掉组织形式后的核心名，整段出现在文本里。
 

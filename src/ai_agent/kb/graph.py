@@ -36,6 +36,7 @@ from ai_agent.kb.graph_names import (
     _clean_type,
     _locate_chunk,
     _subject_from_filename,
+    resolve_graph_subject,
     _usable_name,
     display_name,
     normalize_name,
@@ -55,7 +56,7 @@ logger = get_logger(__name__)
 # 文档自指名。模型在关系里大量写「本公司持股…」「公司实现营业收入…」：
 # 这些**既不能建实体**（一个泛称会把所有子图连成一片），**也不能直接丢**
 # （丢的是整条关系）。单文件图谱里它们几乎总是指这份文件的主体，所以按
-# 文件名推断出的主体全称落地——实测三家季报的「本公司」都指封面上的全称。
+# 封面上的上市公司全称落地。封面没有文字时才回退到文件名。
 _SELF_REF = {
     "本公司",
     "公司",
@@ -323,6 +324,17 @@ class _GraphAccumulator:
         return {"entities": len(entity_rows), "relations": len(relation_rows)}
 
 
+def _cover_page_text(chunks: list[Chunk]) -> str:
+    """封面是页码最小的那一页。没有页码就当封面没有文字，调用方回退文件名。"""
+    pages = [chunk.page for chunk in chunks if chunk.page]
+    if not pages:
+        return ""
+    first = min(pages)
+    return "\n".join(
+        (chunk.text or "") for chunk in chunks if chunk.page == first
+    ).strip()
+
+
 def build_file_graph(
     file_id: uuid.UUID,
     chunks: list[Chunk],
@@ -338,8 +350,9 @@ def build_file_graph(
     未知或为空时走通用配置；level 是同一配置下的轻重粒度（完整/轻量）。
     两者都只影响 prompt，抽取与合并逻辑一份代码通吃。
 
-    doc_name 是文件名，会写进每批 prompt 的开头。财报的表格片段通篇没有
-    公司全称，没有它模型只能给「持股/每股收益」猜一个主语。
+    doc_name 是文件名。封面第一页有上市公司全称时，自指名和每批 prompt
+    都用这个全称；封面没有文字、或认不出公司全称时，才回退到文件名。
+    财报表格片段通篇没有公司全称，prompt 里缺了主体，模型会给持股猜一个主语。
 
     progress 每完成一批回调一次（带累计实体数和 已完成批/总批），
     上层拿它更新 graph_status，前端就能看到百分比。
@@ -363,7 +376,14 @@ def build_file_graph(
     # 批数要按「章节组批」后的实际批数算：进度百分比和分次落库的节奏都
     # 依赖它，用 ceil(片数/批大小) 会在小章节合批后偏高
     total_batches = len(_batch_bounds(kept, batch_size))
-    accumulator = _GraphAccumulator(file_id, _subject_from_filename(doc_name))
+    cover = _cover_page_text(chunks)
+    subject = resolve_graph_subject(doc_name, cover)
+    # 封面全称写进 prompt。文件名里的简称会让模型再抽出一个同主体的点。
+    # 封面没抽出全称时，prompt 仍用原来的文件名。
+    listed = resolve_graph_subject(None, cover)
+    prompt_name = listed or doc_name
+    logger.info("kb 图谱主体 file_id=%s subject=%s", file_id, subject or "未识别")
+    accumulator = _GraphAccumulator(file_id, subject)
     started = time.perf_counter()
 
     def report(done: int) -> None:
@@ -395,7 +415,7 @@ def build_file_graph(
                 time.perf_counter() - started,
             )
 
-    _extract_all(kept, batch_size, system_prompt, sink=sink, doc_name=doc_name)
+    _extract_all(kept, batch_size, system_prompt, sink=sink, doc_name=prompt_name)
     # 收尾必须先于 flush：挂起的关系只有在最后一批之后再试一次才可能落地，
     # 否则 flush 写出去的图里会缺掉「端点出现在更早/更晚批」的整条关系
     accumulator.finalize()
