@@ -450,9 +450,9 @@ def _must_call_kb_tool(
     except Exception:
         logger.exception("主体提及检测失败")
         subjects = set()
-    entities: list[str] = []
-    if not subjects:
-        entities = mentioned_entities(text, file_ids=file_ids)
+    # 主体命中已经足够强制检索，但实体仍要查：问的是公司 A 里的实体 B 时，
+    # 日志里得看得到 B，不能因为 A 命中就把实体检测跳过。
+    entities = mentioned_entities(text, file_ids=file_ids)
     if subjects or entities:
         logger.info(
             "问句命中知识库，强制调用工具 subjects=%s entities=%s",

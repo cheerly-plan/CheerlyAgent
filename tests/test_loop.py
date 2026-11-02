@@ -4,7 +4,13 @@ from unittest.mock import patch
 
 import pytest
 
-from ai_agent.agents.loop import _dedupe_seam, run, run_loop, run_stream
+from ai_agent.agents.loop import (
+    _dedupe_seam,
+    _must_call_kb_tool,
+    run,
+    run_loop,
+    run_stream,
+)
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.short_term import SUMMARY_USER_PREFIX, short_term_memory
@@ -1221,6 +1227,24 @@ def test_run_loop_leaves_tool_choice_auto_without_subject():
         )
 
     assert seen == [("auto", ["kb_search", "web_search"])]
+
+
+def test_must_call_kb_tool_records_entities_when_subject_also_matches(caplog):
+    """点了公司又点了实体时，两样都记进日志。不能因为主体命中就跳过实体检测。"""
+    tools = [{"function": {"name": "kb_search"}}, {"function": {"name": "kg_search"}}]
+    messages = [{"role": "user", "content": "长安汽车的诺安成长持股多少"}]
+    with (
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value={"长安汽车"}),
+        patch(
+            "ai_agent.kb.retrieval.mentioned_entities",
+            return_value=["诺安成长混合型证券投资基金"],
+        ) as entities,
+    ):
+        with caplog.at_level("INFO"):
+            assert _must_call_kb_tool(messages, tools) is True
+    entities.assert_called_once()
+    assert "subjects=长安汽车" in caplog.text
+    assert "entities=诺安成长混合型证券投资基金" in caplog.text
 
 
 def test_run_loop_requires_kb_tool_when_question_names_entity():
