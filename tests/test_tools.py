@@ -168,6 +168,48 @@ def test_kg_search_files_optional():
     assert args.files == ["中国能建三季报.pdf"]
 
 
+def test_execute_kb_search_accepts_files_json_string(monkeypatch):
+    """模型把 files 收成一段 JSON 字符串时，还原成列表再检索。"""
+    from ai_agent.tools.registry import TOOLS_MAP
+
+    seen: dict = {}
+
+    def fake(query, files=None, top_k=3, kinds=None, sections=None):
+        seen["query"] = query
+        seen["files"] = files
+        return "ok"
+
+    monkeypatch.setattr(TOOLS_MAP["kb_search"], "func", fake)
+    result = execute_tool(
+        "kb_search",
+        {
+            "query": "吴义东",
+            "files": '["中国黄金集团黄金珠宝股份有限公司2026年第三季度报告"]',
+        },
+    )
+    assert result == "ok"
+    assert seen["query"] == "吴义东"
+    assert seen["files"] == ["中国黄金集团黄金珠宝股份有限公司2026年第三季度报告"]
+
+
+def test_execute_kb_search_accepts_single_filename_string(monkeypatch):
+    from ai_agent.tools.registry import TOOLS_MAP
+
+    seen: dict = {}
+
+    def fake(query, files=None, top_k=3, kinds=None, sections=None):
+        seen["files"] = files
+        return "ok"
+
+    monkeypatch.setattr(TOOLS_MAP["kb_search"], "func", fake)
+    result = execute_tool(
+        "kb_search",
+        {"query": "吴义东", "files": "中国黄金集团黄金珠宝股份有限公司2026年第三季度报告"},
+    )
+    assert result == "ok"
+    assert seen["files"] == ["中国黄金集团黄金珠宝股份有限公司2026年第三季度报告"]
+
+
 def test_execute_kb_search_missing_files():
     # 与 test_execute_missing_city 同理：参数缺失走 schema / 运行兜底，
     # 且不该伪装成「检索成功」

@@ -69,6 +69,15 @@ _TABLE_IFRS_SUB = re.compile(r"^以(公允价值|摊余成本)计量")
 # 汇总行必须跟本片明细走，禁止单独成片
 _TABLE_TOTAL = re.compile(r"(合计|小计|总计)$")
 _NUM_ONLY_CELL = re.compile(r"^[\d.,%+\-]+$")
+# 第一列里不是行项目的字：表头、单位、纯数字、分组标题（「流动资产：」）
+_INDICATOR_NUM = re.compile(r"^[\d.,，%％+\-－—()（）/\s]+$")
+_INDICATOR_HEADER = re.compile(
+    r"^(项目|科目|附注|注释|行次|序号|金额|本期金额|上期金额|期末余额|期初余额)$"
+    r"|^(单位|币种)[:：]"
+)
+_INDICATOR_SECTION = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9]{1,12}[：:]$")
+_INDICATOR_TOTAL = re.compile(r"^(合计|小计|总计)$")
+_INDICATOR_LIMIT = 40
 
 
 @dataclass
@@ -342,6 +351,18 @@ def _html_row_is_data(row: str) -> bool:
     return any(cell and _NUM_ONLY_CELL.match(cell) for cell in _row_texts(row))
 
 
+def _html_row_is_item(row: str) -> bool:
+    """科目行：第一列是名称，其余列是空的或数字。
+
+    资产负债表跨页时，页首常常是「其他债权投资」这种金额整格为空的行，
+    它没有数字，但仍然是上一张表的续表，不是新的列名。
+    """
+    cells = _row_texts(row)
+    if not cells or not cells[0] or _html_row_is_header(row):
+        return False
+    return all(not cell or _NUM_ONLY_CELL.match(cell) for cell in cells[1:])
+
+
 def _html_row_is_header(row: str) -> bool:
     cells = [cell for cell in _row_texts(row) if cell]
     if len(cells) < 2 or _html_row_is_data(row):
@@ -377,8 +398,8 @@ def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
 
     财报排到页底时，后面几页都不再印「项目 | 本期 | 上期」，第一行就是科目。
     补过的那一页自己再被切断时，同一组列名继续往下页带。只在四件事同时成立时补：
-    上一页以这张表结束、这一页的表排在最前、列数相同、首行是数据。
-    中途印了新列名就改带新的。表后面还有正文，这一路停下。
+    上一页以这张表结束、这一页的表排在最前、列数相同、首行是科目。
+    金额为空的科目行也算。中途印了新列名就改带新的。表后面还有正文，这一路停下。
     """
     pending: list[str] | None = None
     pending_page: int | None = None
@@ -407,8 +428,7 @@ def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
             and page == pending_page + 1
             and starts_page
             and _row_width(rows[0]) == pending_width
-            and _html_row_is_data(rows[0])
-            and not _html_row_is_header(rows[0])
+            and _html_row_is_item(rows[0])
         ):
             html_table = "<table>" + "".join(pending) + "".join(rows) + "</table>"
             text = seg.text[: match.start()] + html_table + seg.text[match.end() :]
@@ -480,6 +500,63 @@ def _cell_plain(raw: str) -> str:
 
 def _row_plain_line(row: str) -> str:
     return " | ".join(_cell_plain(match.group(2)) for match in _HTML_CELL.finditer(row))
+
+
+def extract_table_indicators(text: str) -> list[str]:
+    """表格第一列的行项目名。单位、纯数字、表头和分组标题丢掉，不存数值。"""
+    cells = _table_label_cells(text or "")
+    names: list[str] = []
+    seen: set[str] = set()
+    for cell in cells:
+        name = _clean_indicator(cell)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= _INDICATOR_LIMIT:
+            break
+    return names
+
+
+def _table_label_cells(text: str) -> list[str]:
+    tables = list(_HTML_TABLE.finditer(text))
+    if tables:
+        cells: list[str] = []
+        for match in tables:
+            rows = _table_rows(match.group(0))
+            head_n = _html_header_row_count(rows)
+            for row in rows[head_n:]:
+                if _is_html_section_row(row):
+                    continue
+                found = next(_HTML_CELL.finditer(row), None)
+                if found:
+                    cells.append(_cell_plain(found.group(2)))
+        return cells
+    lines = [line for line in text.splitlines() if line.strip()]
+    while lines and "|" not in lines[0]:
+        lines.pop(0)
+    if not lines:
+        return []
+    body = [
+        line
+        for line in lines[1:]
+        if not _MD_SEPARATOR.match(line.strip())
+    ]
+    return [_md_first_cell(line) for line in body]
+
+
+def _clean_indicator(cell: str) -> str:
+    name = (cell or "").strip().strip("*").strip()
+    if not (2 <= len(name) <= 40):
+        return ""
+    if (
+        _INDICATOR_NUM.match(name)
+        or _INDICATOR_HEADER.match(name)
+        or _INDICATOR_SECTION.match(name)
+        or _INDICATOR_TOTAL.match(name)
+    ):
+        return ""
+    return name
 
 
 def html_table_plain(text: str) -> str:

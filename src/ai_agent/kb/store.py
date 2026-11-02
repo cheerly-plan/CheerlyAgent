@@ -15,7 +15,7 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from ai_agent.core.config import settings
-from ai_agent.kb.chunking import Chunk
+from ai_agent.kb.chunking import Chunk, extract_table_indicators
 from ai_agent.kb.meta import COMPANY_SUFFIX, extract_aliases, extract_file_meta
 from pgvector import Vector
 
@@ -25,6 +25,27 @@ from pgvector import Vector
 # 主体为空（老数据 / 文件名里抽不出公司名）的切片全部落在同一个桶里，
 # 行为与分桶前逐字一致——回填 subject 之后才生效，不会突然改掉存量结果。
 _SUBJECT_BUCKET = "COALESCE(NULLIF(subject, ''), '')"
+# 行项目存在 meta.indicators。关键词命中正文或这一列都算，不拿它做 WHERE。
+_INDICATOR_LIST = (
+    "CASE WHEN jsonb_typeof(c.meta->'indicators') = 'array' "
+    "THEN c.meta->'indicators' ELSE '[]'::jsonb END"
+)
+
+
+def _keyword_hit(i: int) -> str:
+    return (
+        f"(CASE WHEN c.text ILIKE %(kw{i})s OR EXISTS ("
+        f"SELECT 1 FROM jsonb_array_elements_text({_INDICATOR_LIST}) AS item "
+        f"WHERE item ILIKE %(kw{i})s) THEN 1 ELSE 0 END)"
+    )
+
+
+def _chunk_indicators(chunk: Chunk) -> dict:
+    """只有表格切片记行项目。正文没有这一列，meta 留空对象。"""
+    if chunk.kind != "table":
+        return {}
+    names = extract_table_indicators(chunk.text)
+    return {"indicators": names} if names else {}
 
 
 def _chunk_meta_where(
@@ -533,6 +554,7 @@ class KbStore:
                 Vector(vector),
                 subjects[i] if subjects is not None else subject,
                 period,
+                Jsonb(_chunk_indicators(chunk)),
             )
             for i, (chunk, vector) in enumerate(zip(chunks, vectors))
         ]
@@ -542,8 +564,8 @@ class KbStore:
                     """
                     INSERT INTO agent_kb_chunk
                         (id, file_id, user_id, seq, page, page_end, section,
-                         kind, scope, text, embedding, subject, period)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         kind, scope, text, embedding, subject, period, meta)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
@@ -782,6 +804,7 @@ class KbStore:
                 WITH hit AS (
                     SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
                            c.kind, c.scope, c.text, f.filename, c.subject,
+                           {_INDICATOR_LIST} AS indicators,
                            c.embedding <=> %(emb)s AS distance
                     FROM agent_kb_chunk c
                     JOIN agent_kb_file f ON f.id = c.file_id
@@ -802,7 +825,7 @@ class KbStore:
                     FROM hit
                 )
                 SELECT id, file_id, seq, page, page_end, section,
-                       kind, scope, text, filename, subject, distance
+                       kind, scope, text, filename, subject, indicators, distance
                 FROM ranked
                 ORDER BY (rn = 1 AND subject_best <= global_best + %(band)s) DESC,
                          distance
@@ -837,10 +860,7 @@ class KbStore:
             return []
         # 每个关键词一列 CASE：命中 +1。列数受限于调用方的关键词上限
         # （默认 6 个），不会拼出超长 SQL；关键词只作参数，无注入面
-        score_sql = " + ".join(
-            f"(CASE WHEN c.text ILIKE %(kw{i})s THEN 1 ELSE 0 END)"
-            for i in range(len(keywords))
-        )
+        score_sql = " + ".join(_keyword_hit(i) for i in range(len(keywords)))
         params: dict = {
             "file_ids": file_ids or None,
             "top_k": top_k,
@@ -865,6 +885,7 @@ class KbStore:
                 WITH hit AS (
                     SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
                            c.kind, c.scope, c.text, f.filename, c.subject,
+                           {_INDICATOR_LIST} AS indicators,
                            ({score_sql})::float8 AS keyword_score
                     FROM agent_kb_chunk c
                     JOIN agent_kb_file f ON f.id = c.file_id
@@ -885,7 +906,7 @@ class KbStore:
                     FROM hit
                 )
                 SELECT id, file_id, seq, page, page_end, section,
-                       kind, scope, text, filename, subject, keyword_score
+                       kind, scope, text, filename, subject, indicators, keyword_score
                 FROM ranked
                 ORDER BY (rn = 1 AND subject_best >= global_best - %(band)s) DESC,
                          keyword_score DESC, file_id, seq

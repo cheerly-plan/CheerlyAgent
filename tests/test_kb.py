@@ -307,6 +307,27 @@ def test_cross_page_html_table_copies_header_onto_continuation():
     assert chunks[1].scope == "consolidated"
 
 
+def test_cross_page_html_table_copies_header_onto_blank_item():
+    """页首是金额为空的科目（其他债权投资），也要补上一页的列名。"""
+    header = "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
+    page5 = (
+        f"<table>{header}"
+        "<tr><td>发放贷款和垫款</td><td></td><td></td></tr>"
+        "<tr><td>债权投资</td><td></td><td></td></tr></table>"
+    )
+    page6 = (
+        "<table><tr><td>其他债权投资</td><td></td><td></td></tr>"
+        "<tr><td>长期应收款</td><td></td><td>1,274,106,334.49</td></tr></table>"
+    )
+    chunks = chunk_segments(
+        [Segment(page5, 5, "table"), Segment(page6, 6, "table")],
+        max_chars=500,
+        overlap=0,
+    )
+    assert chunks[-1].text.startswith("<table>" + header)
+    assert "其他债权投资" in chunks[-1].text
+
+
 def test_header_keeps_moving_across_later_pages():
     header = "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
     first = (

@@ -1,3 +1,7 @@
+import json
+from types import UnionType
+from typing import Union, get_args, get_origin
+
 from pydantic import ValidationError
 
 from ai_agent.core.logging import get_logger
@@ -56,10 +60,56 @@ def _clamp_out_of_range_args(args_model: type, arguments: dict) -> dict:
     return clamped
 
 
+def _expects_list(annotation: object) -> bool:
+    origin = get_origin(annotation)
+    if origin is list:
+        return True
+    if origin in (Union, UnionType):
+        return any(_expects_list(item) for item in get_args(annotation))
+    return False
+
+
+def _coerce_stringified_lists(args_model: type, arguments: dict) -> dict:
+    """模型有时把数组参数收成一段 JSON 字符串，先还原成列表再校验。
+
+    本地模型会写出 ``files: "[\\"年报.pdf\\"]"``。schema 要的是字符串数组，
+    原样校验会整次失败，检索还没开始。单个文件名没有方括号时，当成只有一项。
+    """
+    coerced = dict(arguments)
+    for name, field in args_model.model_fields.items():
+        value = coerced.get(name)
+        if not isinstance(value, str) or not _expects_list(field.annotation):
+            continue
+        text = value.strip()
+        if not text:
+            coerced[name] = None
+            logger.info("工具参数空数组字符串已忽略：%s.%s", args_model.__name__, name)
+            continue
+        parsed: object = None
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+        if isinstance(parsed, list):
+            items = [str(item).strip() for item in parsed if str(item).strip()]
+        else:
+            items = [text]
+        coerced[name] = items
+        logger.info(
+            "工具参数数组字符串已还原：%s.%s -> %s",
+            args_model.__name__,
+            name,
+            items,
+        )
+    return coerced
+
+
 def execute_tool(name: str, arguments: dict) -> str:
     tool = TOOLS_MAP.get(name)
     if tool is None:
         return f"ERROR: 未知工具 {name}"
+    arguments = _coerce_stringified_lists(tool.args_model, arguments)
     try:
         return tool.run(**arguments)[:3000]
     except ValidationError:

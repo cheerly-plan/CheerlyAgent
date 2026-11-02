@@ -873,8 +873,30 @@ def _rerank(query: str, rows: list[dict], top_k: int) -> list[dict]:
         if len(_rerank_cache) > _RERANK_CACHE_MAX:
             # dict 保插入序，弹出最旧一项，避免进程内无限增长（修复旧实现无淘汰）
             _rerank_cache.pop(next(iter(_rerank_cache)))
-    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    adjusted = _boost_indicator_hits(query, rows, list(scores))
+    order = sorted(range(len(adjusted)), key=lambda i: adjusted[i], reverse=True)
     return [rows[i] for i in order]
+
+
+def _boost_indicator_hits(
+    query: str, rows: list[dict], scores: list[float]
+) -> list[float]:
+    """问句里整段出现的行项目，给对应表格切片一点加分。
+
+    只认指标名整段出现在问句里。「营收」不会因此顶上「营业收入」那一行。
+    加分是分数的一成多，够把接近的两片换位，不够把明显不相关的片抬上来。
+    """
+    text = query or ""
+    boosted: list[float] = []
+    for row, score in zip(rows, scores):
+        names = row.get("indicators") or []
+        if not isinstance(names, list):
+            names = []
+        hit = any(
+            isinstance(name, str) and len(name) >= 2 and name in text for name in names
+        )
+        boosted.append(score * 1.12 if hit else score)
+    return boosted
 
 
 def complete_chat_once(prompt: str) -> str:

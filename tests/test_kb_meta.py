@@ -315,3 +315,60 @@ def test_assign_chunk_subjects_splits_only_when_two_companies_appear():
     assert meta.assign_chunk_subjects(
         [a, a], "中国能源建设股份有限公司", library
     ) == ["中国能源建设股份有限公司", "中国能源建设股份有限公司"]
+
+
+def test_extract_table_indicators_keeps_line_items_only():
+    from ai_agent.kb.chunking import extract_table_indicators
+
+    text = """母公司利润表
+单位：万元
+| 项目 | 本期 | 上期 |
+| --- | --- | --- |
+| 营业收入 | 12 | 10 |
+| 营业成本 | 8 | 7 |
+| 流动资产： |  |  |
+| 合计 | 20 | 17 |
+| 123 | 1 | 2 |
+"""
+    assert extract_table_indicators(text) == ["营业收入", "营业成本"]
+
+
+def test_extract_table_indicators_reads_html_first_column():
+    from ai_agent.kb.chunking import extract_table_indicators
+
+    text = (
+        "<table><tr><td>项目</td><td>本期</td></tr>"
+        "<tr><td>净利润</td><td>3</td></tr>"
+        "<tr><td>流动资产：</td><td></td></tr>"
+        "</table>"
+    )
+    assert extract_table_indicators(text) == ["净利润"]
+
+
+def test_keyword_search_also_matches_indicator_names(monkeypatch):
+    sink: list[str] = []
+    sql = _sql_of(
+        monkeypatch,
+        lambda: store.search_kb_chunks_keyword(["营业收入"]),
+        sink,
+    )
+    assert "jsonb_array_elements_text" in sql
+    assert "c.meta->'indicators'" in sql
+    assert "WHERE item ILIKE" in sql
+
+
+def test_rerank_boosts_chunk_whose_indicator_is_named():
+    from ai_agent.kb.retrieval import _boost_indicator_hits
+
+    rows = [
+        {"indicators": ["营业成本"]},
+        {"indicators": ["营业收入", "净利润"]},
+        {"indicators": []},
+    ]
+    boosted = _boost_indicator_hits("营业收入是多少", rows, [0.80, 0.74, 0.90])
+    assert boosted[1] > boosted[0]
+    assert boosted[0] == 0.80
+    assert boosted[2] == 0.90
+    # 「营收」不是「营业收入」的整段，不加分
+    plain = _boost_indicator_hits("营收是多少", rows, [0.80, 0.74, 0.90])
+    assert plain == [0.80, 0.74, 0.90]
