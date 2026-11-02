@@ -1,5 +1,9 @@
 """整页 OCR：开关、解码参数、熔断，以及正文以 OCR 为准、章节来自文本层。"""
 
+import shutil
+import tempfile
+from pathlib import Path
+
 import httpx2
 import pymupdf
 import pytest
@@ -19,6 +23,23 @@ def _reset_ocr_state(monkeypatch):
     monkeypatch.setattr(settings, "kb_ocr_max_pages", 0)
     monkeypatch.setattr(settings, "kb_ocr_concurrency", 1)
     monkeypatch.setattr(settings, "kb_ocr_max_failures", 2)
+
+
+@pytest.fixture
+def kb_tmp():
+    """PDF 放在项目内 .tmp-kb-test 的独立子目录。
+
+    不用 pytest 的 tmp_path：沙箱里它和这个固定根目录抢同一路径，
+    目录残留或并发 mkdir 会抛 FileExistsError，用例在进断言前就 ERROR。
+    根目录用 exist_ok 接住残留；收尾只删自己的子目录。
+    """
+    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
+    base.mkdir(exist_ok=True)
+    path = Path(tempfile.mkdtemp(dir=base))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class _FakeClient:
@@ -46,8 +67,8 @@ class _FakeClient:
         return type("Resp", (), {"choices": [choice]})()
 
 
-def _pdf(tmp_path, pages: int = 1):
-    path = tmp_path / "doc.pdf"
+def _pdf(directory, pages: int = 1):
+    path = directory / "doc.pdf"
     doc = pymupdf.open()
     for i in range(pages):
         page = doc.new_page()
@@ -65,19 +86,19 @@ def _not_found() -> NotFoundError:
     return NotFoundError("Error code: 404 - Model not exist.", response=response, body=None)
 
 
-def test_disabled_when_model_empty(tmp_path, monkeypatch):
+def test_disabled_when_model_empty(kb_tmp, monkeypatch):
     fake = _FakeClient()
     monkeypatch.setattr(ocr, "_client", fake)
-    assert ocr.ocr_pdf(_pdf(tmp_path)) is None
+    assert ocr.ocr_pdf(_pdf(kb_tmp)) is None
     assert fake.calls == 0
 
 
-def test_page_uses_xiaomi_prompt_and_greedy_decode(tmp_path, monkeypatch):
+def test_page_uses_xiaomi_prompt_and_greedy_decode(kb_tmp, monkeypatch):
     monkeypatch.setattr(settings, "kb_ocr_model", "longwayxu/xiaomi-ocr-0:bf16")
     fake = _FakeClient(content="营业收入 12.3 亿")
     monkeypatch.setattr(ocr, "_client", fake)
 
-    segments = ocr.ocr_pdf(_pdf(tmp_path, pages=2))
+    segments = ocr.ocr_pdf(_pdf(kb_tmp, pages=2))
 
     assert segments is not None
     assert [s.page for s in segments] == [1, 2]
@@ -94,32 +115,32 @@ def test_page_uses_xiaomi_prompt_and_greedy_decode(tmp_path, monkeypatch):
     assert parts[1]["text"] == OCR_DOCUMENT_PROMPT
 
 
-def test_model_not_found_stops_later_pages(tmp_path, monkeypatch):
+def test_model_not_found_stops_later_pages(kb_tmp, monkeypatch):
     monkeypatch.setattr(settings, "kb_ocr_model", "missing-ocr")
     fake = _FakeClient(error=_not_found())
     monkeypatch.setattr(ocr, "_client", fake)
 
-    assert ocr.ocr_pdf(_pdf(tmp_path, pages=3)) is None
+    assert ocr.ocr_pdf(_pdf(kb_tmp, pages=3)) is None
     assert fake.calls == 1
     assert ocr.available() is False
     assert "missing-ocr" in (ocr.disabled_reason() or "")
 
 
-def test_timeouts_trip_breaker(tmp_path, monkeypatch):
+def test_timeouts_trip_breaker(kb_tmp, monkeypatch):
     monkeypatch.setattr(settings, "kb_ocr_model", "slow-ocr")
     monkeypatch.setattr(settings, "kb_ocr_max_failures", 2)
     fake = _FakeClient(error=APITimeoutError(request=httpx2.Request("POST", "https://x")))
     monkeypatch.setattr(ocr, "_client", fake)
 
-    assert ocr.ocr_pdf(_pdf(tmp_path, pages=4)) is None
+    assert ocr.ocr_pdf(_pdf(kb_tmp, pages=4)) is None
     assert fake.calls == 2
     assert ocr.available() is False
 
 
-def test_parse_pdf_uses_ocr_body_and_text_layer_section(tmp_path, monkeypatch):
+def test_parse_pdf_uses_ocr_body_and_text_layer_section(kb_tmp, monkeypatch):
     from ai_agent.kb.parsing import TABLE, TEXT, Segment
 
-    path = _pdf(tmp_path)
+    path = _pdf(kb_tmp)
     monkeypatch.setattr(
         "ai_agent.kb.parsing._pdf_text",
         lambda _path: ([Segment("文本层旧正文", 2, TEXT, "第十节 财务报告")], []),
@@ -143,7 +164,7 @@ def test_parse_pdf_uses_ocr_body_and_text_layer_section(tmp_path, monkeypatch):
     assert "2,721,444" in segments[1].text
 
 
-def test_cover_fields_dropped_by_ocr_are_restored_from_text_layer(tmp_path, monkeypatch):
+def test_cover_fields_dropped_by_ocr_are_restored_from_text_layer(kb_tmp, monkeypatch):
     from ai_agent.kb.parsing import TEXT, Segment
 
     monkeypatch.setattr(
@@ -163,12 +184,12 @@ def test_cover_fields_dropped_by_ocr_are_restored_from_text_layer(tmp_path, monk
         "ai_agent.kb.ocr.ocr_pdf",
         lambda _path: [Segment("# 中国银行股份有限公司\n2026年第三季度报告", 1, TEXT)],
     )
-    segments = parse_segments(_pdf(tmp_path))
+    segments = parse_segments(_pdf(kb_tmp))
     assert segments[0].text.startswith("证券代码：601988\n证券简称：中国银行\n")
     assert segments[0].text.count("证券代码") == 1
 
 
-def test_cover_fields_already_in_ocr_are_not_duplicated(tmp_path, monkeypatch):
+def test_cover_fields_already_in_ocr_are_not_duplicated(kb_tmp, monkeypatch):
     from ai_agent.kb.parsing import TEXT, Segment
 
     monkeypatch.setattr(
@@ -194,7 +215,7 @@ def test_cover_fields_already_in_ocr_are_not_duplicated(tmp_path, monkeypatch):
             )
         ],
     )
-    segments = parse_segments(_pdf(tmp_path))
+    segments = parse_segments(_pdf(kb_tmp))
     assert segments[0].text.count("证券代码") == 1
     assert segments[0].text.count("公告编号") == 1
 
@@ -336,7 +357,7 @@ def test_ocr_page_mark_is_dropped_and_not_used_as_caption():
     assert "第 2 页" not in "".join(s.text for s in segments)
 
 
-def test_parse_pdf_falls_back_to_text_layer_when_ocr_missing(tmp_path, monkeypatch):
+def test_parse_pdf_falls_back_to_text_layer_when_ocr_missing(kb_tmp, monkeypatch):
     from ai_agent.kb.parsing import TEXT, Segment
 
     monkeypatch.setattr("ai_agent.kb.ocr.ocr_pdf", lambda _path: None)
@@ -345,7 +366,7 @@ def test_parse_pdf_falls_back_to_text_layer_when_ocr_missing(tmp_path, monkeypat
         lambda _path: ([Segment("文本层正文", 1, TEXT, "第一节")], [4]),
     )
     monkeypatch.setattr("ai_agent.kb.figures._pdf_figures", lambda *_a, **_k: [])
-    segments = parse_segments(_pdf(tmp_path))
+    segments = parse_segments(_pdf(kb_tmp))
     assert [(s.text, s.section) for s in segments] == [("文本层正文", "第一节")]
 
 

@@ -746,20 +746,34 @@ def test_clean_tags_strips_dedupes_and_caps():
     assert _clean_tags([]) == []
 
 
+def _kb_workdir(request):
+    """项目内临时目录。系统 tmp 在沙箱里写不进去。
+
+    根目录 .tmp-kb-test 可能已经残留，用 exist_ok 创建。每个用例只占一个
+    子目录，收尾只删这个子目录：整棵删掉会和并发用例抢同一路径，mkdir 抛
+    FileExistsError。
+    """
+    import shutil
+    import uuid as _uuid
+
+    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
+    base.mkdir(exist_ok=True)
+    path = base / _uuid.uuid4().hex
+    path.mkdir()
+    request.addfinalizer(lambda: shutil.rmtree(path, ignore_errors=True))
+    return path
+
+
 def _prepare_complete(request, monkeypatch):
     """complete_upload 的公共桩：建档记录 + 分片落盘 + store/pipeline 打桩。
 
     临时目录放项目内（.tmp-kb-test）：系统 tmp 目录在沙箱里写不进去。
     """
-    import shutil
     import uuid as _uuid
 
     from ai_agent.api.routers import kb as kb_router
 
-    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    if not base.exists():
-        base.mkdir()
-    upload_root = base / _uuid.uuid4().hex
+    upload_root = _kb_workdir(request)
     record = {
         "id": _uuid.uuid4(),
         "filename": "a.pdf",
@@ -771,8 +785,6 @@ def _prepare_complete(request, monkeypatch):
     part_dir = upload_root / str(record["id"]) / "parts"
     part_dir.mkdir(parents=True)
     (part_dir / "000000.part").write_bytes(b"ABCD")
-    # 测试收尾清理整个临时根目录（record 目录已由被测代码自己删）
-    request.addfinalizer(lambda: shutil.rmtree(base, ignore_errors=True))
     return kb_router, record
 
 
@@ -828,15 +840,11 @@ def _rename_record(request, monkeypatch, status="ready", filename="旧报告", m
 
     文件名是纯名（不含后缀），类型由 mime 单独存——这是当前数据模型。
     """
-    import shutil
     import uuid as _uuid
 
     from ai_agent.api.routers import kb as kb_router
 
-    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    if not base.exists():
-        base.mkdir()
-    upload_root = base / _uuid.uuid4().hex
+    upload_root = _kb_workdir(request)
     fid = _uuid.uuid4()
     record = {
         "id": fid,
@@ -858,7 +866,6 @@ def _rename_record(request, monkeypatch, status="ready", filename="旧报告", m
     monkeypatch.setattr(
         kb_router.kb_pipeline, "submit_reembed", lambda _fid: submitted.append(_fid)
     )
-    request.addfinalizer(lambda: shutil.rmtree(base, ignore_errors=True))
     return kb_router, record, renamed, submitted
 
 

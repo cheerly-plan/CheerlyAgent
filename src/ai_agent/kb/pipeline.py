@@ -87,6 +87,7 @@ class KbPipeline:
                 max_chars=settings.kb_chunk_size,
                 overlap=settings.kb_chunk_overlap,
                 within_page=settings.kb_chunk_within_page,
+                table_group_mode=settings.kb_table_group_mode,
             )
             if not chunks:
                 store.update_kb_status(file_id, "failed", error="文档内容为空")
