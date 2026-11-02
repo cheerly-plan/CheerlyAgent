@@ -16,9 +16,26 @@ def test_kb_list_filters_to_ready_and_shows_description(monkeypatch):
     )
     out = _kb_list_files()
     assert "知识库当前已就绪的文件" in out
-    assert "a.pdf：年报财务数据" in out  # 有描述则带描述
+    assert "a.pdf：年报财务数据" in out  # 没写报告期时，描述仍紧跟文件名
     assert "c.pdf" in out  # 无描述也列出
     assert "b.pdf" not in out  # 非 ready 不出现
+
+
+def test_kb_list_shows_period_before_description(monkeypatch):
+    monkeypatch.setattr(
+        kb_list.store,
+        "list_kb_files",
+        lambda q="", tag="": [
+            {
+                "filename": "中科飞测2025年第三季度报告.pdf",
+                "status": "ready",
+                "period": "2025Q3",
+                "description": "股东与财务",
+            }
+        ],
+    )
+    out = _kb_list_files()
+    assert "中科飞测2025年第三季度报告.pdf（报告期 2025Q3）：股东与财务" in out
 
 
 def test_kb_list_empty(monkeypatch):

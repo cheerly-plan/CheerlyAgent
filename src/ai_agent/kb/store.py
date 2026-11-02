@@ -805,7 +805,7 @@ class KbStore:
                 WITH hit AS (
                     SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
                            c.kind, c.scope, c.text, f.filename, c.subject,
-                           {_INDICATOR_LIST} AS indicators,
+                           {_INDICATOR_LIST} AS indicators, c.period,
                            c.embedding <=> %(emb)s AS distance
                     FROM agent_kb_chunk c
                     JOIN agent_kb_file f ON f.id = c.file_id
@@ -826,7 +826,8 @@ class KbStore:
                     FROM hit
                 )
                 SELECT id, file_id, seq, page, page_end, section,
-                       kind, scope, text, filename, subject, indicators, distance
+                       kind, scope, text, filename, subject, indicators, period,
+                       distance
                 FROM ranked
                 ORDER BY (rn = 1 AND subject_best <= global_best + %(band)s) DESC,
                          distance
@@ -886,7 +887,7 @@ class KbStore:
                 WITH hit AS (
                     SELECT c.id, c.file_id, c.seq, c.page, c.page_end, c.section,
                            c.kind, c.scope, c.text, f.filename, c.subject,
-                           {_INDICATOR_LIST} AS indicators,
+                           {_INDICATOR_LIST} AS indicators, c.period,
                            ({score_sql})::float8 AS keyword_score
                     FROM agent_kb_chunk c
                     JOIN agent_kb_file f ON f.id = c.file_id
@@ -907,7 +908,8 @@ class KbStore:
                     FROM hit
                 )
                 SELECT id, file_id, seq, page, page_end, section,
-                       kind, scope, text, filename, subject, indicators, keyword_score
+                       kind, scope, text, filename, subject, indicators, period,
+                       keyword_score
                 FROM ranked
                 ORDER BY (rn = 1 AND subject_best >= global_best - %(band)s) DESC,
                          keyword_score DESC, file_id, seq

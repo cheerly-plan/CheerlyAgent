@@ -15,10 +15,12 @@
 """
 
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
+from ai_agent.kb.chunking import html_tables_to_markdown
 from ai_agent.kb.citations import Citation, add_citations
 from ai_agent.kb.otsl import render_otsl
 from ai_agent.kb.retrieval import format_where
@@ -45,6 +47,59 @@ _MAX_NEIGHBOR_ENTITIES = 6
 _MAX_EVIDENCE = 8
 # 注入给模型的关系条数：再多挤掉原文
 _MAX_NEIGHBORHOOD_EDGES = 20
+# 关系问句才预检索。科目行里的「股东」不算：归属于上市公司股东的净利润、股东权益。
+_RELATION_QUERY = re.compile(
+    r"持股|大股东|控股股东|股东(?:有|是|名单|情况)|的股东|哪些股东|"
+    r"子公司|收购|担保|任职|控股|参股|借款|一致行动|回购|实控|实际控制|"
+    r"谁持有|持有多少"
+)
+_PREFETCH_HEADER = (
+    "【图谱邻域】这是本问已经查到的实体和关系，回答持股、股东、子公司、"
+    "收购、担保、任职时先用这段。这段没写到的关系再调用 kg_search。"
+    "报表科目的金额仍必须调用 kb_search。"
+)
+
+
+def wants_graph_neighborhood(query: str) -> bool:
+    """问的是谁和谁的关系，而不是报表科目金额。"""
+    return bool(_RELATION_QUERY.search(query or ""))
+
+
+def prefetch_neighborhood(query: str) -> str:
+    """关系问句的图谱邻域。没有强命中、图谱为空或检索失败时返回空串。
+
+    只给实体和关系，不附原文切片。科目金额仍走 kb_search，
+    这里再塞切片会把科目证据挤出上下文。
+    """
+    if not wants_graph_neighborhood(query):
+        return ""
+    try:
+        if store.graph_stats()["entities"] == 0:
+            return ""
+        query = effective_kb_query(query)
+        parsed_ids = resolve_tool_file_ids(None, query=query)
+        if parsed_ids == []:
+            return ""
+        embedding = embed_query(query)
+        seeds = store.search_entities(
+            embedding,
+            query=query,
+            top_k=5,
+            file_ids=parsed_ids,
+            min_score=settings.kb_graph_min_score,
+        )
+        if not seeds:
+            return ""
+        graph = store.expand_subgraph(
+            [s["id"] for s in seeds],
+            depth=1,
+            max_nodes=settings.kb_graph_max_nodes,
+        )
+    except Exception:
+        logger.warning("图谱预检索失败，跳过", exc_info=True)
+        return ""
+    lines = format_neighborhood(seeds, graph, max_edges=_MAX_NEIGHBORHOOD_EDGES)
+    return _PREFETCH_HEADER + "\n" + "\n".join(lines)
 
 
 def format_neighborhood(
@@ -137,7 +192,7 @@ def _kg_search(
         for item in evidence:
             lines.append(
                 f"[{item['filename']} · {_evidence_where(item)}]\n"
-                f"{render_otsl(item.get('text') or '')}"
+                f"{html_tables_to_markdown(render_otsl(item.get('text') or ''))}"
             )
     # 引用旁路：图谱证据同样可以在前端点开核对（与 kb_search 同一套机制）
     add_citations(_citations_of(evidence))

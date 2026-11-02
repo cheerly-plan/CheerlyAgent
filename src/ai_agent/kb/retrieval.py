@@ -142,6 +142,8 @@ class Hit:
     section: str | None = None
     # 报表口径：consolidated / parent / None（非报表或表里没印表题）
     scope: str | None = None
+    # 文件报告期，如 2025Q3。正文表格常常不写年份，回答时靠它区分两年。
+    period: str = ""
     before: list[str] = field(default_factory=list)
     after: list[str] = field(default_factory=list)
 
@@ -168,6 +170,8 @@ def search_knowledge(
     file_ids: list[uuid.UUID] | None = None,
     top_k: int = 3,
     filters: dict | None = None,
+    per_file: bool = False,
+    diversify_query: str | None = None,
 ) -> list[Hit]:
     """知识库检索主入口。检索词向量化失败会抛异常，由调用方转成友好文案。
 
@@ -179,12 +183,28 @@ def search_knowledge(
     一次，避免过滤过窄直接挂空。
     """
     embedding = embed_query(query)
-    hits = _core_search(query, embedding, file_ids=file_ids, top_k=top_k, filters=filters)
+    hits = _core_search(
+        query,
+        embedding,
+        file_ids=file_ids,
+        top_k=top_k,
+        filters=filters,
+        per_file=per_file,
+        diversify_query=diversify_query,
+    )
     if not hits and filters:
         # 元数据过滤后召回为空，多半是约束过窄（如 scope 强约束把母公司切片
         # 全排除了），回退不过滤再查一次，保证至少有结果而非直接挂空
         logger.info("kb 元数据过滤后召回为空，回退不过滤重查: %s", filters)
-        hits = _core_search(query, embedding, file_ids=file_ids, top_k=top_k, filters=None)
+        hits = _core_search(
+            query,
+            embedding,
+            file_ids=file_ids,
+            top_k=top_k,
+            filters=None,
+            per_file=per_file,
+            diversify_query=diversify_query,
+        )
     return hits
 
 
@@ -194,6 +214,8 @@ def search_knowledge_multi(
     file_ids: list[uuid.UUID] | None = None,
     top_k: int = 3,
     filters: dict | None = None,
+    per_file: bool = False,
+    diversify_query: str | None = None,
 ) -> list[Hit]:
     """多查询检索并融合（multi-query RRF）。
 
@@ -206,7 +228,12 @@ def search_knowledge_multi(
         return []
     if len(queries) == 1:
         return search_knowledge(
-            queries[0], file_ids=file_ids, top_k=top_k, filters=filters
+            queries[0],
+            file_ids=file_ids,
+            top_k=top_k,
+            filters=filters,
+            per_file=per_file,
+            diversify_query=diversify_query,
         )
     merged: dict[tuple[str, int], dict] = {}
     scores: dict[tuple[str, int], float] = {}
@@ -239,7 +266,9 @@ def search_knowledge_multi(
         # 重排用主查询（queries[0]，即改写后的原始问句）做排序
         head = ranked[:_RERANK_LIMIT]
         ranked = _rerank(queries[0], head, top_k) + ranked[_RERANK_LIMIT:]
-    ranked = _diversify_by_subject(ranked, top_k)
+    ranked = _diversify(
+        diversify_query or queries[0], ranked, top_k, per_file=per_file
+    )
     hits = [_to_hit(row) for row in ranked[:top_k]]
     return _attach_neighbors(hits)
 
@@ -297,6 +326,8 @@ def _core_search(
     file_ids: list[uuid.UUID] | None,
     top_k: int,
     filters: dict | None = None,
+    per_file: bool = False,
+    diversify_query: str | None = None,
 ) -> list[Hit]:
     """真正的一轮检索：候选召回 → 重排 → 邻接。"""
     rows = _retrieve_candidates(
@@ -309,7 +340,9 @@ def _core_search(
         # 而排在第 13 名之外的本来也进不了 top_k
         head = rows[:_RERANK_LIMIT]
         rows = _rerank(query, head, top_k) + rows[_RERANK_LIMIT:]
-    rows = _diversify_by_subject(rows, top_k)
+    rows = _diversify(
+        diversify_query or query, rows, top_k, per_file=per_file
+    )
     hits = [_to_hit(row) for row in rows[:top_k]]
     return _attach_neighbors(hits)
 
@@ -468,14 +501,23 @@ def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
         # 文件名没命中这个提示词，再按元数据维度（subject 列 + 别名）匹配：
         # 多主体文档（行业研报）文件名里没有「宁德时代」，但它确实是正文主体，
         # 只有走 subject/别名才能把这种提示词路由到对应文件。
+        # 「中科飞测」不在别名表里，但是全称里独有的一段，同样算点名。
         if not hint_hit:
+            from ai_agent.kb.meta import fragment_subjects
+
+            catalog = [
+                (str(item.get("subject") or ""), list(item.get("subject_aliases") or []))
+                for item in ready
+            ]
+            fragments = fragment_subjects(hint, catalog)
             for item in ready:
                 fid = item["file_id"]
                 if fid in seen:
                     continue
-                if _subject_token_matches(
+                subject = str(item.get("subject") or "")
+                if subject in fragments or _subject_token_matches(
                     hint,
-                    item.get("subject") or "",
+                    subject,
                     item.get("subject_aliases") or [],
                 ):
                     seen.add(fid)
@@ -784,6 +826,88 @@ def _apply_scope_preference(query: str, rows: list[dict]) -> list[dict]:
     return [row for _, _, row in scored]
 
 
+def _diversify(
+    query: str, rows: list[dict], top_k: int, *, per_file: bool = False
+) -> list[dict]:
+    """多期问句、或多家公司一起查时按文件留名额，其余问句仍按主体留名额。
+
+    ``per_file`` 用在范围已经收成这几份文件的时候。股东表的切片主体会被改成
+    股东名，按主体留名额会把一家公司的股东表排满，另一家进不了 top_k。
+    """
+    from ai_agent.kb.meta import query_period_policy
+
+    policy, _token = query_period_policy(query or "")
+    if per_file or policy in {"all", "span_q", "span_h"}:
+        return _diversify_by_file(query, rows, top_k)
+    return _diversify_by_subject(rows, top_k)
+
+
+def _focused_file_ids(query: str, rows: list[dict]) -> set[str]:
+    """结果里被问句点名的文件。用文件名还原主体，不看切片上被改写过的主体。"""
+    from ai_agent.kb.meta import extract_subject, fragment_subjects, name_in_text
+
+    catalog: list[tuple[str, list[str]]] = []
+    by_subject: dict[str, list[str]] = {}
+    for row in rows:
+        subject = extract_subject(str(row.get("filename") or ""))
+        fid = str(row.get("file_id") or "")
+        if not subject or not fid:
+            continue
+        by_subject.setdefault(subject, []).append(fid)
+        catalog.append((subject, []))
+    mentioned = fragment_subjects(query, catalog)
+    for subject in by_subject:
+        if name_in_text(query, subject):
+            mentioned.add(subject)
+    found: set[str] = set()
+    for subject in mentioned:
+        found.update(by_subject.get(subject, []))
+    return found
+
+
+def _diversify_by_file(query: str, rows: list[dict], top_k: int) -> list[dict]:
+    """同一主体的两份报告各留一条，避免后一年把前一年挤出 top_k。
+
+    股东表会被归属到股东名上，按切片 subject 分桶分不开 2025 和 2026。
+    这里按文件留名额。问句点了哪家，就先留那家各期的头名。
+    """
+    if top_k <= 0 or len(rows) <= top_k:
+        return rows[:top_k]
+    head_at: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        fid = str(row.get("file_id") or "")
+        if fid and fid not in head_at:
+            head_at[fid] = index
+    if len(head_at) <= 1:
+        return _diversify_by_subject(rows, top_k)
+    focus = _focused_file_ids(query, rows)
+    if focus:
+        ordered = [i for fid, i in head_at.items() if fid in focus]
+        ordered += [i for fid, i in head_at.items() if fid not in focus]
+    else:
+        ordered = list(head_at.values())
+    chosen: list[int] = []
+    seen: set[int] = set()
+    for index in ordered:
+        if len(chosen) >= top_k:
+            break
+        chosen.append(index)
+        seen.add(index)
+    for index in range(len(rows)):
+        if len(chosen) >= top_k:
+            break
+        if index not in seen:
+            chosen.append(index)
+            seen.add(index)
+    if not focus:
+        return [rows[index] for index in sorted(chosen)]
+    # 点名主体的各期放在前面，模型先看到两年，而不是先读完一年的变体
+    focus_n = sum(1 for fid in head_at if fid in focus)
+    front = chosen[:focus_n]
+    rest = sorted(index for index in chosen[focus_n:])
+    return [rows[index] for index in front + rest]
+
+
 def _diversify_by_subject(rows: list[dict], top_k: int) -> list[dict]:
     """重排之后按主体留名额：够近的主体至少一条进 top_k。
 
@@ -843,13 +967,16 @@ def _diversify_by_subject(rows: list[dict], top_k: int) -> list[dict]:
 def _dedupe(rows: list[dict]) -> list[dict]:
     """按向量顺序去冗余：与任一已保留片段三字组重合度过高的直接丢。"""
     kept: list[dict] = []
-    kept_grams: list[set[str]] = []
+    # 只在同一份文件里去重。两年的股东表结构很像，跨文件丢掉会把前一年整份抹掉。
+    kept_grams: dict[str, list[set[str]]] = {}
     for row in rows:
+        fid = str(row.get("file_id") or "")
         grams = _trigrams(row.get("text") or "")
-        if any(_jaccard(grams, other) >= _DUP_THRESHOLD for other in kept_grams):
+        prior = kept_grams.setdefault(fid, [])
+        if any(_jaccard(grams, other) >= _DUP_THRESHOLD for other in prior):
             continue
         kept.append(row)
-        kept_grams.append(grams)
+        prior.append(grams)
     return kept
 
 
@@ -865,6 +992,7 @@ def _to_hit(row: dict) -> Hit:
         page_end=row.get("page_end"),
         section=row.get("section"),
         scope=row.get("scope"),
+        period=str(row.get("period") or ""),
     )
 
 

@@ -43,10 +43,9 @@ def mentioned_file_ids(query: str) -> list[uuid.UUID]:
     except Exception:
         logger.warning("文档路由读取文件清单失败，跳过点名匹配", exc_info=True)
         return []
+    ready = [row for row in rows if row.get("status") == "ready"]
     hits: list[uuid.UUID] = []
-    for row in rows:
-        if row.get("status") != "ready":
-            continue
+    for row in ready:
         fid = row["file_id"]
         if fid in hits:
             continue
@@ -59,7 +58,39 @@ def mentioned_file_ids(query: str) -> list[uuid.UUID]:
         )
         if named:
             hits.append(fid)
+    # 「中科飞测」这种简称不在别名表里，但是主体名里独有的一段
+    from ai_agent.kb.meta import fragment_subjects
+
+    catalog = [
+        (str(row.get("subject") or ""), list(row.get("subject_aliases") or []))
+        for row in ready
+    ]
+    mentioned = fragment_subjects(text, catalog)
+    if mentioned:
+        for row in ready:
+            fid = row["file_id"]
+            if fid in hits:
+                continue
+            if str(row.get("subject") or "") in mentioned:
+                hits.append(fid)
     return hits
+
+
+def _distinct_subjects(file_ids: list[uuid.UUID]) -> int:
+    """这些文件里有几家不同的主体。同一家的两年报算一家。"""
+    if len(file_ids) < 2:
+        return len(file_ids)
+    try:
+        rows = store.list_kb_files()
+    except Exception:
+        logger.warning("统计点名主体失败，按文件数计", exc_info=True)
+        return len(file_ids)
+    by_id = {
+        str(row.get("file_id")): str(row.get("subject") or "").strip() for row in rows
+    }
+    return len(
+        {by_id.get(str(fid), "") for fid in file_ids if by_id.get(str(fid), "")}
+    )
 
 
 def route_files(
@@ -84,6 +115,16 @@ def route_files(
     if file_ids:
         allowed = set(file_ids)
         picked = [fid for fid in picked if fid in allowed]
+    # 对比两个报告期时，点名已经圈定主体。再用摘要去补别的公司，
+    # 名额会被无关的同年季报占掉，另一年的那份反而进不来。
+    from ai_agent.kb.meta import query_period_policy
+
+    policy, _token = query_period_policy(text)
+    if picked and policy in {"all", "span_q", "span_h"}:
+        return picked
+    # 点名了两家以上时也别补：补进来的是别的公司，会把这两家的名额挤掉。
+    if picked and _distinct_subjects(picked) >= 2:
+        return picked
     # 点名的文件优先且全部保留（对比问句里两家都得在），多于此上限直接截断
     if len(picked) >= top_k:
         return picked[:top_k]

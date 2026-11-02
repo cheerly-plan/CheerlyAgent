@@ -140,7 +140,31 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
         "注：具体数字、报表科目、原文表述不在图谱里，请用 kb_search 查；"
         "关系题同时需要某个科目金额时，kg_search 与 kb_search 两个都调。"
     )
+    period_line = _period_inventory(ready)
+    if period_line:
+        lines.append(period_line)
     return "\n".join(lines)
+
+
+def _period_inventory(ready: list[dict]) -> str:
+    """库里实际有哪些报告期。模型容易按训练截止日判断某年财报还没披露。"""
+    from ai_agent.kb.meta import period_rank
+
+    counts: dict[str, int] = {}
+    for row in ready:
+        period = str(row.get("period") or "").strip()
+        if period:
+            counts[period] = counts.get(period, 0) + 1
+    if not counts:
+        return ""
+    ordered = sorted(counts, key=period_rank, reverse=True)
+    parts = [f"{period}（{counts[period]} 份）" for period in ordered]
+    return (
+        "库内已有报告期：" + "、".join(parts) + "。"
+        "这些是已经入库的文件。某年有没有资料，以这份清单、kb_list_files 和检索结果抬头为准，"
+        "不要按训练知识里的披露进度推断。"
+        "表格中更早的年份是对比列，不是文件的报告期。"
+    )
 
 
 def _system_prompt(
@@ -154,10 +178,19 @@ def _system_prompt(
     # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。
     block = _profile_prompt(user_id)
     cap_block = _kb_capability_block(kb_file_ids) if use_kb else ""
-    tail = "\n\n".join(p for p in (block, cap_block) if p)
+    tail = "\n\n".join(p for p in (_today_line(), block, cap_block) if p)
     if not tail:
         return core
     return f"{core}\n\n{tail}"
+
+
+def _today_line() -> str:
+    from datetime import date
+
+    return (
+        f"【当前日期】今天是 {date.today().isoformat()}。"
+        "此日之前的报告期都是已披露文件，不要当成尚未发布的未来数据。"
+    )
 
 
 def run_stream(
@@ -344,6 +377,43 @@ def _question_already_retrieved(messages: list[ChatMessage]) -> bool:
     return False
 
 
+_KG_PREFETCH_MARK = "【图谱邻域】"
+
+
+def _kg_prefetch_present(messages: list[ChatMessage]) -> bool:
+    """这句问话之后已经注入过邻域，续跑时不要再查一次。"""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return False
+        if msg.get("role") == "system" and str(msg.get("content") or "").startswith(
+            _KG_PREFETCH_MARK
+        ):
+            return True
+    return False
+
+
+def _attach_kg_prefetch(
+    messages: list[ChatMessage], kb_file_ids: tuple[str, ...]
+) -> None:
+    """关系问句在选工具前放入图谱邻域。科目金额问句不放。"""
+    if _kg_prefetch_present(messages):
+        return
+    text = _latest_user_text(messages).strip()
+    if not text:
+        return
+    from ai_agent.tools.kg_search import prefetch_neighborhood
+
+    scope_token = set_kb_scope(kb_file_ids)
+    try:
+        block = prefetch_neighborhood(text)
+    finally:
+        reset_kb_scope(scope_token)
+    if not block:
+        return
+    logger.info("图谱预检索已注入 chars=%d", len(block))
+    messages.append({"role": "system", "content": block})
+
+
 def _must_call_kb_tool(
     messages: list[ChatMessage],
     tools: list[dict],
@@ -413,6 +483,8 @@ def run_loop(
     if not use_kb:
         excluded.update({"kb_search", "kg_search"})
     tools = [s for s in tool_schemas() if s["function"]["name"] not in excluded]
+    if use_kb:
+        _attach_kg_prefetch(messages, kb_file_ids)
     step = 0
     # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
     # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库

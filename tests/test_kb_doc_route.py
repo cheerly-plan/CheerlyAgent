@@ -167,6 +167,54 @@ def test_mentioned_file_ids_ignores_unrelated_query(monkeypatch):
 # ---------- 路由 ----------
 
 
+def test_route_files_skips_padding_when_comparing_two_periods(monkeypatch):
+    """对比两年时只留点名的那家，不用摘要再补进别的公司的同年季报。"""
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    monkeypatch.setattr(
+        memory_store.store,
+        "list_kb_files",
+        lambda **k: [
+            _file(
+                a,
+                "深圳中科飞测科技股份有限公司2026年第三季度报告.pdf",
+                "深圳中科飞测科技股份有限公司",
+            ),
+            _file(
+                b,
+                "深圳中科飞测科技股份有限公司2025年第三季度报告.pdf",
+                "深圳中科飞测科技股份有限公司",
+            ),
+            _file(c, "中国银行股份有限公司2026年第三季度报告.pdf", "中国银行股份有限公司"),
+        ],
+    )
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("对比两年时不该再走摘要补文件")
+
+    monkeypatch.setattr(store, "search_kb_files", boom)
+    assert set(route_files("中科飞测2025年和2026年三季度持股对比")) == {a, b}
+
+
+def test_route_files_skips_padding_when_two_companies_named(monkeypatch):
+    """点了两家就只查这两家，不用摘要再补第三家。"""
+    bank, auto, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    monkeypatch.setattr(
+        memory_store.store,
+        "list_kb_files",
+        lambda **k: [
+            _file(bank, "中国银行股份有限公司2026年第三季度报告.pdf", "中国银行股份有限公司"),
+            _file(auto, "长安汽车有限公司2026年第三季度报告.pdf", "长安汽车有限公司"),
+            _file(other, "中国黄金集团黄金珠宝股份有限公司2026年第三季度报告.pdf", "中国黄金"),
+        ],
+    )
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("点了两家时不该再走摘要补文件")
+
+    monkeypatch.setattr(store, "search_kb_files", boom)
+    assert set(route_files("中国银行和长安汽车的总资产分别是多少")) == {bank, auto}
+
+
 def test_route_files_pads_named_files_with_summary_hits(monkeypatch):
     """点名的在前（确定性命中），摘要向量补齐没点名的那部分。"""
     a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()

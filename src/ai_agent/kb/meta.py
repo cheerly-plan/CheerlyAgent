@@ -219,7 +219,22 @@ _QUERY_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 _QUERY_QUARTER_RE = re.compile(r"第?([一二三四1-4])季度")
 _QUERY_HALF_RE = re.compile(r"半年度|半年报|中期")
 _MULTI_PERIOD_RE = re.compile(r"同比|环比|历年|各季度|各期|近[一二三四五六七八九十\d]+年")
+_COMPARE_RE = re.compile(r"对比|比较|相比|相较")
+_PRIOR_RE = re.compile(r"去年|前年|上年|上期")
 _QUARTER_DIGIT = {"一": "1", "二": "2", "三": "3", "四": "4", "1": "1", "2": "2", "3": "3", "4": "4"}
+# 公司名里太常见的四字，不能拿来当简称。否则「股份有限」会把每家公司都点中。
+_GENERIC_NAME_FRAGMENTS = frozenset(
+    {
+        "股份有限",
+        "有限公司",
+        "有限责任",
+        "集团公司",
+        "科技股份",
+        "控股股份",
+        "集团股份",
+        "股份公司",
+    }
+)
 
 
 def period_rank(period: str) -> tuple[int, int]:
@@ -239,8 +254,10 @@ def query_period_policy(query: str, *, today=None) -> tuple[str, str]:
     """问句要收成哪一期。
 
     返回 (策略, 令牌)：
-    - all / ""：同比、历年、两个年份，不收窄
-    - exact / 2026Q3：指定了季度或半年
+    - all / ""：同比、历年、两个年份且没指定季度，不收窄到某一期
+    - span_q / Q3：点了两个年份（或和去年对比）并且指定了季度，两年的这一季都要
+    - span_h / H1：同上，但是半年报
+    - exact / 2026Q3：只指定了一季或半年
     - year / 2025：只给了年份，或「去年」「今年」
     - latest / ""：没提时期，同一主体只留最新一期
     """
@@ -249,25 +266,36 @@ def query_period_policy(query: str, *, today=None) -> tuple[str, str]:
     text = query or ""
     if not text.strip() or _MULTI_PERIOD_RE.search(text):
         return ("all", "")
-    years = list(dict.fromkeys(_QUERY_YEAR_RE.findall(text)))
-    if len(years) >= 2:
-        return ("all", "")
     anchor = today or date.today()
-    year = ""
-    if years:
-        year = years[0]
-    elif "前年" in text:
-        year = str(anchor.year - 2)
-    elif "去年" in text:
-        year = str(anchor.year - 1)
-    elif "今年" in text:
-        year = str(anchor.year)
+    years = list(dict.fromkeys(_QUERY_YEAR_RE.findall(text)))
+    if "前年" in text:
+        years.append(str(anchor.year - 2))
+    if "去年" in text:
+        years.append(str(anchor.year - 1))
+    if "今年" in text:
+        years.append(str(anchor.year))
+    # 「和去年对比」说的是两边，不能收成去年那一年
+    if _COMPARE_RE.search(text) and _PRIOR_RE.search(text):
+        if "前年" in text:
+            years.append(str(anchor.year - 2))
+        if re.search(r"去年|上年|上期", text):
+            years.append(str(anchor.year - 1))
+        years.append(str(anchor.year))
+    years = list(dict.fromkeys(years))
     quarter = _QUERY_QUARTER_RE.search(text)
+    half = _QUERY_HALF_RE.search(text)
+    if len(years) >= 2:
+        if quarter:
+            return ("span_q", f"Q{_QUARTER_DIGIT[quarter.group(1)]}")
+        if half:
+            return ("span_h", "H1")
+        return ("all", "")
+    year = years[0] if years else ""
     if quarter:
         # 「三季度营收」没写年份时，按当前年理解
         pinned = year or str(anchor.year)
         return ("exact", f"{pinned}Q{_QUARTER_DIGIT[quarter.group(1)]}")
-    if _QUERY_HALF_RE.search(text):
+    if half:
         pinned = year or str(anchor.year)
         return ("exact", f"{pinned}H1")
     if year:
@@ -280,7 +308,62 @@ def period_matches(period: str, policy: str, token: str) -> bool:
         return period == token
     if policy == "year":
         return (period or "").startswith(token)
+    if policy == "span_q":
+        return bool(re.fullmatch(rf"(?:19|20)\d{{2}}{re.escape(token)}", period or ""))
+    if policy == "span_h":
+        return bool(re.fullmatch(rf"(?:19|20)\d{{2}}{re.escape(token)}", period or ""))
     return True
+
+
+def _name_windows(text: str) -> list[str]:
+    """问句里连续汉字的 4–8 字窗口，用来对主体名做片段匹配。"""
+    found: list[str] = []
+    seen: set[str] = set()
+    for run in re.findall(r"[\u4e00-\u9fff]{4,}", normalize_name(text)):
+        upper = min(len(run), 8)
+        for size in range(4, upper + 1):
+            for start in range(0, len(run) - size + 1):
+                frag = run[start : start + size]
+                if frag in seen or frag in _GENERIC_NAME_FRAGMENTS:
+                    continue
+                seen.add(frag)
+                found.append(frag)
+    return found
+
+
+def fragment_subjects(
+    query: str, catalog: list[tuple[str, list[str]]]
+) -> set[str]:
+    """问句里的简称是某一家主体核心名独有的一段时，算点名了这家。
+
+    「中科飞测」包含在「深圳中科飞测科技」里，库里没有第二家含这四个字，
+    就命中。同一段字出现在两家公司名里则放弃，避免把无关公司拉进来。
+    全称或别名整段出现仍由 :func:`name_in_text` 处理，这里只补「名字的一段」。
+    """
+    windows = _name_windows(query)
+    if not windows:
+        return set()
+    cores: list[tuple[str, str]] = []
+    seen_subject: set[str] = set()
+    for subject, aliases in catalog:
+        subject = (subject or "").strip()
+        if not subject or subject in seen_subject:
+            continue
+        seen_subject.add(subject)
+        for cand in (subject, *(aliases or [])):
+            core = normalize_name(subject_core(cand))
+            if len(core) >= 4:
+                cores.append((subject, core))
+    found: set[str] = set()
+    for frag in windows:
+        subjects = {
+            subject
+            for subject, core in cores
+            if frag in core and frag != core
+        }
+        if len(subjects) == 1:
+            found.add(next(iter(subjects)))
+    return found
 
 
 def resolve_file_identity(filename: str, cover: str = "") -> dict:

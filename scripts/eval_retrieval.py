@@ -21,6 +21,9 @@
 指标：hit@1 / hit@3 / hit@k 看"能不能查到"，recall@10 看"证据够不够
 模型答全"，MRR@10 看"排得多靠前"——三档都命中时靠 MRR 分辨优劣。
 
+评测走对话同一条检索（kb_search.retrieve_for_question）：问句先圈定文件，
+去掉公司名，再在这些文件里查。不再把原句直接丢进全库。
+
 用法：
     uv run python scripts/eval_retrieval.py            # 全量评测（默认关重排，纯检索质量）
     uv run python scripts/eval_retrieval.py --validate # 只校验用例与语料是否对齐
@@ -188,8 +191,8 @@ def run_evaluation(
     检索；打开时预热避免首例冷启动。窗口至少 10 以计算 recall@10/MRR@10。
     查询向量走进程内 lru_cache，对照时「开」轮不会重复付 embedding。
     """
-    from ai_agent.kb import retrieval
     from ai_agent.memory.embeddings import embed_texts
+    from ai_agent.tools.kb_search import retrieve_for_question
 
     if not rerank:
         settings.kb_rerank_enabled = False
@@ -205,8 +208,8 @@ def run_evaluation(
         filters = infer_filters(case["query"], case) if filters_on else None
         if filters:
             applied += 1
-        hits = retrieval.search_knowledge(
-            case["query"], top_k=window, filters=filters
+        _ids, hits = retrieve_for_question(
+            case["query"], top_k=window, extra_filters=filters
         )
         rank = hit_rank(hits, case["expect"])
         at1 = rank == 1
@@ -372,7 +375,7 @@ def evaluate_stability(
     no_cache=True 时每次运行前清掉 embed / rerank 缓存，逼出真实冷调用抖动；
     默认 False 则复现「同进程重复同问」的生产缓存表现——两者要分开看。
     """
-    from ai_agent.kb import retrieval
+    from ai_agent.tools.kb_search import retrieve_for_question
 
     if not rerank:
         settings.kb_rerank_enabled = False
@@ -393,7 +396,7 @@ def evaluate_stability(
             if no_cache:
                 # 每次走冷调用：embed / 重排都重新请求，暴露真实抖动
                 _clear_retrieval_caches()
-            last_hits = retrieval.search_knowledge(case["query"], top_k=window)
+            _ids, last_hits = retrieve_for_question(case["query"], top_k=window)
             runs_keys.append([f"{h.filename}#{h.seq}" for h in last_hits])
         base = runs_keys[0]
         jaccards = [set_jaccard(base, ks) for ks in runs_keys[1:]]

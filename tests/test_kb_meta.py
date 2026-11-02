@@ -315,6 +315,39 @@ def test_query_period_policy():
     assert meta.query_period_policy("2026年三季度营收", today=today) == ("exact", "2026Q3")
     assert meta.query_period_policy("三季度营收", today=today) == ("exact", "2026Q3")
     assert meta.query_period_policy("半年报营收", today=today) == ("exact", "2026H1")
+    # 两年都点了名，又指定了季度：两年的这一季都要，不能收成其中一年
+    assert meta.query_period_policy("2025年和2026年三季度持股", today=today) == (
+        "span_q",
+        "Q3",
+    )
+    assert meta.query_period_policy("三季度持股和去年对比", today=today) == (
+        "span_q",
+        "Q3",
+    )
+    assert meta.query_period_policy("去年和今年的营收", today=today) == ("all", "")
+    assert meta.query_period_policy("宁德时代与比亚迪对比", today=today) == (
+        "latest",
+        "",
+    )
+    assert meta.period_matches("2025Q3", "span_q", "Q3")
+    assert meta.period_matches("2026Q3", "span_q", "Q3")
+    assert not meta.period_matches("2025", "span_q", "Q3")
+    assert not meta.period_matches("2026H1", "span_q", "Q3")
+
+
+def test_fragment_subject_matches_unique_short_name():
+    """「中科飞测」不在别名表里，但是全称里独有的一段。"""
+    catalog = [
+        ("深圳中科飞测科技股份有限公司", ["深圳中科飞测科技"]),
+        ("中国银行股份有限公司", ["中国银行"]),
+        ("长安汽车有限公司", ["长安汽车"]),
+    ]
+    assert meta.fragment_subjects("中科飞测2025年和2026年三季度持股对比", catalog) == {
+        "深圳中科飞测科技股份有限公司"
+    }
+    # 整段就是核心名时交给 name_in_text，片段匹配不重复认
+    assert "中国银行股份有限公司" not in meta.fragment_subjects("中国银行营收", catalog)
+    assert meta.fragment_subjects("今年季度报告里毛利率怎么算", catalog) == set()
 
 
 def test_assign_chunk_subjects_splits_only_when_two_companies_appear():

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.kb.chunking import html_tables_to_markdown
 from ai_agent.kb.citations import Citation, add_citations
 from ai_agent.kb.retrieval import (
     Hit,
@@ -24,6 +25,7 @@ from ai_agent.kb.retrieval import (
 from ai_agent.kb.scope import (
     effective_kb_query,
     expand_queries,
+    kb_scope,
     resolve_tool_file_ids,
 )
 from ai_agent.memory.store import store
@@ -116,6 +118,72 @@ class KbSearchArgs(BaseModel):
     )
 
 
+def retrieve_for_question(
+    query: str,
+    files: list[str] | None = None,
+    top_k: int = 3,
+    kinds: list[str] | None = None,
+    sections: list[str] | None = None,
+    extra_filters: dict | None = None,
+) -> tuple[list | None, list[Hit]]:
+    """对话和评测共用的检索：先圈文件，再去掉公司名，在这些文件里查。
+
+    返回 (parsed_ids, hits)。parsed_ids 为 [] 表示点了文件但一个都没解析到；
+    为 None 表示没圈住，按全库查。检索失败抛异常，由调用方转文案。
+    """
+    query = effective_kb_query(query)
+    parsed_ids = resolve_tool_file_ids(files, query=query)
+    if parsed_ids == []:
+        return [], []
+
+    # 范围里全是点名的文件时，问句里的公司名只剩噪声。摘要补进来的文件不剥：
+    # 「证券代码」这种词每份报告封面都有，剥掉公司名就分不出是哪一家。
+    named_only = _named_scope(query, files, parsed_ids)
+    retrieval_query = (
+        _strip_scope_subject(query, parsed_ids) if named_only else query
+    )
+
+    filters: dict = dict(extra_filters or {})
+    if kinds:
+        filters["kinds"] = kinds
+    if sections:
+        filters["sections"] = sections
+    if "scopes" not in filters and _PARENT_INTENT.search(retrieval_query):
+        filters["scopes"] = [SCOPE_PARENT]
+
+    queries = (
+        expand_queries(retrieval_query)
+        if settings.kb_multiquery_enabled
+        else [retrieval_query]
+    )
+    search_kwargs: dict = {
+        "file_ids": parsed_ids,
+        "top_k": top_k,
+        "filters": filters or None,
+    }
+    # 范围里有多家（或同一家的多份）时按文件留名额。股东表的主体会被改成股东名，
+    # 按主体留名额会让一家占满 top_k。
+    if named_only and parsed_ids and len(parsed_ids) >= 2:
+        search_kwargs["per_file"] = True
+    if retrieval_query != query:
+        # 公司名剥掉之后，分档还要靠原句知道点了哪几家
+        search_kwargs["diversify_query"] = query
+    hits = search_knowledge_multi(queries, **search_kwargs)
+    return parsed_ids, hits
+
+
+def _named_scope(query: str, files: list[str] | None, parsed_ids: list | None) -> bool:
+    """范围里每一份都是问句或 files 点到的，没有摘要补进来的其他公司。"""
+    if not parsed_ids:
+        return False
+    if files:
+        return True
+    from ai_agent.kb.router import mentioned_file_ids
+
+    named = {str(fid) for fid in mentioned_file_ids(query)}
+    return {str(fid) for fid in parsed_ids} <= named
+
+
 def _kb_search(
     query: str,
     files: list[str] | None = None,
@@ -126,74 +194,56 @@ def _kb_search(
     if not store.has_ready_kb_file():
         return KB_EMPTY_HINT
 
-    # files 没填时由文档路由按摘要向量选文件（files 是模型的可选项，不是
-    # 必答题）；路由也没结果时 file_ids=None，退化为搜全库
-    query = effective_kb_query(query)
-    parsed_ids = resolve_tool_file_ids(files, query=query)
-    # files 明确指定但解析不到（编造的文件名/主体名）→ 明确提示，而非静默退回全库
+    try:
+        parsed_ids, hits = retrieve_for_question(
+            query, files=files, top_k=top_k, kinds=kinds, sections=sections
+        )
+    except Exception:
+        logger.exception("知识库检索失败 query=%s", query[:80])
+        return KB_ERROR_HINT
+
     if parsed_ids == []:
         # 模型点了不存在的文件，和「问句里的报告期库里没有」不是同一件事
         if files:
             return KB_FILES_NOT_FOUND_HINT
         return KB_NO_HIT_HINT
 
-    # files 已指定时，选文件这步已完成，检索 query 里再带主体名纯属噪声：会把嵌入
-    # 拉向反复出现公司名的页眉页、并挤占关键词名额。确定性剥掉（用解析后文件自身的
-    # subject/别名/文件名），向量与关键词两路共用同一句剥完的话。files 未提供
-    # （路由模式）则原句不动——那时主体还得用来选文件。
-    retrieval_query = (
-        _strip_scope_subject(query, parsed_ids)
-        if files is not None and parsed_ids
-        else query
-    )
-
-    # 双轨元数据过滤：scope 仅当用户明确提及母公司/单体口径时才硬过滤（合并为默认，
-    # 沿用 _apply_scope_preference 的软偏好，避免无关口径的查询被砍成只剩合并切片）；
-    # kinds/sections 由模型显式指定，缩小检索范围、直击目标切片类型/章节
-    filters: dict = {}
-    if kinds:
-        filters["kinds"] = kinds
-    if sections:
-        filters["sections"] = sections
-    if _PARENT_INTENT.search(retrieval_query):
-        filters["scopes"] = [SCOPE_PARENT]
-
-    # 多主体问句不拆开检索：files 或文档路由已经把 A、B 的文件圈进同一范围，
-    # 在这批文件里查一次字段（如「营业收入」）。融合和重排各做一遍，重排后再
-    # 按主体留名额。multi-query 只是同义变体，变体之间再做一次 RRF。
-    queries = (
-        expand_queries(retrieval_query)
-        if settings.kb_multiquery_enabled
-        else [retrieval_query]
-    )
-    try:
-        hits = search_knowledge_multi(
-            queries,
-            file_ids=parsed_ids,
-            top_k=top_k,
-            filters=filters or None,
-        )
-    except Exception:
-        logger.exception("知识库检索失败 query=%s", query[:80])
-        return KB_ERROR_HINT
-
     if not hits:
-        if parsed_ids:
-            # 有范围限制时，空结果很可能是"范围外"，提示用户放宽而不是换词
-            return build_kb_no_hit_scoped(len(parsed_ids))
+        if _user_limited_scope(files, parsed_ids):
+            # 用户或模型圈了文件，空结果很可能是范围外，提示放宽而不是换词。
+            # 系统按报告期收窄不算用户限定，不能说成「你只查了这几份」。
+            return build_kb_no_hit_scoped(len(parsed_ids or []))
         return KB_NO_HIT_HINT
     # 向量距离超阈值的命中与主题无关：直接当未命中，不下发引用，避免把不
     # 相关片段当依据、又挂着"中国银行季报·第9页"这类矛盾来源（见截图问题）。
     # distance=None 是关键词独有命中（确实含 query 词），保留作相关。
     relevant = _keep_relevant(hits)
     if not relevant:
-        if parsed_ids:
-            return build_kb_no_hit_scoped(len(parsed_ids))
+        if _user_limited_scope(files, parsed_ids):
+            return build_kb_no_hit_scoped(len(parsed_ids or []))
         return KB_NO_HIT_HINT
     # 引用走旁路交给上层（SSE 下发 + 随消息落库），文本里仍保留
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(relevant))
-    return "\n\n".join(_format_hit_with_context(hit) for hit in relevant)
+    body = "\n\n".join(_format_hit_with_context(hit) for hit in relevant)
+    periods: list[str] = []
+    for hit in relevant:
+        period = (hit.period or "").strip()
+        if period and period not in periods:
+            periods.append(period)
+    if not periods:
+        return body
+    # 表内常有上年同期。先写明这次命中的是哪几期，避免把对比列当成库的覆盖范围。
+    note = (
+        "本次命中的报告期：" + "、".join(periods) + "。"
+        "文中更早的年份是对比列，不是文件的报告期，也不表示库里没有这些年份。"
+    )
+    return f"{note}\n\n{body}"
+
+
+def _user_limited_scope(files: list[str] | None, parsed_ids: list | None) -> bool:
+    """只有用户在输入框里圈了文件，或模型明确点了 files，才算范围限制。"""
+    return bool(parsed_ids) and (bool(files) or bool(kb_scope()))
 
 
 def _keep_relevant(hits: list[Hit]) -> list[Hit]:
@@ -246,12 +296,18 @@ def _format_hit(row: dict) -> str:
         filename=row.get("filename") or "",
         mime=row.get("mime") or "",
     )
-    if kind == "figure":
-        return f"[{row['filename']} · {where}（图像识别，可能有误差）]\n{row['text']}"
     section = row.get("section")
-    if section:
+    if section and kind != "figure":
         where = f"{where} · {section}"
-    return f"[{row['filename']} · {where}]\n{row['text']}"
+    # 表格正文经常只有「本报告期」，年份写在文件上。抬头带上报告期，两年才分得开。
+    period = str(row.get("period") or "").strip()
+    if period:
+        where = f"{period} · {where}"
+    # 引用芯片仍用库存的 HTML（前端要 colspan）。这里只改模型看到的正文。
+    body = html_tables_to_markdown(row.get("text") or "")
+    if kind == "figure":
+        return f"[{row['filename']} · {where}（图像识别，可能有误差）]\n{body}"
+    return f"[{row['filename']} · {where}]\n{body}"
 
 
 def _format_hit_with_context(hit: Hit) -> str:
@@ -268,15 +324,16 @@ def _format_hit_with_context(hit: Hit) -> str:
             "page_end": hit.page_end,
             "section": hit.section,
             "seq": hit.seq,
+            "period": hit.period,
             "text": "",
         }
     ).rstrip("\n")
     lines = [head]
     for text in hit.before:
-        lines.append(f"〔上文〕{_clip_tail(text)}")
-    lines.append(hit.text)
+        lines.append(f"〔上文〕{_clip_tail(html_tables_to_markdown(text))}")
+    lines.append(html_tables_to_markdown(hit.text))
     for text in hit.after:
-        lines.append(f"〔下文〕{_clip_head(text)}")
+        lines.append(f"〔下文〕{_clip_head(html_tables_to_markdown(text))}")
     return "\n".join(lines)
 
 

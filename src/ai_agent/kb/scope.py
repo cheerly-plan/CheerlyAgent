@@ -121,23 +121,46 @@ def _narrow_by_period(
     """按问句里的报告期收窄文件。
 
     指定了季度或年份就只留那一期；没提时期时，同一主体只留最新一期。
-    同比、历年、两个年份不收窄。显式点名的文件如果被收成空，保留原范围。
+    同比、历年不收窄。点了两个年份又指定季度时，同一主体的这一季都留下，
+    路由只命中其中一年也会把另一年补进来。显式点名的文件如果被收成空，保留原范围。
     """
     from ai_agent.kb.meta import period_matches, period_rank, query_period_policy
     from ai_agent.memory.store import store
 
     policy, token = query_period_policy(query or "")
-    if policy == "all":
-        return file_ids
     try:
         rows = store.list_kb_files()
     except Exception:
         logger.warning("按报告期收窄失败，保持原范围", exc_info=True)
         return file_ids
-    ready = [row for row in rows if row.get("status") == "ready"]
+    ready_all = [row for row in rows if row.get("status") == "ready"]
     if file_ids is not None:
         want = {str(fid) for fid in file_ids}
-        ready = [row for row in ready if str(row.get("file_id")) in want]
+        ready = [row for row in ready_all if str(row.get("file_id")) in want]
+    else:
+        ready = ready_all
+    if policy in {"all", "span_q", "span_h"} and file_ids is not None:
+        # 问句要对比多期，但路由或模型可能只点到其中一年。同一主体的其它期补上。
+        subjects = {
+            str(row.get("subject") or "").strip()
+            for row in ready
+            if str(row.get("subject") or "").strip()
+        }
+        if subjects:
+            widened = [
+                row
+                for row in ready_all
+                if str(row.get("subject") or "").strip() in subjects
+                and (
+                    policy == "all"
+                    or period_matches(str(row.get("period") or ""), policy, token)
+                )
+            ]
+            if widened:
+                return _parse_file_ids(widened) or file_ids
+        return file_ids
+    if policy == "all":
+        return file_ids
     # 目录里对不上这些 id（或库是空的）时无法判断报告期，保持调用方已经解析出的范围
     if not ready:
         return file_ids
@@ -164,8 +187,12 @@ def _narrow_by_period(
         ]
     if not kept:
         return file_ids if explicit else []
+    return _parse_file_ids(kept) or (file_ids if explicit else [])
+
+
+def _parse_file_ids(rows: list[dict]) -> list[uuid.UUID]:
     parsed: list[uuid.UUID] = []
-    for row in kept:
+    for row in rows:
         raw = row.get("file_id")
         if isinstance(raw, uuid.UUID):
             parsed.append(raw)
@@ -174,7 +201,7 @@ def _narrow_by_period(
                 parsed.append(uuid.UUID(str(raw)))
             except ValueError:
                 continue
-    return parsed or (file_ids if explicit else [])
+    return parsed
 
 
 def _route(query: str | None) -> list[uuid.UUID]:

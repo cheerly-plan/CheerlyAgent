@@ -10,7 +10,8 @@
 - table：一个行项目一片，每片重复表头、表题和单位。「其中：」、加减行和
   合计行跟所属科目走，不单独成片。正文里的 HTML `<table>` 先整张抽出，
   kind 记成 table。续页没印列名时补上一页的列名，表题同样往下带。
-  向量和重排读的是单元格文字，不读标签。
+  向量和重排读的是单元格文字，不读标签。给模型的检索和抽取把 HTML 表
+  换成 Markdown 表，库里仍留 HTML，前端合并单元格不用重切。
 - figure：图像描述本身很短，直接沿用常规策略（一般不触发切分）
 
 两级栅栏，谁窄听谁的：
@@ -575,15 +576,126 @@ def _clean_indicator(cell: str) -> str:
 
 
 def html_table_plain(text: str) -> str:
-    """HTML 表换成「单元格 | 单元格」的行。标签不进向量，也不进重排。"""
+    """表格换成「单元格 | 单元格」的行。标签和 Markdown 分隔行不进向量，也不进重排。"""
+    if not text:
+        return text
+    if _HTML_TABLE.search(text):
+
+        def repl(match: re.Match[str]) -> str:
+            lines = [_row_plain_line(row) for row in _table_rows(match.group(0))]
+            return "\n".join(line for line in lines if line.strip())
+
+        text = _HTML_TABLE.sub(repl, text).strip()
+    return _markdown_table_plain(text)
+
+
+def _markdown_table_plain(text: str) -> str:
+    """人工修订存成 Markdown 表时，分隔行同样不进向量。"""
+    if "|" not in text:
+        return text
+    lines = text.splitlines()
+    out: list[str] = []
+    changed = False
+    index = 0
+    while index < len(lines):
+        nxt = lines[index + 1] if index + 1 < len(lines) else ""
+        if _md_row(lines[index]) and _MD_SEPARATOR.match(nxt.strip()):
+            changed = True
+            while index < len(lines) and _md_row(lines[index]):
+                if not _MD_SEPARATOR.match(lines[index].strip()):
+                    joined = " | ".join(_md_cells(lines[index]))
+                    if joined.strip():
+                        out.append(joined)
+                index += 1
+            continue
+        out.append(lines[index])
+        index += 1
+    return "\n".join(out).strip() if changed else text
+
+
+def _md_row(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _md_cells(line: str) -> list[str]:
+    raw = line.strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [part.strip().replace("\\|", "|") for part in re.split(r"(?<!\\)\|", raw)]
+
+
+def html_tables_to_markdown(text: str) -> str:
+    """HTML 表换成 Markdown 表。只用于喂给模型的正文，库存和引用仍是 HTML。
+
+    colspan / rowspan 展开成矩形，合并格的文字写进它盖住的每一列，
+    「期末余额」横跨「合并 | 母公司」时两列都还带着这个列名。
+    整行只有一个分组标题（「流动资产：」）时不横着复制，避免把它当成每列的值。
+    """
     if not text or not _HTML_TABLE.search(text):
         return text
+    return _HTML_TABLE.sub(lambda match: _one_html_table_to_markdown(match.group(0)), text)
 
-    def repl(match: re.Match[str]) -> str:
-        lines = [_row_plain_line(row) for row in _table_rows(match.group(0))]
-        return "\n".join(line for line in lines if line.strip())
 
-    return _HTML_TABLE.sub(repl, text).strip()
+def _one_html_table_to_markdown(table: str) -> str:
+    grid = _expand_html_grid(_table_rows(table))
+    if not grid or not any(grid):
+        plain = html_table_plain(table)
+        return plain or table
+    width = max(len(row) for row in grid)
+    lines = [
+        "| " + " | ".join(_md_cell(cell) for cell in row + [""] * (width - len(row))) + " |"
+        for row in grid
+    ]
+    separator = "| " + " | ".join("---" for _ in range(width)) + " |"
+    return "\n".join([lines[0], separator, *lines[1:]])
+
+
+def _md_cell(text: str) -> str:
+    return (text or "").replace("|", "\\|")
+
+
+def _expand_html_grid(rows: list[str]) -> list[list[str]]:
+    """按 colspan / rowspan 把表铺成矩形。被上一行占住的格子跳过。"""
+    grid: list[list[str | None]] = []
+    for row_index, row_html in enumerate(rows):
+        while len(grid) <= row_index:
+            grid.append([])
+        column = 0
+        # 「流动资产：」这种分组行横跨整表。复制到每一列，模型会把它当成该列的数值。
+        section_row = _is_html_section_row(row_html)
+        for match in _HTML_CELL.finditer(row_html):
+            attrs = match.group(1) or ""
+            colspan = _span_attr(_HTML_COLSPAN, attrs)
+            rowspan = _span_attr(_HTML_ROWSPAN, attrs)
+            while column < len(grid[row_index]) and grid[row_index][column] is not None:
+                column += 1
+            text = _cell_plain(match.group(2))
+            section = section_row and colspan > 1
+            for down in range(rowspan):
+                while len(grid) <= row_index + down:
+                    grid.append([])
+                target = grid[row_index + down]
+                while len(target) < column + colspan:
+                    target.append(None)
+                for offset in range(colspan):
+                    if target[column + offset] is None:
+                        target[column + offset] = "" if section and offset else text
+            column += colspan
+    width = max((len(row) for row in grid), default=0)
+    return [[cell or "" for cell in row] + [""] * (width - len(row)) for row in grid]
+
+
+def _span_attr(pattern: re.Pattern[str], attrs: str) -> int:
+    found = pattern.search(attrs)
+    if not found:
+        return 1
+    try:
+        return max(int(found.group(1)), 1)
+    except ValueError:
+        return 1
 
 
 def _html_header_row_count(rows: list[str]) -> int:

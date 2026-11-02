@@ -1258,12 +1258,50 @@ def test_run_loop_requires_kb_tool_when_question_names_entity():
         patch("ai_agent.agents.loop.execute_tool", return_value="命中实体：金仙"),
         patch("ai_agent.kb.retrieval.mentioned_subjects", return_value=set()),
         patch("ai_agent.kb.retrieval.mentioned_entities", return_value=["金仙"]),
+        patch("ai_agent.tools.kg_search.prefetch_neighborhood", return_value=""),
     ):
         events = list(run_loop([{"role": "user", "content": "金仙的任职"}]))
 
     assert seen[0] == ("required", ["kb_search", "kg_search"])
     assert seen[1][0] == "auto"
     assert events[-1]["type"] == "done"
+
+
+def test_run_loop_injects_graph_neighborhood_before_tools():
+    """关系问句在选工具前把图谱邻域放进上下文。科目问句不放。"""
+    seen: list[list[dict]] = []
+
+    def capture(messages, tools, tool_choice="auto"):
+        seen.append(list(messages))
+        yield ("text", "汇金持股")
+        yield ("result", {"content": "汇金持股", "tool_calls": []})
+
+    block = "【图谱邻域】\n命中实体：中央汇金(org)"
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.tool_schemas", return_value=[]),
+        patch(
+            "ai_agent.tools.kg_search.prefetch_neighborhood",
+            return_value=block,
+        ) as prefetch,
+    ):
+        list(run_loop([{"role": "user", "content": "中国银行的股东有哪些"}]))
+
+    assert prefetch.called
+    assert seen[0][-1]["content"] == block
+
+    seen.clear()
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.tool_schemas", return_value=[]),
+        patch(
+            "ai_agent.tools.kg_search.prefetch_neighborhood",
+            return_value="",
+        ),
+    ):
+        list(run_loop([{"role": "user", "content": "营业收入是多少"}]))
+
+    assert seen[0][-1]["content"] == "营业收入是多少"
 
 
 def test_run_loop_does_not_force_tool_after_this_question_was_retrieved():

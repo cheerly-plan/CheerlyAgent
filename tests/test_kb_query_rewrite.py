@@ -248,7 +248,7 @@ def test_search_knowledge_multi_single_query_delegates(monkeypatch):
     """单条 query 退化为 search_knowledge，行为一致。"""
     from ai_agent.kb import retrieval
 
-    def fake_single(query, *, file_ids=None, top_k=3, filters=None):
+    def fake_single(query, *, file_ids=None, top_k=3, filters=None, **_kwargs):
         assert query == "唯一查询"
         return ["hit"]
 

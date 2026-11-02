@@ -161,6 +161,47 @@ def test_period_narrows_to_latest_named_year_or_keeps_both(monkeypatch):
     assert set(resolve_tool_file_ids(["中国能源建设"], query="2020年营收")) == {a, b}
 
 
+def test_span_quarter_keeps_both_years_and_pulls_the_missing_one(monkeypatch):
+    """对比两年三季度时，只点到 2026 也要把同一家的 2025 三季报补上。"""
+    y2026 = uuid.uuid4()
+    y2025 = uuid.uuid4()
+    annual = uuid.uuid4()
+    other = uuid.uuid4()
+    rows = [
+        _ready(
+            y2026,
+            "深圳中科飞测科技股份有限公司2026年第三季度报告.pdf",
+            "深圳中科飞测科技股份有限公司",
+            ["深圳中科飞测科技"],
+            "2026Q3",
+        ),
+        _ready(
+            y2025,
+            "深圳中科飞测科技股份有限公司2025年第三季度报告.pdf",
+            "深圳中科飞测科技股份有限公司",
+            ["深圳中科飞测科技"],
+            "2025Q3",
+        ),
+        _ready(
+            annual,
+            "深圳中科飞测科技股份有限公司2025年年度报告.pdf",
+            "深圳中科飞测科技股份有限公司",
+            ["深圳中科飞测科技"],
+            "2025",
+        ),
+        _ready(other, "中国银行2026年第三季度报告.pdf", "中国银行股份有限公司", [], "2026Q3"),
+    ]
+    monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
+    both = resolve_tool_file_ids(
+        ["深圳中科飞测科技股份有限公司2026年第三季度报告"],
+        query="2025年和2026年三季度股东持股对比",
+    )
+    assert set(both) == {y2025, y2026}
+    # 简称不在别名表里，也要圈到两年的三季报，不把年报和别的公司带上
+    named = resolve_tool_file_ids(None, query="中科飞测2025年和2026年三季度持股对比")
+    assert set(named) == {y2025, y2026}
+
+
 def test_capability_block_lists_doc_types_not_file_inventory(monkeypatch):
     """提示词只声明文档类型的实体和关系，不注入公司名单和文件清单。"""
     monkeypatch.setattr(
@@ -196,5 +237,6 @@ def test_capability_block_lists_doc_types_not_file_inventory(monkeypatch):
     assert "关系=" in block
     assert "中国能源建设股份有限公司" not in block
     assert "中国能源建设2026三季报.pdf" not in block
+    assert "库内已有报告期：2026Q3（2 份）" in block
     assert "【知识库主体】" not in block
     assert "【知识库可用文件】" not in block

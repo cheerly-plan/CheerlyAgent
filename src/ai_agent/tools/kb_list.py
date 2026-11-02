@@ -74,7 +74,10 @@ def _matches(row: dict, needle: str) -> bool:
 def _format_line(row: dict) -> str:
     name = str(row.get("filename") or "(未命名)").strip()
     desc = str(row.get("description") or "").strip()
+    period = str(row.get("period") or "").strip()
     line = f"- {name}"
+    if period:
+        line += f"（报告期 {period}）"
     if desc:
         line += f"：{desc}"
     return line

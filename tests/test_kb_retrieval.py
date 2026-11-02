@@ -6,8 +6,8 @@ import pytest
 
 from ai_agent.core.config import settings
 from ai_agent.kb import retrieval
-from ai_agent.kb.chunking import context_prefix, embedding_input
-from ai_agent.tools.kb_search import _format_hit_with_context
+from ai_agent.kb.chunking import context_prefix, embedding_input, html_tables_to_markdown
+from ai_agent.tools.kb_search import _format_hit, _format_hit_with_context
 
 FILE_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
@@ -55,6 +55,147 @@ def test_embedding_and_rerank_read_table_cells_not_tags():
     assert "<td>" not in shown
     assert "货币资金 | 634,706,310.18" in shown
     assert retrieval._RERANK_CLIP == 800
+
+
+def test_embedding_flattens_markdown_table_separator():
+    """修订切片若存成 Markdown 表，分隔行不能进向量。"""
+    md = "| 项目 | 期末 |\n| --- | --- |\n| 货币资金 | 1 |"
+    embedded = embedding_input(md, filename="季报.pdf", page=8, kind="table")
+    assert "---" not in embedded
+    assert "货币资金 | 1" in embedded
+
+
+def test_html_table_becomes_markdown_and_keeps_merged_headers():
+    """模型看到的是 Markdown 表。合并列表头要复制到每一列，分组标题不横着复制。"""
+    html = (
+        "<table>"
+        '<tr><td rowspan="2">项目</td><td colspan="2">期末余额</td></tr>'
+        "<tr><td>合并</td><td>母公司</td></tr>"
+        '<tr><td colspan="3">流动资产：</td></tr>'
+        "<tr><td>货币资金</td><td>100</td><td>80</td></tr>"
+        "</table>"
+    )
+    md = html_tables_to_markdown(f"合并资产负债表\n{html}\n附注")
+    assert "<td>" not in md and "<table>" not in md
+    assert md.startswith("合并资产负债表\n")
+    assert md.endswith("附注")
+    assert "| 项目 | 期末余额 | 期末余额 |" in md
+    assert "| 项目 | 合并 | 母公司 |" in md
+    assert "| 流动资产： |  |  |" in md
+    assert "| 货币资金 | 100 | 80 |" in md
+    # 竖线是列分隔，单元格里的竖线不能再被当成一列
+    assert html_tables_to_markdown("<table><tr><td>a|b</td><td>1</td></tr></table>") == (
+        "| a\\|b | 1 |\n| --- | --- |"
+    )
+
+
+def test_format_hit_sends_markdown_table_to_the_model():
+    html = (
+        "<table><tr><td>项目</td><td>本期</td></tr>"
+        "<tr><td>营业收入</td><td>169,462</td></tr></table>"
+    )
+    text = _format_hit(
+        {
+            "filename": "季报.pdf",
+            "kind": "table",
+            "page": 8,
+            "seq": 3,
+            "text": html,
+        }
+    )
+    assert "<td>" not in text
+    assert "| 营业收入 | 169,462 |" in text
+    assert text.startswith("[季报.pdf · 第8页]")
+
+
+def test_citations_keep_html_so_the_preview_can_merge_cells():
+    """前端预览靠 colspan 画合并格，引用正文不能跟模型上下文一起改成 Markdown。"""
+    from ai_agent.tools.kb_search import _citations_of
+
+    html = "<table><tr><td colspan=\"2\">流动资产：</td></tr></table>"
+    hit = retrieval.Hit(
+        file_id=str(FILE_ID),
+        filename="季报.pdf",
+        seq=3,
+        page=8,
+        kind="table",
+        text=html,
+        distance=0.2,
+    )
+    [citation] = _citations_of([hit])
+    assert citation.text == html
+
+
+def test_dedupe_keeps_similar_table_from_another_file():
+    """两年的股东表长得很像，去重不能把另一年整份丢掉。"""
+    body = "前10名股东持股情况表苏州翌流明光电科技有限公司37800963" * 4
+    rows = [
+        {**_row(0, body), "file_id": uuid.uuid4()},
+        {**_row(1, body + "尾"), "file_id": uuid.uuid4()},
+    ]
+    assert len(retrieval._dedupe(rows)) == 2
+
+
+def test_multi_period_query_keeps_both_report_years(monkeypatch):
+    """重排把 2026 排满时，点名的 2025 三季报仍要占一个名额，并且排在前面。"""
+    monkeypatch.setattr(settings, "kb_subject_quota_band", 0.12)
+    newer = uuid.uuid4()
+    older = uuid.uuid4()
+    rows = []
+    for seq in range(3):
+        rows.append(
+            {
+                **_row(seq, f"2026股东{seq}", distance=0.2 + seq * 0.01),
+                "file_id": newer,
+                "filename": "深圳中科飞测科技股份有限公司2026年第三季度报告.pdf",
+                "subject": "苏州翌流明光电科技有限公司",
+            }
+        )
+    rows.append(
+        {
+            **_row(3, "2025股东", distance=0.45),
+            "file_id": older,
+            "filename": "深圳中科飞测科技股份有限公司2025年第三季度报告.pdf",
+            "subject": "深圳市创新投资集团有限公司",
+        }
+    )
+    picked = retrieval._diversify(
+        "中科飞测2025年和2026年三季度股东持股对比", rows, top_k=3
+    )
+    assert {row["file_id"] for row in picked} >= {newer, older}
+    assert picked[0]["file_id"] == newer
+    assert picked[1]["file_id"] == older
+
+
+def test_two_named_companies_each_keep_a_slot_despite_rewritten_subjects():
+    """两家一起查时，股东表把主体改成股东名，也不能让一家占满 top_k。"""
+    bank = uuid.uuid4()
+    auto = uuid.uuid4()
+    rows = []
+    for seq in range(4):
+        rows.append(
+            {
+                **_row(seq, f"长安股东{seq}", distance=0.20 + seq * 0.01),
+                "file_id": auto,
+                "filename": "长安汽车有限公司2026年第三季度报告.pdf",
+                "subject": f"股东{seq}",
+            }
+        )
+    rows.append(
+        {
+            **_row(4, "41,108,449", distance=0.25),
+            "file_id": bank,
+            "filename": "中国银行股份有限公司2026年第三季度报告.pdf",
+            "subject": "中国银行股份有限公司",
+        }
+    )
+    picked = retrieval._diversify(
+        "中国银行和长安汽车的总资产分别是多少",
+        rows,
+        top_k=3,
+        per_file=True,
+    )
+    assert [row["file_id"] for row in picked[:2]] == [auto, bank]
 
 
 def test_dedupe_drops_near_duplicate_chunks():
@@ -194,6 +335,20 @@ def test_to_hit_keeps_missing_distance_as_none():
     assert retrieval._to_hit(row).distance is None
     row["distance"] = 0.0
     assert retrieval._to_hit(row).distance == 0.0
+
+
+def test_format_hit_puts_period_before_the_page():
+    text = _format_hit(
+        {
+            "filename": "甲公司2025年第三季度报告.pdf",
+            "kind": "table",
+            "page": 4,
+            "seq": 13,
+            "text": "苏州翌流明 37,800,963",
+            "period": "2025Q3",
+        }
+    )
+    assert text.startswith("[甲公司2025年第三季度报告.pdf · 2025Q3 · 第4页]")
 
 
 def test_format_hit_with_context_marks_neighbors_and_position():

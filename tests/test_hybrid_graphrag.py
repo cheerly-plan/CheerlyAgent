@@ -326,6 +326,51 @@ def test_format_neighborhood_lists_seeds_and_edges():
     assert "长鑫存储 —生产→ DRAM：存储原厂" in lines[2]
 
 
+def test_graph_prefetch_only_for_relation_questions():
+    assert kg_search.wants_graph_neighborhood("长安汽车的股东有哪些")
+    assert kg_search.wants_graph_neighborhood("谁任职于中国银行")
+    assert kg_search.wants_graph_neighborhood("华宝新能收购了哪家公司")
+    assert not kg_search.wants_graph_neighborhood("长安汽车前三季度营业收入是多少")
+    assert not kg_search.wants_graph_neighborhood("归属于上市公司股东的净利润")
+    assert not kg_search.wants_graph_neighborhood("股东权益是多少")
+
+
+def test_prefetch_neighborhood_lists_edges_without_evidence(monkeypatch):
+    seed = _entity("中央汇金")
+    seed["type"] = "org"
+    company = _entity("中国银行股份有限公司")
+    company["type"] = "org"
+    monkeypatch.setattr(kg_search.store, "graph_stats", lambda: {"entities": 2})
+    monkeypatch.setattr(kg_search, "embed_query", lambda q: [0.1])
+    monkeypatch.setattr(kg_search, "resolve_tool_file_ids", lambda files, query=None: None)
+    monkeypatch.setattr(kg_search.store, "search_entities", lambda *a, **k: [seed])
+    monkeypatch.setattr(
+        kg_search.store,
+        "expand_subgraph",
+        lambda *a, **k: {
+            "nodes": [seed, company],
+            "edges": [
+                {
+                    "source_id": seed["id"],
+                    "target_id": company["id"],
+                    "relation": "持股",
+                    "description": "占比58.59%",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        kg_search.store,
+        "get_entity_chunks",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("预检索不该取原文切片")),
+    )
+    text = kg_search.prefetch_neighborhood("中国银行的股东有哪些")
+    assert text.startswith("【图谱邻域】")
+    assert "中央汇金 —持股→ 中国银行股份有限公司：占比58.59%" in text
+    assert "原文依据" not in text
+    assert kg_search.prefetch_neighborhood("营业收入是多少") == ""
+
+
 def test_kg_search_fuses_seed_neighbor_and_vector_evidence(monkeypatch):
     e1, e2 = _entity("长鑫存储"), _entity("DRAM")
     ev1 = _evidence(e1["id"], 0, "长鑫存储是存储原厂")
@@ -627,7 +672,7 @@ def test_search_knowledge_forwards_explicit_file_ids(monkeypatch):
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
     calls = []
 
-    def fake_core(query, embedding, *, file_ids, top_k, filters=None):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None, **_kwargs):
         calls.append(file_ids)
         return []
 
@@ -643,7 +688,7 @@ def test_search_knowledge_defaults_to_whole_library(monkeypatch):
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
     calls = []
 
-    def fake_core(query, embedding, *, file_ids, top_k, filters=None):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None, **_kwargs):
         calls.append(file_ids)
         return []
 
@@ -659,7 +704,7 @@ def test_search_knowledge_forwards_top_k(monkeypatch):
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
     seen = {}
 
-    def fake_core(query, embedding, *, file_ids, top_k, filters=None):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None, **_kwargs):
         seen["top_k"] = top_k
         return []
 
@@ -846,6 +891,19 @@ def test_prompt_carries_doc_name_and_span():
     assert head.startswith("以下是《安克创新科技股份有限公司2026 年第三季度报告》")
     assert "第 65–66 段" in head
     assert "第 18–19 页" in head
+
+
+def test_prompt_turns_html_tables_into_markdown():
+    from ai_agent.kb.chunking import Chunk
+    from ai_agent.kb.graph_extract import _build_prompt
+
+    table = (
+        "<table><tr><td>项目</td><td>本期</td></tr>"
+        "<tr><td>营业收入</td><td>1</td></tr></table>"
+    )
+    prompt = _build_prompt([Chunk(text=table, page=8, kind="table")], 0, "季报.pdf")
+    assert "<td>" not in prompt
+    assert "| 营业收入 | 1 |" in prompt
 
 
 def test_prompt_drops_file_extension_and_keeps_backward_compat():

@@ -43,6 +43,19 @@ def _citation(seq: int = 0) -> Citation:
     )
 
 
+def test_kb_search_names_the_periods_it_actually_hit(monkeypatch):
+    """命中抬头先写报告期，避免模型把表里的对比年份当成库的覆盖范围。"""
+    from ai_agent.tools import kb_search as kb_tool
+
+    hit = _hit()
+    hit.period = "2025Q3"
+    monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [hit])
+    text = kb_tool._kb_search("持股对比")
+    assert text.startswith("本次命中的报告期：2025Q3。")
+    assert "2025Q3 · 第3页" in text
+
+
 def test_kb_search_records_citations_with_position(monkeypatch):
     from ai_agent.tools import kb_search as kb_tool
 
