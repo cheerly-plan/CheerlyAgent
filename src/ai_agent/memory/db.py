@@ -619,6 +619,105 @@ class Database:
                   AND f.chunk_count > 0
                 """
             )
+            # ——— 检索元数据（主体 / 报告期 / 长尾）———
+            # 之前检索只能按 file_id 过滤，再靠单一 query 向量在 top_k 个名额里
+            # 全局抢：「A 和 B 的营业收入」这种对比问句里，离混合向量更近的那家
+            # 会把名额吃满，另一家一条都回不来。补上 subject 维度后，检索可以按
+            # 主体分桶、每桶独立配额（见 kb/store.search_kb_chunks），这类问题
+            # 才不需要靠模型「自觉拆成两次调用」来兜。
+            # 热维度成列（可直接索引、可 PARTITION BY 分桶），长尾进 meta JSONB。
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS subject TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS subject_aliases TEXT[] NOT NULL DEFAULT '{}'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS period TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS meta JSONB
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_file_subject_idx
+                ON agent_kb_file (subject)
+                """
+            )
+            # 切片冗余主体/期间：分桶排序要在单表上 PARTITION BY，JOIN 文件表
+            # 会让窗口函数走不成索引；且「一份研报讲多家公司」需要切片级覆盖
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_chunk
+                ADD COLUMN IF NOT EXISTS subject TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_chunk
+                ADD COLUMN IF NOT EXISTS period TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_chunk
+                ADD COLUMN IF NOT EXISTS meta JSONB
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_chunk_subject_idx
+                ON agent_kb_chunk (subject)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_chunk_meta_idx
+                ON agent_kb_chunk USING gin (meta)
+                """
+            )
+            # ——— 文档级摘要：检索前的「路由层」索引 ———
+            # 切片索引回答「哪一段相关」，摘要索引回答「哪一份文件相关」。
+            # 没有它，模型只能对着注入的文件清单猜要查哪几份——文件一多
+            # （几十上百份）清单既撑爆上下文，也选不准。有了文档向量，
+            # 路由在检索层完成，files 不再是模型的负担。
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                f"""
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS summary_embedding vector({dim})
+                """
+            )
+            # '' 未生成 / ready / failed / empty（无可用素材）
+            conn.execute(
+                """
+                ALTER TABLE agent_kb_file
+                ADD COLUMN IF NOT EXISTS summary_status TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_kb_file_summary_hnsw
+                ON agent_kb_file USING hnsw (summary_embedding vector_cosine_ops)
+                """
+            )
             conn.commit()
 
     def close(self) -> None:

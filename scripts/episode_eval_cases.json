@@ -1,0 +1,54 @@
+{
+  "episodes": [
+    "用户日常用 pytest 写后端单测，不写前端测试。",
+    "用户在做知识库的文档路由，想先按公司名和报告期圈定文件。",
+    "用户原先计划下周去深圳见客户。",
+    "用户下周的出差改去了上海出差三天，主要见投资人。",
+    "用户家里的猫叫年糕，每天晚上要陪它玩。",
+    "用户以前的前端仓库用 JavaScript 编写。",
+    "用户已经把前端仓库改成 TypeScript 了。",
+    "用户此前在做图谱抽取。",
+    "用户现在改为做记忆评测，用黄金对话集。"
+  ],
+  "queries": [
+    {"id": "pytest", "query": "我平时用什么框架写单测", "expect": "pytest"},
+    {"id": "doc-route", "query": "文档路由做到哪一步了", "expect": "文档路由"},
+    {"id": "cat", "query": "我的猫叫什么名字", "expect": "年糕"},
+    {
+      "id": "trip-now",
+      "query": "我下周出差现在去哪",
+      "expect": "上海出差",
+      "avoid": "深圳"
+    },
+    {
+      "id": "trip-before",
+      "query": "我原先计划出差去哪",
+      "expect": "深圳",
+      "avoid": "上海出差"
+    },
+    {
+      "id": "frontend-now",
+      "query": "前端仓库现在用什么语言",
+      "expect": "TypeScript",
+      "avoid": "JavaScript"
+    },
+    {
+      "id": "frontend-before",
+      "query": "前端仓库以前用什么语言",
+      "expect": "JavaScript",
+      "avoid": "TypeScript"
+    },
+    {
+      "id": "task-now",
+      "query": "我现在在做哪个项目",
+      "expect": "记忆评测",
+      "avoid": "图谱抽取"
+    },
+    {
+      "id": "task-before",
+      "query": "我之前在做哪个项目",
+      "expect": "图谱抽取",
+      "avoid": "记忆评测"
+    }
+  ]
+}

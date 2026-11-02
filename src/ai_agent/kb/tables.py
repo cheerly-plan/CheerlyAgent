@@ -19,8 +19,8 @@ from ai_agent.kb.table_cells import (
     _CJK,
     _CJK_RE,
     _clean_table,
-    _is_data_row,
     _is_header_row,
+    _is_item_row,
     _tidy_header,
 )
 
@@ -304,7 +304,7 @@ def _carry_page_headers(
 
     补的条件同时成立才动手，宁可漏补也不误补：
     - 表格在页面顶部（续表只会从顶部开始）；
-    - 首行是数据行（含纯数字单元格）；
+    - 首行是科目行（有数字，或金额格是空的）；
     - 上一页最后一张表排到了页底（说明它是被切断的，不是自己结束的）；
     - 列数与最近一次见到的表头一致。
     """
@@ -318,7 +318,7 @@ def _carry_page_headers(
         width = max(len(row) for row in rows)
         if (
             y <= _HEAD_CARRY_Y
-            and _is_data_row(rows[0])
+            and _is_item_row(rows[0])
             and last_header is not None
             and len(last_header) == width
             and _reached_page_bottom(
@@ -386,8 +386,8 @@ def _is_table_continuation(
         return False
     if p_cap and c_cap and p_cap != c_cap:
         return False
-    # 续表要么重印同一行表头，要么第一行已经是数据
-    if p_rows[0] != c_rows[0] and not _is_data_row(c_rows[0]):
+    # 续表要么重印同一行表头，要么第一行已经是科目（金额可以为空）
+    if p_rows[0] != c_rows[0] and not _is_item_row(c_rows[0]):
         return False
     if not _boxes_vertically_stacked(p_bbox, c_bbox):
         return False

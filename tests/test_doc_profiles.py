@@ -67,6 +67,19 @@ def test_base_prompt_has_no_document_specific_words():
         assert word not in _BASE_SYSTEM
 
 
+def test_quarterly_report_asks_for_holders_not_statement_lines():
+    """季报图只回答股份、营收来源、机构、资金往来，不把报表每一行建成点。"""
+    prompt = build_system_prompt("quarterly_report", "full")
+    assert "股东与持股机构" in prompt
+    assert "持有人指向被持股公司" in prompt
+    assert "货币资金、应收账款、净利润" in prompt
+    assert "在手订单、新签订单" in prompt
+    # 年报仍抽财务指标；两套不能再是同一份配置
+    annual = build_system_prompt("annual_report", "full")
+    assert "财务指标" in annual
+    assert "持有人指向被持股公司" not in annual
+
+
 def test_scope_and_predicates_are_injected():
     prompt = build_system_prompt("prospectus", "full")
     assert "募投项目" in prompt

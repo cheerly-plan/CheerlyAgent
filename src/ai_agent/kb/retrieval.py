@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 import re
 import uuid
@@ -23,18 +22,28 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
+from ai_agent.kb.lexicon import load_short_words, read_extra
+from ai_agent.kb.meta import name_in_text
+from ai_agent.kb.meta import ENTITY_SUFFIX as _ENTITY_SUFFIX
+from ai_agent.kb.meta import EXT_RE as _EXT_RE
+from ai_agent.kb.meta import FILENAME_NOISE as _FILENAME_NOISE
+from ai_agent.kb.meta import NAME_PUNCT as _NAME_PUNCT
+from ai_agent.kb.otsl import render_otsl
 from ai_agent.kb.parsing import FIGURE, TABLE
 from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.memory.embeddings import embed_query
 from ai_agent.memory.store import store
 from ai_agent.prompts.kb import build_rerank_user
+from ai_agent.kb.rerank import get_reranker
 
 logger = get_logger(__name__)
 
 # 与已保留片段的三字组 Jaccard 超过这个值就当成重复（overlap 造成的近似片）
 _DUP_THRESHOLD = 0.72
-# 送重排时单段文本截断长度：重排只看相关性，不需要读完整段
-_RERANK_CLIP = 300
+# 送重排的正文上限，与 HTML 表行组是同一个字数：一组表重排能看完，
+# 不会停在表头。正文切片本来就短于这个上限，放宽后整段也能读完。
+_RERANK_CLIP = TABLE_GROUP_CHARS
 # 送重排的候选上限：再多提示词就太长，而且第 13 名之后本来就进不了 top_k
 _RERANK_LIMIT = 12
 # RRF 融合平滑项（业界惯用 60）：排名越靠前贡献越大，两路都命中会叠加
@@ -45,6 +54,14 @@ _RRF_K = 60
 # 权重 1.0（两路同权）时，这种片段能和向量第一名打平，把真正带数据的
 # 切片挤下去；降到 0.5 后它只算「补充证据」，压不过向量路的高名次。
 _RRF_KEYWORD_WEIGHT = 0.5
+# 关键词「全命中」（一条切片命中了本次检索的全部查询词，见 `_rrf_merge`
+# 的 `n_keywords`）时恢复权重到 1.0。这类切片基本就是用户要的字面答案
+# （如封面「证券代码：600916」同时含「证券」和「代码」）：原统一 0.5 会把
+# 它压在向量第 16 名之下、被 RERANK_LIMIT 砍掉，于是「证券代码是多少」
+# 答到其他地方。要压过向量第 16 名需 w/61 > 1/76 → w > 0.803，故取整值
+# 1.0。只有「全命中」才恢复，部分命中的目录/页眉仍保持 0.5 折扣，以防
+# 字面噪声挤掉真正带数据的切片。
+_RRF_KEYWORD_WEIGHT_FULL = 1.0
 
 # ——— 报表口径偏好 ———
 # 同一指标在合并报表与母公司报表里各有一份数，值可能差几十倍（能建期末
@@ -71,24 +88,6 @@ _STOPWORDS = {
 _JSON_ARRAY = re.compile(r"\[[^\[\]]*\]")
 # Excel 的 page 是工作表序号；PDF/Word 的 page 是页码。展示名不能混用「表N」。
 _SHEET_EXTS = {".xlsx", ".xlsm", ".xls", ".csv"}
-
-# ——— 文件名主体收窄（tags 为空时的兜底信号） ———
-# 查询与文件主体的最长公共子串至少有 3 个字、且占主体核心名 40% 以上，
-# 才认定「这一问在问这家公司」。实测「中国能建」×「中国能源建设」= 3/6，
-# 「顺丰控股」×全称 = 4/4；库里没被问到的公司一律 0。
-_SUBJECT_MIN_COMMON = 3
-_SUBJECT_MIN_RATIO = 0.4
-_EXT_RE = re.compile(r"\.(pdf|docx?|xlsx?|xlsm|md|markdown|txt|csv)$", re.I)
-# 每份文件标题里都有、对「是哪家主体」没有区分度的部分
-_FILENAME_NOISE = re.compile(
-    r"\d{4}\s*年|第[一二三四五六七八九十]+季度|半年度报告|季度报告|年度报告|报告|公告"
-)
-# 组织形式后缀：剥掉才知道主体核心名有多长
-_ENTITY_SUFFIX = re.compile(r"(股份有限公司|有限责任公司|有限公司|集团公司|集团|公司)$")
-_NAME_PUNCT = re.compile(
-    r"""[\s\-_/·・,，。.、:：;；!！?？'"“”‘’()（）\[\]【】<>《》]+"""
-)
-
 
 def is_sheet_file(filename: str = "", mime: str = "") -> bool:
     suffix = Path(filename or "").suffix.lower()
@@ -143,6 +142,8 @@ class Hit:
     section: str | None = None
     # 报表口径：consolidated / parent / None（非报表或表里没印表题）
     scope: str | None = None
+    # 文件报告期，如 2025Q3。正文表格常常不写年份，回答时靠它区分两年。
+    period: str = ""
     before: list[str] = field(default_factory=list)
     after: list[str] = field(default_factory=list)
 
@@ -168,25 +169,108 @@ def search_knowledge(
     *,
     file_ids: list[uuid.UUID] | None = None,
     top_k: int = 3,
+    filters: dict | None = None,
+    per_file: bool = False,
+    diversify_query: str | None = None,
 ) -> list[Hit]:
     """知识库检索主入口。检索词向量化失败会抛异常，由调用方转成友好文案。
 
-    `file_ids` 为空时先按查询推断候选文件范围（标签、文件名主体），再把
-    收窄结果用全库结果补位。收窄是"猜"出来的，可能判窄，所以绝不能拿
-    召回率换精度——见 `_pad_from_full`。
-
-    范围推导放在这一层而不是工具层：模型不传 files 时，kb_search / kg_search
-    都走这里；放在工具层等于主路径白丢一次提纯候选的机会。
+    `file_ids` 为空表示搜全库——检索范围完全由调用方决定（工具层传入模型
+    指定的 files，或会话级 kb_scope），本层不再根据查询内容自动推断文件范围。
+    `filters`（可选）是 chunk 元数据过滤（kinds/subjects/periods/scopes/
+    sections），由调用方（工具层）构造后传入：scope 从 query 意图推断、
+    kinds/sections 由模型显式指定。带过滤召回为空时自动回退「不过滤」再查
+    一次，避免过滤过窄直接挂空。
     """
     embedding = embed_query(query)
-    if file_ids is None:
-        scope_ids = _derive_scope(query)
-        if scope_ids:
-            hits = _core_search(query, embedding, file_ids=scope_ids, top_k=top_k)
-            if len(hits) >= top_k:
-                return hits
-            return _pad_from_full(query, embedding, hits, top_k)
-    return _core_search(query, embedding, file_ids=file_ids, top_k=top_k)
+    hits = _core_search(
+        query,
+        embedding,
+        file_ids=file_ids,
+        top_k=top_k,
+        filters=filters,
+        per_file=per_file,
+        diversify_query=diversify_query,
+    )
+    if not hits and filters:
+        # 元数据过滤后召回为空，多半是约束过窄（如 scope 强约束把母公司切片
+        # 全排除了），回退不过滤再查一次，保证至少有结果而非直接挂空
+        logger.info("kb 元数据过滤后召回为空，回退不过滤重查: %s", filters)
+        hits = _core_search(
+            query,
+            embedding,
+            file_ids=file_ids,
+            top_k=top_k,
+            filters=None,
+            per_file=per_file,
+            diversify_query=diversify_query,
+        )
+    return hits
+
+
+def search_knowledge_multi(
+    queries: list[str],
+    *,
+    file_ids: list[uuid.UUID] | None = None,
+    top_k: int = 3,
+    filters: dict | None = None,
+    per_file: bool = False,
+    diversify_query: str | None = None,
+) -> list[Hit]:
+    """多查询检索并融合（multi-query RRF）。
+
+    把多条改写变体分别检索后，按 (file_id, seq) 去重并跨查询累加 RRF 分数
+    （score = Σ 1/(60+rank)），再统一重排、截断、邻接。单条查询时退化为
+    search_knowledge，保证行为一致。任一变体向量化失败仅跳过该变体。
+    """
+    queries = [q.strip() for q in queries if q and q.strip()]
+    if not queries:
+        return []
+    if len(queries) == 1:
+        return search_knowledge(
+            queries[0],
+            file_ids=file_ids,
+            top_k=top_k,
+            filters=filters,
+            per_file=per_file,
+            diversify_query=diversify_query,
+        )
+    merged: dict[tuple[str, int], dict] = {}
+    scores: dict[tuple[str, int], float] = {}
+    for q in queries:
+        try:
+            embedding = embed_query(q)
+        except Exception:
+            logger.exception("multi-query 向量化失败，跳过变体：%s", q[:60])
+            continue
+        rows = _retrieve_candidates(
+            q, embedding, file_ids=file_ids, top_k=top_k, filters=filters
+        )
+        if not rows and filters:
+            rows = _retrieve_candidates(
+                q, embedding, file_ids=file_ids, top_k=top_k, filters=None
+            )
+        for rank, row in enumerate(rows):
+            key = (str(row["file_id"]), int(row["seq"]))
+            if key not in merged:
+                merged[key] = dict(row)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank + 1)
+    if not merged:
+        return []
+    ranked = sorted(
+        merged.values(),
+        key=lambda r: scores[(str(r["file_id"]), int(r["seq"]))],
+        reverse=True,
+    )
+    if settings.kb_rerank_enabled and len(ranked) > top_k:
+        # 重排用主查询（queries[0]，即改写后的原始问句）做排序
+        head = ranked[:_RERANK_LIMIT]
+        ranked = _rerank(queries[0], head, top_k) + ranked[_RERANK_LIMIT:]
+    ranked = _diversify(
+        diversify_query or queries[0], ranked, top_k, per_file=per_file
+    )
+    hits = [_to_hit(row) for row in ranked[:top_k]]
+    return _attach_neighbors(hits)
 
 
 def preview_search(
@@ -206,32 +290,33 @@ def preview_search(
     return [hit for hit in hits if hit.distance is None or hit.distance <= limit]
 
 
-def _derive_scope(query: str) -> list[uuid.UUID] | None:
-    """范围推导失败不该拖垮检索，退化为全库。"""
-    try:
-        return tag_file_scope(query)
-    except Exception:
-        logger.warning("kb 范围推导失败，走全库检索", exc_info=True)
-        return None
-
-
-def _pad_from_full(
+def _retrieve_candidates(
     query: str,
     embedding: list[float],
-    hits: list[Hit],
+    *,
+    file_ids: list[uuid.UUID] | None,
     top_k: int,
-) -> list[Hit]:
-    """收窄后召回不足 top_k：用全库结果补位，收窄结果仍排前面。
+    filters: dict | None = None,
+) -> list[dict]:
+    """一轮检索的候选召回：召回 → 关键词融合 → 口径偏好 → 去重（不含重排/截断/邻接）。
 
-    只多花一次候选查询（embedding 已算好，不重复向量化），换的是
-    "标签判窄也不会漏召回"。
+    供 search_knowledge（单 query）与 search_knowledge_multi（多 query 融合）共用。
     """
-    seen = {(hit.file_id, hit.seq) for hit in hits}
-    for extra in _core_search(query, embedding, file_ids=None, top_k=top_k):
-        if (extra.file_id, extra.seq) not in seen:
-            hits.append(extra)
-            seen.add((extra.file_id, extra.seq))
-    return hits[:top_k]
+    candidates = max(top_k, settings.kb_search_candidates)
+    rows = store.search_kb_chunks(
+        embedding,
+        file_ids=file_ids,
+        top_k=candidates,
+        max_distance=settings.kb_search_max_distance,
+        **(filters or {}),
+    )
+    rows = _fuse_with_keywords(query, rows, file_ids, filters=filters)
+    if not rows:
+        return []
+    # 口径偏好放在去冗余与重排之前：它改的是「谁先被看到」，重排是从
+    # 这 12 条候选里挑，候选顺序本身会影响模型的注意力
+    rows = _apply_scope_preference(query, rows)
+    return _dedupe(rows)
 
 
 def _core_search(
@@ -240,33 +325,25 @@ def _core_search(
     *,
     file_ids: list[uuid.UUID] | None,
     top_k: int,
+    filters: dict | None = None,
+    per_file: bool = False,
+    diversify_query: str | None = None,
 ) -> list[Hit]:
-    """真正的一轮检索：召回 → 融合 → 去冗余 → 重排 → 邻接。
-
-    embedding 由调用方传入：范围推导会搜两次（收窄 + 兜底），共用一份
-    查询向量，不必为同一条 query 付两次向量化。
-    """
-    candidates = max(top_k, settings.kb_search_candidates)
-    rows = store.search_kb_chunks(
-        embedding,
-        file_ids=file_ids,
-        top_k=candidates,
-        max_distance=settings.kb_search_max_distance,
+    """真正的一轮检索：候选召回 → 重排 → 邻接。"""
+    rows = _retrieve_candidates(
+        query, embedding, file_ids=file_ids, top_k=top_k, filters=filters
     )
-    rows = _fuse_with_keywords(query, rows, file_ids)
     if not rows:
         return []
-    # 口径偏好放在去冗余与重排之前：它改的是「谁先被看到」，重排是从
-    # 这 12 条候选里挑，候选顺序本身会影响模型的注意力
-    rows = _apply_scope_preference(query, rows)
-
-    kept = _dedupe(rows)
-    if settings.kb_rerank_enabled and len(kept) > top_k:
+    if settings.kb_rerank_enabled and len(rows) > top_k:
         # 只把前 _RERANK_LIMIT 条交给模型：候选再多，提示词变长、延迟也变高，
         # 而排在第 13 名之外的本来也进不了 top_k
-        head = kept[:_RERANK_LIMIT]
-        kept = _rerank(query, head, top_k) + kept[_RERANK_LIMIT:]
-    hits = [_to_hit(row) for row in kept[:top_k]]
+        head = rows[:_RERANK_LIMIT]
+        rows = _rerank(query, head, top_k) + rows[_RERANK_LIMIT:]
+    rows = _diversify(
+        diversify_query or query, rows, top_k, per_file=per_file
+    )
+    hits = [_to_hit(row) for row in rows[:top_k]]
     return _attach_neighbors(hits)
 
 
@@ -277,6 +354,7 @@ def _extract_keywords(query: str) -> list[str]:
     而它们恰恰是向量最容易丢、子串匹配最准的东西。
     """
     keywords: list[str] = []
+    load_short_words()
     try:
         import jieba.analyse
 
@@ -299,6 +377,93 @@ def _extract_keywords(query: str) -> list[str]:
         if len(unique) >= settings.kb_hybrid_keywords:
             break
     return unique
+
+
+# 相邻两个二字词才拼。单字（「前」）不参与，避免「前」+「三季度」变成
+# 「前三季度」，对不上正文里的「第三季度」。两边都是二字，加起来正好四字。
+_SHORT_WORD = re.compile(r"^[\u4e00-\u9fff]{2}$")
+
+
+def _adjacent_short_phrases(query: str) -> list[tuple[str, str, str]]:
+    """问句里相邻的两个二字词，拼成一个不超过四字的短词。
+
+    返回 (短词, 左词, 右词)。已经是一个词的（「净利润」「注册资本」，以及
+    短词表里的词）不会被拆开再拼。单字和停用词不参与。
+    """
+    load_short_words()
+    try:
+        import jieba
+
+        tokens = [token.strip() for token in jieba.cut(query or "") if token.strip()]
+    except Exception:
+        logger.warning("jieba 短词切分失败，跳过短词", exc_info=True)
+        return []
+    found: list[tuple[str, str, str]] = []
+    index = 0
+    while index < len(tokens) - 1:
+        left, right = tokens[index], tokens[index + 1]
+        if (
+            _SHORT_WORD.fullmatch(left)
+            and _SHORT_WORD.fullmatch(right)
+            and left not in _STOPWORDS
+            and right not in _STOPWORDS
+            and len(left) + len(right) <= 4
+        ):
+            found.append((left + right, left, right))
+            index += 2
+            continue
+        index += 1
+    return found
+
+
+def _apply_short_phrases(
+    query: str,
+    keywords: list[str],
+    file_ids: list[uuid.UUID] | None,
+) -> list[str]:
+    """两个二字在库里以词的形式出现过，就用整段替换拆开的两半。
+
+    后面还紧跟汉字的不算出现过：「合并利润」只是「合并利润表」的前缀，
+    仍退回「合并」和「利润」。一个边界命中都没有、过半切片都含有、
+    或写在排除名单里的，都不替换。词频取不到时也不替换。
+    """
+    pairs = _adjacent_short_phrases(query)
+    if not pairs:
+        return keywords
+    try:
+        total, freq = store.keyword_boundary_freq(
+            [phrase for phrase, _, _ in pairs], file_ids=file_ids
+        )
+    except Exception:
+        logger.warning("kb 短词词频统计失败，保留拆开的词", exc_info=True)
+        return keywords
+    if total <= 0:
+        return keywords
+    blocked = read_extra()[1]
+    chosen: list[str] = []
+    drop: set[str] = set()
+    for phrase, left, right in pairs:
+        if phrase in blocked:
+            continue
+        hits = freq.get(phrase, 0)
+        if hits <= 0 or hits * 2 > total:
+            continue
+        chosen.append(phrase)
+        drop.update((left, right))
+    if not chosen:
+        return keywords
+    logger.info("kb 关键词改用短词：%s", chosen)
+    merged: list[str] = []
+    seen: set[str] = set()
+    for keyword in [*chosen, *[word for word in keywords if word not in drop]]:
+        key = keyword.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(keyword)
+        if len(merged) >= settings.kb_hybrid_keywords:
+            break
+    return merged
 
 
 def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
@@ -324,6 +489,7 @@ def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
     matched: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
     for hint in hints:
+        hint_hit = False
         for item in ready:
             fid = item["file_id"]
             if fid in seen:
@@ -331,9 +497,50 @@ def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
             if _filename_hint_matches(hint, item.get("filename") or ""):
                 seen.add(fid)
                 matched.append(fid)
-    if not matched or len(matched) == len(ready):
-        return None
+                hint_hit = True
+        # 文件名没命中这个提示词，再按元数据维度（subject 列 + 别名）匹配：
+        # 多主体文档（行业研报）文件名里没有「宁德时代」，但它确实是正文主体，
+        # 只有走 subject/别名才能把这种提示词路由到对应文件。
+        # 「中科飞测」不在别名表里，但是全称里独有的一段，同样算点名。
+        if not hint_hit:
+            from ai_agent.kb.meta import fragment_subjects
+
+            catalog = [
+                (str(item.get("subject") or ""), list(item.get("subject_aliases") or []))
+                for item in ready
+            ]
+            fragments = fragment_subjects(hint, catalog)
+            for item in ready:
+                fid = item["file_id"]
+                if fid in seen:
+                    continue
+                subject = str(item.get("subject") or "")
+                if subject in fragments or _subject_token_matches(
+                    hint,
+                    subject,
+                    item.get("subject_aliases") or [],
+                ):
+                    seen.add(fid)
+                    matched.append(fid)
+                    hint_hit = True
+    if not matched:
+        return []  # 点名但一个都解析不到 → 上层按「未找到」处理
+    # 仅在就绪文件多于 1 份时，「命中覆盖全部」才等于没缩小范围；
+    # 单文件库（ready==1）命中那唯一一份就是成功圈定，不可短路。
+    if len(ready) > 1 and len(matched) == len(ready):
+        return None  # 点名无缩小意义 → 上层退回全库
     return matched
+
+
+def _subject_token_matches(tok: str, subject: str, aliases: list[str]) -> bool:
+    """提示词里的主体是否整段出现在文件 subject 或别名里。
+
+    「中国能建」只在别名表有这四个字时命中，不再和全称做最长公共子串。
+    """
+    for cand in [subject, *list(aliases or [])]:
+        if cand and name_in_text(tok, cand):
+            return True
+    return False
 
 
 def _clean_filename_hint(name: str) -> str:
@@ -368,61 +575,7 @@ def _filename_hint_matches(hint: str, filename: str) -> bool:
             hint_norm in name_norm or name_norm in hint_norm
         ):
             return True
-    return _query_mentions(hint, _file_subject(filename))
-
-
-def tag_file_scope(query: str) -> list[uuid.UUID] | None:
-    """按查询关键词推导一个候选文件范围。
-
-    「先圈定范围再搜」的廉价实现：复用关键词提取（jieba + 编号 token，
-    没有新增 LLM 调用），命中来源有两处——
-    1. 文件标签：关键词与标签互为子串即算命中（"考勤" 命中 "考勤制度"）；
-    2. 文件名主体：库里文件常常一个标签都没打，只认 tags 时这层收窄永远
-       返回 None，等于白写；文件名是必然存在的信号，拿来兜底。
-
-    返回 None 表示不值得收窄：没提取到关键词、或全员命中（没有区分度）。
-    调用方必须自带弱召回兜底——标签判窄了不能变成漏召回。
-    """
-    if not settings.kb_tag_scope_enabled:
-        return None
-    keywords = _extract_keywords(query)
-    if not keywords:
-        return None
-    try:
-        files = store.list_kb_files()
-    except Exception:
-        logger.warning("kb 标签范围推导拿文件列表失败，跳过预过滤", exc_info=True)
-        return None
-    # 只有 ready 的文件才有切片可检索
-    candidates = [f for f in files if f.get("status") == "ready"]
-    return _tag_scope_ids(keywords, candidates, query)
-
-
-def _tag_scope_ids(
-    keywords: list[str], files: list[dict], query: str = ""
-) -> list[uuid.UUID] | None:
-    """纯函数：关键词 × (标签 | 文件名主体) 匹配，命中部分文件才收窄。
-
-    主体匹配用 query 原文而不是 keywords：jieba 会把「中国能建前三季度」
-    切成「能建前」，主体名被切碎后再去对文件名，一个字都对不上。
-    """
-    probe = query or " ".join(keywords)
-    matched: list[uuid.UUID] = []
-    for item in files:
-        tags = [str(t).strip().lower() for t in (item.get("tags") or []) if str(t).strip()]
-        hit = any(
-            kwl in tag or tag in kwl
-            for kwl in (k.lower() for k in keywords)
-            for tag in tags
-        )
-        if not hit:
-            subject = _file_subject(item.get("filename") or "")
-            hit = _query_mentions(probe, subject)
-        if hit:
-            matched.append(item["file_id"])
-    if not matched or len(matched) == len(files):
-        return None
-    return matched
+    return name_in_text(hint, _file_subject(filename))
 
 
 def _file_subject(filename: str) -> str:
@@ -462,7 +615,7 @@ def query_looks_on_topic(
         want = {str(fid) for fid in file_ids}
         ready = [item for item in ready if str(item.get("file_id")) in want]
     for item in ready:
-        if _query_mentions(probe, _file_subject(item.get("filename") or "")):
+        if name_in_text(probe, _file_subject(item.get("filename") or "")):
             return True
         for tag in item.get("tags") or []:
             text = str(tag).strip()
@@ -471,32 +624,64 @@ def query_looks_on_topic(
     return False
 
 
-def _query_mentions(query: str, subject: str) -> bool:
-    """查询里是否提到了这个主体（允许简称）。
+def mentioned_subjects(
+    query: str, file_ids: list[uuid.UUID] | None = None
+) -> set[str]:
+    """query 里点名的文件主体（subject 核心名）集合。
 
-    判据是最长公共子串而不是整体相似度：query 里除主体名外还带着一长串
-    提问内容，"中国能建…同比是增长还是下降"与全称的整体重合率会被稀释到
-    0.15 以下，但最长公共子串始终是「中国能」这 3 个字，足以判定。
+    主体、别名、文件名去噪后的名字都必须整段出现。简称只认别名表里的写法。
     """
-    core = _subject_core(subject)
-    if len(core) < 2:
-        return False
-    text = _NAME_PUNCT.sub("", (query or "").lower())
+    text = (query or "").strip()
     if not text:
-        return False
-    match = difflib.SequenceMatcher(None, text, core).find_longest_match(
-        0, len(text), 0, len(core)
-    )
-    return (
-        match.size >= _SUBJECT_MIN_COMMON
-        and match.size >= len(core) * _SUBJECT_MIN_RATIO
-    )
+        return set()
+    try:
+        files = store.list_kb_files()
+    except Exception:
+        logger.warning("kb 主体提及检测拿文件列表失败", exc_info=True)
+        return set()
+    ready = [item for item in files if item.get("status") == "ready"]
+    if file_ids:
+        want = {str(fid) for fid in file_ids}
+        ready = [item for item in ready if str(item.get("file_id")) in want]
+    subjects: set[str] = set()
+    for item in ready:
+        names = [item.get("subject") or ""]
+        names.extend(alias for alias in (item.get("subject_aliases") or []) if alias)
+        names.append(_file_subject(item.get("filename") or ""))
+        for name in names:
+            if name and name_in_text(text, name):
+                core = _subject_core(name)
+                subjects.add(core or name)
+                break
+    return subjects
+
+
+def mentioned_entities(
+    query: str, file_ids: list[uuid.UUID] | None = None
+) -> list[str]:
+    """问句里按字面出现的图谱实体名或别名。
+
+    文件主体的简称由 mentioned_subjects 负责。这里补人名、子公司、产品
+    这类不在文件 subject 上的名字：实体名或别名整段出现在问句里才算命中。
+    读库失败返回空，调用方退回「不强制检索」。
+    """
+    text = (query or "").strip()
+    if len(text) < 2:
+        return []
+    try:
+        names = store.query_mentions_entity(text, file_ids=file_ids)
+    except Exception:
+        logger.warning("kb 实体提及检测失败", exc_info=True)
+        return []
+    return [name for name in names if name]
 
 
 def _fuse_with_keywords(
     query: str,
     vector_rows: list[dict],
     file_ids: list[uuid.UUID] | None,
+    *,
+    filters: dict | None = None,
 ) -> list[dict]:
     """混合检索：向量召回 + 关键词召回做 RRF 融合。
 
@@ -508,6 +693,9 @@ def _fuse_with_keywords(
     keywords = _extract_keywords(query)
     if not keywords:
         return vector_rows
+    keywords = _apply_short_phrases(query, keywords, file_ids)
+    if not keywords:
+        return vector_rows
     keywords = _keep_distinctive_keywords(keywords, file_ids)
     if not keywords:
         return vector_rows
@@ -516,13 +704,14 @@ def _fuse_with_keywords(
             keywords,
             file_ids=file_ids,
             top_k=settings.kb_hybrid_candidates,
+            **(filters or {}),
         )
     except Exception:
         logger.warning("kb 关键词召回失败，退回纯向量", exc_info=True)
         return vector_rows
     if not keyword_rows:
         return vector_rows
-    return _rrf_merge(vector_rows, keyword_rows)
+    return _rrf_merge(vector_rows, keyword_rows, n_keywords=len(keywords))
 
 
 def _keep_distinctive_keywords(
@@ -553,11 +742,19 @@ def _keep_distinctive_keywords(
     return kept
 
 
-def _rrf_merge(vector_rows: list[dict], keyword_rows: list[dict]) -> list[dict]:
+def _rrf_merge(
+    vector_rows: list[dict],
+    keyword_rows: list[dict],
+    n_keywords: int | None = None,
+) -> list[dict]:
     """两路召回按名次做 RRF 融合：score = Σ 权重/(60+名次)，双路命中叠加。
 
-    关键词路带 `_RRF_KEYWORD_WEIGHT` 的折扣：它只数「命中了几个词」，
-    不像向量路衡量语义相关性，同权会盖过真正带数据的切片。
+    关键词路默认带 `_RRF_KEYWORD_WEIGHT` 的折扣：它只数「命中了几个词」，
+    不像向量路衡量语义相关性，同权会盖过真正带数据的切片。但「全命中」
+    （一条切片命中了本次检索的全部查询词，即 `keyword_score == n_keywords`）
+    是强字面信号，基本就是用户要的字面答案，此时恢复 `_RRF_KEYWORD_WEIGHT_FULL`
+    权重，让其压过向量路中低名次、进入重排候选。`n_keywords` 为 None 时
+    （旧调用方/离线用例）一律走 0.5 折扣，保持原行为。
 
     关键词独有片段没有 distance（向量化这条路没走过），保持缺失；
     _to_hit 写成 None，不能填 0。融合结果按分数降序返回。
@@ -572,7 +769,13 @@ def _rrf_merge(vector_rows: list[dict], keyword_rows: list[dict]) -> list[dict]:
         key = (str(row["file_id"]), int(row["seq"]))
         if key not in merged:
             merged[key] = dict(row)
-        scores[key] = scores.get(key, 0.0) + _RRF_KEYWORD_WEIGHT / (_RRF_K + rank + 1)
+        kw_score = row.get("keyword_score")
+        weight = (
+            _RRF_KEYWORD_WEIGHT_FULL
+            if n_keywords and kw_score == n_keywords
+            else _RRF_KEYWORD_WEIGHT
+        )
+        scores[key] = scores.get(key, 0.0) + weight / (_RRF_K + rank + 1)
     ranked = sorted(merged.items(), key=lambda item: scores[item[0]], reverse=True)
     # 分数留在行上：口径偏好要按分数比例加权，只改名次会破坏 RRF 的相对差距
     fused = []
@@ -623,16 +826,157 @@ def _apply_scope_preference(query: str, rows: list[dict]) -> list[dict]:
     return [row for _, _, row in scored]
 
 
+def _diversify(
+    query: str, rows: list[dict], top_k: int, *, per_file: bool = False
+) -> list[dict]:
+    """多期问句、或多家公司一起查时按文件留名额，其余问句仍按主体留名额。
+
+    ``per_file`` 用在范围已经收成这几份文件的时候。股东表的切片主体会被改成
+    股东名，按主体留名额会把一家公司的股东表排满，另一家进不了 top_k。
+    """
+    from ai_agent.kb.meta import query_period_policy
+
+    policy, _token = query_period_policy(query or "")
+    if per_file or policy in {"all", "span_q", "span_h"}:
+        return _diversify_by_file(query, rows, top_k)
+    return _diversify_by_subject(rows, top_k)
+
+
+def _focused_file_ids(query: str, rows: list[dict]) -> set[str]:
+    """结果里被问句点名的文件。用文件名还原主体，不看切片上被改写过的主体。"""
+    from ai_agent.kb.meta import extract_subject, fragment_subjects, name_in_text
+
+    catalog: list[tuple[str, list[str]]] = []
+    by_subject: dict[str, list[str]] = {}
+    for row in rows:
+        subject = extract_subject(str(row.get("filename") or ""))
+        fid = str(row.get("file_id") or "")
+        if not subject or not fid:
+            continue
+        by_subject.setdefault(subject, []).append(fid)
+        catalog.append((subject, []))
+    mentioned = fragment_subjects(query, catalog)
+    for subject in by_subject:
+        if name_in_text(query, subject):
+            mentioned.add(subject)
+    found: set[str] = set()
+    for subject in mentioned:
+        found.update(by_subject.get(subject, []))
+    return found
+
+
+def _diversify_by_file(query: str, rows: list[dict], top_k: int) -> list[dict]:
+    """同一主体的两份报告各留一条，避免后一年把前一年挤出 top_k。
+
+    股东表会被归属到股东名上，按切片 subject 分桶分不开 2025 和 2026。
+    这里按文件留名额。问句点了哪家，就先留那家各期的头名。
+    """
+    if top_k <= 0 or len(rows) <= top_k:
+        return rows[:top_k]
+    head_at: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        fid = str(row.get("file_id") or "")
+        if fid and fid not in head_at:
+            head_at[fid] = index
+    if len(head_at) <= 1:
+        return _diversify_by_subject(rows, top_k)
+    focus = _focused_file_ids(query, rows)
+    if focus:
+        ordered = [i for fid, i in head_at.items() if fid in focus]
+        ordered += [i for fid, i in head_at.items() if fid not in focus]
+    else:
+        ordered = list(head_at.values())
+    chosen: list[int] = []
+    seen: set[int] = set()
+    for index in ordered:
+        if len(chosen) >= top_k:
+            break
+        chosen.append(index)
+        seen.add(index)
+    for index in range(len(rows)):
+        if len(chosen) >= top_k:
+            break
+        if index not in seen:
+            chosen.append(index)
+            seen.add(index)
+    if not focus:
+        return [rows[index] for index in sorted(chosen)]
+    # 点名主体的各期放在前面，模型先看到两年，而不是先读完一年的变体
+    focus_n = sum(1 for fid in head_at if fid in focus)
+    front = chosen[:focus_n]
+    rest = sorted(index for index in chosen[focus_n:])
+    return [rows[index] for index in front + rest]
+
+
+def _diversify_by_subject(rows: list[dict], top_k: int) -> list[dict]:
+    """重排之后按主体留名额：够近的主体至少一条进 top_k。
+
+    召回阶段的主体配额只保证候选里有第二家，cross-encoder 仍可能把名额
+    全给分数更高的那家。这里在最终截断前，把带宽内每个主体的重排头名
+    换进结果，其余位置仍按重排顺序填。带宽为 0 时关闭。没有主体、或只有
+    一个主体时原样截断。
+    """
+    if top_k <= 0 or len(rows) <= top_k:
+        return rows[:top_k]
+    band = settings.kb_subject_quota_band
+    if band <= 0:
+        return rows[:top_k]
+
+    def distance_of(row: dict) -> float | None:
+        raw = row.get("distance")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    known = [dist for dist in (distance_of(row) for row in rows) if dist is not None]
+    best = min(known) if known else None
+
+    def within_band(row: dict) -> bool:
+        dist = distance_of(row)
+        if dist is None or best is None:
+            return True
+        return dist <= best + band
+
+    head_at: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        subject = str(row.get("subject") or "").strip()
+        if not subject or subject in head_at:
+            continue
+        if within_band(row):
+            head_at[subject] = index
+    if len(head_at) <= 1:
+        return rows[:top_k]
+
+    chosen = set(sorted(head_at.values())[:top_k])
+    for index in range(len(rows)):
+        if len(chosen) >= top_k:
+            break
+        chosen.add(index)
+    picked = [rows[index] for index in sorted(chosen)]
+    if {id(row) for row in picked} != {id(row) for row in rows[:top_k]}:
+        logger.info(
+            "kb 重排后按主体留名额：%s",
+            "、".join(sorted(head_at)),
+        )
+    return picked
+
+
 def _dedupe(rows: list[dict]) -> list[dict]:
     """按向量顺序去冗余：与任一已保留片段三字组重合度过高的直接丢。"""
     kept: list[dict] = []
-    kept_grams: list[set[str]] = []
+    # 只在同一份文件里去重。两年的股东表结构很像，跨文件丢掉会把前一年整份抹掉。
+    kept_grams: dict[str, list[set[str]]] = {}
     for row in rows:
+        fid = str(row.get("file_id") or "")
         grams = _trigrams(row.get("text") or "")
-        if any(_jaccard(grams, other) >= _DUP_THRESHOLD for other in kept_grams):
+        prior = kept_grams.setdefault(fid, [])
+        if any(_jaccard(grams, other) >= _DUP_THRESHOLD for other in prior):
             continue
         kept.append(row)
-        kept_grams.append(grams)
+        prior.append(grams)
     return kept
 
 
@@ -643,11 +987,12 @@ def _to_hit(row: dict) -> Hit:
         seq=int(row["seq"]),
         page=row.get("page"),
         kind=row.get("kind") or "text",
-        text=row.get("text") or "",
+        text=render_otsl(row.get("text") or ""),
         distance=_vector_distance(row),
         page_end=row.get("page_end"),
         section=row.get("section"),
         scope=row.get("scope"),
+        period=str(row.get("period") or ""),
     )
 
 
@@ -678,48 +1023,100 @@ def _attach_neighbors(hits: list[Hit]) -> list[Hit]:
         for delta in range(1, radius + 1):
             prev = grouped.get((hit.file_id, hit.seq - delta))
             if prev:
-                before.append((hit.seq - delta, prev[0]["text"]))
+                before.append((hit.seq - delta, render_otsl(prev[0]["text"])))
             nxt = grouped.get((hit.file_id, hit.seq + delta))
             if nxt:
-                after.append((hit.seq + delta, nxt[0]["text"]))
+                after.append((hit.seq + delta, render_otsl(nxt[0]["text"])))
         hit.before = [text for _, text in sorted(before)]
         hit.after = [text for _, text in sorted(after)]
     return hits
 
 
-_rerank_cache: dict[tuple, list[int]] = {}
+_RERANK_CACHE_MAX = 1024
+_rerank_cache: dict[tuple, list[float]] = {}
+
+
+def _candidate_text(row: dict) -> str:
+    """喂给重排器的候选文本：文件名 + 位置 + 单元格文字。
+
+    HTML 标签先去掉再截断。否则 800 字窗口全花在 `<td>` 上，表身还是看不见。
+    """
+    body = html_table_plain(render_otsl(row.get("text") or ""))
+    return f"{row.get('filename') or ''} · {_where(row)}\n{_clip(body)}"
+
+
+def _llm_rerank_scores(query: str, docs: list[str]) -> list[float]:
+    """LLM 重排：让模型对候选编号排序，折算成分数（名次越靠前分越高）。
+
+    仅作为 cross-encoder 不可用时的兜底；分数制与 cross-encoder 后端输出同构，
+    `_rerank` 无需感知具体后端。
+    """
+    listing = "\n\n".join(f"[{i + 1}] {doc}" for i, doc in enumerate(docs))
+    prompt = build_rerank_user(query, listing, len(docs))
+    try:
+        answer = complete_chat_once(prompt)
+    except Exception:
+        logger.warning("kb LLM 重排调用失败", exc_info=True)
+        raise
+    order = _parse_order(answer, len(docs))
+    if not order:
+        raise ValueError("kb LLM 重排未解析出有效顺序")
+    n = len(docs)
+    scores = [0.0] * n
+    for rank, idx in enumerate(order):
+        if 1 <= idx <= n:
+            scores[idx - 1] = float(n - rank)
+    return scores
 
 
 def _rerank(query: str, rows: list[dict], top_k: int) -> list[dict]:
-    """LLM 重排：只输出候选编号顺序，解析失败就退回向量顺序。
+    """重排：调用可插拔 Reranker 对候选打分，按分数降序返回。
 
-    同 (query, 候选序列) 直接复用首次重排结果：LLM 编号输出非确定，缓存可
-    消除「同问不同序」，也省一次重排调用。候选序列用 file_id#seq 签名，
-    重排候选变了（范围/阈值不同）即失效，不会串味。
+    候选序列用 file_id#seq 签名，重排候选变了（范围/阈值不同）即失效，不会串味。
+    后端由 settings.kb_rerank_backend 决定（见 ai_agent.kb.rerank）。失败或分数
+    数量不符时退回向量顺序，绝不丢候选。
     """
-    cache_key = (query, tuple((r.get("file_id"), r.get("seq")) for r in rows))
-    cached = _rerank_cache.get(cache_key)
-    if cached is None:
-        listing = "\n\n".join(
-            f"[{i + 1}] {row.get('filename') or ''} · {_where(row)}\n{_clip(row.get('text') or '')}"
-            for i, row in enumerate(rows)
-        )
-        prompt = build_rerank_user(query, listing, min(top_k, len(rows)))
+    sig = tuple((r.get("file_id"), r.get("seq")) for r in rows)
+    cache_key = (query, sig)
+    scores = _rerank_cache.get(cache_key)
+    if scores is None:
+        docs = [_candidate_text(r) for r in rows]
         try:
-            answer = complete_chat_once(prompt)
+            scores = get_reranker().rerank(query, docs)
         except Exception:
             logger.warning("kb 重排调用失败，退回向量顺序", exc_info=True)
             return rows
-        order = _parse_order(answer, len(rows))
-        if not order:
+        if len(scores) != len(rows):
+            logger.warning("kb 重排返回分数数量与候选不符，退回向量顺序")
             return rows
-        _rerank_cache[cache_key] = order
-    else:
-        order = cached
-    # 重排结果里没提到的候选按原顺序补在后面：宁可多给一条，也别丢候选
-    ordered = [rows[i - 1] for i in order]
-    ordered.extend(row for i, row in enumerate(rows, start=1) if i not in set(order))
-    return ordered
+        _rerank_cache[cache_key] = scores
+        if len(_rerank_cache) > _RERANK_CACHE_MAX:
+            # dict 保插入序，弹出最旧一项，避免进程内无限增长（修复旧实现无淘汰）
+            _rerank_cache.pop(next(iter(_rerank_cache)))
+    adjusted = _boost_indicator_hits(query, rows, list(scores))
+    order = sorted(range(len(adjusted)), key=lambda i: adjusted[i], reverse=True)
+    return [rows[i] for i in order]
+
+
+def _boost_indicator_hits(
+    query: str, rows: list[dict], scores: list[float]
+) -> list[float]:
+    """问句里整段出现的行项目，给对应表格切片一点加分。
+
+    只认指标名整段出现在问句里。「营收」不会因此顶上「营业收入」那一行。
+    加分是分数的一成多，够把接近的两片换位，不够把明显不相关的片抬上来。
+    """
+    text = query or ""
+    boosted: list[float] = []
+    for row, score in zip(rows, scores):
+        names = row.get("indicators") or []
+        if not isinstance(names, list):
+            names = []
+        hit = any(
+            isinstance(name, str) and len(name) >= 2 and name in text for name in names
+        )
+        boosted.append(score * 1.12 if hit else score)
+    return boosted
 
 
 def complete_chat_once(prompt: str) -> str:

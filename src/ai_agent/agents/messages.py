@@ -11,7 +11,6 @@ import hashlib
 import json
 
 from ai_agent.agents.turn import _checkpoint_update
-from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.short_term import (
@@ -52,42 +51,6 @@ def _canonical_args(name: str, arguments: dict) -> str:
 
 def _output_digest(output: str) -> str:
     return hashlib.sha1(output.strip().encode("utf-8")).hexdigest()
-
-
-def _previous_turns(messages: list[ChatMessage]) -> list[str]:
-    """当前 user 之前最近 N 轮的「问句 + 最终回答」，时间正序。
-
-    从当前 user 的前一条开始往前扫。不能从 messages[-1] 开始——那会把
-    「当前这句」当成上一轮塞进去，改写上下文里就没有主体（公司名）。
-    倒序扫描先遇到「回答」再遇到「问句」，所以每轮暂存成 (user, answer)，
-    最后按时间正序摊平。
-    """
-    turns: list[tuple[str, str]] = []
-    pending_answer = ""
-    last = len(messages) - 1
-    end = last - 1 if last >= 0 and messages[last].get("role") == "user" else last
-    for i in range(end, -1, -1):
-        msg = messages[i]
-        role = msg.get("role")
-        if role == "assistant":
-            if msg.get("tool_calls"):
-                continue
-            text = str(msg.get("content") or "").strip()
-            if text and not pending_answer:
-                pending_answer = text
-        elif role == "user":
-            text = str(msg.get("content") or "").strip()
-            if text:
-                turns.append((text, pending_answer))
-                pending_answer = ""
-        if len(turns) >= settings.kb_rewrite_history_turns:
-            break
-    prev_turn: list[str] = []
-    for user_q, answer in reversed(turns):
-        prev_turn.append(user_q)
-        if answer:
-            prev_turn.append(answer)
-    return prev_turn
 
 
 def _drop_empty_assistant(messages: list[ChatMessage]) -> None:

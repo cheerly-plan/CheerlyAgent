@@ -8,5 +8,8 @@ dist/
 .workbuddy/
 # 知识库上传的原始文件（运行时生成，不入库）
 data/
+# 四字短词表在源码里，不受上面的 data/ 忽略
+!src/ai_agent/kb/data/
+!src/ai_agent/kb/data/**
 # 测试临时目录（沙箱里系统 tmp 不可写，测试改用项目内目录）
 .tmp-kb-test/

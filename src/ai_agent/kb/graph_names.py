@@ -183,6 +183,22 @@ def _subject_from_filename(name: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def resolve_graph_subject(doc_name: str | None, cover: str = "") -> str | None:
+    """图谱主体：封面有文字就用封面上的上市公司全称，没有再回退文件名。
+
+    「本公司」要落到封面上的那一个点。文件名「长安汽车有限公司」和封面
+    「重庆长安汽车股份有限公司」不是同一家写法，按文件名落地会多出一个点。
+    封面是空白、或封面里认不出公司全称时，仍用文件名。
+    """
+    from ai_agent.kb.meta import cover_company
+
+    if (cover or "").strip():
+        found = cover_company(cover)
+        if found:
+            return found
+    return _subject_from_filename(doc_name)
+
+
 def _claimed_offset(claimed: int, start: int, count: int) -> int:
     """把模型报的片段编号换算成批内下标。
 

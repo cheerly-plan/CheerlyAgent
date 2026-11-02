@@ -37,6 +37,71 @@ def test_extract_keywords_keeps_codes_and_drops_stopwords():
     assert len(kws) <= settings.kb_hybrid_keywords
 
 
+def test_adjacent_short_phrases_join_two_char_words_only():
+    """二字加二字收成短词。单字「前」不拼进「三季度」，五字的「归母净利润」不拼。
+
+    用词表外的说法：词表里的科目结巴不再切开，拼接步骤看不到它们。
+    """
+    compared = retrieval._adjacent_short_phrases("比较营业和其中利润")
+    assert ("比较营业", "比较", "营业") in compared
+    assert ("其中利润", "其中", "利润") in compared
+    parent = retrieval._adjacent_short_phrases("中国银行前三季度归母净利润")
+    assert all(phrase != "前三季度" for phrase, _, _ in parent)
+    assert all(phrase != "归母净利润" for phrase, _, _ in parent)
+
+
+def test_apply_short_phrases_replaces_parts_when_phrase_exists(monkeypatch):
+    monkeypatch.setattr(
+        retrieval,
+        "_adjacent_short_phrases",
+        lambda query: [("营业利润", "营业", "利润")],
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_boundary_freq",
+        lambda kws, file_ids=None: (100, {"营业利润": 4}),
+    )
+    assert retrieval._apply_short_phrases(
+        "长安汽车前三季度营业利润",
+        ["长安汽车", "营业", "利润", "三季度"],
+        None,
+    ) == ["营业利润", "长安汽车", "三季度"]
+
+
+def test_apply_short_phrases_keeps_parts_when_phrase_is_absent(monkeypatch):
+    monkeypatch.setattr(
+        retrieval,
+        "_adjacent_short_phrases",
+        lambda query: [("营业利润", "营业", "利润")],
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_boundary_freq",
+        lambda kws, file_ids=None: (100, {"营业利润": 0}),
+    )
+    keywords = ["长安汽车", "营业", "利润", "三季度"]
+    assert (
+        retrieval._apply_short_phrases("长安汽车前三季度营业利润", keywords, None)
+        == keywords
+    )
+
+
+def test_apply_short_phrases_skips_excluded_phrase(monkeypatch):
+    monkeypatch.setattr(
+        retrieval,
+        "_adjacent_short_phrases",
+        lambda query: [("合并利润", "合并", "利润")],
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_boundary_freq",
+        lambda kws, file_ids=None: (100, {"合并利润": 4}),
+    )
+    monkeypatch.setattr(retrieval, "read_extra", lambda: ([], {"合并利润"}))
+    keywords = ["合并", "利润", "收入"]
+    assert retrieval._apply_short_phrases("合并利润和收入", keywords, None) == keywords
+
+
 def test_extract_keywords_survives_jieba_failure(monkeypatch):
     import builtins
 
@@ -84,6 +149,80 @@ def test_rrf_merge_keyword_only_rows_carry_no_distance():
     merged = retrieval._rrf_merge([], [only_kw])
     assert merged[0].get("distance") is None
     assert retrieval._to_hit(merged[0]).distance is None
+
+
+def test_rrf_merge_full_keyword_hit_outranks_low_vector_ranks():
+    """全关键词命中的封面切片应压过向量低名次、进入重排候选窗。
+
+    复现「中国银行证券代码是多少」答偏：封面「证券代码：600916」只在关键词
+    路命中、且命中了全部查询词，但不在向量 16 条内。原统一 0.5 权重下其分
+    =0.5/61≈0.0082，低于向量第 16 名 1/76≈0.0132，被排到第 17、砍在
+    RERANK_LIMIT 门外。改为全命中恢复 1.0 后其分=1/61≈0.0164 > 向量第 2~16
+    名，应稳定落在前 12。
+    """
+    # 16 条向量结果（rank 1..16），分数 1/61 .. 1/76
+    vector_rows = [_row(FILE_ID, seq, f"向量第 {seq} 段") for seq in range(16)]
+    cover = {
+        "id": uuid.uuid4(),
+        "file_id": FILE_ID,
+        "filename": "中国银行2024年报.pdf",
+        "seq": 99,
+        "page": 1,
+        "kind": "text",
+        "text": "证券代码：600916",
+        "keyword_score": 2,  # 命中「证券」「代码」两个查询词 = 全命中
+    }
+    merged = retrieval._rrf_merge(vector_rows, [cover], n_keywords=2)
+    seqs = [row["seq"] for row in merged]
+    cover_pos = seqs.index(99)
+    worst_vector_pos = seqs.index(15)  # 向量第 16 名
+    # 封面压过向量第 16 名，且进入重排候选窗（前 _RERANK_LIMIT）
+    assert cover_pos < worst_vector_pos
+    assert cover_pos < retrieval._RERANK_LIMIT
+
+
+def test_rrf_merge_partial_keyword_hit_stays_discounted():
+    """只命中部分查询词的目录/页眉仍保持 0.5 折扣，不抢占数据切片。"""
+    first = _row(FILE_ID, 10, "向量第一名（带数据）")
+    kw_only = {
+        "id": uuid.uuid4(),
+        "file_id": OTHER_ID,
+        "filename": "目录.docx",
+        "seq": 20,
+        "page": 1,
+        "kind": "text",
+        "text": "只命中了公司名",
+        "keyword_score": 1,  # 仅命中 2 个查询词中的 1 个 = 部分命中
+    }
+    merged = retrieval._rrf_merge([first], [kw_only], n_keywords=2)
+    assert [row["seq"] for row in merged] == [10, 20]
+
+
+def test_fuse_full_keyword_hit_reaches_rerank_window(monkeypatch):
+    """`_fuse_with_keywords` 把查询词数透传给 RRF，全命中封面进入前 12。"""
+    monkeypatch.setattr(settings, "kb_hybrid_enabled", True)
+    monkeypatch.setattr(retrieval, "_extract_keywords", lambda q: ["证券", "代码"])
+    monkeypatch.setattr(
+        retrieval, "_keep_distinctive_keywords", lambda kws, *a, **k: kws
+    )
+    vector_rows = [_row(FILE_ID, seq, f"向量第 {seq} 段") for seq in range(16)]
+    cover = {
+        "id": uuid.uuid4(),
+        "file_id": FILE_ID,
+        "filename": "中国银行2024年报.pdf",
+        "seq": 99,
+        "page": 1,
+        "kind": "text",
+        "text": "证券代码：600916",
+        "keyword_score": 2,
+    }
+    monkeypatch.setattr(
+        retrieval.store, "search_kb_chunks_keyword", lambda *a, **k: [cover]
+    )
+    merged = retrieval._fuse_with_keywords("代码是多少", vector_rows, None)
+    seqs = [row["seq"] for row in merged]
+    assert seqs.index(99) < seqs.index(15)
+    assert seqs.index(99) < retrieval._RERANK_LIMIT
 
 
 def test_fuse_disabled_returns_vector_rows_untouched(monkeypatch):
@@ -185,6 +324,51 @@ def test_format_neighborhood_lists_seeds_and_edges():
     )
     assert lines[0] == "命中实体：长鑫存储(org)"
     assert "长鑫存储 —生产→ DRAM：存储原厂" in lines[2]
+
+
+def test_graph_prefetch_only_for_relation_questions():
+    assert kg_search.wants_graph_neighborhood("长安汽车的股东有哪些")
+    assert kg_search.wants_graph_neighborhood("谁任职于中国银行")
+    assert kg_search.wants_graph_neighborhood("华宝新能收购了哪家公司")
+    assert not kg_search.wants_graph_neighborhood("长安汽车前三季度营业收入是多少")
+    assert not kg_search.wants_graph_neighborhood("归属于上市公司股东的净利润")
+    assert not kg_search.wants_graph_neighborhood("股东权益是多少")
+
+
+def test_prefetch_neighborhood_lists_edges_without_evidence(monkeypatch):
+    seed = _entity("中央汇金")
+    seed["type"] = "org"
+    company = _entity("中国银行股份有限公司")
+    company["type"] = "org"
+    monkeypatch.setattr(kg_search.store, "graph_stats", lambda: {"entities": 2})
+    monkeypatch.setattr(kg_search, "embed_query", lambda q: [0.1])
+    monkeypatch.setattr(kg_search, "resolve_tool_file_ids", lambda files, query=None: None)
+    monkeypatch.setattr(kg_search.store, "search_entities", lambda *a, **k: [seed])
+    monkeypatch.setattr(
+        kg_search.store,
+        "expand_subgraph",
+        lambda *a, **k: {
+            "nodes": [seed, company],
+            "edges": [
+                {
+                    "source_id": seed["id"],
+                    "target_id": company["id"],
+                    "relation": "持股",
+                    "description": "占比58.59%",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        kg_search.store,
+        "get_entity_chunks",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("预检索不该取原文切片")),
+    )
+    text = kg_search.prefetch_neighborhood("中国银行的股东有哪些")
+    assert text.startswith("【图谱邻域】")
+    assert "中央汇金 —持股→ 中国银行股份有限公司：占比58.59%" in text
+    assert "原文依据" not in text
+    assert kg_search.prefetch_neighborhood("营业收入是多少") == ""
 
 
 def test_kg_search_fuses_seed_neighbor_and_vector_evidence(monkeypatch):
@@ -319,47 +503,7 @@ def test_kg_search_reports_empty_graph(monkeypatch):
     assert "知识图谱还没有数据" in kg_search._kg_search("任何问题")
 
 
-# ---------- 标签预过滤 ----------
-
-
-def _kb_file(fid, tags, status="ready", filename=""):
-    return {"file_id": fid, "tags": tags, "status": status, "filename": filename}
-
-
-def test_tag_scope_narrows_to_tagged_match():
-    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    files = [_kb_file(a, ["考勤制度"]), _kb_file(b, ["FAQ"]), _kb_file(c, ["薪酬"])]
-    assert retrieval._tag_scope_ids(["考勤"], files) == [a]
-
-
-def test_tag_scope_falls_back_to_filename_when_tags_empty():
-    """文件一个标签都没打时，靠文件名主体收窄——否则这层逻辑永远不生效。"""
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [
-        _kb_file(a, [], filename="顺丰控股股份有限公司2026 年第三季度报告"),
-        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
-    ]
-    assert retrieval._tag_scope_ids(["顺丰控股"], files) == [a]
-
-
-def test_tag_scope_matches_abbreviated_subject():
-    """简称与全称差字，子串对不上，靠二元组重合判定同一主体。"""
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [
-        _kb_file(a, [], filename="中国能源建设股份有限公司2026 年第三季度报告"),
-        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
-    ]
-    assert retrieval._tag_scope_ids(["中国能建"], files) == [a]
-
-
-def test_tag_scope_ignores_unrelated_subject():
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [
-        _kb_file(a, [], filename="顺丰控股股份有限公司2026 年第三季度报告"),
-        _kb_file(b, [], filename="安克创新科技股份有限公司2026 年第三季度报告"),
-    ]
-    # 库外的主体不该把范围收到任何一份文件上
-    assert retrieval._tag_scope_ids(["宁德时代"], files) is None
+# ---------- 文件名解析与范围定位（files 必填前的文件名→id 解析） ----------
 
 
 def test_file_subject_strips_year_and_report_type():
@@ -398,7 +542,9 @@ def test_resolve_files_by_name_matches_abbreviation_and_full_name(monkeypatch):
             },
         ],
     )
-    assert retrieval.resolve_files_by_name(["中国能建"]) == [nengjian]
+    # 简称不再靠和全称的公共子串命中；核心名整段出现在文件名里仍然命中
+    assert retrieval.resolve_files_by_name(["中国能建"]) == []
+    assert retrieval.resolve_files_by_name(["中国能源建设"]) == [nengjian]
     assert retrieval.resolve_files_by_name(
         ["中国能源建设股份有限公司2026年第三季度报告.pdf"]
     ) == [nengjian]
@@ -407,24 +553,49 @@ def test_resolve_files_by_name_matches_abbreviation_and_full_name(monkeypatch):
     ) == [nengjian]
     assert retrieval.resolve_files_by_name(["安克创新"]) == [anker]
     # 两个提示都能命中 → 两份都纳入
-    assert retrieval.resolve_files_by_name(["中国能建", "安克创新"]) == [
+    assert retrieval.resolve_files_by_name(["中国能源建设", "安克创新"]) == [
         nengjian,
         anker,
     ]
-    # 命中全部就绪文件 = 没圈范围
+    # 命中全部就绪文件 = 没圈范围，退回全库（库里文件名都含「季度报告」子串）
     assert retrieval.resolve_files_by_name(["季度报告"]) is None
     assert retrieval.resolve_files_by_name([]) is None
 
 
-def test_query_mentions_allows_abbreviation_but_not_other_company():
+def test_resolve_files_by_name_single_ready_file_not_short_circuited(monkeypatch):
+    """库里只有一份就绪文件时，模型点名命中它应返回该文件 id，而非被短路成 None。
+
+    回归：原 `len(matched) == len(ready)` 在 ready==1 时把合法命中误判为
+    「没圈范围」返回 None，上层再误当「文件不存在」。
+    """
+    only = uuid.uuid4()
+    monkeypatch.setattr(
+        retrieval.store,
+        "list_kb_files",
+        lambda **k: [
+            {
+                "file_id": only,
+                "filename": "中国银行2026年第三季度报告.pdf",
+                "status": "ready",
+            },
+        ],
+    )
+    assert retrieval.resolve_files_by_name(["中国银行"]) == [only]
+    assert retrieval.resolve_files_by_name(
+        ["中国银行2026年第三季度报告.pdf"]
+    ) == [only]
+
+
+def test_name_in_text_requires_whole_alias_not_shared_prefix():
+    from ai_agent.kb.meta import name_in_text
+
     full = "中国能源建设股份有限公司"
-    # 简称与全称只共享「中国能」，但足以判定是同一主体
-    assert retrieval._query_mentions("中国能建前三季度营收", full)
-    assert retrieval._query_mentions("中国能源建设营收", full)
-    # 库外的公司一个连续字都对不上，不能收窄
-    assert not retrieval._query_mentions("宁德时代营收", full)
-    # 少于 3 字的重合不足以判定（"公司" 这类通用后缀不算）
-    assert not retrieval._query_mentions("公司营收", full)
+    # 核心名整段出现才算；「中国能建」和全称只共享前三个字，不再算命中
+    assert name_in_text("中国能源建设营收", full)
+    assert not name_in_text("中国能建前三季度营收", full)
+    assert not name_in_text("宁德时代营收", full)
+    assert not name_in_text("公司营收", full)
+    assert name_in_text("中国能建前三季度营收", "中国能建")
 
 
 def test_keep_distinctive_keywords_drops_ubiquitous_terms(monkeypatch):
@@ -484,24 +655,6 @@ def test_fuse_falls_back_to_vector_when_all_keywords_are_ubiquitous(monkeypatch)
     assert retrieval._fuse_with_keywords("营收多少", rows, None) is rows
 
 
-def test_tag_scope_none_when_no_discrimination():
-    a, b = uuid.uuid4(), uuid.uuid4()
-    files = [_kb_file(a, ["考勤"]), _kb_file(b, ["考勤制度"])]
-    assert retrieval._tag_scope_ids(["考勤"], files) is None  # 全员命中
-    assert retrieval._tag_scope_ids(["报销"], files) is None  # 全员未命中
-
-
-def test_tag_scope_matches_bidirectional_substring_case_insensitive():
-    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    files = [_kb_file(a, ["OT-01 考勤"]), _kb_file(b, ["薪酬"]), _kb_file(c, ["FAQ"])]
-    assert retrieval._tag_scope_ids(["ot-01"], files) == [a]  # 大小写不敏感
-    # 方向一：关键词是标签的子串，"考勤" 命中复合标签 "OT-01 考勤"
-    assert retrieval._tag_scope_ids(["考勤"], files) == [a]
-    # 方向二：标签是关键词的子串，"考勤" 命中 "考勤处罚规定"
-    files2 = [_kb_file(a, ["考勤"]), _kb_file(b, ["薪酬"])]
-    assert retrieval._tag_scope_ids(["考勤处罚规定"], files2) == [a]
-
-
 def _hit(fid, seq):
     from ai_agent.kb.retrieval import Hit
 
@@ -511,57 +664,15 @@ def _hit(fid, seq):
     )
 
 
-def test_search_knowledge_narrows_then_pads_from_full(monkeypatch):
-    """收窄后召回不足 top_k：用全库补位，收窄结果仍排前面。"""
-    from ai_agent.kb import retrieval
-
-    scoped, other = uuid.uuid4(), uuid.uuid4()
-    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-    monkeypatch.setattr(retrieval, "tag_file_scope", lambda q: [scoped])
-
-    calls = []
-
-    def fake_core(query, embedding, *, file_ids, top_k):
-        calls.append(file_ids)
-        if file_ids:  # 收窄那一搜只有 1 条：弱召回
-            return [_hit(scoped, 0)]
-        return [_hit(scoped, 0), _hit(other, 1), _hit(other, 2)]
-
-    monkeypatch.setattr(retrieval, "_core_search", fake_core)
-    hits = retrieval.search_knowledge("考勤怎么算", top_k=3)
-    assert calls == [[scoped], None]  # 先收窄，兜底走全库
-    assert len(hits) == 3
-    assert (hits[0].file_id, hits[0].seq) == (str(scoped), 0)  # 收窄结果排前
-
-
-def test_search_knowledge_skips_scope_when_none(monkeypatch):
-    from ai_agent.kb import retrieval
-
-    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-    monkeypatch.setattr(retrieval, "tag_file_scope", lambda q: None)
-    calls = []
-
-    def fake_core(query, embedding, *, file_ids, top_k):
-        calls.append(file_ids)
-        return []
-
-    monkeypatch.setattr(retrieval, "_core_search", fake_core)
-    retrieval.search_knowledge("随便问", top_k=3)
-    assert calls == [None]  # 没有可用范围：只搜一次全库
-
-
-def test_search_knowledge_skips_scope_when_file_ids_given(monkeypatch):
-    """模型/前端已显式圈定文件时不该再猜范围。"""
+def test_search_knowledge_forwards_explicit_file_ids(monkeypatch):
+    """模型/前端已显式圈定文件时，file_ids 原样下传给 _core_search，不再猜范围。"""
     from ai_agent.kb import retrieval
 
     pinned = [uuid.uuid4()]
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-    monkeypatch.setattr(
-        retrieval, "tag_file_scope", lambda q: pytest.fail("显式范围下不该推导")
-    )
     calls = []
 
-    def fake_core(query, embedding, *, file_ids, top_k):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None, **_kwargs):
         calls.append(file_ids)
         return []
 
@@ -570,25 +681,36 @@ def test_search_knowledge_skips_scope_when_file_ids_given(monkeypatch):
     assert calls == [pinned]
 
 
-def test_search_knowledge_survives_scope_failure(monkeypatch):
-    """范围推导抛异常时退回全库，不能把检索拖挂。"""
+def test_search_knowledge_defaults_to_whole_library(monkeypatch):
+    """不传 file_ids 时不再自动按查询猜范围，file_ids=None 透传给核心检索（搜全库）。"""
     from ai_agent.kb import retrieval
 
     monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
-
-    def boom(q):
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(retrieval, "tag_file_scope", boom)
     calls = []
 
-    def fake_core(query, embedding, *, file_ids, top_k):
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None, **_kwargs):
         calls.append(file_ids)
         return []
 
     monkeypatch.setattr(retrieval, "_core_search", fake_core)
-    retrieval.search_knowledge("考勤怎么算", top_k=3)
+    retrieval.search_knowledge("随便问", top_k=3)
     assert calls == [None]
+
+
+def test_search_knowledge_forwards_top_k(monkeypatch):
+    """top_k 透传给核心检索，圈定文件与全库共用同一参数。"""
+    from ai_agent.kb import retrieval
+
+    monkeypatch.setattr(retrieval, "embed_query", lambda q: [0.1])
+    seen = {}
+
+    def fake_core(query, embedding, *, file_ids, top_k, filters=None, **_kwargs):
+        seen["top_k"] = top_k
+        return []
+
+    monkeypatch.setattr(retrieval, "_core_search", fake_core)
+    retrieval.search_knowledge("随便问", top_k=5)
+    assert seen["top_k"] == 5
 
 
 # ---------- 图谱抽取并行化 ----------
@@ -769,6 +891,19 @@ def test_prompt_carries_doc_name_and_span():
     assert head.startswith("以下是《安克创新科技股份有限公司2026 年第三季度报告》")
     assert "第 65–66 段" in head
     assert "第 18–19 页" in head
+
+
+def test_prompt_turns_html_tables_into_markdown():
+    from ai_agent.kb.chunking import Chunk
+    from ai_agent.kb.graph_extract import _build_prompt
+
+    table = (
+        "<table><tr><td>项目</td><td>本期</td></tr>"
+        "<tr><td>营业收入</td><td>1</td></tr></table>"
+    )
+    prompt = _build_prompt([Chunk(text=table, page=8, kind="table")], 0, "季报.pdf")
+    assert "<td>" not in prompt
+    assert "| 营业收入 | 1 |" in prompt
 
 
 def test_prompt_drops_file_extension_and_keeps_backward_compat():

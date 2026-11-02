@@ -29,6 +29,10 @@ from ai_agent.tasks.title import shutdown_title_jobs
 async def lifespan(_app: FastAPI):
     # schema 迁移走 Alembic（版本化、可回滚）；ensure_schema 保留作回滚锚点
     run_migrations()
+    # 重排后端自检：默认 local_ce，未装依赖/无权重时显式告警并退回 LLM
+    from ai_agent.kb.rerank import probe_reranker
+
+    probe_reranker()
     # 上次进程异常退出时卡在 parsing/embedding 的知识库文件标 failed
     kb_pipeline.recover_stuck()
     short_term_memory.start_cleanup()

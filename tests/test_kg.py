@@ -885,6 +885,41 @@ def test_relation_with_metric_endpoint_is_dropped_on_finalize():
     assert "2026年前三季度" not in acc.entities
 
 
+def test_graph_subject_uses_cover_company_and_falls_back():
+    """封面标题上的上市公司全称优先。封面没有文字，或认不出全称，用文件名。"""
+    filename = "长安汽车有限公司2026年第三季度报告"
+    cover = "证券代码：000625\n# 重庆长安汽车股份有限公司\n2026年第三季度报告"
+    assert graph.resolve_graph_subject(filename, cover) == "重庆长安汽车股份有限公司"
+    assert graph.resolve_graph_subject(filename, "") == "长安汽车有限公司"
+    assert graph.resolve_graph_subject(filename, "   ") == "长安汽车有限公司"
+    assert graph.resolve_graph_subject(filename, "重要内容提示") == "长安汽车有限公司"
+    assert graph._cover_page_text([
+        Chunk("# 后一页有限公司", page=2),
+        Chunk("# 重庆长安汽车股份有限公司", page=1),
+    ]) == "# 重庆长安汽车股份有限公司"
+    assert graph._cover_page_text([Chunk("没有页码的正文")]) == ""
+
+
+def test_build_file_graph_puts_cover_company_in_prompt(monkeypatch):
+    seen: dict[str, str | None] = {}
+
+    def fake_all(*_args, doc_name=None, **_kwargs):
+        seen["doc_name"] = doc_name
+
+    monkeypatch.setattr(graph, "_extract_all", fake_all)
+    graph.build_file_graph(
+        uuid.uuid4(),
+        [
+            Chunk(
+                "# 重庆长安汽车股份有限公司\n2026年第三季度报告\n本公司董事会保证真实、准确、完整。",
+                page=1,
+            )
+        ],
+        doc_name="长安汽车有限公司2026年第三季度报告",
+    )
+    assert seen["doc_name"] == "重庆长安汽车股份有限公司"
+
+
 def test_subject_from_filename_takes_full_name():
     assert (
         graph._subject_from_filename("安克创新科技股份有限公司2026 年第三季度报告.pdf")

@@ -347,6 +347,20 @@ def test_carry_page_headers_prepends_header_to_continuation():
     assert out[1][3][1] == ["基本每股收益", "0.01", "0.06"]
 
 
+def test_carry_page_headers_prepends_header_when_first_amount_is_blank():
+    header = ["项目", "期末余额", "期初余额"]
+    prev = (
+        1,
+        577.0,
+        (0.0, 577.0, 500.0, 800.0),
+        [header, ["债权投资", "", ""]],
+    )
+    cont = (2, 72.0, (0.0, 72.0, 500.0, 300.0), [["其他债权投资", "", ""]])
+    out = _carry_page_headers([prev, cont], {1: 842.0, 2: 842.0})
+    assert out[1][3][0] == header
+    assert out[1][3][1][0] == "其他债权投资"
+
+
 def test_carry_page_headers_skips_when_previous_table_ended_midpage():
     # 上一页的表在页中结束（528 < 842-90），说明它没被切断，下一张不是它的续表
     header = ["项目", "本报告期", "年初至报告期末"]

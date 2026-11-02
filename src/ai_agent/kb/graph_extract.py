@@ -22,9 +22,10 @@ from typing import Callable
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.chunking import Chunk
+from ai_agent.kb.chunking import Chunk, html_tables_to_markdown
 from ai_agent.kb.graph_names import _doc_title
 from ai_agent.kb.graph_schema import _Extraction, _parse_extraction
+from ai_agent.kb.otsl import render_otsl
 from ai_agent.llm.client import complete_chat, graph_client, graph_model
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.parse import load_llm_json
@@ -72,7 +73,9 @@ def _build_prompt(chunks: list[Chunk], start_seq: int, doc_name: str | None = No
         # 标号必须是**绝对**段号：写批内下标 [0] 时，模型引用只能靠数位置，
         # 而开头又写着「第 28–35 段」，两套编号并存，它报回来的数字两边都不像
         seq = chunk.seq if chunk.seq is not None else start_seq + i
-        parts.append(f"[{seq}] （{tag}）\n{chunk.text}")
+        parts.append(
+            f"[{seq}] （{tag}）\n{html_tables_to_markdown(render_otsl(chunk.text))}"
+        )
     # 整批同属一节时，把节名提到开头：模型据此判断"这些片段是同一个业务
     # 主题的连续论述"，关系更容易连上；跨节的批不写，免得它硬凑跨节关系
     sections = {c.section for c in chunks}

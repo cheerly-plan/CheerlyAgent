@@ -225,6 +225,322 @@ def test_xlsx_supported_suffix():
     assert not supported(".xls")
 
 
+def test_html_table_stays_one_chunk():
+    rows = "".join(
+        f"<tr><td>项目{i}</td><td>{i * 1000}.00</td></tr>" for i in range(40)
+    )
+    table = f"<table><tr><td>项目</td><td>本期</td></tr>{rows}</table>"
+    text = f"单位：元\n\n{table}\n\n以上为合并口径。"
+    chunks = chunk_text(text, max_chars=180, overlap=50)
+    assert chunks == ["单位：元", table, "以上为合并口径。"]
+
+
+def test_html_table_chunk_kind_is_table():
+    table = "<table><tr><td>营业收入</td><td>1</td></tr></table>"
+    text = f"前文说明。\n\n{table}\n\n后文。"
+    chunks = chunk_segments([Segment(text, 4)], max_chars=500, overlap=50)
+    assert [(c.kind, c.text) for c in chunks] == [
+        ("text", "前文说明。"),
+        ("table", table),
+        ("text", "后文。"),
+    ]
+    assert chunks[1].page == 4
+
+
+def test_cross_page_html_tables_merge_and_drop_repeated_header():
+    header = "<tr><td>项目</td><td>本期金额</td></tr>"
+    page4 = (
+        "单位：元\n\n"
+        f"<table>{header}<tr><td>营业收入</td><td>1</td></tr></table>"
+    )
+    page5 = (
+        f"<table>{header}<tr><td>净利润</td><td>2</td></tr></table>\n\n"
+        "以上为合并口径。"
+    )
+    chunks = chunk_segments(
+        [Segment(page4, 4), Segment(page5, 5)],
+        max_chars=500,
+        overlap=0,
+    )
+    tables = [c for c in chunks if c.kind == "table"]
+    assert [c.kind for c in chunks] == ["text", "table", "table", "text"]
+    assert all(c.page == 4 and c.page_end == 5 for c in tables)
+    assert all(c.text.count(header) == 1 for c in tables)
+    assert "营业收入" in tables[0].text
+    assert "净利润" in tables[1].text
+    assert "营业收入" not in tables[1].text
+
+
+def test_cross_page_tables_stay_apart_when_columns_differ():
+    page4 = "<table><tr><td>项目</td><td>本期</td></tr><tr><td>收入</td><td>1</td></tr></table>"
+    page5 = "<table><tr><td>甲</td><td>乙</td><td>丙</td></tr></table>"
+    chunks = chunk_segments(
+        [Segment(page4, 4), Segment(page5, 5)],
+        max_chars=500,
+        overlap=0,
+    )
+    assert [(c.page, c.page_end) for c in chunks] == [(4, 4), (5, 5)]
+
+
+def test_cross_page_html_table_copies_header_onto_continuation():
+    header = "<tr><td>项目</td><td>2026年前三季度</td><td>2025年前三季度</td></tr>"
+    page1 = (
+        f"合并利润表\n单位：元\n<table>{header}"
+        "<tr><td>营业收入</td><td>30,439.00</td><td>45,763.00</td></tr></table>"
+    )
+    page2 = (
+        "<table><tr><td>资产减值损失</td><td>-507.00</td><td>3.00</td></tr></table>"
+    )
+    chunks = chunk_segments(
+        [
+            Segment(page1, 11, "table", "四、财务报表", scope="consolidated"),
+            Segment(page2, 12, "table", "四、财务报表", scope="consolidated"),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    assert chunks[1].text.startswith("合并利润表\n单位：元\n<table>" + header)
+    assert "资产减值损失" in chunks[1].text
+    assert chunks[1].page == 12
+    assert chunks[1].scope == "consolidated"
+
+
+def test_cross_page_html_table_copies_header_onto_blank_item():
+    """页首是金额为空的科目（其他债权投资），也要补上一页的列名。"""
+    header = "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
+    page5 = (
+        f"<table>{header}"
+        "<tr><td>发放贷款和垫款</td><td></td><td></td></tr>"
+        "<tr><td>债权投资</td><td></td><td></td></tr></table>"
+    )
+    page6 = (
+        "<table><tr><td>其他债权投资</td><td></td><td></td></tr>"
+        "<tr><td>长期应收款</td><td></td><td>1,274,106,334.49</td></tr></table>"
+    )
+    chunks = chunk_segments(
+        [Segment(page5, 5, "table"), Segment(page6, 6, "table")],
+        max_chars=500,
+        overlap=0,
+    )
+    page6 = [c for c in chunks if c.page == 6]
+    assert page6
+    assert all(c.text.startswith("<table>" + header) for c in page6)
+    assert any("其他债权投资" in c.text for c in page6)
+
+
+def test_header_keeps_moving_across_later_pages():
+    header = "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
+    first = (
+        f"<table>{header}"
+        "<tr><td>货币资金</td><td>100</td><td>90</td></tr></table>"
+    )
+    later = [
+        "<table><tr><td>长期股权投资</td><td>20</td><td>18</td></tr></table>",
+        "<table><tr><td>应交税费</td><td>6</td><td>8</td></tr></table>",
+        "<table><tr><td>盈余公积</td><td>4</td><td>4</td></tr></table>",
+    ]
+    chunks = chunk_segments(
+        [Segment(first, 5, "table"), *[Segment(text, 6 + i, "table") for i, text in enumerate(later)]],
+        max_chars=500,
+        overlap=0,
+    )
+    assert [c.page for c in chunks] == [5, 6, 7, 8]
+    assert all(header in c.text for c in chunks)
+    assert chunks[3].text.index("项目") < chunks[3].text.index("盈余公积")
+
+
+def test_new_statement_header_replaces_the_carried_one():
+    old = "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
+    new = "<tr><td>项目</td><td>本期发生额</td><td>上期发生额</td></tr>"
+    chunks = chunk_segments(
+        [
+            Segment(
+                f"<table>{old}<tr><td>货币资金</td><td>100</td><td>90</td></tr></table>",
+                8,
+                "table",
+            ),
+            Segment(
+                f"合并利润表\n<table>{new}"
+                "<tr><td>营业收入</td><td>101</td><td>114</td></tr></table>",
+                9,
+                "table",
+            ),
+            Segment(
+                "<table><tr><td>营业利润</td><td>-510</td><td>2,398</td></tr></table>",
+                10,
+                "table",
+            ),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    assert old not in chunks[2].text
+    assert chunks[2].text.startswith("合并利润表\n<table>" + new)
+    assert "营业利润" in chunks[2].text
+
+
+def test_cross_page_html_table_copies_the_latest_header():
+    # 页中换了列名，续表沿用最后一组，不把资产负债表的列名安到财务费用上
+    page1 = (
+        "<table>"
+        "<tr><td>合并资产负债表项目</td><td>2026年9月30日</td><td>变动比例</td></tr>"
+        "<tr><td>货币资金</td><td>35,914.00</td><td>-33.52%</td></tr>"
+        "<tr><td>合并利润表项目</td><td>2026年1-9月</td><td>变动比例</td></tr>"
+        "<tr><td>税金及附加</td><td>1,420.00</td><td>-45.20%</td></tr>"
+        "</table>"
+    )
+    page2 = "<table><tr><td>财务费用</td><td>647.00</td><td>131.33%</td></tr></table>"
+    chunks = chunk_segments(
+        [Segment(page1, 2, "table"), Segment(page2, 3, "table")],
+        max_chars=500,
+        overlap=0,
+    )
+    continued = next(c for c in chunks if c.page == 3)
+    assert "合并利润表项目" in continued.text
+    assert "合并资产负债表项目" not in continued.text
+    assert continued.text.index("合并利润表项目") < continued.text.index("财务费用")
+    tax = next(c for c in chunks if "税金及附加" in c.text)
+    assert "合并资产负债表项目" not in tax.text
+
+
+def test_cross_page_html_table_does_not_copy_header_after_prose():
+    page1 = (
+        "<table><tr><td>项目</td><td>本期</td></tr>"
+        "<tr><td>营业收入</td><td>100</td></tr></table>"
+    )
+    page2 = "<table><tr><td>净利润</td><td>18</td></tr></table>"
+    chunks = chunk_segments(
+        [
+            Segment(page1, 2, "table"),
+            Segment("标的公司产权清晰，不存在抵押。", 2, "text"),
+            Segment(page2, 3, "table"),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    assert "项目" not in chunks[-1].text
+    assert chunks[-1].text.startswith("<table><tr><td>净利润</td>")
+
+
+def test_captioned_html_table_does_not_count_caption_as_table():
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = "".join(
+        "<tr><td>科目"
+        f"{i:02d}名称比较长用来撑开这一行</td><td>{i},234,567.89</td>"
+        f"<td>{i},876,543.21</td></tr>"
+        for i in range(25)
+    )
+    table = f"<table>{header}{rows}</table>"
+    chunks = chunk_segments(
+        [
+            Segment("报表前的说明文字。", 8, "text", "第十节 财务报告"),
+            Segment(
+                f"母公司利润表\n{table}",
+                8,
+                "table",
+                "第十节 财务报告",
+                scope="parent",
+            ),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    texts = [c for c in chunks if c.kind == "text"]
+    tables = [c for c in chunks if c.kind == "table"]
+    assert [c.text for c in texts] == ["报表前的说明文字。"]
+    assert len(tables) > 1
+    assert all(c.text.startswith("母公司利润表\n<table>") for c in tables)
+    assert all(c.scope == "parent" for c in tables)
+
+
+def test_long_html_table_splits_by_row_and_repeats_header():
+    from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
+
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = "".join(
+        "<tr><td>科目"
+        f"{i:02d}名称比较长用来撑开这一行</td><td>{i},234,567.89</td>"
+        f"<td>{i},876,543.21</td></tr>"
+        for i in range(25)
+    )
+    table = f"<table>{header}{rows}</table>"
+    chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=50)
+    assert len(chunks) > 1
+    assert all(c.kind == "table" and c.page == 8 for c in chunks)
+    assert all(header in c.text for c in chunks)
+    joined = "".join(c.text for c in chunks)
+    for i in range(25):
+        assert f"科目{i:02d}" in joined
+    for chunk in chunks:
+        plain = html_table_plain(chunk.text)
+        lines = [line for line in plain.splitlines() if line.strip()]
+        if len(lines) > 2:
+            assert len(plain) <= TABLE_GROUP_CHARS
+
+
+def test_html_table_section_row_starts_a_new_group():
+    header = "<tr><td>项目</td><td>期末</td></tr>"
+    body = "".join(
+        "<tr><td>流动项"
+        f"{i:02d}的名字比较长用来把这一组撑过上限</td><td>{i},000,000.00</td></tr>"
+        for i in range(24)
+    )
+    section = "<tr><td colspan=\"2\">非流动资产：</td></tr>"
+    tail = (
+        "<tr><td>投资性房地产</td><td>2,578,854.37</td></tr>"
+        "<tr><td>固定资产</td><td>9,000.00</td></tr>"
+    )
+    table = f"<table>{header}{body}{section}{tail}</table>"
+    chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=0)
+    assert len(chunks) > 1
+    hosts = [c for c in chunks if "非流动资产" in c.text]
+    assert len(hosts) == 2
+    assert "投资性房地产" in hosts[0].text
+    assert "固定资产" in hosts[1].text
+    assert all("流动项00" not in c.text for c in hosts)
+
+
+def test_html_income_statement_account_is_its_own_chunk():
+    """营业利润单独成片，表题和列名跟着走；加减行留在这一片里。"""
+    header = "<tr><td>项目</td><td>本期发生额</td><td>上期发生额</td></tr>"
+    rows = "".join(
+        [
+            "<tr><td>一、营业总收入</td><td>101</td><td>114</td></tr>",
+            "<tr><td>三、营业利润(亏损以“-”号填列)</td><td>-510</td><td>2,398</td></tr>",
+            "<tr><td>加:营业外收入</td><td>95</td><td>131</td></tr>",
+            "<tr><td>四、利润总额(亏损总额以“-”号填列)</td><td>-451</td><td>2,499</td></tr>",
+            "<tr><td>五、净利润(净亏损以“-”号填列)</td><td>-726</td><td>2,144</td></tr>",
+        ]
+    )
+    text = f"## 2、合并年初到报告期末利润表\n单位：元\n<table>{header}{rows}</table>"
+    chunks = chunk_segments([Segment(text, 9, "table")], max_chars=500, overlap=0)
+    assert len(chunks) == 4
+    assert all(
+        c.text.startswith("## 2、合并年初到报告期末利润表\n单位：元\n<table>" + header)
+        for c in chunks
+    )
+    profit = next(c for c in chunks if "营业利润" in c.text)
+    assert "营业外收入" in profit.text
+    assert "净利润" not in profit.text
+    assert "营业总收入" not in profit.text
+
+
+def test_html_table_one_long_row_stays_with_header():
+    header = "<tr><td>项目</td><td>说明</td></tr>"
+    long = "甲" * 900
+    table = f"<table>{header}<tr><td>备注</td><td>{long}</td></tr></table>"
+    chunks = chunk_segments([Segment(table, 1)], max_chars=500, overlap=0)
+    assert len(chunks) == 1
+    assert chunks[0].kind == "table"
+    assert long in chunks[0].text
+
+
+def test_short_html_table_not_merged_into_prose():
+    table = "<table><tr><td>营业收入</td><td>1</td></tr></table>"
+    text = f"前文说明。\n\n{table}\n\n后文。"
+    assert chunk_text(text, max_chars=500, overlap=50) == ["前文说明。", table, "后文。"]
+
+
 def test_chunk_table_kept_whole_when_short():
     text = "| 年份 | 营收 |\n|---|---|\n| 2024 | 142 |"
     chunks = chunk_segments([Segment(text, 1, "table")], max_chars=500)
@@ -337,6 +653,70 @@ def test_chunk_merged_table_keeps_page_span():
     assert chunks[0].page_end == 8
 
 
+def test_table_group_mode_section_aggregates_by_section():
+    """section 模式按分组聚合：分组边界干净，且切片数少于 row 模式。"""
+    header = "<tr><td>项目</td><td>期末</td><td>期初</td></tr>"
+    flow = "".join(
+        f"<tr><td>流动项{i:02d}比较长用来把这一组撑过上限</td><td>{i},000</td><td>{i},111</td></tr>"
+        for i in range(24)
+    )
+    section = "<tr><td colspan=\"3\">非流动资产：</td></tr>"
+    nonflow = "".join(
+        f"<tr><td>非流动项{i:02d}比较长用来把这一组撑过上限</td><td>{i},000</td><td>{i},111</td></tr>"
+        for i in range(24)
+    )
+    table = f"<table>{header}{flow}{section}{nonflow}</table>"
+    row_chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=0)
+    sec_chunks = chunk_segments(
+        [Segment(table, 8)], max_chars=500, overlap=0, table_group_mode="section"
+    )
+    assert len(sec_chunks) < len(row_chunks)
+    hosts = [c for c in sec_chunks if "非流动资产" in c.text]
+    assert hosts
+    # 分组边界干净：非流动组的片里不该出现流动项（用 ">流动项" 锚，
+    # 避开「非流动项」里的「流动项」子串误匹配）
+    assert all(">流动项" not in c.text for c in hosts)
+    assert all(header in c.text for c in sec_chunks)
+
+
+def test_table_group_mode_section_slides_plain_table():
+    """无分组标题的扁平长表：按窗口在科目边界断、每片重复表头，片数少于 row。"""
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = "".join(
+        f"<tr><td>科目{i:02d}名称较长</td><td>{i},234,567.89</td><td>{i},876,543.21</td></tr>"
+        for i in range(25)
+    )
+    table = f"<table>{header}{rows}</table>"
+    row_chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=0)
+    sec_chunks = chunk_segments(
+        [Segment(table, 8)], max_chars=500, overlap=0, table_group_mode="section"
+    )
+    assert len(sec_chunks) > 1
+    assert len(sec_chunks) < len(row_chunks)
+    assert all(header in c.text for c in sec_chunks)
+
+
+def test_table_group_mode_section_keeps_subtotal_with_parent():
+    """section 模式下合计/加减行仍跟所属科目走，不单独成片。"""
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = (
+        "<tr><td>一、营业总收入</td><td>101</td><td>114</td></tr>"
+        "<tr><td>三、营业利润</td><td>-510</td><td>2,398</td></tr>"
+        "<tr><td>加:营业外收入</td><td>95</td><td>131</td></tr>"
+        "<tr><td>四、利润总额</td><td>-451</td><td>2,499</td></tr>"
+    )
+    table = f"<table>{header}{rows}</table>"
+    chunks = chunk_segments(
+        [Segment(table, 9, "table")],
+        max_chars=200,
+        overlap=0,
+        table_group_mode="section",
+    )
+    profit = [c for c in chunks if "营业利润" in c.text]
+    assert len(profit) == 1
+    assert "营业外收入" in profit[0].text
+
+
 def test_format_hit_labels_content_kind():
     base = {"filename": "报告.pdf", "seq": 0, "text": "内容"}
     assert _format_hit({**base, "kind": "text", "page": 3}) == "[报告.pdf · 第3页]\n内容"
@@ -366,20 +746,34 @@ def test_clean_tags_strips_dedupes_and_caps():
     assert _clean_tags([]) == []
 
 
+def _kb_workdir(request):
+    """项目内临时目录。系统 tmp 在沙箱里写不进去。
+
+    根目录 .tmp-kb-test 可能已经残留，用 exist_ok 创建。每个用例只占一个
+    子目录，收尾只删这个子目录：整棵删掉会和并发用例抢同一路径，mkdir 抛
+    FileExistsError。
+    """
+    import shutil
+    import uuid as _uuid
+
+    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
+    base.mkdir(exist_ok=True)
+    path = base / _uuid.uuid4().hex
+    path.mkdir()
+    request.addfinalizer(lambda: shutil.rmtree(path, ignore_errors=True))
+    return path
+
+
 def _prepare_complete(request, monkeypatch):
     """complete_upload 的公共桩：建档记录 + 分片落盘 + store/pipeline 打桩。
 
     临时目录放项目内（.tmp-kb-test）：系统 tmp 目录在沙箱里写不进去。
     """
-    import shutil
     import uuid as _uuid
 
     from ai_agent.api.routers import kb as kb_router
 
-    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    if not base.exists():
-        base.mkdir()
-    upload_root = base / _uuid.uuid4().hex
+    upload_root = _kb_workdir(request)
     record = {
         "id": _uuid.uuid4(),
         "filename": "a.pdf",
@@ -391,8 +785,6 @@ def _prepare_complete(request, monkeypatch):
     part_dir = upload_root / str(record["id"]) / "parts"
     part_dir.mkdir(parents=True)
     (part_dir / "000000.part").write_bytes(b"ABCD")
-    # 测试收尾清理整个临时根目录（record 目录已由被测代码自己删）
-    request.addfinalizer(lambda: shutil.rmtree(base, ignore_errors=True))
     return kb_router, record
 
 
@@ -448,15 +840,11 @@ def _rename_record(request, monkeypatch, status="ready", filename="旧报告", m
 
     文件名是纯名（不含后缀），类型由 mime 单独存——这是当前数据模型。
     """
-    import shutil
     import uuid as _uuid
 
     from ai_agent.api.routers import kb as kb_router
 
-    base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    if not base.exists():
-        base.mkdir()
-    upload_root = base / _uuid.uuid4().hex
+    upload_root = _kb_workdir(request)
     fid = _uuid.uuid4()
     record = {
         "id": fid,
@@ -478,7 +866,6 @@ def _rename_record(request, monkeypatch, status="ready", filename="旧报告", m
     monkeypatch.setattr(
         kb_router.kb_pipeline, "submit_reembed", lambda _fid: submitted.append(_fid)
     )
-    request.addfinalizer(lambda: shutil.rmtree(base, ignore_errors=True))
     return kb_router, record, renamed, submitted
 
 

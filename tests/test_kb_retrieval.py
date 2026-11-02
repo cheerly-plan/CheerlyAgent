@@ -6,8 +6,8 @@ import pytest
 
 from ai_agent.core.config import settings
 from ai_agent.kb import retrieval
-from ai_agent.kb.chunking import context_prefix, embedding_input
-from ai_agent.tools.kb_search import _format_hit_with_context
+from ai_agent.kb.chunking import context_prefix, embedding_input, html_tables_to_markdown
+from ai_agent.tools.kb_search import _format_hit, _format_hit_with_context
 
 FILE_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
@@ -41,6 +41,163 @@ def test_embedding_input_prefixes_context_but_keeps_body():
     )
 
 
+def test_embedding_and_rerank_read_table_cells_not_tags():
+    html = (
+        "<table><tr><td>项目</td><td>期末</td></tr>"
+        "<tr><td>货币资金</td><td>634,706,310.18</td></tr></table>"
+    )
+    embedded = embedding_input(html, filename="季报.pdf", page=8, kind="table")
+    assert "<td>" not in embedded
+    assert "货币资金 | 634,706,310.18" in embedded
+    shown = retrieval._candidate_text(
+        {"filename": "季报.pdf", "kind": "table", "page": 8, "seq": 1, "text": html}
+    )
+    assert "<td>" not in shown
+    assert "货币资金 | 634,706,310.18" in shown
+    assert retrieval._RERANK_CLIP == 800
+
+
+def test_embedding_flattens_markdown_table_separator():
+    """修订切片若存成 Markdown 表，分隔行不能进向量。"""
+    md = "| 项目 | 期末 |\n| --- | --- |\n| 货币资金 | 1 |"
+    embedded = embedding_input(md, filename="季报.pdf", page=8, kind="table")
+    assert "---" not in embedded
+    assert "货币资金 | 1" in embedded
+
+
+def test_html_table_becomes_markdown_and_keeps_merged_headers():
+    """模型看到的是 Markdown 表。合并列表头要复制到每一列，分组标题不横着复制。"""
+    html = (
+        "<table>"
+        '<tr><td rowspan="2">项目</td><td colspan="2">期末余额</td></tr>'
+        "<tr><td>合并</td><td>母公司</td></tr>"
+        '<tr><td colspan="3">流动资产：</td></tr>'
+        "<tr><td>货币资金</td><td>100</td><td>80</td></tr>"
+        "</table>"
+    )
+    md = html_tables_to_markdown(f"合并资产负债表\n{html}\n附注")
+    assert "<td>" not in md and "<table>" not in md
+    assert md.startswith("合并资产负债表\n")
+    assert md.endswith("附注")
+    assert "| 项目 | 期末余额 | 期末余额 |" in md
+    assert "| 项目 | 合并 | 母公司 |" in md
+    assert "| 流动资产： |  |  |" in md
+    assert "| 货币资金 | 100 | 80 |" in md
+    # 竖线是列分隔，单元格里的竖线不能再被当成一列
+    assert html_tables_to_markdown("<table><tr><td>a|b</td><td>1</td></tr></table>") == (
+        "| a\\|b | 1 |\n| --- | --- |"
+    )
+
+
+def test_format_hit_sends_markdown_table_to_the_model():
+    html = (
+        "<table><tr><td>项目</td><td>本期</td></tr>"
+        "<tr><td>营业收入</td><td>169,462</td></tr></table>"
+    )
+    text = _format_hit(
+        {
+            "filename": "季报.pdf",
+            "kind": "table",
+            "page": 8,
+            "seq": 3,
+            "text": html,
+        }
+    )
+    assert "<td>" not in text
+    assert "| 营业收入 | 169,462 |" in text
+    assert text.startswith("[季报.pdf · 第8页]")
+
+
+def test_citations_keep_html_so_the_preview_can_merge_cells():
+    """前端预览靠 colspan 画合并格，引用正文不能跟模型上下文一起改成 Markdown。"""
+    from ai_agent.tools.kb_search import _citations_of
+
+    html = "<table><tr><td colspan=\"2\">流动资产：</td></tr></table>"
+    hit = retrieval.Hit(
+        file_id=str(FILE_ID),
+        filename="季报.pdf",
+        seq=3,
+        page=8,
+        kind="table",
+        text=html,
+        distance=0.2,
+    )
+    [citation] = _citations_of([hit])
+    assert citation.text == html
+
+
+def test_dedupe_keeps_similar_table_from_another_file():
+    """两年的股东表长得很像，去重不能把另一年整份丢掉。"""
+    body = "前10名股东持股情况表苏州翌流明光电科技有限公司37800963" * 4
+    rows = [
+        {**_row(0, body), "file_id": uuid.uuid4()},
+        {**_row(1, body + "尾"), "file_id": uuid.uuid4()},
+    ]
+    assert len(retrieval._dedupe(rows)) == 2
+
+
+def test_multi_period_query_keeps_both_report_years(monkeypatch):
+    """重排把 2026 排满时，点名的 2025 三季报仍要占一个名额，并且排在前面。"""
+    monkeypatch.setattr(settings, "kb_subject_quota_band", 0.12)
+    newer = uuid.uuid4()
+    older = uuid.uuid4()
+    rows = []
+    for seq in range(3):
+        rows.append(
+            {
+                **_row(seq, f"2026股东{seq}", distance=0.2 + seq * 0.01),
+                "file_id": newer,
+                "filename": "深圳中科飞测科技股份有限公司2026年第三季度报告.pdf",
+                "subject": "苏州翌流明光电科技有限公司",
+            }
+        )
+    rows.append(
+        {
+            **_row(3, "2025股东", distance=0.45),
+            "file_id": older,
+            "filename": "深圳中科飞测科技股份有限公司2025年第三季度报告.pdf",
+            "subject": "深圳市创新投资集团有限公司",
+        }
+    )
+    picked = retrieval._diversify(
+        "中科飞测2025年和2026年三季度股东持股对比", rows, top_k=3
+    )
+    assert {row["file_id"] for row in picked} >= {newer, older}
+    assert picked[0]["file_id"] == newer
+    assert picked[1]["file_id"] == older
+
+
+def test_two_named_companies_each_keep_a_slot_despite_rewritten_subjects():
+    """两家一起查时，股东表把主体改成股东名，也不能让一家占满 top_k。"""
+    bank = uuid.uuid4()
+    auto = uuid.uuid4()
+    rows = []
+    for seq in range(4):
+        rows.append(
+            {
+                **_row(seq, f"长安股东{seq}", distance=0.20 + seq * 0.01),
+                "file_id": auto,
+                "filename": "长安汽车有限公司2026年第三季度报告.pdf",
+                "subject": f"股东{seq}",
+            }
+        )
+    rows.append(
+        {
+            **_row(4, "41,108,449", distance=0.25),
+            "file_id": bank,
+            "filename": "中国银行股份有限公司2026年第三季度报告.pdf",
+            "subject": "中国银行股份有限公司",
+        }
+    )
+    picked = retrieval._diversify(
+        "中国银行和长安汽车的总资产分别是多少",
+        rows,
+        top_k=3,
+        per_file=True,
+    )
+    assert [row["file_id"] for row in picked[:2]] == [auto, bank]
+
+
 def test_dedupe_drops_near_duplicate_chunks():
     """切片 overlap 会让相邻片高度重合，只保留信息量最大的那条。"""
     body = "2026 年 HBM 市场规模约 546 亿美元，同比增速 58%，产能供不应求。" * 3
@@ -53,22 +210,65 @@ def test_dedupe_drops_near_duplicate_chunks():
     assert [row["seq"] for row in kept] == [0, 2]
 
 
+class _FakeReranker:
+    """可插拔重排后端的测试桩：_rerank 现在走 get_reranker().rerank()。"""
+
+    def __init__(self, scores):
+        self._scores = scores
+
+    def rerank(self, query: str, docs: list[str]) -> list[float]:
+        return self._scores
+
+
 def test_rerank_follows_model_order_and_keeps_unlisted(monkeypatch):
     rows = [_row(0, "甲"), _row(1, "乙"), _row(2, "丙")]
-    monkeypatch.setattr(retrieval, "complete_chat_once", lambda prompt: "[3,1]")
+    # 分数制：rank 越高分越高；这里让丙(2)最相关、甲(0)次之、乙(1)最低
+    fake = _FakeReranker([1.0, 0.0, 2.0])
+    monkeypatch.setattr(retrieval, "get_reranker", lambda: fake)
     ordered = retrieval._rerank("问题", rows, top_k=2)
     assert [row["seq"] for row in ordered] == [2, 0, 1]
 
 
+def test_diversify_by_subject_keeps_second_company_after_rerank(monkeypatch):
+    """重排把一家排满 top_k 时，带宽内的另一家头名仍要留下。"""
+    monkeypatch.setattr(settings, "kb_subject_quota_band", 0.12)
+    rows = [
+        {**_row(0, "甲营收", distance=0.20), "subject": "甲公司"},
+        {**_row(1, "甲利润", distance=0.21), "subject": "甲公司"},
+        {**_row(2, "甲现金", distance=0.22), "subject": "甲公司"},
+        {**_row(3, "乙营收", distance=0.30), "subject": "乙公司"},
+    ]
+    picked = retrieval._diversify_by_subject(rows, top_k=3)
+    assert [row["seq"] for row in picked] == [0, 1, 3]
+
+
+def test_diversify_by_subject_skips_far_company(monkeypatch):
+    monkeypatch.setattr(settings, "kb_subject_quota_band", 0.12)
+    rows = [
+        {**_row(0, "甲营收", distance=0.20), "subject": "甲公司"},
+        {**_row(1, "甲利润", distance=0.21), "subject": "甲公司"},
+        {**_row(2, "甲现金", distance=0.22), "subject": "甲公司"},
+        {**_row(3, "乙无关", distance=0.50), "subject": "乙公司"},
+    ]
+    picked = retrieval._diversify_by_subject(rows, top_k=3)
+    assert [row["seq"] for row in picked] == [0, 1, 2]
+
+
 def test_rerank_falls_back_on_garbage_or_error(monkeypatch):
     rows = [_row(0, "甲"), _row(1, "乙")]
-    monkeypatch.setattr(retrieval, "complete_chat_once", lambda prompt: "我觉得第2条更好")
+
+    # 分数数量不符（garbage）→ 退回向量顺序
+    fake = _FakeReranker([1.0])  # 只有 1 个分数，候选有 2 条
+    monkeypatch.setattr(retrieval, "get_reranker", lambda: fake)
     assert retrieval._rerank("问题", rows, top_k=2) == rows
 
-    def boom(prompt):
+    # 后端抛错 → 退回向量顺序，绝不丢候选
+    def boom(query, docs):
         raise RuntimeError("模型超时")
 
-    monkeypatch.setattr(retrieval, "complete_chat_once", boom)
+    fake_err = _FakeReranker([])
+    fake_err.rerank = boom
+    monkeypatch.setattr(retrieval, "get_reranker", lambda: fake_err)
     assert retrieval._rerank("问题", rows, top_k=2) == rows
 
 
@@ -137,6 +337,20 @@ def test_to_hit_keeps_missing_distance_as_none():
     assert retrieval._to_hit(row).distance == 0.0
 
 
+def test_format_hit_puts_period_before_the_page():
+    text = _format_hit(
+        {
+            "filename": "甲公司2025年第三季度报告.pdf",
+            "kind": "table",
+            "page": 4,
+            "seq": 13,
+            "text": "苏州翌流明 37,800,963",
+            "period": "2025Q3",
+        }
+    )
+    assert text.startswith("[甲公司2025年第三季度报告.pdf · 2025Q3 · 第4页]")
+
+
 def test_format_hit_with_context_marks_neighbors_and_position():
     hit = retrieval.Hit(
         file_id=str(FILE_ID),
@@ -179,12 +393,35 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     seen: dict = {}
 
-    def fake_search(query, *, file_ids=None, top_k=3):
+    def fake_search(queries, *, file_ids=None, top_k=3, filters=None):
         seen["file_ids"] = file_ids
         return []
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", fake_search)
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", fake_search)
+    monkeypatch.setattr("ai_agent.kb.scope._route", lambda q: [])
+    latest = uuid.uuid4()
+    monkeypatch.setattr(
+        "ai_agent.memory.store.store.list_kb_files",
+        lambda **k: [
+            {
+                "file_id": uuid.uuid4(),
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2025",
+                "filename": "甲公司2025年年度报告.pdf",
+                "subject_aliases": [],
+            },
+            {
+                "file_id": latest,
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2026Q3",
+                "filename": "甲公司2026年第三季度报告.pdf",
+                "subject_aliases": [],
+            },
+        ],
+    )
 
     token = set_kb_scope([str(FILE_ID)])
     try:
@@ -206,9 +443,9 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
         reset_kb_scope(token)
     assert seen["file_ids"] == [other]
 
-    # 无范围 = 全库（None，不加过滤）
+    # 没圈范围、问句也没写时期：同一主体只留最新一期，不再把年报和季报一起搜
     kb_tool._kb_search("问题")
-    assert seen["file_ids"] is None
+    assert seen["file_ids"] == [latest]
 
 
 def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
@@ -220,6 +457,29 @@ def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     monkeypatch.setattr(kg_tool.store, "graph_stats", lambda **k: {"entities": 3})
     monkeypatch.setattr(kg_tool, "embed_query", lambda q: [0.1])
+    monkeypatch.setattr("ai_agent.kb.scope._route", lambda q: [])
+    latest = uuid.uuid4()
+    monkeypatch.setattr(
+        "ai_agent.memory.store.store.list_kb_files",
+        lambda **k: [
+            {
+                "file_id": uuid.uuid4(),
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2025",
+                "filename": "甲公司2025年年度报告.pdf",
+                "subject_aliases": [],
+            },
+            {
+                "file_id": latest,
+                "status": "ready",
+                "subject": "甲公司",
+                "period": "2026Q3",
+                "filename": "甲公司2026年第三季度报告.pdf",
+                "subject_aliases": [],
+            },
+        ],
+    )
 
     def fake_entities(embedding, *, query="", top_k=5, file_ids=None, min_score=0.0):
         seen["file_ids"] = file_ids
@@ -236,29 +496,9 @@ def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
     assert seen["file_ids"] == [FILE_ID]
 
     kg_tool._kg_search("问题和谁有关")
-    assert seen["file_ids"] is None
+    assert seen["file_ids"] == [latest]
 
 
-def test_kb_search_uses_rewritten_query_when_model_echoes_user(monkeypatch):
-    from ai_agent.kb.scope import reset_kb_query_hint, set_kb_query_hint
-    from ai_agent.tools import kb_search as kb_tool
-
-    queries: list[str] = []
-
-    def fake_search(query, *, file_ids=None, top_k=3):
-        queries.append(query)
-        return []
-
-    monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", fake_search)
-    token = set_kb_query_hint("股东持股情况", "中国能建 股东持股情况")
-    try:
-        kb_tool._kb_search("股东持股情况")
-        kb_tool._kb_search("前十大股东持股比例")
-    finally:
-        reset_kb_query_hint(token)
-
-    assert queries == ["中国能建 股东持股情况", "前十大股东持股比例"]
 
 
 def test_kb_search_schema_exposes_files_not_ids():

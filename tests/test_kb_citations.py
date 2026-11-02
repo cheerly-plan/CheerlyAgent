@@ -10,6 +10,7 @@ from ai_agent.kb.citations import (
     MAX_SOURCES,
     Citation,
     add_citations,
+    clip_visible,
     collect_citations,
     merge_sources,
 )
@@ -42,11 +43,24 @@ def _citation(seq: int = 0) -> Citation:
     )
 
 
+def test_kb_search_names_the_periods_it_actually_hit(monkeypatch):
+    """命中抬头先写报告期，避免模型把表里的对比年份当成库的覆盖范围。"""
+    from ai_agent.tools import kb_search as kb_tool
+
+    hit = _hit()
+    hit.period = "2025Q3"
+    monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [hit])
+    text = kb_tool._kb_search("持股对比")
+    assert text.startswith("本次命中的报告期：2025Q3。")
+    assert "2025Q3 · 第3页" in text
+
+
 def test_kb_search_records_citations_with_position(monkeypatch):
     from ai_agent.tools import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", lambda *a, **kw: [_hit()])
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [_hit()])
 
     with collect_citations() as cited:
         text = kb_tool._kb_search("迟到怎么处理")
@@ -117,7 +131,7 @@ def test_citations_without_collector_are_silently_dropped(monkeypatch):
     from ai_agent.tools import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
-    monkeypatch.setattr(kb_tool, "search_knowledge", lambda *a, **kw: [_hit()])
+    monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [_hit()])
 
     text = kb_tool._kb_search("迟到怎么处理")
     assert "考勤制度" in text
@@ -182,7 +196,7 @@ def test_kb_search_returns_no_hit_when_all_hits_irrelevant(monkeypatch):
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(
         kb_tool,
-        "search_knowledge",
+        "search_knowledge_multi",
         lambda *a, **kw: [_hit(distance=0.85), _hit(seq=7, distance=0.91)],
     )
     with collect_citations() as cited:
@@ -199,7 +213,7 @@ def test_kb_search_keeps_only_relevant_hits(monkeypatch):
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(
         kb_tool,
-        "search_knowledge",
+        "search_knowledge_multi",
         lambda *a, **kw: [_hit(distance=0.2), _hit(seq=7, distance=0.9)],
     )
     with collect_citations() as cited:
@@ -358,3 +372,12 @@ def test_citation_payload_falls_back_to_page_for_single_page_chunk():
     payload = citation.payload()
     assert payload["page_start"] == payload["page_end"] == 12
     assert payload["section"] is None
+
+
+def test_clip_visible_keeps_whole_html_table():
+    row = "<tr><td>非经常性损益项目</td><td>本期金额</td></tr>"
+    table = "<table>" + row * 30 + "</table>"
+    assert len(table) > 800
+    shown = clip_visible(table, 800)
+    assert shown == table
+    assert shown.endswith("</table>")

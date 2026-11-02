@@ -3,7 +3,6 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 from ai_agent.agents.budget import Budget
-from ai_agent.agents.intent import classify_intent, intent_hint
 from ai_agent.prompts.chat import (
     RUNTIME_BUDGET_EXHAUSTED,
     RUNTIME_DUP_CALL,
@@ -15,11 +14,13 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.citations import collect_citations, merge_sources
+from ai_agent.kb.doc_profiles import resolve_profile
 from ai_agent.kb.scope import (
-    reset_kb_query_hint,
+    extract_prev_turn,
     reset_kb_scope,
-    set_kb_query_hint,
+    reset_rewrite_context,
     set_kb_scope,
+    set_rewrite_context,
 )
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
@@ -39,10 +40,8 @@ from ai_agent.agents.messages import (
     _keep_prefill_tail,
     _output_digest,
     _pop_incomplete_assistant,
-    _previous_turns,
     _stash_partial_assistant,
 )
-from ai_agent.agents.rewrite import _rewrite_query
 from ai_agent.agents.turn import (
     _capture_turn,
     _checkpoint_create,
@@ -56,9 +55,9 @@ from ai_agent.agents.turn import (
 
 logger = get_logger(__name__)
 
-
-
-logger = get_logger(__name__)
+# 问句点名了库内主体或图谱实体时，第一步只留这两个工具并强制调用。
+# 天气、记忆、联网留在后面的轮次，避免模型用它们应付「必须调一个工具」。
+_KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
 
 # 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
 # 不再阻塞 SSE 尾部延迟；进程退出时由 lifespan 调 shutdown_turn_finalizer 等待。
@@ -99,19 +98,99 @@ def _profile_prompt(user_id: str) -> str:
     return format_profile_block(items)
 
 
-def _system_prompt(user_id: str, *, use_kb: bool = True, intent=None) -> str:
+def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
+    """拼接知识库能力声明，注入系统提示词。
+
+    静态提示词只讲「怎么选工具」（关系→kg_search、数字→kb_search），具体
+    图谱覆盖哪些实体/关系由本块按库内实际文档类型动态生成——加公告、年报
+    等新类型时无需改提示词，只要 doc_profiles 里配好即可，提示词不再只针对季报。
+    这样模型按问题选对应类型的关系，而不是被硬编码的季报语义带偏。
+    """
+    try:
+        rows = store.list_kb_files()
+    except Exception:
+        logger.exception("知识库文件清单读取失败")
+        return ""
+    ready = [r for r in rows if r.get("status") == "ready"]
+    if kb_file_ids:
+        want = {str(f) for f in kb_file_ids}
+        ready = [r for r in ready if str(r.get("file_id")) in want]
+    if not ready:
+        return ""
+
+    # 按 doc_type 分组；空 doc_type 回落到 general（恰好能暴露漏标类型的问题）
+    groups: dict[str, list[dict]] = {}
+    for r in ready:
+        dt = str(r.get("doc_type") or "general").strip() or "general"
+        groups.setdefault(dt, []).append(r)
+
+    lines = [
+        "【知识库能力】知识库图谱存的是实体之间的关系（「谁和谁有什么关系」）。"
+        "各文档类型在图谱中覆盖的实体与关系如下，不在其中的关系请走 kb_search 读原文：",
+    ]
+    for dt, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        profile = resolve_profile(dt)
+        scope = "、".join(profile.entity_scope) if profile.entity_scope else "（通用抽取，无限定范围）"
+        preds = "、".join(profile.predicates) if profile.predicates else "（通用抽取，无限定谓词）"
+        count = len(members)
+        lines.append(f"- {profile.label}（{count} 份）")
+        lines.append(f"  实体范围={scope}")
+        lines.append(f"  关系={preds}")
+    lines.append(
+        "注：具体数字、报表科目、原文表述不在图谱里，请用 kb_search 查；"
+        "关系题同时需要某个科目金额时，kg_search 与 kb_search 两个都调。"
+    )
+    period_line = _period_inventory(ready)
+    if period_line:
+        lines.append(period_line)
+    return "\n".join(lines)
+
+
+def _period_inventory(ready: list[dict]) -> str:
+    """库里实际有哪些报告期。模型容易按训练截止日判断某年财报还没披露。"""
+    from ai_agent.kb.meta import period_rank
+
+    counts: dict[str, int] = {}
+    for row in ready:
+        period = str(row.get("period") or "").strip()
+        if period:
+            counts[period] = counts.get(period, 0) + 1
+    if not counts:
+        return ""
+    ordered = sorted(counts, key=period_rank, reverse=True)
+    parts = [f"{period}（{counts[period]} 份）" for period in ordered]
+    return (
+        "库内已有报告期：" + "、".join(parts) + "。"
+        "这些是已经入库的文件。某年有没有资料，以这份清单、kb_list_files 和检索结果抬头为准，"
+        "不要按训练知识里的披露进度推断。"
+        "表格中更早的年份是对比列，不是文件的报告期。"
+    )
+
+
+def _system_prompt(
+    user_id: str, *, use_kb: bool = True, kb_file_ids: tuple[str, ...] = ()
+) -> str:
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
-    base = build_system_prompt(use_kb=use_kb)
-    # 意图信号：只在对知识库明显无关（天气/闲聊）时追加强提示，避免过指令化。
-    # intent 为 None（未启用/无法判定）时不追加，退回主模型自由裁量。
-    hint = intent_hint(intent) if (use_kb and intent) else ""
-    core = f"{base}\n\n{hint}" if hint else base
+    core = build_system_prompt(use_kb=use_kb)
+    # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
+    # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。
     block = _profile_prompt(user_id)
-    if not block:
+    cap_block = _kb_capability_block(kb_file_ids) if use_kb else ""
+    tail = "\n\n".join(p for p in (_today_line(), block, cap_block) if p)
+    if not tail:
         return core
-    return f"{core}\n\n{block}"
+    return f"{core}\n\n{tail}"
+
+
+def _today_line() -> str:
+    from datetime import date
+
+    return (
+        f"【当前日期】今天是 {date.today().isoformat()}。"
+        "此日之前的报告期都是已披露文件，不要当成尚未发布的未来数据。"
+    )
 
 
 def run_stream(
@@ -189,15 +268,13 @@ def run_stream(
                 return
             replacing = True
             user_input = str(recent[-1].get("content") or "")
-            intent = classify_intent(user_input)
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, intent=intent), summary, recent
+                _system_prompt(user_id, use_kb=use_kb, kb_file_ids=kb_file_ids), summary, recent
             )
             persisted = len(messages)
         else:
-            intent = classify_intent(user_input)
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, intent=intent), summary, recent
+                _system_prompt(user_id, use_kb=use_kb, kb_file_ids=kb_file_ids), summary, recent
             )
             persisted = len(messages)
             turn_anchor = {"role": "user", "content": user_input}
@@ -282,6 +359,109 @@ def run_stream(
                 _compress_and_cache(user_id, chat_session_id, messages, summary)
 
 
+def _latest_user_text(messages: list[ChatMessage]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return str(msg.get("content") or "")
+    return ""
+
+
+def _question_already_retrieved(messages: list[ChatMessage]) -> bool:
+    """当前这句问话之后已经有工具结果，就不再强制检索。"""
+    for msg in reversed(messages):
+        role = msg.get("role")
+        if role == "tool":
+            return True
+        if role == "user":
+            return False
+    return False
+
+
+_KG_PREFETCH_MARK = "【图谱邻域】"
+
+
+def _kg_prefetch_present(messages: list[ChatMessage]) -> bool:
+    """这句问话之后已经注入过邻域，续跑时不要再查一次。"""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return False
+        if msg.get("role") == "system" and str(msg.get("content") or "").startswith(
+            _KG_PREFETCH_MARK
+        ):
+            return True
+    return False
+
+
+def _attach_kg_prefetch(
+    messages: list[ChatMessage], kb_file_ids: tuple[str, ...]
+) -> None:
+    """关系问句在选工具前放入图谱邻域。科目金额问句不放。"""
+    if _kg_prefetch_present(messages):
+        return
+    text = _latest_user_text(messages).strip()
+    if not text:
+        return
+    from ai_agent.tools.kg_search import prefetch_neighborhood
+
+    scope_token = set_kb_scope(kb_file_ids)
+    try:
+        block = prefetch_neighborhood(text)
+    finally:
+        reset_kb_scope(scope_token)
+    if not block:
+        return
+    logger.info("图谱预检索已注入 chars=%d", len(block))
+    messages.append({"role": "system", "content": block})
+
+
+def _must_call_kb_tool(
+    messages: list[ChatMessage],
+    tools: list[dict],
+    kb_file_ids: tuple[str, ...] = (),
+) -> bool:
+    """问句点名了文件主体或图谱实体时，这一步必须调用知识库工具。
+
+    主体（公司名、简称）和图谱实体（人名、子公司、产品）都会触发。
+    只强制「必须查」，选 kb_search 还是 kg_search 仍由模型按【知识库能力】决定。
+    只看当前这句用户消息。上一轮查过别的对象不算数；这句之后已经有
+    工具结果（续跑、检索完准备作答）也不再强制。读库失败则放行。
+    """
+    names = {t.get("function", {}).get("name") for t in tools}
+    if not (_KB_RETRIEVAL_TOOLS & names):
+        return False
+    if _question_already_retrieved(messages):
+        return False
+    text = _latest_user_text(messages).strip()
+    if not text:
+        return False
+    from ai_agent.kb.retrieval import mentioned_entities, mentioned_subjects
+
+    file_ids: list[uuid.UUID] | None = None
+    if kb_file_ids:
+        parsed: list[uuid.UUID] = []
+        for raw in kb_file_ids:
+            try:
+                parsed.append(uuid.UUID(str(raw)))
+            except ValueError:
+                continue
+        file_ids = parsed or None
+    try:
+        subjects = mentioned_subjects(text, file_ids=file_ids)
+    except Exception:
+        logger.exception("主体提及检测失败")
+        subjects = set()
+    entities: list[str] = []
+    if not subjects:
+        entities = mentioned_entities(text, file_ids=file_ids)
+    if subjects or entities:
+        logger.info(
+            "问句命中知识库，强制调用工具 subjects=%s entities=%s",
+            "、".join(sorted(subjects)),
+            "、".join(entities),
+        )
+    return bool(subjects or entities)
+
+
 def run_loop(
     messages: list[ChatMessage],
     user_id: str = "default",
@@ -303,6 +483,8 @@ def run_loop(
     if not use_kb:
         excluded.update({"kb_search", "kg_search"})
     tools = [s for s in tool_schemas() if s["function"]["name"] not in excluded]
+    if use_kb:
+        _attach_kg_prefetch(messages, kb_file_ids)
     step = 0
     # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
     # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库
@@ -316,25 +498,23 @@ def run_loop(
     # 已经走到头了（图谱永远返回同一个中心实体、向量库永远空结果）。
     # 只在下次重复时追加一句系统提示，不阻断调用
     seen_outputs: dict[tuple[str, str], int] = {}
-    # 目录 + 改写：只在新一轮提问的入口做（最后一条是 user）。断点续跑
-    # 中断在工具轮时，目录已在 checkpoint 快照里，最后一条是 assistant/tool，
-    # 不会重复注入。改写词留给后面工具执行时替换「原话 query」。
-    original_query = ""
-    rewritten_query = ""
-    if use_kb and messages and messages[-1].get("role") == "user":
-        original_query = str(messages[-1].get("content") or "").strip()
-        rewritten_query = _rewrite_query(
-            original_query, _previous_turns(messages)
-        )
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
         tool_choice: str | dict = "auto"
+        step_tools = tools
+        # 点名了库内主体、而这句还没查过：这一步必须调 kb_search 或 kg_search。
+        # 工具返回后的下一步不再强制，模型可以继续查，也可以写答案。
+        if _must_call_kb_tool(messages, tools, kb_file_ids):
+            tool_choice = "required"
+            step_tools = [
+                s for s in tools if s["function"]["name"] in _KB_RETRIEVAL_TOOLS
+            ]
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
             context = _fit_context(messages, settings.llm_context_char_budget)
             for kind, payload in stream_chat(
-                context, tools, tool_choice=tool_choice
+                context, step_tools, tool_choice=tool_choice
             ):
                 if kind == "text":
                     streamed += payload
@@ -461,17 +641,19 @@ def run_loop(
             seen_calls.add(dedupe_key)
             # 前端只用来清掉调用前的半截字，展示名不再下发
             yield {"type": "tool_start", "name": call["name"]}
-            # 范围必须在工具执行这一层同栈设置：run_stream 的生成器会被
-            # 不同线程轮流 next() 推进，外层设的 contextvar 传不进来
+            # 范围与查询改写上下文必须在工具执行这一层同栈设置：run_stream 的
+            # 生成器会被不同线程轮流 next() 推进，外层设的 contextvar 传不进来
             scope_token = set_kb_scope(kb_file_ids)
-            hint_token = set_kb_query_hint(original_query, rewritten_query)
+            rewrite_token = set_rewrite_context(
+                extract_prev_turn(messages, settings.kb_rewrite_history_turns)
+            )
             try:
                 with collect_citations() as cited:
                     with user_scope(user_id):
                         output = execute_tool(call["name"], call["arguments"])
             finally:
-                reset_kb_query_hint(hint_token)
                 reset_kb_scope(scope_token)
+                reset_rewrite_context(rewrite_token)
             turn_sources = merge_sources(turn_sources, cited)
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
             # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾

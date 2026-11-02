@@ -14,6 +14,11 @@ class Settings(BaseSettings):
 
     base_url: str
     api_key: str
+    # 向量和整页 OCR 专用网关。空则跟随 BASE_URL / API_KEY。
+    # 对话、重排、视觉、图谱走线上时，这里填本地 Ollama，避免嵌入和 OCR
+    # 被一起带到线上（换嵌入模型等于整库重嵌，小米 OCR 也只在本地）。
+    local_base_url: str = ""
+    local_api_key: str = ""
     model: str
     small_model: str = ""
     max_turns: int = 10
@@ -80,6 +85,16 @@ class Settings(BaseSettings):
     # 这类「每句证据必须绑单页」的场景才打开。
     # 关闭时（默认）允许同节内跨页聚合，引用按「第134–135页」展示。
     kb_chunk_within_page: bool = False
+    # 表格切片力度：row=每个行项目（科目）单独成片，自解释最强但切片数多，
+    # 一张百行财报会切出上百片、同表切片挤占 top_k 名额淹没其他文件；
+    # section=语义感知滑动窗口——按 kb_chunk_size 累积、在科目行边界断，
+    # 分组标题（「流动资产：」）强制起新片，「其中：」/合计跟所属科目走，
+    # 每窗重复表头+分组标题保持自解释。财报长表建议切到 section 降切片数。
+    # 两种模式都按行项目保底（绝不从单元格中间切），只是聚合粒度不同。
+    # 生产默认 section：财报长表切片数大幅下降、同表切片不再挤占 top_k 名额；
+    # 函数层 chunk_segments 的默认值仍为 "row"（细粒度兜底 + 测试隔离），
+    # 真实入库以本配置值为准（pipeline 显式传入）。
+    kb_table_group_mode: str = "section"
     # PDF 表格识别：把表格抽成独立的 table 切片（整表成片、前端渲染成真
     # 表格），并把表格占用的文本行从正文里剔除，避免同一份内容存两份。
     # 关掉即回到「表格按文本行切成单列」的老行为。
@@ -121,14 +136,27 @@ class Settings(BaseSettings):
     # 位图占页面面积的比例下限：页眉 logo、装饰线、水印都远小于该值
     kb_vision_min_image_ratio: float = 0.06
 
+    # 整页 OCR（Xiaomi-OCR-0 的 page 模式）：PDF 逐页渲染成图，用官方
+    # 文档抽取提示词交给视觉模型。模型名为空则关闭，PDF 仍走文字层。
+    # 官方 MCP 只接受 127.0.0.1，这里直接打 BASE_URL，局域网 Ollama 也能用。
+    kb_ocr_model: str = ""
+    # 0 = 不截断页数。整页识别按页计时，长文档先设一个上限再放开。
+    kb_ocr_max_pages: int = 0
+    kb_ocr_dpi: int = 150
+    # 长边像素上限，对齐官方 fit_image（超过会降采样，避免视觉 token 爆上下文）
+    kb_ocr_max_edge: int = 2048
+    kb_ocr_concurrency: int = 2
+    kb_ocr_max_tokens: int = 4096
+    kb_ocr_timeout_seconds: float = 180.0
+    kb_ocr_max_failures: int = 2
+
     # 知识图谱（P2）：切片入库后异步抽取实体关系（每批 = 一次 LLM 调用）。
     # 默认开启；关闭后新上传的文件不再生成图谱，已有图谱保留、仍可检索。
     # 抽取失败只影响图谱（graph_status=failed），文件本身仍是 ready、照常检索。
     kb_graph_enabled: bool = True
-    # 空 = 跟随 MODEL。对话/嵌入走本地时，这里填线上模型名，并配
-    # kb_graph_base_url，实体抽取才不会打到 Ollama 上 404。
+    # 空 = 跟随 MODEL。只有抽取要换模型或换网关时才填下面三项。
     kb_graph_model: str = ""
-    # 抽取专用网关。空 = 跟 BASE_URL。对话用 Ollama、抽实体用线上时填这个。
+    # 抽取专用网关。空 = 跟 BASE_URL。
     kb_graph_base_url: str = ""
     # 抽取专用 key。空 = 跟 API_KEY。
     kb_graph_api_key: str = ""
@@ -150,8 +178,7 @@ class Settings(BaseSettings):
     # 单批抽取的超时：云端模型 45s 够，但本地 7B 模型产出 4k token 的 JSON
     # 常要 60~150s，给足余量（超时 = 丢一批，宁可慢也别丢）
     kb_graph_timeout_seconds: float = 180
-    # 检索时取多少个种子实体、向前端返回的图最大节点数
-    kb_graph_top_k: int = 6
+    # 向前端返回的图最大节点数。种子实体条数由检索请求的 top_k 决定。
     kb_graph_max_nodes: int = 200
     # 没有名称/关键词依据的候选，向量相似度必须过这条线。
     # 向量模型对无关词也会给 0.45~0.52 的基线，低于 0.55 基本只是话题沾边；
@@ -198,26 +225,20 @@ class Settings(BaseSettings):
     # 每次排出同一个顺序，否则评测结果会随采样抖动，改动好坏无法归因
     kb_rerank_temperature: float = 0.0
     kb_rerank_timeout_seconds: float = 30.0
+    # 重排后端：local_ce（本地 bge-reranker-v2-m3，便宜 1-2 个数量级、完全确定、
+    # 财报文本不出网，默认）/ llm（沿用大模型重排，仅作兜底）。local_ce 需
+    # FlagEmbedding 依赖（uv add --group rerank FlagEmbedding）且首次需拉取权重
+    # （HF_ENDPOINT=https://hf-mirror.com）；加载失败自动退回 llm。应用启动时
+    # lifespan 会探测后端并打印就绪/退回日志，便于确认实际生效的是哪个。
+    kb_rerank_backend: str = "local_ce"
+    # local_ce 使用的 cross-encoder 模型
+    kb_rerank_local_model: str = "BAAI/bge-reranker-v2-m3"
     # 实体对齐是否要求模型输出 JSON（response_format），取值与
     # memory_extract_json_mode 相同（off / json_object）。
     # 对齐的输出形状最简单（{"same":[1,0,1]}），但裁决结果会被直接拿去合并
     # 实体，猜错代价大——正是最需要硬约束的地方，所以和记忆抽取一起试点。
     # 默认 off，理由同上：先实测网关支持度。
     kb_align_json_mode: str = "off"
-    # 对话改写：多轮对话里，当前这句省略了主体/语境（上轮在问「中国能源
-    # 建设」、这轮问「股东持股情况」），结合上一轮对话把这句改写/扩写成
-    # 自包含的检索词。改写结果写入本轮目录消息，模型若仍用用户原话调工具
-    # 则服务端自动换成改写词。第一问无上文时跳过；失败/超时退回原话。
-    kb_rewrite_enabled: bool = True
-    # 空 = 用 small_model（或回落主模型）。改写是短任务，不需要大模型
-    kb_rewrite_model: str = ""
-    # 改写是「同一句话补主体」，不该每次补出不同措辞：不同措辞会引出不同的
-    # 召回集合，让「重排坏了」和「改写抖了」分不清
-    kb_rewrite_temperature: float = 0.0
-    kb_rewrite_timeout_seconds: float = 6.0
-    # 改写喂给模型的最近几轮「完整对话（user 问句 + assistant 最终回答）」：
-    # 主体（公司名）可能出现在更早那轮、中间隔了无主体的追问，取 2 轮更稳。
-    kb_rewrite_history_turns: int = 2
     # 命中切片前后各带几段一起给模型：跨段落的答案常常被切片边界切断
     kb_neighbor_expand: int = 1
     # 混合检索：关键词直查 + 向量召回做 RRF 融合。向量对制度编号、
@@ -227,11 +248,52 @@ class Settings(BaseSettings):
     kb_hybrid_keywords: int = 6
     # 关键词路的召回条数：与向量路同量级，融合后一起去重/重排
     kb_hybrid_candidates: int = 12
-    # 标签预过滤：查询关键词命中文件标签时先收窄到这批文件再检索，
-    # 少了别的文件的干扰项（如 FAQ），重排输入更干净。
-    # 代价是可能判窄，所以调用方必须带弱召回兜底（见 tools/kb_search）。
-    # 提取关键词用的是已有逻辑，没有新增 LLM 调用
-    kb_tag_scope_enabled: bool = True
+    # 主体配额的「相关性带宽」：某一主体的最佳命中与全局最佳命中的距离差
+    # 在带宽内时，才保证它至少拿到一个名额（对比问句靠这条两家都出得来）。
+    # 超出带宽的主体不保底——问一家公司时，别家的头名差 0.3 也硬塞进来
+    # 只会稀释上下文。0 = 关掉配额，退回纯按距离取前 N 条。
+    kb_subject_quota_band: float = 0.12
+    # ——— 查询改写（多轮对话补全 + 检索增强）———
+    # 多轮对话改写：结合上一轮对话把当前追问补全/指代消解成自包含检索词
+    # （如「那它去年呢？」补全公司名）。关闭/无上文/失败一律退回原话。
+    kb_rewrite_enabled: bool = True
+    # 空 = 跟随 resolve_llm()（小模型优先，短文本判别不需要大模型）
+    kb_rewrite_model: str = ""
+    kb_rewrite_timeout_seconds: float = 3.0
+    kb_rewrite_history_turns: int = 2
+    # 检索增强改写（multi-query）：把一条查询扩写成多条变体分别检索后 RRF 融合，
+    # 提升对比/口语长问句召回。默认关闭——开启会显著增加检索次数与延迟，
+    # 请先用评测验证效果与延迟可接受再用于生产。
+    kb_multiquery_enabled: bool = False
+    kb_multiquery_model: str = ""
+    kb_multiquery_count: int = 3
+    kb_multiquery_timeout_seconds: float = 3.0
+    # ——— 文档级摘要索引 + 语义路由 ———
+    # 每份文件入库后额外生成一段摘要并单独 embedding（见 kb/summary.py），
+    # 检索前先用它把「该查哪几份文件」这个问题解答掉：
+    # 不再依赖模型对着文件清单挑 files，库里有一千份文件也进不了提示词。
+    kb_summary_enabled: bool = True
+    # 摘要总长上限（字符）：够覆盖主体/报告期 + 十几条要点，再长边际收益
+    # 递减，还会把不同僚公司的特征词稀释到同一个向量里
+    kb_summary_max_chars: int = 1200
+    # 摘要里收录的切片首句数与每条截断长度：只取正文开头若干段——财报、
+    # 研报的开篇基本就写清了「谁、什么期间、讲了什么」
+    kb_summary_head_chunks: int = 8
+    kb_summary_head_chars: int = 160
+    # 摘要里补充的图谱实体名上限（按提及频次取）：行业研报正文讲的是宁德
+    # 时代、比亚迪，这些主体只有图谱实体里有。控制在个位数两位——再往下
+    # 就是各类会计科目，它们不加区分度（每份财报都有「营业收入」）
+    kb_summary_entities: int = 12
+    # 文档路由：模型没指定 files 时，按摘要向量自动选出候选文档。
+    # 关掉则退回会话范围 / 全库（旧行为）
+    kb_doc_route_enabled: bool = True
+    # 一次路由选出的文档数上限。给得比实际需要的宽一点，精排除交给
+    # 下面的距离门槛与切片层的重排——路由漏召回是无药可救的
+    kb_doc_route_top_k: int = 6
+    # 摘要向量与查询向量的余弦距离上限：超过就认为这份文件和问题无关。
+    # 文档级摘要比切片更「泛」，同主题不同公司的距离常常只差 0.05，
+    # 这个门槛比 kb_search_max_distance 更严，否则路由等于没做
+    kb_doc_route_max_distance: float = 0.55
 
     database_url: str
     embedding_model: str
@@ -264,12 +326,11 @@ class Settings(BaseSettings):
     # 链路 400。先在支持 JSON 模式的网关上实测后再打开。
     memory_extract_json_mode: str = "off"
 
-    # 意图软提示（对话路由）：用纯关键词判定用户问题是否为「天气 / 闲聊」这类
-    # 与知识库无关的内容，给主模型一个显式但软性的路由提示（明确别去调
-    # kb_search/kg_search）。不做小模型分类——那两类关键词就能确定性识别，
-    # 没必要每轮多一次 LLM 调用；且小模型误判反而可能跳过本该查的库。
-    # 本开关只控制「是否追加提示」，永不关闭检索工具；关掉即退回主模型自行决定。
-    intent_enabled: bool = True
+    def local_llm(self) -> tuple[str, str]:
+        """向量和整页 OCR 的网关。未单独配置时跟主网关。"""
+        url = (self.local_base_url or "").strip() or self.base_url
+        key = (self.local_api_key or "").strip() or self.api_key
+        return url, key
 
     def resolve_llm(self, business_model: str = "") -> str:
         return business_model or self.small_model or self.model

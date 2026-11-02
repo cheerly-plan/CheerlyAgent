@@ -102,6 +102,14 @@ def _is_data_row(row: list[str]) -> bool:
     return any(cell and _NUM_ONLY.match(cell) for cell in row)
 
 
+def _is_item_row(row: list[str]) -> bool:
+    """科目行：第一列是名称，其余列是空的或数字。金额整格为空也算科目行。"""
+    cells = [cell or "" for cell in row]
+    if not cells or not cells[0] or _is_header_row(row):
+        return False
+    return all(not cell or _NUM_ONLY.match(cell) for cell in cells[1:])
+
+
 def _is_header_row(row: list[str]) -> bool:
     """列名行：至少两个非空单元格、不含纯数字、带中文。"""
     cells = [cell for cell in row if cell]

@@ -46,8 +46,10 @@ from ai_agent.api.schemas import (
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import embedding_input
+from ai_agent.kb.otsl import render_otsl
 from ai_agent.kb.parsing import supported, supported_label
 from ai_agent.kb.pipeline import kb_pipeline
+from ai_agent.kb.citations import clip_visible
 from ai_agent.kb.retrieval import preview_search
 from ai_agent.memory.db import UserRecord
 from ai_agent.memory.embeddings import embed_texts
@@ -262,14 +264,7 @@ def list_files(
 
 
 def _clip_preview(text: str, limit: int = 800) -> str:
-    body = (text or "").strip()
-    if len(body) <= limit:
-        return body
-    cut = body[:limit]
-    nl = cut.rfind("\n")
-    if nl >= 80:
-        cut = cut[:nl]
-    return f"{cut}\n…"
+    return clip_visible(text, limit)
 
 
 @router.post("/search")
@@ -383,7 +378,9 @@ def list_chunks(
         raise HTTPException(status_code=404, detail="文件不存在")
     chunks, total = store.list_kb_chunks(fid, limit=limit, offset=offset)
     # 顺带给最大页码：前端「跳页」控件要显示「共 N 页」，否则得再发一次请求
-    return {"chunks": chunks, "total": total, "page_count": store.kb_chunk_page_count(fid)}
+    # OTSL 标记只在展示时换成表格，库里的原文不动
+    shown = [{**dict(chunk), "text": render_otsl(chunk["text"] or "")} for chunk in chunks]
+    return {"chunks": shown, "total": total, "page_count": store.kb_chunk_page_count(fid)}
 
 
 @router.get("/files/{file_id}/chunks/locate")

@@ -1,0 +1,185 @@
+[
+  {
+    "id": "self-name",
+    "note": "用户自报姓名，应写入画像的姓名侧面",
+    "turn": [
+      {"role": "user", "content": "我叫林晓，以后这么称呼我。"},
+      {"role": "assistant", "content": "好的，之后称呼你林晓。"}
+    ],
+    "expect": [
+      {"kind": "profile", "facet": "name", "contains": ["林晓"]}
+    ]
+  },
+  {
+    "id": "ask-chairman",
+    "note": "问董事长不是用户的职业",
+    "turn": [
+      {"role": "user", "content": "中国能建的董事长是谁？"},
+      {"role": "assistant", "content": "季报披露的董事长是宋海良。"}
+    ],
+    "expect_empty": true,
+    "forbid": ["董事长", "宋海良", "中国能建"]
+  },
+  {
+    "id": "ask-revenue",
+    "note": "查财报数字不是用户近况",
+    "turn": [
+      {"role": "user", "content": "顺丰控股2026年第三季度营业收入是多少？"},
+      {"role": "assistant", "content": "营业收入为一百亿元，同比增长百分之五。"}
+    ],
+    "expect_empty": true,
+    "forbid": ["营业收入", "顺丰", "一百亿"]
+  },
+  {
+    "id": "career-done",
+    "note": "已经转行要更新职业，写成当前职业",
+    "existing_profile": ["- 职业：画家"],
+    "turn": [
+      {"role": "user", "content": "我已经转行做前端开发了。"},
+      {"role": "assistant", "content": "记住了，你现在做前端开发。"}
+    ],
+    "expect": [
+      {"kind": "profile", "facet": "occupation", "contains": ["前端"]}
+    ]
+  },
+  {
+    "id": "career-intent",
+    "note": "只是打算转行，不能把目标职业写成现状",
+    "existing_profile": ["- 职业：画家"],
+    "turn": [
+      {"role": "user", "content": "我打算转行做 Agent 开发，还没开始。"},
+      {"role": "assistant", "content": "了解，这是计划，你目前仍是画家。"}
+    ],
+    "forbid_facet": [{"facet": "occupation", "contains": "Agent"}]
+  },
+  {
+    "id": "ongoing-project",
+    "note": "用户自己正在做、会跨会话延续的任务记成情景",
+    "turn": [
+      {"role": "user", "content": "我在做记忆模块的评测，方案已经定了用黄金对话集。"},
+      {"role": "assistant", "content": "好，按黄金对话集来做评测。"}
+    ],
+    "expect": [
+      {"kind": "episode", "contains": ["评测"]}
+    ]
+  },
+  {
+    "id": "assistant-suggestion",
+    "note": "助手的建议不是用户正在做的事，不记成情景",
+    "turn": [
+      {"role": "user", "content": "这个检索要怎么优化？"},
+      {"role": "assistant", "content": "建议先做文档路由，再做报告期过滤。"}
+    ],
+    "expect_empty": true,
+    "forbid": ["文档路由", "报告期过滤"]
+  },
+  {
+    "id": "preference-add",
+    "note": "新偏好单独追加，不要覆盖已有偏好",
+    "existing_profile": ["- 偏好：回答用深色主题"],
+    "turn": [
+      {"role": "user", "content": "我还喜欢回答简洁一点。"},
+      {"role": "assistant", "content": "好，之后回答会更简洁。"}
+    ],
+    "expect": [
+      {"kind": "profile", "facet": "preference", "op": "add", "contains": ["简洁"]}
+    ]
+  },
+  {
+    "id": "move-city",
+    "note": "居住地只留当前城市",
+    "existing_profile": ["- 地区：北京"],
+    "turn": [
+      {"role": "user", "content": "我搬到上海了。"},
+      {"role": "assistant", "content": "好的，你现在在上海。"}
+    ],
+    "expect": [
+      {
+        "kind": "profile",
+        "facet": "locale",
+        "contains": ["上海"],
+        "excludes": ["北京"]
+      }
+    ]
+  },
+  {
+    "id": "weather",
+    "note": "一次性天气查询不记",
+    "turn": [
+      {"role": "user", "content": "深圳明天要带伞吗？"},
+      {"role": "assistant", "content": "明天有雨，建议带伞。"}
+    ],
+    "expect_empty": true
+  },
+  {
+    "id": "reply-language",
+    "note": "长期语言偏好写入语言侧面",
+    "turn": [
+      {"role": "user", "content": "请以后用英文回复我。"},
+      {"role": "assistant", "content": "之后我会用英文回复。"}
+    ],
+    "expect": [
+      {"kind": "profile", "facet": "language", "contains": ["英"]}
+    ]
+  },
+  {
+    "id": "rename-across-turns",
+    "note": "多轮里改口，姓名以最后一次为准",
+    "turn": [
+      {"role": "user", "content": "我叫林晓。"},
+      {"role": "assistant", "content": "林晓，是吗？"},
+      {"role": "user", "content": "说错了，我叫林晓舟。"},
+      {"role": "assistant", "content": "好的，你是林晓舟。"}
+    ],
+    "expect": [
+      {"kind": "profile", "facet": "name", "contains": ["林晓舟"]}
+    ]
+  },
+  {
+    "id": "move-city-multiturn",
+    "note": "多轮把居住地从北京改成杭州，只留现居地",
+    "turn": [
+      {"role": "user", "content": "我现在住在北京。"},
+      {"role": "assistant", "content": "北京，记下了。"},
+      {"role": "user", "content": "不对，上周已经搬到杭州了。"},
+      {"role": "assistant", "content": "更正：你现在住在杭州。"}
+    ],
+    "expect": [
+      {
+        "kind": "profile",
+        "facet": "locale",
+        "contains": ["杭州"],
+        "excludes": ["北京"]
+      }
+    ]
+  },
+  {
+    "id": "preference-retract",
+    "note": "多轮里否定旧偏好，删掉旧的并记下新的",
+    "existing_profile": ["- 偏好：回答写得详细"],
+    "turn": [
+      {"role": "user", "content": "我喜欢回答写得详细一点。"},
+      {"role": "assistant", "content": "好，之后回答会写详细。"},
+      {"role": "user", "content": "算了，详细的不要了，还是简洁一点。"},
+      {"role": "assistant", "content": "好，不再写得很详细，改成简洁。"}
+    ],
+    "expect": [
+      {"kind": "profile", "facet": "preference", "op": "delete", "contains": ["详细"]},
+      {"kind": "profile", "facet": "preference", "op": "add", "contains": ["简洁"]}
+    ]
+  },
+  {
+    "id": "task-switch",
+    "note": "多轮确认任务切换，情景记现在在做的事",
+    "existing_episodes": ["用户此前在做图谱抽取"],
+    "turn": [
+      {"role": "user", "content": "图谱抽取先停一下。"},
+      {"role": "assistant", "content": "停掉。接下来做什么？"},
+      {"role": "user", "content": "改做记忆评测，用黄金对话集。"},
+      {"role": "assistant", "content": "好，当前任务改成记忆评测。"}
+    ],
+    "expect": [
+      {"kind": "episode", "contains": ["记忆评测"]}
+    ]
+  }
+]

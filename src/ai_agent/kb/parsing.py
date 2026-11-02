@@ -80,22 +80,290 @@ def parse_segments(path: Path) -> list[Segment]:
 # ——— PDF ———
 
 
-def _parse_pdf(path: Path) -> list[Segment]:
-    segments, text_lens = _pdf_text(path)
-    if not segments:
-        # pymupdf 不可用 / 无文本层：退回整页抽取（无章节、无页眉剔除），
-        # 扫描件走这条路时仍是「抽不出字就报错」，不做假解析
-        segments, text_lens = _pdf_text_fallback(path)
+# OCR 整页里的 HTML 表。表题在表前一行，用来判断合并/母公司口径。
+_OCR_TABLE = re.compile(r"<table\b[^>]*>[\s\S]*?</table>", re.IGNORECASE)
+# 整页 OCR 没有坐标，页眉页脚的「1 / 16」「第 1 页 / 共 16 页」会混进正文。
+# 只删独占一行的页码，句子里的比例不动。
+# 视觉模型按「忽略页眉」训练，会把贴顶的证券代码、证券简称、公告编号整行丢掉。
+_COVER_FIELD = re.compile(
+    r"(?:证券代码|证券简称|股票代码|股票简称|公告编号)\s*[:：]"
+)
+# 「主要财务数据……如下：」是贴着表的引导句。再往上的正文句子不带。
+_TABLE_INTRO = re.compile(r"(?:如下表|如下|下表)\s*[:：]\s*$")
+_TABLE_INTRO_MAX = 160
+_OCR_PAGE_MARK = re.compile(
+    r"^[^\w\u4e00-\u9fff]*"
+    r"(?:第\s*)?\d{1,4}\s*页?\s*[/／]\s*(?:共\s*)?\d{1,4}\s*页?"
+    r"[^\w\u4e00-\u9fff]*$"
+)
 
-    # 图表单独走渲染 + 视觉识别（pypdf 不能把页转成图）
-    # 延迟 import 避免与 figures 模块的循环依赖
+
+def _parse_pdf(path: Path) -> list[Segment]:
+    """整页 OCR 的正文为准，文本层只提供每页章节。
+
+    财报表格的数字以视觉模型读出的 HTML 表为准。文本层仍跑一遍，但只用它的
+    章节标签：每一块挂上所在页的 section，表前一行表题决定合并/母公司口径。
+    贴在页顶、被 OCR 当成页眉丢掉的证券代码、证券简称、公告编号，从文本层补回。
+    OCR 没开、模型没拉起或一页都没识别出来时，退回文本层原来的解析（含表格
+    识别和图表）。
+    """
+    from ai_agent.kb.ocr import ocr_pdf
+
+    try:
+        text_segments, text_lens = _pdf_text(path)
+    except Exception:
+        logger.warning("PDF 文本层抽取失败", exc_info=True)
+        text_segments, text_lens = [], []
+
+    ocr_pages = ocr_pdf(path)
+    if ocr_pages:
+        segments = _segments_from_ocr(
+            ocr_pages, _section_by_page(text_segments), text_segments
+        )
+        if segments:
+            return segments
+
+    if any((s.text or "").strip() for s in text_segments):
+        from ai_agent.kb.figures import _pdf_figures
+
+        text_segments.extend(_pdf_figures(path, text_lens))
+        return text_segments
+
     from ai_agent.kb.figures import _pdf_figures
 
-    segments.extend(_pdf_figures(path, text_lens))
-
-    if not segments:
+    figures = _pdf_figures(path, text_lens)
+    if not figures:
         raise ParseError("PDF 中没有可提取的文本（可能是扫描件/图片版）")
-    return segments
+    return figures
+
+
+def _section_by_page(segments: list[Segment]) -> dict[int, str]:
+    """每页一个章节标签。页内有多个节时取该页第一段的节，后面的空页沿用上一页。"""
+    first: dict[int, str] = {}
+    for seg in segments:
+        if seg.page and seg.section and seg.page not in first:
+            first[seg.page] = seg.section
+    if not first:
+        return {}
+    current: str | None = None
+    out: dict[int, str] = {}
+    for page in range(1, max(first) + 1):
+        if page in first:
+            current = first[page]
+        if current:
+            out[page] = current
+    return out
+
+
+def _segments_from_ocr(
+    pages: list[Segment],
+    sections_by_page: dict[int, str],
+    text_segments: list[Segment],
+) -> list[Segment]:
+    out: list[Segment] = []
+    # 合并资产负债表的表名常常在上一页末尾，续表本身不再印。口径顺着往下传，
+    # 直到出现下一张报表名（母公司利润表会把口径改过来）。
+    carried_scope: str | None = None
+    pending_lead = ""
+    for page_seg in pages:
+        page = page_seg.page
+        section = sections_by_page.get(page) if page else None
+        text = _restore_cover_fields(text_segments, page, page_seg.text or "")
+        segments, carried_scope, pending_lead = _split_ocr_markdown(
+            text, page, section, carried_scope, pending_lead
+        )
+        out.extend(segments)
+    if pending_lead:
+        last = pages[-1]
+        out.append(
+            Segment(
+                pending_lead,
+                last.page,
+                TEXT,
+                sections_by_page.get(last.page) if last.page else None,
+            )
+        )
+    return out
+
+
+def _restore_cover_fields(
+    text_segments: list[Segment], page: int | None, ocr_text: str
+) -> str:
+    """OCR 漏掉的封面字段行插回该页正文开头。已经写进 OCR 的不重复。"""
+    if page is None:
+        return ocr_text
+    ocr_compact = re.sub(r"\s+", "", ocr_text)
+    missing: list[str] = []
+    seen: set[str] = set()
+    for seg in text_segments:
+        if seg.page != page or seg.kind != TEXT:
+            continue
+        for raw in seg.text.splitlines():
+            line = re.sub(r"\s+", " ", raw).strip()
+            if not line or len(line) > 120 or not _COVER_FIELD.search(line):
+                continue
+            compact = re.sub(r"\s+", "", line)
+            if compact in ocr_compact or compact in seen:
+                continue
+            seen.add(compact)
+            missing.append(line)
+    if not missing:
+        return ocr_text
+    return "\n".join(missing + [ocr_text.strip()]).strip()
+
+
+def _split_ocr_markdown(
+    text: str,
+    page: int | None,
+    section: str | None,
+    carried_scope: str | None = None,
+    pending_lead: str = "",
+) -> tuple[list[Segment], str | None, str]:
+    """一页 OCR markdown：含 HTML 表的块成表格，其余成正文。
+
+    返回 (段落, 传到下一页的口径, 表名)。表名不一定贴着表格：中间可以有
+    勾选行、提问句和空行，也可以落在上一页末尾，跟下一页的表拼在一起。
+    """
+    body = _strip_ocr_page_marks(text)
+    if not body:
+        return [], carried_scope, pending_lead
+    out: list[Segment] = []
+    carried = carried_scope
+    if not _OCR_TABLE.search(body):
+        merged = "\n".join(part for part in (pending_lead, body) if part)
+        fresh = _statement_scope_in(merged)
+        if fresh:
+            carried = fresh
+        return [Segment(merged, page, TEXT, section)], carried, ""
+    last = 0
+    lead = pending_lead
+    for match in _OCR_TABLE.finditer(body):
+        preamble = body[last : match.start()]
+        fresh = _statement_scope_in(preamble)
+        if fresh:
+            carried = fresh
+        before, caption = _split_table_preamble(preamble)
+        if lead:
+            if before:
+                out.append(Segment(lead, page, TEXT, section))
+            else:
+                caption = "\n".join(part for part in (lead, caption) if part)
+                fresh = _statement_scope_in(lead)
+                if fresh:
+                    carried = fresh
+            lead = ""
+        if before:
+            out.append(Segment(before, page, TEXT, section))
+        table = match.group(0).strip()
+        if caption:
+            table = f"{caption}\n{table}"
+        out.append(Segment(table, page, TABLE, section, scope=carried))
+        last = match.end()
+    prose, trailing = _split_table_preamble(body[last:])
+    if prose:
+        out.append(Segment(prose, page, TEXT, section))
+        fresh = _statement_scope_in(prose)
+        if fresh:
+            carried = fresh
+    if trailing:
+        fresh = _statement_scope_in(trailing)
+        if fresh:
+            carried = fresh
+    return out, carried, trailing
+
+
+def _statement_scope_in(text: str) -> str | None:
+    """一段文字里最后一条报表名的口径。句子里的「企业合并」不算。"""
+    from ai_agent.kb.tables import _table_scope
+
+    found: str | None = None
+    for raw in text.splitlines():
+        line = _clean_caption_line(raw)
+        if not line or len(line) > 40 or line[-1] in "。；，、：:":
+            continue
+        if not line.endswith("表"):
+            continue
+        scope = _table_scope(line)
+        if scope:
+            found = scope
+    return found
+
+
+def _clean_caption_line(raw: str) -> str:
+    line = raw.strip().strip("*").strip()
+    line = re.sub(r"^#{1,6}\s*", "", line)
+    line = re.sub(r"^\d{1,2}\s*[、.．]\s*", "", line)
+    line = re.sub(r"^（[一二三四五六七八九十]+）\s*", "", line)
+    return line.strip()
+
+
+def _strip_ocr_page_marks(text: str) -> str:
+    kept = [
+        line for line in (text or "").splitlines() if not _OCR_PAGE_MARK.match(line.strip())
+    ]
+    return "\n".join(kept).strip()
+
+
+def _split_table_preamble(preamble: str) -> tuple[str, str]:
+    """表前的标题、引导句、勾选和单位行归这张表，再往上的正文留下。
+
+    空行不截断：标题和表格之间常常空一行，或者夹着
+    「公司是否需追溯调整…」「□ 是 √ 否」，以及「……如下：」。
+    碰到正文句子才停。
+    """
+    from ai_agent.kb.tables import _CAPTION_NOISE, _CAPTION_SHAPE
+
+    lines = preamble.splitlines()
+    start = len(lines)
+    anchor_noise = False
+    blanks = 0
+    while start > 0:
+        raw = lines[start - 1]
+        if not raw.strip():
+            blanks += 1
+            start -= 1
+            continue
+        if _is_strong_lead(raw, _CAPTION_NOISE, _CAPTION_SHAPE):
+            anchor_noise = _is_noise_line(raw, _CAPTION_NOISE)
+            blanks = 0
+            start -= 1
+            continue
+        # 勾选、单位上方那句短提问，隔一行也算表头。再往上的正文不带。
+        if _is_weak_lead(raw) and anchor_noise and blanks <= 1:
+            anchor_noise = False
+            blanks = 0
+            start -= 1
+            continue
+        break
+    return "\n".join(lines[:start]).strip(), "\n".join(lines[start:]).strip()
+
+
+def _is_noise_line(raw: str, noise: re.Pattern[str]) -> bool:
+    line = raw.strip()
+    return bool(noise.search(line)) and not re.match(r"^#{1,6}\s*\S", line)
+
+
+def _is_strong_lead(raw: str, noise: re.Pattern[str], shape: re.Pattern[str]) -> bool:
+    line = raw.strip()
+    if _TABLE_INTRO.search(line) and len(line) <= _TABLE_INTRO_MAX:
+        return True
+    if re.match(r"^#{1,6}\s*\S", line) and len(line) <= 80:
+        return True
+    if noise.search(line):
+        return True
+    cleaned = _clean_caption_line(line)
+    if not cleaned or len(cleaned) > 40 or cleaned[-1] in "。；，、：:":
+        return False
+    return cleaned.endswith("表") or bool(shape.search(cleaned))
+
+
+def _is_weak_lead(raw: str) -> bool:
+    line = raw.strip()
+    if _COVER_FIELD.search(line):
+        return False
+    if len(line) > 40 or line[-1] in "。；，、：:":
+        return False
+    return True
 
 
 def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:

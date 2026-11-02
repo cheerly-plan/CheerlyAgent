@@ -21,12 +21,18 @@
 指标：hit@1 / hit@3 / hit@k 看"能不能查到"，recall@10 看"证据够不够
 模型答全"，MRR@10 看"排得多靠前"——三档都命中时靠 MRR 分辨优劣。
 
+评测走对话同一条检索（kb_search.retrieve_for_question）：问句先圈定文件，
+去掉公司名，再在这些文件里查。不再把原句直接丢进全库。
+
 用法：
     uv run python scripts/eval_retrieval.py            # 全量评测（默认关重排，纯检索质量）
     uv run python scripts/eval_retrieval.py --validate # 只校验用例与语料是否对齐
     uv run python scripts/eval_retrieval.py --rerank   # 带上 LLM 重排（需模型可用，较慢）
     uv run python scripts/eval_retrieval.py --dump     # 列出库内切片，便于编写用例
     uv run python scripts/eval_retrieval.py --top-k 10 # 调大观察窗口
+    uv run python scripts/eval_retrieval.py --cases 另一份.json   # 指定用例集（默认黄金集）
+    uv run python scripts/eval_retrieval.py --filters  # 开启 chunk 级元数据过滤（模拟生产传参）后评测
+    uv run python scripts/eval_retrieval.py --compare-filters     # 过滤关/开各跑一轮，对照 hit@k/MRR@10
     uv run python scripts/eval_retrieval.py --stability --rerank   # 同一 query 跑 N 次，量化同问稳定性
     uv run python scripts/eval_retrieval.py --stability --rerank --no-cache   # 每次清缓存，逼出重排/嵌入真实抖动
 
@@ -50,8 +56,9 @@ CASES_PATH = Path(__file__).resolve().parent / "retrieval_eval_cases.json"
 HIT3_THRESHOLD = 0.85
 
 
-def load_cases() -> list[dict]:
-    with CASES_PATH.open(encoding="utf-8") as fh:
+def load_cases(path: str | None = None) -> list[dict]:
+    p = Path(path) if path else CASES_PATH
+    with p.open(encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -146,30 +153,65 @@ def hit_rank(hits: list, expect: dict) -> int | None:
     return None
 
 
-def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
-    # 延迟导入：--validate / --dump 不需要碰 embedding/LLM
-    from ai_agent.kb import retrieval
+def infer_filters(query: str, case: dict) -> dict | None:
+    """镜像生产 kb_search._kb_search 的「元数据过滤」推断（不含 file/query 改写）。
+
+    生产里过滤由「模型显式传参」+「query 意图推断」两部分构成；这里用 golden
+    用例自带的 ``filters`` 字段模拟「模型对该问法正确传参」（最贴近真实调用），
+    再叠加 query 命中 ``_PARENT_INTENT``（母公司/单体口径）时的 scopes 硬过滤，
+    与 retrieval/kb_search 的实际行为一致。返回 None 即「不加任何过滤」，与
+    「过滤关」等价。
+
+    黄金集按当前语料维护；filters 字段只写在「答案确实落在对应类型切片」的用例上
+    （如表格指标 → kinds=["table"]），避免把无关过滤强加给检索、伪造精度提升。
+    """
+    from ai_agent.kb.retrieval import _PARENT_INTENT, SCOPE_PARENT
+
+    filters: dict = {}
+    explicit = case.get("filters")
+    if isinstance(explicit, dict):
+        for key in ("kinds", "sections", "scopes", "subjects", "periods"):
+            val = explicit.get(key)
+            if val:
+                filters[key] = list(val)
+    if "scopes" not in filters and _PARENT_INTENT.search(query or ""):
+        filters["scopes"] = [SCOPE_PARENT]
+    return filters or None
+
+
+def run_evaluation(
+    cases: list[dict],
+    top_k: int,
+    rerank: bool,
+    filters_on: bool = False,
+) -> tuple[dict, list[tuple]]:
+    """执行一轮评测，返回 (指标字典, 逐条明细)。
+
+    抽成独立函数以便「过滤关/开」各跑一轮做对照。关重排时关掉 rerank 评纯
+    检索；打开时预热避免首例冷启动。窗口至少 10 以计算 recall@10/MRR@10。
+    查询向量走进程内 lru_cache，对照时「开」轮不会重复付 embedding。
+    """
     from ai_agent.memory.embeddings import embed_texts
+    from ai_agent.tools.kb_search import retrieve_for_question
 
     if not rerank:
-        # 重排引入模型输出的随机性，默认关掉，评的是纯检索策略质量
         settings.kb_rerank_enabled = False
     else:
-        # 预热连接与模型路径，避免首例冷启动拉高波动
         embed_texts(["预热"])
 
-    # 观察窗口至少 10：Recall@10 / MRR@10 需要看到第 10 名，而 hit@1/3/5
-    # 只取前几条。一次检索拿满窗口，指标在本地切片算，不多花调用
     window = max(top_k, 10)
     n1 = n3 = nk = n10 = 0
     rr = 0.0
-    failures: list[str] = []
-    print(f"{'query':<30} hit@  命中位置")
-    print("-" * 70)
+    applied = 0
+    detail: list[tuple] = []
     for case in cases:
-        hits = retrieval.search_knowledge(case["query"], top_k=window)
+        filters = infer_filters(case["query"], case) if filters_on else None
+        if filters:
+            applied += 1
+        _ids, hits = retrieve_for_question(
+            case["query"], top_k=window, extra_filters=filters
+        )
         rank = hit_rank(hits, case["expect"])
-
         at1 = rank == 1
         at3 = rank is not None and rank <= 3
         atk = rank is not None and rank <= top_k
@@ -178,15 +220,38 @@ def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
         n3 += at3
         nk += atk
         n10 += at10
-        # 跨多条证据时 rank 是"最后一条凑齐"的位置，用它算 MRR 与
-        # "证据全部可见"的体验一致（只要有片段没进窗口，模型就答不全）
         rr += 1.0 / rank if rank else 0.0
-        shown = f"#{rank}" if rank is not None else "miss"
-        print(f"{case['query'][:28]:<30} {'✓' if atk else '✗'}   {shown}/{len(hits)}")
-        if not at3:
-            failures.append(case["query"])
-
+        detail.append((case["query"], rank, atk, filters))
     total = len(cases)
+    metrics = {
+        "total": total,
+        "n1": n1, "n3": n3, "nk": nk, "n10": n10,
+        "hit1": n1 / total, "hit3": n3 / total, "hitk": nk / total,
+        "recall10": n10 / total, "mrr": rr / total, "applied": applied,
+    }
+    return metrics, detail
+
+
+def evaluate(
+    cases: list[dict],
+    top_k: int,
+    rerank: bool,
+    filters_on: bool = False,
+) -> int:
+    # 延迟导入：--validate / --dump 不需要碰 embedding/LLM
+    metrics, detail = run_evaluation(
+        cases, top_k, rerank, filters_on=filters_on
+    )
+    n1 = metrics["n1"]; n3 = metrics["n3"]; nk = metrics["nk"]; n10 = metrics["n10"]
+    total = metrics["total"]
+    failures: list[str] = []
+    print(f"{'query':<30} hit@  命中位置")
+    print("-" * 70)
+    for query, rank, atk, _ in detail:
+        shown = f"#{rank}" if rank is not None else "miss"
+        print(f"{query[:28]:<30} {'✓' if atk else '✗'}   {shown}")
+        if rank is None or rank > 3:
+            failures.append(query)
     print("-" * 70)
     print(
         f"用例 {total} 条 | hit@1 {n1}/{total} ({n1 / total:.0%}) | "
@@ -195,12 +260,61 @@ def evaluate(cases: list[dict], top_k: int, rerank: bool) -> int:
     )
     # MRR 比 hit@k 更细：同样"都命中了"，排第 1 和第 5 的差别要能看出来，
     # 否则调参到最后几名来回挪，hit@k 一动不动
-    print(f"MRR@10 {rr / total:.3f}")
+    print(f"MRR@10 {metrics['mrr']:.3f}")
     if failures:
         print(f"hit@3 未通过：{'、'.join(failures)}")
-    ok = n3 / total >= HIT3_THRESHOLD
+    ok = metrics["hit3"] >= HIT3_THRESHOLD
     print(f"阈值 hit@3 ≥ {HIT3_THRESHOLD:.0%}：{'通过' if ok else '未通过'}")
     return 0 if ok else 1
+
+
+def compare_filters(cases: list[dict], top_k: int, rerank: bool) -> int:
+    """过滤关 vs 过滤开 对照：hit@k / MRR@10 与逐条名次差。
+
+    用同一批用例各跑一轮（查询向量进程内缓存，开轮不重复付 embedding），输出
+    关/开的指标对照，并列出名次发生变化的用例，便于定位「精度提升来自哪条 / 是否
+    丢了召回」。过滤开应用的是各用例的 filters 字段（模拟模型正确传参）+ 母公司
+    口径自动推断，与生产行为一致。
+    """
+    off_m, off_d = run_evaluation(cases, top_k, rerank, filters_on=False)
+    on_m, on_d = run_evaluation(cases, top_k, rerank, filters_on=True)
+    t = off_m["total"]
+    print(f"过滤对照（top_k={top_k}, 用例={t}, 过滤开命中 {on_m['applied']}/{t} 条应用了元数据过滤）")
+    print(f"{'指标':<12}{'关':>12}{'开':>12}{'Δ':>10}")
+    print("-" * 46)
+    rows = [
+        ("hit@1", off_m["hit1"], on_m["hit1"]),
+        ("hit@3", off_m["hit3"], on_m["hit3"]),
+        (f"hit@{top_k}", off_m["hitk"], on_m["hitk"]),
+        ("recall@10", off_m["recall10"], on_m["recall10"]),
+        ("MRR@10", off_m["mrr"], on_m["mrr"]),
+    ]
+    for name, a, b in rows:
+        delta = b - a
+        dstr = f"{delta:+.0%}" if name != "MRR@10" else f"{delta:+.3f}"
+        print(f"{name:<12}{a:>11.0%}{b:>11.0%}{dstr:>10}")
+    # 逐条名次变化（仅列变了的，避免刷屏）
+    changed = []
+    for (qo, ro, _, _), (q1, r1, _, f1) in zip(off_d, on_d):
+        if ro != r1:
+            changed.append((qo, ro, r1, f1))
+    print("-" * 46)
+    if changed:
+        print(f"名次变化的用例（{len(changed)}/{t}）：")
+        for q, ro, r1, f1 in changed:
+            so = f"#{ro}" if ro is not None else "miss"
+            s1 = f"#{r1}" if r1 is not None else "miss"
+            ftag = f"  filter={f1}" if f1 else ""
+            print(f"  {q[:26]:<28} {so:>6} → {s1:<6}{ftag}")
+    else:
+        print("过滤开/关名次完全一致（过滤未改变任何召回排序）")
+    # 结论提示：开不低于关即「不丢召回」；精度看 MRR / hit@k 是否提升
+    if on_m["hit3"] >= off_m["hit3"] and on_m["recall10"] >= off_m["recall10"]:
+        lift = "；MRR/hit@k 有提升" if (on_m["mrr"] > off_m["mrr"] or on_m["hit1"] > off_m["hit1"]) else "；精度持平"
+        print(f"结论：过滤开未降低 hit@3 / recall@10（不丢召回）{lift}")
+    else:
+        print("⚠️ 过滤开导致 hit@3 / recall@10 下降，需排查过滤是否过窄")
+    return 0
 
 
 def set_jaccard(a: list[str], b: list[str]) -> float:
@@ -261,7 +375,7 @@ def evaluate_stability(
     no_cache=True 时每次运行前清掉 embed / rerank 缓存，逼出真实冷调用抖动；
     默认 False 则复现「同进程重复同问」的生产缓存表现——两者要分开看。
     """
-    from ai_agent.kb import retrieval
+    from ai_agent.tools.kb_search import retrieve_for_question
 
     if not rerank:
         settings.kb_rerank_enabled = False
@@ -282,7 +396,7 @@ def evaluate_stability(
             if no_cache:
                 # 每次走冷调用：embed / 重排都重新请求，暴露真实抖动
                 _clear_retrieval_caches()
-            last_hits = retrieval.search_knowledge(case["query"], top_k=window)
+            _ids, last_hits = retrieve_for_question(case["query"], top_k=window)
             runs_keys.append([f"{h.filename}#{h.seq}" for h in last_hits])
         base = runs_keys[0]
         jaccards = [set_jaccard(base, ks) for ks in runs_keys[1:]]
@@ -320,6 +434,22 @@ def main() -> int:
     parser.add_argument("--rerank", action="store_true", help="启用 LLM 重排（默认关闭）")
     parser.add_argument("--top-k", type=int, default=5, help="观察窗口大小（默认 5）")
     parser.add_argument(
+        "--cases",
+        type=str,
+        default=str(CASES_PATH),
+        help="用例集路径（默认黄金集 retrieval_eval_cases.json）",
+    )
+    parser.add_argument(
+        "--filters",
+        action="store_true",
+        help="开启 chunk 级元数据过滤（模拟生产传参）后再评测",
+    )
+    parser.add_argument(
+        "--compare-filters",
+        action="store_true",
+        help="同时跑过滤关/开两轮，输出 hit@k/MRR@10 对照与逐条名次差",
+    )
+    parser.add_argument(
         "--stability",
         action="store_true",
         help="同一 query 重复运行度量 top-k 稳定性（配合 --rerank 暴露抖动）",
@@ -336,7 +466,7 @@ def main() -> int:
         dump_chunks()
         return 0
 
-    cases = load_cases()
+    cases = load_cases(args.cases)
     if not cases:
         print("用例集为空", file=sys.stderr)
         return 1
@@ -357,10 +487,15 @@ def main() -> int:
         print(f"用例校验通过：{len(cases)} 条全部与语料对齐")
         return 0
 
+    if args.compare_filters:
+        return compare_filters(cases, args.top_k, args.rerank)
+
     if args.stability:
         return evaluate_stability(cases, args.top_k, args.rerank, args.runs, args.no_cache)
 
-    return evaluate(cases, args.top_k, args.rerank)
+    return evaluate(
+        cases, args.top_k, args.rerank, filters_on=args.filters
+    )
 
 
 if __name__ == "__main__":

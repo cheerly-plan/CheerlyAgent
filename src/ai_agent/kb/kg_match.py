@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import re
 
+from ai_agent.core.config import settings
+
 
 
 # ——— 检索打分：向量分 + 字面依据 ———
@@ -197,4 +199,39 @@ def _rank_candidates(
         picked.append({**best, "score": top["score"], "matched": top["matched"]})
 
     picked.sort(key=lambda r: float(r["score"] or 0), reverse=True)
-    return picked[:top_k]
+    return take_by_subject(picked, top_k, band=settings.kb_subject_quota_band)
+
+
+def take_by_subject(rows: list[dict], top_k: int, band: float = 0.12) -> list[dict]:
+    """种子名额按主体（公司）保底：够近的主体各先拿一个种子，其余按分数竞争。
+
+    与切片检索同一套规则（``store._SUBJECT_BUCKET``）。不这么做时，问「A 和 B
+    的营业收入」会把 top_k 个种子全给分数更高的那家，子图从种子扩展出去，
+    另一家连一个节点都进不来。
+
+    ``band`` 是相关性带宽：只有「最佳分差在 band 内」的主体才保底。纯轮转
+    （不分带宽）会让只问一家公司时也塞进远不相关的别家种子，实测把单主体
+    问句的命中率打下去——保底必须带门槛。
+
+    主体为空（老数据 / 文件名抽不出公司名）的候选全在同一个桶里，取法退化
+    成按分数取前 top_k 个——与分桶前逐字一致，回填 subject 后才生效。
+    """
+    if not rows:
+        return []
+    best = max(float(r.get("score") or 0) for r in rows)
+    heads: list[dict] = []
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        key = str(row.get("subject") or "").strip()
+        buckets.setdefault(key, []).append(row)
+    for items in buckets.values():
+        head = max(items, key=lambda r: float(r.get("score") or 0))
+        if float(head.get("score") or 0) >= best - band:
+            heads.append(head)
+    head_ids = {id(r) for r in heads}
+    rest = [r for r in rows if id(r) not in head_ids]
+    by_score = lambda r: float(r.get("score") or 0)  # noqa: E731
+    ordered = sorted(heads, key=by_score, reverse=True) + sorted(
+        rest, key=by_score, reverse=True
+    )
+    return ordered[:top_k]
