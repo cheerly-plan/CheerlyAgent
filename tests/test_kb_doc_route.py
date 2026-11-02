@@ -215,9 +215,9 @@ def test_route_files_skips_padding_when_two_companies_named(monkeypatch):
     assert set(route_files("中国银行和长安汽车的总资产分别是多少")) == {bank, auto}
 
 
-def test_route_files_pads_named_files_with_summary_hits(monkeypatch):
-    """点名的在前（确定性命中），摘要向量补齐没点名的那部分。"""
-    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+def test_route_files_skips_padding_when_one_company_named(monkeypatch):
+    """点了一家就只查这家，不用摘要再补别的公司。"""
+    a, c = uuid.uuid4(), uuid.uuid4()
     monkeypatch.setattr(
         memory_store.store,
         "list_kb_files",
@@ -231,13 +231,12 @@ def test_route_files_pads_named_files_with_summary_hits(monkeypatch):
             _file(c, "新能源行业研究报告.pdf", "新能源行业"),
         ],
     )
-    monkeypatch.setattr("ai_agent.kb.router.embed_query", lambda q: [0.1, 0.2])
-    monkeypatch.setattr(
-        store,
-        "search_kb_files",
-        lambda emb, **kw: [{"file_id": c, "distance": 0.2}, {"file_id": b, "distance": 0.3}],
-    )
-    assert route_files("中国能建的营业收入") == [a, c, b]
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("点名命中后不该再走摘要补文件")
+
+    monkeypatch.setattr(store, "search_kb_files", boom)
+    assert route_files("中国能建的营业收入") == [a]
 
 
 def test_route_files_stays_inside_session_scope(monkeypatch):
@@ -262,7 +261,8 @@ def test_route_files_stays_inside_session_scope(monkeypatch):
 
     monkeypatch.setattr("ai_agent.kb.router.embed_query", lambda q: [0.1])
     monkeypatch.setattr(store, "search_kb_files", fake_search)
-    assert route_files("甲公司营收", file_ids=[b, a]) == [a, b]
+    # 问句没点名，才会走到摘要；范围仍要原样传下去
+    assert route_files("毛利率怎么算", file_ids=[b, a]) == [b]
     assert seen["file_ids"] == [b, a]
 
 
@@ -317,7 +317,7 @@ def test_kb_search_without_files_hits_summary_index(monkeypatch):
         lambda query, *, file_ids=None, top_k=3, filters=None: seen.setdefault("file_ids", file_ids)
         and [],
     )
-    _kb_search("甲公司第三季度的净利润是多少")
+    _kb_search("哪家公司第三季度的净利润最高")
     assert seen["file_ids"] == [fid]
     assert seen["max_distance"] == settings.kb_doc_route_max_distance
 
