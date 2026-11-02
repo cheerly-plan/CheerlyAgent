@@ -10,6 +10,7 @@ chunk.user_id 只作为「谁上传的」溯源信息保留。update_kb_status �
 管道用（不在任何 user_scope 里，按主键更新）。
 """
 
+import re
 import uuid
 
 from psycopg.types.json import Jsonb
@@ -936,6 +937,39 @@ class KbStore:
         params: dict = {"file_ids": file_ids or None}
         for i, kw in enumerate(keywords):
             params[f"kw{i}"] = f"%{kw}%"
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                f"""
+                SELECT count(*) AS total, {cols}
+                FROM agent_kb_chunk c
+                WHERE (%(file_ids)s::uuid[] IS NULL
+                       OR c.file_id = ANY(%(file_ids)s::uuid[]))
+                """,
+                params,
+            ).fetchone()
+        total = int(row["total"] or 0)
+        return total, {kw: int(row[f"df{i}"] or 0) for i, kw in enumerate(keywords)}
+
+    def keyword_boundary_freq(
+        self,
+        keywords: list[str],
+        *,
+        file_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[int, dict[str, int]]:
+        """返回（切片总数, {关键词: 后面不再是汉字的切片数}）。
+
+        「合并利润」在库里全是「合并利润表」的前缀，子串计数会把它当成真词。
+        四个字后面还是汉字的不计；标点、括号、数字或片段结束才算。
+        """
+        if not keywords:
+            return 0, {}
+        cols = ", ".join(
+            f"count(*) FILTER (WHERE c.text ~ %(kw{i})s) AS df{i}"
+            for i in range(len(keywords))
+        )
+        params: dict = {"file_ids": file_ids or None}
+        for i, kw in enumerate(keywords):
+            params[f"kw{i}"] = re.escape(kw) + "([^\\u4e00-\\u9fff]|$)"
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 f"""

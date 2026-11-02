@@ -7,12 +7,10 @@
 
 按内容类型分派：
 - text：上面的常规策略
-- table：整表成一片，超长时按**行组**切并**每片重复表头 / 表题 / 单位**，
-  「其中：」子项和合计行不拆开，否则行与列名脱节，检索命中后无法还原
-  "哪一年的营收、单位是百万还是元"。正文里的 HTML `<table>` 先整张抽出，
-  kind 记成 table。相邻两页的表列数相同就接成一张，续页重复的表头丢掉，
-  page_end 记到最后一页。接完之后若去掉标签仍超过一行组上限，再按行切开，
-  每片重复表头。向量和重排读的是单元格文字，不读标签。
+- table：一个行项目一片，每片重复表头、表题和单位。「其中：」、加减行和
+  合计行跟所属科目走，不单独成片。正文里的 HTML `<table>` 先整张抽出，
+  kind 记成 table。续页没印列名时补上一页的列名，表题同样往下带。
+  向量和重排读的是单元格文字，不读标签。
 - figure：图像描述本身很短，直接沿用常规策略（一般不触发切分）
 
 两级栅栏，谁窄听谁的：
@@ -52,10 +50,8 @@ _TOC_RESIDUE = re.compile(r"^目\s*录$|^contents$", re.IGNORECASE)
 _SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
 # Markdown 表格的分隔行：|---|---|
 _MD_SEPARATOR = re.compile(r"^\|[\s:\-|]+\|$")
-# 整页 OCR 的表是一整段 HTML。按 500 字硬切会切断 </td>，所以整表抽出。
-# 抽出、跨页接上之后，再按「去掉标签的字数」拆成行组。这一上限和重排窗口
-# 是同一个数：重排读得完这一组，向量也只覆盖这一组，不会把整张资产负债表
-# 压成一个点。
+# 整页 OCR 的表是一整段 HTML。按 500 字硬切会切断 </td>，所以整表抽出，
+# 再按行项目切开。这个数是重排读正文的窗口，不是一行组能装多少字。
 TABLE_GROUP_CHARS = 800
 _HTML_TABLE = re.compile(r"<table\b[^>]*>[\s\S]*?</table>", re.IGNORECASE)
 _HTML_ROW = re.compile(r"<tr\b[^>]*>[\s\S]*?</tr>", re.IGNORECASE)
@@ -101,6 +97,7 @@ def chunk_segments(
     max_chars: int = 500,
     overlap: int = 50,
     within_page: bool = False,
+    table_group_mode: str = "row",
 ) -> list[Chunk]:
     """按节成流、按段兜底：同节连续正文合并后聚合，表与无章节段独立处理。
 
@@ -139,7 +136,9 @@ def chunk_segments(
                     section=seg.section,
                     scope=seg.scope,
                 )
-                for piece in _chunk_table(seg.text, max_chars=max_chars)
+                for piece in _chunk_table(
+                    seg.text, max_chars=max_chars, group_mode=table_group_mode
+                )
             )
         elif seg.section is None:
             # 无章节信息：页与页的正文不合并。紧挨着的 HTML 表在
@@ -159,7 +158,9 @@ def chunk_segments(
             flow.append(seg)
     flush_plain()
     flush_flow()
-    return _expand_long_html_tables(chunks)
+    return _expand_long_html_tables(
+        chunks, max_chars=max_chars, group_mode=table_group_mode
+    )
 
 
 def _drop_noise(segments: list[Segment]) -> list[Segment]:
@@ -394,16 +395,18 @@ def _html_header_to_carry(rows: list[str]) -> list[str] | None:
 
 
 def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
-    """跨页续表补列名，并顺着后面每一页传下去。
+    """跨页续表补列名和表题，并顺着后面每一页传下去。
 
-    财报排到页底时，后面几页都不再印「项目 | 本期 | 上期」，第一行就是科目。
-    补过的那一页自己再被切断时，同一组列名继续往下页带。只在四件事同时成立时补：
-    上一页以这张表结束、这一页的表排在最前、列数相同、首行是科目。
-    金额为空的科目行也算。中途印了新列名就改带新的。表后面还有正文，这一路停下。
+    财报排到页底时，后面几页都不再印「项目 | 本期 | 上期」，第一行就是科目，
+    「合并年初到报告期末利润表」也只出现在第一页。补过的那一页再被切断时，
+    同一组列名和表题继续往下页带。只在四件事同时成立时补：上一页以这张表结束、
+    这一页的表排在最前、列数相同、首行是科目。金额为空的科目行也算。
+    中途印了新列名或新表题就改带新的。表后面还有正文，这一路停下。
     """
     pending: list[str] | None = None
     pending_page: int | None = None
     pending_width = 0
+    pending_caption = ""
     seen_pages: set[int] = set()
     out: list[Segment] = []
     for seg in segments:
@@ -411,6 +414,7 @@ def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
         if seg.kind != TABLE:
             if page is not None and page == pending_page:
                 pending = None
+                pending_caption = ""
             if page is not None:
                 seen_pages.add(page)
             out.append(seg)
@@ -420,6 +424,7 @@ def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
         # 表后面的正文要在补表头之前量。补完再量，旧的结束位置会落在新表头上。
         tail = seg.text[match.end() :].strip() if match else ""
         starts_page = page is not None and page not in seen_pages
+        carried = False
         if (
             match
             and rows
@@ -430,10 +435,15 @@ def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
             and _row_width(rows[0]) == pending_width
             and _html_row_is_item(rows[0])
         ):
+            prefix = seg.text[: match.start()].strip()
+            if not prefix and pending_caption:
+                prefix = pending_caption
             html_table = "<table>" + "".join(pending) + "".join(rows) + "</table>"
-            text = seg.text[: match.start()] + html_table + seg.text[match.end() :]
-            seg = replace(seg, text=text)
+            suffix = seg.text[match.end() :]
+            text = f"{prefix}\n{html_table}" if prefix else html_table
+            seg = replace(seg, text=text + suffix)
             rows = [*pending, *rows]
+            carried = True
         out.append(seg)
         if page is not None:
             seen_pages.add(page)
@@ -443,8 +453,13 @@ def _carry_html_page_headers(segments: list[Segment]) -> list[Segment]:
             pending = header
             pending_page = page
             pending_width = _row_width(header[0])
+            current = _HTML_TABLE.search(seg.text or "")
+            own_caption = seg.text[: current.start()].strip() if current else ""
+            if own_caption or not carried:
+                pending_caption = own_caption
         else:
             pending = None
+            pending_caption = ""
     return out
 
 
@@ -571,10 +586,6 @@ def html_table_plain(text: str) -> str:
     return _HTML_TABLE.sub(repl, text).strip()
 
 
-def _rows_plain_len(rows: list[str]) -> int:
-    return len("\n".join(_row_plain_line(row) for row in rows))
-
-
 def _html_header_row_count(rows: list[str]) -> int:
     """表头占几行：第一行的 rowspan 盖住的都算表头，每片都要重复。"""
     if not rows:
@@ -594,44 +605,140 @@ def _is_html_section_row(row: str) -> bool:
     return len(filled) == 1 and filled[0].endswith(("：", ":"))
 
 
-def _split_html_table(table: str, limit: int = TABLE_GROUP_CHARS) -> list[str]:
-    """长 HTML 表按行组切开。每片重复表头；单行超长时整行留下，不从格子中间切。"""
+def _buf_has_account(buf: list[str], head_n: int) -> bool:
+    """表头和分组标题（「流动资产：」）之外，已经有一行科目。"""
+    return any(not _is_html_section_row(row) for row in buf[head_n:])
+
+
+def _split_html_table(
+    table: str, *, max_chars: int = 500, group_mode: str = "row"
+) -> list[str]:
+    """HTML 表按行项目切开。每片重复表头和当前分组标题。
+
+    「其中：」、加减行、合计跟所属科目留在同一片。单行再长也不从格子中间切。
+
+    group_mode="row"（默认）：每个行项目单独成片，自解释最强但切片数多。
+    group_mode="section"：语义感知滑动窗口（见 _split_html_table_grouped），
+    按 max_chars 累积、在科目行边界断、分组标题强制起新片，切片数大幅减少。
+    """
     rows = _table_rows(table)
-    if not rows or _rows_plain_len(rows) <= limit:
+    if not rows:
         return [table]
     head_n = _html_header_row_count(rows)
     header, data = rows[:head_n], rows[head_n:]
-    if not data:
+    if len(data) <= 1:
         return [table]
+    if group_mode == "section":
+        return _split_html_table_grouped(header, data, max_chars)
     groups: list[list[str]] = []
+    section: list[str] = []
     buf = list(header)
 
-    def flush() -> None:
+    def restart(extra: list[str]) -> None:
         nonlocal buf
-        if len(buf) > head_n:
+        if _buf_has_account(buf, len(header)):
             groups.append(buf)
-        buf = list(header)
+        buf = [*header, *extra]
 
     for row in data:
         first = _row_plain_line(row).split(" | ", 1)[0].strip()
-        if _is_html_section_row(row) and len(buf) > head_n:
-            flush()
+        # 同一张表中途换列名（资产负债表下面又印利润表）时，后面的科目跟新列名。
+        if _html_row_is_header(row):
+            if _buf_has_account(buf, len(header)):
+                groups.append(buf)
+                header = [row]
+            elif buf == header:
+                header = [*header, row]
+            else:
+                header = [row]
+            section = []
+            buf = list(header)
+            continue
+        if _is_html_section_row(row):
+            section = [row]
+            restart(section)
+            continue
         sticky = _is_sub_row(first) or _is_total_row(first)
-        if (
-            not sticky
-            and len(buf) > head_n
-            and _rows_plain_len(buf + [row]) > limit
-        ):
-            flush()
+        if not sticky and _buf_has_account(buf, len(header)):
+            restart(section)
         buf.append(row)
-    if len(buf) > head_n:
+    if _buf_has_account(buf, len(header)):
         groups.append(buf)
     if not groups:
         return [table]
     return ["<table>" + "".join(group) + "</table>" for group in groups]
 
 
-def _expand_long_html_tables(chunks: list[Chunk]) -> list[Chunk]:
+def _rows_len(rows: list[str]) -> int:
+    """一组表格行的字符长度（用向量化的单元格文字计，与 max_chars 同一量级）。"""
+    return sum(len(_row_plain_line(row)) + 1 for row in rows)
+
+
+def _split_html_table_grouped(
+    header: list[str], data: list[str], max_chars: int
+) -> list[str]:
+    """section 模式：语义感知滑动窗口，替代固定行数切分。
+
+    按 max_chars 累积行，到窗口临界时在下一个科目行边界（非「其中：」/合计、
+    非分组标题）断开——绝不切断一个科目及其子项。分组标题（「流动资产：」）
+    强制起新片，让同组科目聚在一片；「其中：」子项、合计/小计跟所属科目走。
+    每片重复表头 + 当前分组标题，离开表题/单位也能自解释。无分组标题的扁平
+    表同样适用：只是在科目边界按窗口断，不会无限聚成一片。
+    """
+    groups: list[list[str]] = []
+    section: list[str] = []
+    buf = list(header)
+    cur_len = _rows_len(header)
+
+    def flush() -> None:
+        nonlocal buf, cur_len
+        if _buf_has_account(buf, len(header)):
+            groups.append(buf)
+        buf = [*header, *section]
+        cur_len = _rows_len(buf)
+
+    for row in data:
+        first = _row_plain_line(row).split(" | ", 1)[0].strip()
+        if _html_row_is_header(row):
+            # 中途换列名：保留原分支语义
+            if _buf_has_account(buf, len(header)):
+                groups.append(buf)
+                header = [row]
+            elif buf == header:
+                header = [*header, row]
+            else:
+                header = [row]
+            section = []
+            buf = list(header)
+            cur_len = _rows_len(buf)
+            continue
+        if _is_html_section_row(row):
+            # 分组标题强制起新片，同组科目聚在一片
+            flush()
+            section = [row]
+            buf = [*header, *section]
+            cur_len = _rows_len(buf)
+            continue
+        sticky = _is_sub_row(first) or _is_total_row(first)
+        row_len = len(_row_plain_line(row)) + 1
+        if (
+            not sticky
+            and _buf_has_account(buf, len(header))
+            and cur_len + row_len > max_chars
+        ):
+            flush()
+        buf.append(row)
+        cur_len += row_len
+    if _buf_has_account(buf, len(header)):
+        groups.append(buf)
+    if not groups:
+        return ["<table>" + "".join(header + data) + "</table>"]
+    return ["<table>" + "".join(group) + "</table>" for group in groups]
+
+
+def _expand_long_html_tables(
+    chunks: list[Chunk], *, max_chars: int = 500, group_mode: str = "row"
+) -> list[Chunk]:
     """跨页接完之后再拆。先拆再接会把续页表头当成另一张表。"""
     out: list[Chunk] = []
     for chunk in chunks:
@@ -639,7 +746,9 @@ def _expand_long_html_tables(chunks: list[Chunk]) -> list[Chunk]:
         if chunk.kind != TABLE or not _HTML_TABLE.fullmatch(text):
             out.append(chunk)
             continue
-        parts = _split_html_table(text)
+        parts = _split_html_table(
+            text, max_chars=max_chars, group_mode=group_mode
+        )
         if len(parts) == 1:
             out.append(chunk)
             continue
@@ -647,40 +756,43 @@ def _expand_long_html_tables(chunks: list[Chunk]) -> list[Chunk]:
     return out
 
 
-def _chunk_html_table(text: str) -> list[str] | None:
+def _chunk_html_table(
+    text: str, *, max_chars: int = 500, group_mode: str = "row"
+) -> list[str] | None:
     """表题加一张 HTML 表时按行切开，每片重复表题。不是这种形态就返回 None。"""
     matches = list(_HTML_TABLE.finditer(text))
     if len(matches) != 1 or text[matches[0].end() :].strip():
         return None
     match = matches[0]
     caption = text[: match.start()].strip()
-    parts = _split_html_table(match.group(0))
+    parts = _split_html_table(
+        match.group(0), max_chars=max_chars, group_mode=group_mode
+    )
     if not caption:
         return parts
     return [f"{caption}\n{part}" for part in parts]
 
 
-def _chunk_table(text: str, *, max_chars: int) -> list[str]:
-    """表格切片：短表整片保留；长表按行组切，每片重复表头（含工作表名）。
+def _chunk_table(text: str, *, max_chars: int, group_mode: str = "row") -> list[str]:
+    """表格切片：短表整片保留；多行表按行项目切，每片重复表头和表题。
 
     表格正文开头可能有若干不含竖线的行：表题（「母公司利润表」）和
-    单位 / 审计状态。这些必须当成表头的一部分在每片里重复——否则长表
-    被切开后，后半张表的切片又退回「项目 | 本期 | 上期 + 一堆数字」，
-    看不出这张表属于母公司还是合并口径，也不知道单位是百万还是元。
+    单位 / 审计状态。这些必须在每片里重复——否则后半张表只剩
+    「项目 | 本期 | 上期 + 一堆数字」，看不出这张表属于谁、单位是什么。
 
-    切分边界是行组而不是单行：「其中：」子项、金融工具三个计量类别、
-    合计 / 总计都跟它们所属的明细走，避免半组数字进检索。
+    「其中：」子项、金融工具三个计量类别、合计 / 总计都跟所属科目走。
     """
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return []
-    if len(text) <= max_chars:
-        return [text]
 
     # HTML 表没有竖线。不走下面的 Markdown 切法，否则表题会被单独算成一张表。
-    html_parts = _chunk_html_table(text)
+    # 多行科目即使整表不到 max_chars 也切开，避免一张利润表合成一个向量。
+    html_parts = _chunk_html_table(text, max_chars=max_chars, group_mode=group_mode)
     if html_parts is not None:
         return html_parts
+    if len(text) <= max_chars:
+        return [text]
 
     caption: list[str] = []
     while lines and "|" not in lines[0]:
@@ -698,7 +810,7 @@ def _chunk_table(text: str, *, max_chars: int) -> list[str]:
         # 不是表格形态（单行超长），退回普通切分
         return chunk_text(text, max_chars=max_chars, overlap=0)
 
-    return _pack_table_units(header, _table_row_units(data), max_chars) or [text]
+    return _pack_table_units(header, _table_row_units(data)) or [text]
 
 
 def _md_first_cell(line: str) -> str:
@@ -742,40 +854,31 @@ def _table_row_units(data: list[str]) -> list[list[str]]:
     return units
 
 
-def _pack_table_units(
-    header: list[str], units: list[list[str]], max_chars: int
-) -> list[str]:
-    """按行组装箱。一组超长就整组独占一片，合计绝不单独开片。"""
+def _pack_table_units(header: list[str], units: list[list[str]]) -> list[str]:
+    """每个行项目一片。表头和当前分组标题每片都带，合计绝不单独开片。"""
     out: list[str] = []
     buf: list[str] = list(header)
-    hanging: list[str] = []
+    section: list[str] = []
+
+    def has_account() -> bool:
+        return any(line not in header and not _is_section_label(line) for line in buf)
 
     def emit() -> None:
-        skip = set(header)
-        if any(line not in skip and not _is_section_label(line) for line in buf):
+        if has_account():
             out.append("\n".join(buf))
 
     def restart() -> None:
         nonlocal buf
-        buf = [*header, *hanging]
+        buf = [*header, *section]
 
     for unit in units:
         if len(unit) == 1 and _is_section_label(unit[0]):
-            if len(buf) > len(header) and _joined_len(buf + unit) > max_chars:
+            if has_account():
                 emit()
-                hanging = list(unit)
-                restart()
-            else:
-                hanging = list(unit)
-                if unit[0] not in buf:
-                    buf.extend(unit)
+            section = list(unit)
+            restart()
             continue
-        if len(buf) > len(header) and _joined_len(buf + unit) > max_chars:
-            if _is_total_row(_md_first_cell(unit[0])):
-                buf.extend(unit)
-                emit()
-                restart()
-                continue
+        if has_account():
             emit()
             restart()
         buf.extend(unit)
@@ -793,10 +896,6 @@ def _merge_orphan_total_chunks(header: list[str], chunks: list[str]) -> list[str
         prev = chunks[-2].splitlines()
         return [*chunks[:-2], "\n".join(prev + body)]
     return chunks
-
-
-def _joined_len(lines: list[str]) -> int:
-    return sum(len(line) + 1 for line in lines)
 
 
 def context_prefix(

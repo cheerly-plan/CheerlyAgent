@@ -6,7 +6,7 @@ from scripts.rebuild_graph import _forward
 
 def test_kb_help_lists_daily_commands():
     text = _parser().format_help()
-    for cmd in ("list", "reparse", "graph", "reembed", "coverage"):
+    for cmd in ("list", "reparse", "graph", "reembed", "coverage", "lexicon"):
         assert cmd in text
 
 

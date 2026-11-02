@@ -37,6 +37,71 @@ def test_extract_keywords_keeps_codes_and_drops_stopwords():
     assert len(kws) <= settings.kb_hybrid_keywords
 
 
+def test_adjacent_short_phrases_join_two_char_words_only():
+    """二字加二字收成短词。单字「前」不拼进「三季度」，五字的「归母净利润」不拼。
+
+    用词表外的说法：词表里的科目结巴不再切开，拼接步骤看不到它们。
+    """
+    compared = retrieval._adjacent_short_phrases("比较营业和其中利润")
+    assert ("比较营业", "比较", "营业") in compared
+    assert ("其中利润", "其中", "利润") in compared
+    parent = retrieval._adjacent_short_phrases("中国银行前三季度归母净利润")
+    assert all(phrase != "前三季度" for phrase, _, _ in parent)
+    assert all(phrase != "归母净利润" for phrase, _, _ in parent)
+
+
+def test_apply_short_phrases_replaces_parts_when_phrase_exists(monkeypatch):
+    monkeypatch.setattr(
+        retrieval,
+        "_adjacent_short_phrases",
+        lambda query: [("营业利润", "营业", "利润")],
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_boundary_freq",
+        lambda kws, file_ids=None: (100, {"营业利润": 4}),
+    )
+    assert retrieval._apply_short_phrases(
+        "长安汽车前三季度营业利润",
+        ["长安汽车", "营业", "利润", "三季度"],
+        None,
+    ) == ["营业利润", "长安汽车", "三季度"]
+
+
+def test_apply_short_phrases_keeps_parts_when_phrase_is_absent(monkeypatch):
+    monkeypatch.setattr(
+        retrieval,
+        "_adjacent_short_phrases",
+        lambda query: [("营业利润", "营业", "利润")],
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_boundary_freq",
+        lambda kws, file_ids=None: (100, {"营业利润": 0}),
+    )
+    keywords = ["长安汽车", "营业", "利润", "三季度"]
+    assert (
+        retrieval._apply_short_phrases("长安汽车前三季度营业利润", keywords, None)
+        == keywords
+    )
+
+
+def test_apply_short_phrases_skips_excluded_phrase(monkeypatch):
+    monkeypatch.setattr(
+        retrieval,
+        "_adjacent_short_phrases",
+        lambda query: [("合并利润", "合并", "利润")],
+    )
+    monkeypatch.setattr(
+        retrieval.store,
+        "keyword_boundary_freq",
+        lambda kws, file_ids=None: (100, {"合并利润": 4}),
+    )
+    monkeypatch.setattr(retrieval, "read_extra", lambda: ([], {"合并利润"}))
+    keywords = ["合并", "利润", "收入"]
+    assert retrieval._apply_short_phrases("合并利润和收入", keywords, None) == keywords
+
+
 def test_extract_keywords_survives_jieba_failure(monkeypatch):
     import builtins
 
@@ -154,7 +219,7 @@ def test_fuse_full_keyword_hit_reaches_rerank_window(monkeypatch):
     monkeypatch.setattr(
         retrieval.store, "search_kb_chunks_keyword", lambda *a, **k: [cover]
     )
-    merged = retrieval._fuse_with_keywords("证券代码是多少", vector_rows, None)
+    merged = retrieval._fuse_with_keywords("代码是多少", vector_rows, None)
     seqs = [row["seq"] for row in merged]
     assert seqs.index(99) < seqs.index(15)
     assert seqs.index(99) < retrieval._RERANK_LIMIT

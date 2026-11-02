@@ -262,15 +262,13 @@ def test_cross_page_html_tables_merge_and_drop_repeated_header():
         max_chars=500,
         overlap=0,
     )
-    assert [(c.kind, c.page, c.page_end) for c in chunks] == [
-        ("text", 4, 4),
-        ("table", 4, 5),
-        ("text", 5, 5),
-    ]
-    table = chunks[1].text
-    assert table.count(header) == 1
-    assert "营业收入" in table
-    assert "净利润" in table
+    tables = [c for c in chunks if c.kind == "table"]
+    assert [c.kind for c in chunks] == ["text", "table", "table", "text"]
+    assert all(c.page == 4 and c.page_end == 5 for c in tables)
+    assert all(c.text.count(header) == 1 for c in tables)
+    assert "营业收入" in tables[0].text
+    assert "净利润" in tables[1].text
+    assert "营业收入" not in tables[1].text
 
 
 def test_cross_page_tables_stay_apart_when_columns_differ():
@@ -301,7 +299,7 @@ def test_cross_page_html_table_copies_header_onto_continuation():
         max_chars=500,
         overlap=0,
     )
-    assert chunks[1].text.startswith("<table>" + header)
+    assert chunks[1].text.startswith("合并利润表\n单位：元\n<table>" + header)
     assert "资产减值损失" in chunks[1].text
     assert chunks[1].page == 12
     assert chunks[1].scope == "consolidated"
@@ -324,8 +322,10 @@ def test_cross_page_html_table_copies_header_onto_blank_item():
         max_chars=500,
         overlap=0,
     )
-    assert chunks[-1].text.startswith("<table>" + header)
-    assert "其他债权投资" in chunks[-1].text
+    page6 = [c for c in chunks if c.page == 6]
+    assert page6
+    assert all(c.text.startswith("<table>" + header) for c in page6)
+    assert any("其他债权投资" in c.text for c in page6)
 
 
 def test_header_keeps_moving_across_later_pages():
@@ -375,7 +375,7 @@ def test_new_statement_header_replaces_the_carried_one():
         overlap=0,
     )
     assert old not in chunks[2].text
-    assert new in chunks[2].text
+    assert chunks[2].text.startswith("合并利润表\n<table>" + new)
     assert "营业利润" in chunks[2].text
 
 
@@ -395,9 +395,12 @@ def test_cross_page_html_table_copies_the_latest_header():
         max_chars=500,
         overlap=0,
     )
-    assert "合并利润表项目" in chunks[1].text
-    assert "合并资产负债表项目" not in chunks[1].text
-    assert chunks[1].text.index("合并利润表项目") < chunks[1].text.index("财务费用")
+    continued = next(c for c in chunks if c.page == 3)
+    assert "合并利润表项目" in continued.text
+    assert "合并资产负债表项目" not in continued.text
+    assert continued.text.index("合并利润表项目") < continued.text.index("财务费用")
+    tax = next(c for c in chunks if "税金及附加" in c.text)
+    assert "合并资产负债表项目" not in tax.text
 
 
 def test_cross_page_html_table_does_not_copy_header_after_prose():
@@ -483,13 +486,43 @@ def test_html_table_section_row_starts_a_new_group():
         for i in range(24)
     )
     section = "<tr><td colspan=\"2\">非流动资产：</td></tr>"
-    tail = "<tr><td>投资性房地产</td><td>2,578,854.37</td></tr>"
+    tail = (
+        "<tr><td>投资性房地产</td><td>2,578,854.37</td></tr>"
+        "<tr><td>固定资产</td><td>9,000.00</td></tr>"
+    )
     table = f"<table>{header}{body}{section}{tail}</table>"
     chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=0)
     assert len(chunks) > 1
-    host = next(c for c in chunks if "非流动资产" in c.text)
-    assert "投资性房地产" in host.text
-    assert "流动项00" not in host.text
+    hosts = [c for c in chunks if "非流动资产" in c.text]
+    assert len(hosts) == 2
+    assert "投资性房地产" in hosts[0].text
+    assert "固定资产" in hosts[1].text
+    assert all("流动项00" not in c.text for c in hosts)
+
+
+def test_html_income_statement_account_is_its_own_chunk():
+    """营业利润单独成片，表题和列名跟着走；加减行留在这一片里。"""
+    header = "<tr><td>项目</td><td>本期发生额</td><td>上期发生额</td></tr>"
+    rows = "".join(
+        [
+            "<tr><td>一、营业总收入</td><td>101</td><td>114</td></tr>",
+            "<tr><td>三、营业利润(亏损以“-”号填列)</td><td>-510</td><td>2,398</td></tr>",
+            "<tr><td>加:营业外收入</td><td>95</td><td>131</td></tr>",
+            "<tr><td>四、利润总额(亏损总额以“-”号填列)</td><td>-451</td><td>2,499</td></tr>",
+            "<tr><td>五、净利润(净亏损以“-”号填列)</td><td>-726</td><td>2,144</td></tr>",
+        ]
+    )
+    text = f"## 2、合并年初到报告期末利润表\n单位：元\n<table>{header}{rows}</table>"
+    chunks = chunk_segments([Segment(text, 9, "table")], max_chars=500, overlap=0)
+    assert len(chunks) == 4
+    assert all(
+        c.text.startswith("## 2、合并年初到报告期末利润表\n单位：元\n<table>" + header)
+        for c in chunks
+    )
+    profit = next(c for c in chunks if "营业利润" in c.text)
+    assert "营业外收入" in profit.text
+    assert "净利润" not in profit.text
+    assert "营业总收入" not in profit.text
 
 
 def test_html_table_one_long_row_stays_with_header():
@@ -618,6 +651,70 @@ def test_chunk_merged_table_keeps_page_span():
     assert len(chunks) == 1
     assert chunks[0].page == 7
     assert chunks[0].page_end == 8
+
+
+def test_table_group_mode_section_aggregates_by_section():
+    """section 模式按分组聚合：分组边界干净，且切片数少于 row 模式。"""
+    header = "<tr><td>项目</td><td>期末</td><td>期初</td></tr>"
+    flow = "".join(
+        f"<tr><td>流动项{i:02d}比较长用来把这一组撑过上限</td><td>{i},000</td><td>{i},111</td></tr>"
+        for i in range(24)
+    )
+    section = "<tr><td colspan=\"3\">非流动资产：</td></tr>"
+    nonflow = "".join(
+        f"<tr><td>非流动项{i:02d}比较长用来把这一组撑过上限</td><td>{i},000</td><td>{i},111</td></tr>"
+        for i in range(24)
+    )
+    table = f"<table>{header}{flow}{section}{nonflow}</table>"
+    row_chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=0)
+    sec_chunks = chunk_segments(
+        [Segment(table, 8)], max_chars=500, overlap=0, table_group_mode="section"
+    )
+    assert len(sec_chunks) < len(row_chunks)
+    hosts = [c for c in sec_chunks if "非流动资产" in c.text]
+    assert hosts
+    # 分组边界干净：非流动组的片里不该出现流动项（用 ">流动项" 锚，
+    # 避开「非流动项」里的「流动项」子串误匹配）
+    assert all(">流动项" not in c.text for c in hosts)
+    assert all(header in c.text for c in sec_chunks)
+
+
+def test_table_group_mode_section_slides_plain_table():
+    """无分组标题的扁平长表：按窗口在科目边界断、每片重复表头，片数少于 row。"""
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = "".join(
+        f"<tr><td>科目{i:02d}名称较长</td><td>{i},234,567.89</td><td>{i},876,543.21</td></tr>"
+        for i in range(25)
+    )
+    table = f"<table>{header}{rows}</table>"
+    row_chunks = chunk_segments([Segment(table, 8)], max_chars=500, overlap=0)
+    sec_chunks = chunk_segments(
+        [Segment(table, 8)], max_chars=500, overlap=0, table_group_mode="section"
+    )
+    assert len(sec_chunks) > 1
+    assert len(sec_chunks) < len(row_chunks)
+    assert all(header in c.text for c in sec_chunks)
+
+
+def test_table_group_mode_section_keeps_subtotal_with_parent():
+    """section 模式下合计/加减行仍跟所属科目走，不单独成片。"""
+    header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
+    rows = (
+        "<tr><td>一、营业总收入</td><td>101</td><td>114</td></tr>"
+        "<tr><td>三、营业利润</td><td>-510</td><td>2,398</td></tr>"
+        "<tr><td>加:营业外收入</td><td>95</td><td>131</td></tr>"
+        "<tr><td>四、利润总额</td><td>-451</td><td>2,499</td></tr>"
+    )
+    table = f"<table>{header}{rows}</table>"
+    chunks = chunk_segments(
+        [Segment(table, 9, "table")],
+        max_chars=200,
+        overlap=0,
+        table_group_mode="section",
+    )
+    profit = [c for c in chunks if "营业利润" in c.text]
+    assert len(profit) == 1
+    assert "营业外收入" in profit[0].text
 
 
 def test_format_hit_labels_content_kind():

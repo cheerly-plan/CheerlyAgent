@@ -14,6 +14,7 @@
     uv run python scripts/kb.py summary --all --dry-run --show  # 看文档摘要长什么样
     uv run python scripts/kb.py summary --all                   # 补文档级摘要索引（路由用）
     uv run python scripts/kb.py coverage --name 中行        # 哪些页没有切片
+    uv run python scripts/kb.py lexicon                     # 按当前库重写四字短词表
 
 --file / --name / --all 选文件；--dry-run 只看会动谁；--all 要加 --yes。
 
@@ -134,6 +135,10 @@ def _parser() -> argparse.ArgumentParser:
     p_cov.add_argument("--name", help="文件名模糊匹配")
     p_cov.add_argument("--full", action="store_true", help="缺页全打，不折成区间")
     p_cov.set_defaults(handler=_cmd_coverage)
+
+    p_lex = sub.add_parser("lexicon", help="按当前库重写四字短词表")
+    p_lex.add_argument("--dry-run", action="store_true", help="只打印会写入的词，不覆盖文件")
+    p_lex.set_defaults(handler=_cmd_lexicon)
     return parser
 
 
@@ -329,8 +334,10 @@ def _cmd_reparse(args: argparse.Namespace) -> int:
         return 1
     if not files:
         return 0
+    parsed = False
     for rec in files:
         ok = _reparse_one(rec, args.dry_run)
+        parsed = parsed or ok
         if ok and args.with_graph:
             from ai_agent.memory.store import store
 
@@ -340,6 +347,35 @@ def _cmd_reparse(args: argparse.Namespace) -> int:
                     (rec["id"],),
                 ).fetchone()
             _graph_one({**rec, **dict(row)}, args.dry_run)
+    if parsed:
+        _refresh_lexicon()
+    return 0
+
+
+def _refresh_lexicon() -> None:
+    from ai_agent.kb.lexicon import rebuild_short_words
+    from ai_agent.memory.store import store
+
+    try:
+        words = rebuild_short_words(store)
+    except Exception:
+        logger.exception("短词表重写失败")
+        print("短词表重写失败，切片已经更新")
+        return
+    print(f"短词表已重写：{len(words)} 个。检索进程重启后生效。")
+
+
+def _cmd_lexicon(args: argparse.Namespace) -> int:
+    from ai_agent.kb.lexicon import rebuild_short_words
+    from ai_agent.memory.store import store
+
+    words = rebuild_short_words(store, write=not args.dry_run)
+    if args.dry_run:
+        print(f"将写入 {len(words)} 个短词：")
+    else:
+        print(f"短词表已重写：{len(words)} 个。检索进程重启后生效。")
+    for word in words:
+        print(f"  {word}")
     return 0
 
 

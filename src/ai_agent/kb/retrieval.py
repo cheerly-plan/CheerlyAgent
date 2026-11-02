@@ -23,6 +23,7 @@ from pathlib import Path
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
+from ai_agent.kb.lexicon import load_short_words, read_extra
 from ai_agent.kb.meta import name_in_text
 from ai_agent.kb.meta import ENTITY_SUFFIX as _ENTITY_SUFFIX
 from ai_agent.kb.meta import EXT_RE as _EXT_RE
@@ -320,6 +321,7 @@ def _extract_keywords(query: str) -> list[str]:
     而它们恰恰是向量最容易丢、子串匹配最准的东西。
     """
     keywords: list[str] = []
+    load_short_words()
     try:
         import jieba.analyse
 
@@ -342,6 +344,93 @@ def _extract_keywords(query: str) -> list[str]:
         if len(unique) >= settings.kb_hybrid_keywords:
             break
     return unique
+
+
+# 相邻两个二字词才拼。单字（「前」）不参与，避免「前」+「三季度」变成
+# 「前三季度」，对不上正文里的「第三季度」。两边都是二字，加起来正好四字。
+_SHORT_WORD = re.compile(r"^[\u4e00-\u9fff]{2}$")
+
+
+def _adjacent_short_phrases(query: str) -> list[tuple[str, str, str]]:
+    """问句里相邻的两个二字词，拼成一个不超过四字的短词。
+
+    返回 (短词, 左词, 右词)。已经是一个词的（「净利润」「注册资本」，以及
+    短词表里的词）不会被拆开再拼。单字和停用词不参与。
+    """
+    load_short_words()
+    try:
+        import jieba
+
+        tokens = [token.strip() for token in jieba.cut(query or "") if token.strip()]
+    except Exception:
+        logger.warning("jieba 短词切分失败，跳过短词", exc_info=True)
+        return []
+    found: list[tuple[str, str, str]] = []
+    index = 0
+    while index < len(tokens) - 1:
+        left, right = tokens[index], tokens[index + 1]
+        if (
+            _SHORT_WORD.fullmatch(left)
+            and _SHORT_WORD.fullmatch(right)
+            and left not in _STOPWORDS
+            and right not in _STOPWORDS
+            and len(left) + len(right) <= 4
+        ):
+            found.append((left + right, left, right))
+            index += 2
+            continue
+        index += 1
+    return found
+
+
+def _apply_short_phrases(
+    query: str,
+    keywords: list[str],
+    file_ids: list[uuid.UUID] | None,
+) -> list[str]:
+    """两个二字在库里以词的形式出现过，就用整段替换拆开的两半。
+
+    后面还紧跟汉字的不算出现过：「合并利润」只是「合并利润表」的前缀，
+    仍退回「合并」和「利润」。一个边界命中都没有、过半切片都含有、
+    或写在排除名单里的，都不替换。词频取不到时也不替换。
+    """
+    pairs = _adjacent_short_phrases(query)
+    if not pairs:
+        return keywords
+    try:
+        total, freq = store.keyword_boundary_freq(
+            [phrase for phrase, _, _ in pairs], file_ids=file_ids
+        )
+    except Exception:
+        logger.warning("kb 短词词频统计失败，保留拆开的词", exc_info=True)
+        return keywords
+    if total <= 0:
+        return keywords
+    blocked = read_extra()[1]
+    chosen: list[str] = []
+    drop: set[str] = set()
+    for phrase, left, right in pairs:
+        if phrase in blocked:
+            continue
+        hits = freq.get(phrase, 0)
+        if hits <= 0 or hits * 2 > total:
+            continue
+        chosen.append(phrase)
+        drop.update((left, right))
+    if not chosen:
+        return keywords
+    logger.info("kb 关键词改用短词：%s", chosen)
+    merged: list[str] = []
+    seen: set[str] = set()
+    for keyword in [*chosen, *[word for word in keywords if word not in drop]]:
+        key = keyword.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(keyword)
+        if len(merged) >= settings.kb_hybrid_keywords:
+            break
+    return merged
 
 
 def resolve_files_by_name(names: list[str]) -> list[uuid.UUID] | None:
@@ -560,6 +649,9 @@ def _fuse_with_keywords(
     if not settings.kb_hybrid_enabled:
         return vector_rows
     keywords = _extract_keywords(query)
+    if not keywords:
+        return vector_rows
+    keywords = _apply_short_phrases(query, keywords, file_ids)
     if not keywords:
         return vector_rows
     keywords = _keep_distinctive_keywords(keywords, file_ids)
