@@ -1095,3 +1095,238 @@ def test_short_selection_chunk_is_not_filtered_out():
     # 没勾选记号的短碎片照样跳过
     assert not graph._worth_extracting("单位：元")
     assert not graph._worth_extracting("2026 10 29")
+
+
+_STATEMENT = (
+    "合并利润表\n单位：元\n"
+    "<table><tr><td>项目</td><td>附注</td><td>本期金额</td><td>上期金额</td></tr>"
+    "<tr><td>货币资金</td><td>七、1</td><td>30,439.00</td><td>（507.00）</td></tr></table>"
+)
+_HOLDER = (
+    "<table><tr><td>股东名称</td><td>持股比例</td><td>持股数量</td></tr>"
+    "<tr><td>中央汇金投资有限责任公司</td><td>58.59%</td><td>1,234</td></tr></table>"
+)
+_SEGMENT = (
+    "<table><tr><td>项目</td><td>营业收入</td><td>营业成本</td></tr>"
+    "<tr><td>电力</td><td>100</td><td>80</td></tr></table>"
+)
+
+
+def test_statement_line_is_recognized_and_holder_is_not():
+    """科目行退出抽取；股东全称、分行业营收留下。"""
+    subject = "中国能源建设股份有限公司"
+    assert graph._is_statement_line(Chunk(_STATEMENT, kind="table"), subject)
+    assert not graph._is_statement_line(Chunk(_HOLDER, kind="table"), subject)
+    assert not graph._is_statement_line(Chunk(_SEGMENT, kind="table"), subject)
+    # 正文里提到利润表，不是表格科目行
+    assert not graph._is_statement_line(
+        Chunk("详见合并利润表中的营业收入。", kind="text"), subject
+    )
+
+
+def test_statement_line_keeps_a_named_counterparty():
+    """科目行里写出了另一家公司，留给模型抽持股或担保。"""
+    text = (
+        "合并资产负债表\n<table>"
+        "<tr><td>项目</td><td>期末余额</td></tr>"
+        "<tr><td>长期股权投资</td><td>中能建投资有限公司</td></tr></table>"
+    )
+    assert not graph._is_statement_line(
+        Chunk(text, kind="table"), "中国能源建设股份有限公司"
+    )
+
+
+def test_statement_line_ignores_the_issuer_name():
+    """表题上的上市公司自己不算「另一家公司」。"""
+    text = (
+        "中国能源建设股份有限公司\n合并资产负债表\n<table>"
+        "<tr><td>项目</td><td>期末余额</td><td>期初余额</td></tr>"
+        "<tr><td>货币资金</td><td>1</td><td></td></tr></table>"
+    )
+    assert graph._is_statement_line(
+        Chunk(text, kind="table"), "中国能源建设股份有限公司"
+    )
+
+
+def test_quarterly_graph_does_not_send_statement_lines(monkeypatch):
+    """季报建图不把科目行送进模型；招股书仍送。股东表两种文档都送。"""
+    monkeypatch.setattr(settings, "kb_graph_min_chunk_chars", 1)
+    seen: list[Chunk] = []
+
+    def fake_all(chunks, *_args, **_kwargs):
+        seen.extend(chunks)
+        return []
+
+    monkeypatch.setattr(graph, "_extract_all", fake_all)
+    monkeypatch.setattr(graph.store, "replace_file_graph", lambda *a, **k: None)
+    cover = Chunk("# 中国能源建设股份有限公司\n2026年第三季度报告", page=1)
+    chunks = [
+        cover,
+        Chunk(_STATEMENT, kind="table", page=4),
+        Chunk(_HOLDER, kind="table", page=8),
+        Chunk(_SEGMENT, kind="table", page=9),
+    ]
+    build_file_graph(
+        uuid.uuid4(),
+        chunks,
+        doc_type="quarterly_report",
+        doc_name="中国能源建设股份有限公司2026年第三季度报告.pdf",
+    )
+    blob = "\n".join(chunk.text for chunk in seen)
+    assert "货币资金" not in blob
+    assert "中央汇金投资有限责任公司" in blob
+    assert "电力" in blob
+
+    seen.clear()
+    build_file_graph(
+        uuid.uuid4(),
+        chunks,
+        doc_type="prospectus",
+        doc_name="中国能源建设股份有限公司2026年第三季度报告.pdf",
+    )
+    assert "货币资金" in "\n".join(chunk.text for chunk in seen)
+
+
+def _holder_graph(company: str, rows: list[tuple[str, str]], extra=None):
+    """rows: (持有人, 说明)。额外关系原样放进图，用来确认任职边不会被收掉。"""
+    entities = {
+        company: {"name": company, "norm": company, "type": "org", "description": "上市公司"}
+    }
+    relations = {}
+    for name, desc in rows:
+        entities[name] = {"name": name, "norm": name, "type": "org", "description": ""}
+        relations[(name, company, "持股")] = {
+            "source": name,
+            "target": company,
+            "relation": "持股",
+            "description": desc,
+            "chunk_seq": 1,
+        }
+    for rel in extra or []:
+        relations[rel] = {
+            "source": rel[0],
+            "target": rel[1],
+            "relation": rel[2],
+            "description": "",
+            "chunk_seq": 2,
+        }
+        for endpoint in rel[:2]:
+            entities.setdefault(
+                endpoint, {"name": endpoint, "norm": endpoint, "type": "org", "description": ""}
+            )
+    entities["旁观者"] = {"name": "旁观者", "norm": "旁观者", "type": "org", "description": "没有持股"}
+    mentions = {(name, 1): 1 for name in entities}
+    graph._trim_minor_stakes(entities, relations, mentions, company)
+    return entities, relations
+
+
+def test_minor_stakes_keep_top_ten_and_anyone_at_least_one_percent():
+    company = "甲公司"
+    rows = [(f"股东{i}", f"持股{i}股，{pct}%") for i, pct in enumerate(
+        [20, 15, 10, 5, 4, 3, 2, 1.5, 1.2, 0.8, 0.2], start=1
+    )]
+    entities, relations = _holder_graph(company, rows)
+    kept = {key[0] for key in relations}
+    assert "股东11" not in kept
+    assert "股东10" in kept  # 0.8% 但在前 10 名
+    assert "股东1" in kept
+    assert "股东11" not in entities
+    assert "旁观者" in entities
+    assert "其余持股" in entities[company]["description"]
+    assert "股东11" in entities[company]["description"]
+
+
+def test_stakes_at_least_one_percent_all_stay_past_ten():
+    company = "甲公司"
+    rows = [(f"股东{i}", f"持股{i}%，{i + 100}股") for i in range(1, 13)]
+    _entities, relations = _holder_graph(company, rows)
+    assert len(relations) == 12
+
+
+def test_share_count_joins_the_same_ranking_when_total_is_known():
+    """只有股数的，用已知名的股数和比例反推总股本，再参加同一排序。"""
+    company = "中国能源建设股份有限公司"
+    rows = [
+        ("中国能源建设集团有限公司", "持股18,847,137,078股，42.60%"),
+        ("HKSCC NOMINEES LIMITED", "持股7,850,442,781股，17.75%"),
+        ("上海隧道工程股份有限公司", "持股2,203,651,019股，4.98%"),
+        ("中国国新控股有限责任公司", "持股2,029,378,794股，4.59%"),
+        ("中国华星（香港）国际有限公司", "持有H股633,704,000股"),
+        ("香港中央结算有限公司", "持股380,591,472股，0.86%"),
+        ("中车资本控股有限公司", "持股294,117,647股，0.66%"),
+        ("徐州大任同赢管理咨询合伙企业(有限合伙)", "持股274,117,647股，0.62%"),
+        ("中国国有企业结构调整基金二期股份有限公司", "持股254,901,960股，0.58%"),
+        ("王梓旭", "持股117,647,058股，0.27%"),
+        ("交银人寿保险有限公司-传统2", "持股101,960,784股，0.23%"),
+        ("电力规划总院有限公司", "持有无限售流通股98,542,651股"),
+        ("中国工商银行股份有限公司一华泰柏瑞沪深300交易型开放式指数证券投资基金", "持有A股58,525,986股"),
+        ("裘兴祥", "持有A股26,095,100股"),
+        ("香港中央结算（代理人）有限公司", "代多个客户持有H股"),
+    ]
+    entities, relations = _holder_graph(
+        company,
+        rows,
+        extra=[("中国国新控股有限责任公司", "中国华星（香港）国际有限公司", "控股")],
+    )
+    kept = {key[0] for key in relations if key[2] == "持股"}
+    assert "中国华星（香港）国际有限公司" in kept  # 约 1.43%
+    assert "王梓旭" in kept  # 前 10 名
+    assert "交银人寿保险有限公司-传统2" not in kept
+    assert "电力规划总院有限公司" not in entities
+    assert "裘兴祥" not in entities
+    assert "香港中央结算（代理人）有限公司" in kept  # 没有股数也没有比例
+    assert ("中国国新控股有限责任公司", "中国华星（香港）国际有限公司", "控股") in relations
+
+
+def test_share_counts_alone_keep_the_ten_largest():
+    company = "甲公司"
+    rows = [(f"股东{i:02d}", f"持有{i * 1000}股") for i in range(1, 13)]
+    _entities, relations = _holder_graph(company, rows)
+    kept = {key[0] for key in relations}
+    assert "股东01" not in kept
+    assert "股东02" not in kept
+    assert "股东03" in kept
+    assert len(kept) == 10
+
+
+def test_reversed_stake_points_back_at_the_company_before_trimming():
+    company = "甲公司"
+    entities = {
+        company: {"name": company, "norm": company, "type": "org", "description": ""},
+        "小股东": {"name": "小股东", "norm": "小股东", "type": "person", "description": ""},
+    }
+    relations = {
+        (company, "小股东", "持股"): {
+            "source": company,
+            "target": "小股东",
+            "relation": "持股",
+            "description": "持股0.01%",
+            "chunk_seq": 1,
+        }
+    }
+    for i, pct in enumerate([5, 4, 3, 2, 1.5, 1.2, 0.9, 0.7, 0.5, 0.4], start=1):
+        name = f"股东{i}"
+        entities[name] = {"name": name, "norm": name, "type": "org", "description": ""}
+        relations[(name, company, "持股")] = {
+            "source": name,
+            "target": company,
+            "relation": "持股",
+            "description": f"持股{pct}%",
+            "chunk_seq": 1,
+        }
+    graph._trim_minor_stakes(entities, relations, {}, company)
+    assert (company, "小股东", "持股") not in relations
+    assert ("小股东", company, "持股") not in relations
+    assert "小股东" not in entities
+
+
+def test_dropped_holder_with_another_edge_stays():
+    company = "甲公司"
+    rows = [(f"股东{i}", f"持股{12 - i}%") for i in range(1, 11)]
+    rows.append(("股东11", "持股0.01%"))
+    entities, relations = _holder_graph(
+        company, rows, extra=[("股东11", "甲公司", "任职")]
+    )
+    assert ("股东11", company, "持股") not in relations
+    assert ("股东11", company, "任职") in relations
+    assert "股东11" in entities
