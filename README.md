@@ -1,4 +1,4 @@
-# almost-agent
+# cheely-agent
 
 FastAPI + PostgreSQL(pgvector) 的多用户 AI Agent 后端：带工具自主循环的对话、
 知识库 RAG（含 PDF 表格/图表识别与知识图谱）、四层记忆系统、断点续跑。
