@@ -4,11 +4,11 @@
 既撑爆上下文，模型也挑不准（还会编造清单外的文件名）。摘要向量把
 「哪些文件相关」变成一次 ANN 查询，文件清单因此不必再进提示词。
 
-两路合成，各补对方盲区：
+点名和摘要二选一，不混用：
 - **提及优先**：问句里点名了主体/别名/文件名（「A 和 B 的营业收入」），
-  确定性命中，不看向量距离——对比类问句里两家都得进得来，靠向量排序
-  保证不了这一点（离混合向量更近的那家会独占名额，正是之前踩过的坑）。
-- **语义补足**：没点名时（「哪家公司的毛利率最高」）由摘要向量补齐，
+  命中即收口，不再用摘要补别的文件。补进来的常常是别的公司，既挤占
+  已经点到的名额，也让后面没法把公司名从检索词里剥掉。
+- **语义补足**：一句都没点名时（「哪家公司的毛利率最高」）才走摘要向量，
   距离超过 kb_doc_route_max_distance 的文件不进候选。
 """
 
@@ -76,23 +76,6 @@ def mentioned_file_ids(query: str) -> list[uuid.UUID]:
     return hits
 
 
-def _distinct_subjects(file_ids: list[uuid.UUID]) -> int:
-    """这些文件里有几家不同的主体。同一家的两年报算一家。"""
-    if len(file_ids) < 2:
-        return len(file_ids)
-    try:
-        rows = store.list_kb_files()
-    except Exception:
-        logger.warning("统计点名主体失败，按文件数计", exc_info=True)
-        return len(file_ids)
-    by_id = {
-        str(row.get("file_id")): str(row.get("subject") or "").strip() for row in rows
-    }
-    return len(
-        {by_id.get(str(fid), "") for fid in file_ids if by_id.get(str(fid), "")}
-    )
-
-
 def route_files(
     query: str, *, file_ids: list[uuid.UUID] | None = None
 ) -> list[uuid.UUID]:
@@ -115,18 +98,9 @@ def route_files(
     if file_ids:
         allowed = set(file_ids)
         picked = [fid for fid in picked if fid in allowed]
-    # 对比两个报告期时，点名已经圈定主体。再用摘要去补别的公司，
-    # 名额会被无关的同年季报占掉，另一年的那份反而进不来。
-    from ai_agent.kb.meta import query_period_policy
-
-    policy, _token = query_period_policy(text)
-    if picked and policy in {"all", "span_q", "span_h"}:
-        return picked
-    # 点名了两家以上时也别补：补进来的是别的公司，会把这两家的名额挤掉。
-    if picked and _distinct_subjects(picked) >= 2:
-        return picked
-    # 点名的文件优先且全部保留（对比问句里两家都得在），多于此上限直接截断
-    if len(picked) >= top_k:
+    # 点名已经圈定文件。再用摘要去补，名额会被别的公司占掉，
+    # 公司名也剥不掉（范围里混进了没点名的文件）。
+    if picked:
         return picked[:top_k]
     try:
         vector = embed_query(text)

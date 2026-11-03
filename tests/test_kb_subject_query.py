@@ -161,6 +161,72 @@ def test_period_narrows_to_latest_named_year_or_keeps_both(monkeypatch):
     assert set(resolve_tool_file_ids(["中国能源建设"], query="2020年营收")) == {a, b}
 
 
+def test_exact_entity_in_older_file_overrides_latest(monkeypatch):
+    """没写时期时，精确点到的实体只在旧文件里，就改查那份，不留最新一期的别家。"""
+    latest = uuid.uuid4()
+    older = uuid.uuid4()
+    other = uuid.uuid4()
+    rows = [
+        _ready(latest, "中科飞测2026年第三季度报告.pdf", "深圳中科飞测科技股份有限公司", [], "2026Q3"),
+        _ready(older, "中科飞测2025年第三季度报告.pdf", "深圳中科飞测科技股份有限公司", [], "2025Q3"),
+        _ready(other, "中国银行2026年第三季度报告.pdf", "中国银行股份有限公司", [], "2026Q3"),
+    ]
+    monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
+    monkeypatch.setattr("ai_agent.kb.router.route_files", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "ai_agent.memory.store.store.exact_entity_files", lambda query: [older]
+    )
+    assert resolve_tool_file_ids(None, query="诺安成长混合型证券投资基金") == [older]
+
+
+def test_exact_entity_already_in_latest_keeps_period_scope(monkeypatch):
+    """实体在最新一期里还有一份时，期收窄的结果不动。"""
+    latest = uuid.uuid4()
+    older = uuid.uuid4()
+    rows = [
+        _ready(latest, "中科飞测2026年第三季度报告.pdf", "深圳中科飞测科技股份有限公司", [], "2026Q3"),
+        _ready(older, "中科飞测2025年第三季度报告.pdf", "深圳中科飞测科技股份有限公司", [], "2025Q3"),
+    ]
+    monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
+    monkeypatch.setattr("ai_agent.kb.router.route_files", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "ai_agent.memory.store.store.exact_entity_files", lambda query: [latest, older]
+    )
+    assert resolve_tool_file_ids(None, query="营业收入") == [latest]
+
+
+def test_exact_entity_does_not_override_named_period_or_explicit_other_file(monkeypatch):
+    """写了年份，或用户点的文件里本来没有这个实体，都不把范围改走。"""
+    latest = uuid.uuid4()
+    older = uuid.uuid4()
+    rows = [
+        _ready(
+            latest,
+            "中国能源建设股份有限公司2026年第三季度报告.pdf",
+            "中国能源建设股份有限公司",
+            ["中国能源建设"],
+            "2026Q3",
+        ),
+        _ready(
+            older,
+            "中国能源建设股份有限公司2025年年度报告.pdf",
+            "中国能源建设股份有限公司",
+            ["中国能源建设"],
+            "2025",
+        ),
+    ]
+    monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
+    monkeypatch.setattr(
+        "ai_agent.memory.store.store.exact_entity_files", lambda query: [older]
+    )
+    assert resolve_tool_file_ids(["中国能源建设"], query="2026年营收") == [latest]
+    # 只点了 2026 这份，旧文件不在候选里，精确实体不能把范围换成它
+    assert resolve_tool_file_ids(
+        ["中国能源建设股份有限公司2026年第三季度报告.pdf"],
+        query="诺安成长混合型证券投资基金",
+    ) == [latest]
+
+
 def test_span_quarter_keeps_both_years_and_pulls_the_missing_one(monkeypatch):
     """对比两年三季度时，只点到 2026 也要把同一家的 2025 三季报补上。"""
     y2026 = uuid.uuid4()

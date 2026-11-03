@@ -65,6 +65,20 @@ def test_embedding_flattens_markdown_table_separator():
     assert "货币资金 | 1" in embedded
 
 
+def test_oversized_rowspan_does_not_invent_rows():
+    """合并格被切剩一行时，不能按 rowspan 补出只有原因、没有项目名的空行。"""
+    html = (
+        "<table>"
+        "<tr><td>项目名称</td><td>变动比例(%)</td><td>主要原因</td></tr>"
+        "<tr><td>利润总额_本报告期</td><td>-76.60</td>"
+        '<td rowspan="9">利润波动</td></tr>'
+        "</table>"
+    )
+    md = html_tables_to_markdown(html)
+    assert md.count("利润波动") == 1
+    assert "|  |  | 利润波动 |" not in md
+
+
 def test_html_table_becomes_markdown_and_keeps_merged_headers():
     """模型看到的是 Markdown 表。合并列表头要复制到每一列，分组标题不横着复制。"""
     html = (

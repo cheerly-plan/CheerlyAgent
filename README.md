@@ -5,7 +5,7 @@ FastAPI + PostgreSQL(pgvector) 的多用户 AI Agent 后端：带工具自主循
 
 ```
 Python 3.13 · uv · FastAPI · psycopg3 + pgvector · OpenAI 兼容 LLM 接口
-源码 ~1.65 万行 · 测试 ~1.09 万行 · 654 个用例
+源码 ~2.33 万行 · 测试 ~1.48 万行 · 885 个用例
 ```
 
 ---
@@ -50,6 +50,9 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 
 监听 `127.0.0.1:8000`，健康检查 `GET /health`，交互式文档 `/docs`。
 
+启动时 lifespan 会依次做：Alembic 迁移 → 重排后端自检（未装权重则告警并退回
+LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed。
+
 ---
 
 ## 架构
@@ -72,20 +75,21 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
                         │            │
         ┌───────────────▼──┐   ┌─────▼─────────────────────────┐
  llm/   │ client.py 流式   │   │ tools/  工具（模型自主调用）  │
-        │ OpenAI 兼容      │   │ kb_search 知识库检索          │
-        └──────────────────┘   │ kg_search 图谱检索            │
-                               │ memory_search / memory_write  │
-                               │ web_search · weather          │
+        │ OpenAI 兼容      │   │ kb_search · kb_list_files     │
+        └──────────────────┘   │ kg_search                     │
+                               │ search_memory · write_memory  │
+                               │ web_search · get_weather      │
                                └─────┬─────────────────────────┘
                                      │
         ┌────────────────────────────▼─────────────────────────┐
   kb/   │ 解析 parsing → tables / table_cells / figures / office│
-        │ 切片 chunking → 嵌入 → retrieval（改写·混合·重排）    │
+        │ 章节 sections → 切片 chunking → 嵌入                 │
+        │ 检索 router → scope → retrieval（混合·重排 → rerank）│
         │ 图谱 graph / graph_store / align / community          │
         └────────────────────────────┬─────────────────────────┘
   memory/                            │
         短期(会话窗口) · 长期(向量) · 情景(episode) · 画像(profile)
-        断点续跑 checkpoint_store · 认证 auth_store
+        写入门控 gate · 断点续跑 checkpoint_store · 认证 auth_store
                                      │
                           ┌──────────▼───────────┐
                           │ PostgreSQL + pgvector │
@@ -94,39 +98,71 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 
 ## 模块职责
 
+> 下表路径均相对 `src/ai_agent/`。
+
 | 目录 | 职责 |
 |---|---|
 | `api/` | FastAPI 应用、中间件（request_id / 鉴权 / 限流）、路由、请求响应模型 |
 | `agents/` | Agent 主循环与周边：`loop.py` 主流程、`messages.py` 上下文裁剪与断点缝合、`turn.py` 持久化与收尾、`budget.py` |
 | `llm/` | OpenAI 兼容客户端，流式输出与超时控制 |
-| `tools/` | 工具定义与注册：`kb_search`、`kg_search`、`memory_search`、`memory_write`、`web_search`、`weather` |
+| `tools/` | 工具定义与注册（见下方「工具一览」） |
 | `kb/` | 知识库：解析、切片、嵌入、检索、图谱、引用溯源、视觉识别 |
-| `memory/` | 存储层：连接池与建表（`db.py`）、短/长期记忆、情景记忆、画像、会话、断点 |
+| `memory/` | 存储层：连接池与迁移（`db.py`）、短/长期记忆、情景记忆、画像、会话、断点 |
+| `prompts/` | 提示词：系统提示与工具描述（`chat.py` / `tools.py`）、知识库提示（`kb.py`）、记忆抽取（`memory.py`）、后台任务（`tasks.py`）、装配器（`builder.py`） |
 | `migrations/` | Alembic 迁移脚本（见下方「数据库与迁移」） |
 | `core/` | 配置（`config.py`）、异常、HTTP 客户端、日志 |
 | `tasks/` | 后台任务：会话标题生成、定期清理 |
-| `scripts/` | 运维脚本：知识库重建/重解析、重嵌入、检索评测、图谱检查 |
+| `scripts/` | 运维与评测脚本：知识库重建/重解析、重嵌入、三套评测、图谱检查 |
+
+### 工具一览
+
+模型自主调用，注册在 `tools/registry.py` 的 `TOOLS` 列表里。
+
+| 工具名 | 模块 | 作用 |
+|---|---|---|
+| `kb_search` | `kb_search.py` | 知识库检索，返回带文件名/页码/章节的引用片段 |
+| `kg_search` | `kg_search.py` | 知识图谱检索，返回实体邻域（三元组与关系描述） |
+| `kb_list_files` | `kb_list.py` | 列出库内文件清单（替代「目录注入」，模型需要时才主动查） |
+| `search_memory` / `write_memory` | `memory.py` | 长期/情景记忆的检索与写入 |
+| `web_search` | `web_search.py` | 联网搜索（`ddgs`） |
+| `get_weather` | `weather.py` | 天气查询 |
 
 ### kb/ 解析链（本项目的核心能力）
 
 | 模块 | 职责 |
 |---|---|
 | `parsing.py` | 公共入口与 PDF 文本主流程：选项归一化、断行合并、章节识别 |
+| `sections.py` | 标题与页眉甄别：页眉与真标题文本可能一字不差，靠字号 + 纵向位置 + 编号正则三者组合判定 |
 | `tables.py` | PDF 表格识别与页面组织：找表、跨页/同页续表合并、补表题与元信息、剔签字栏 |
 | `table_cells.py` | 单元格清洗与表头对齐：数字断行还原、千分位/小数点归位、分组表头压平 |
+| `otsl.py` | OTSL 表格结构表示（单元格合并/表头语义） |
 | `figures.py` | 图表识别：文字密度/位图面积/矢量路径三道筛 + 视觉模型并行调用 |
+| `vision.py` / `ocr.py` | 视觉模型与 OCR 兜底 |
 | `office.py` | DOCX / XLSX 解析，含内嵌图片与内嵌表格 |
-| `chunking.py` | 按章节/页切块，表格整表成片 |
-| `retrieval.py` | 混合检索（关键词 + 向量 RRF，按主体保底配额）→ LLM 重排 |
+| `chunking.py` | 按章节/页切块，表格整表成片；跨页续片重复携带表题与表头以保持自解释 |
+| `retrieval.py` | 混合检索（关键词 + 向量 RRF，按主体保底配额）→ 重排 |
+| `rerank.py` | 重排后端：默认 `local_ce`（`BAAI/bge-reranker-v2-m3`），未装则退回 LLM 重排 |
+| `router.py` | 文档路由：问句点名即收口，一句都没点名时才用摘要向量补 |
+| `scope.py` | 检索作用域：文件集合 / 报告期 / 主体的收窄与可达性兜底 |
 | `meta.py` | 检索元数据：从文件名规则抽取主体 / 报告期，并给多主体文档的切片做主体归属 |
 | `summary.py` | 文档级摘要：把一份文件压成一段「它讲的是什么」，单独 embedding 供路由使用 |
-| `router.py` | 文档路由：问句点名的文件优先命中，其余按摘要向量补齐，自动圈定检索范围 |
+| `doc_profiles.py` | 文档画像：按文档类型给出实体范围与关系谓词，喂给系统提示的「知识库能力」块 |
+| `citations.py` | 引用溯源 |
+| `lexicon.py` | 词表（科目词、短词表等） |
+| `pipeline.py` | 入库编排：解析 → 切片 → 嵌入 → 图谱，含卡住文件的恢复 |
+| `store.py` | `KbStore` mixin：切片与关键词的存取、邻接、词频统计 |
+
+### kb/ 图谱链
+
+| 模块 | 职责 |
+|---|---|
 | `graph.py` | 图谱构建入口：跨批合并（实体/关系/提及）与分批落库编排 |
 | `graph_extract.py` | 抽取调用：进批过滤 → 按章节组批 → 单批容错（重问/拆半）→ 并发编排 |
 | `graph_names.py` | 实体名归一化与可用性判据（停用词/谓词/数值/占位词），以及按名字在批内定位 |
 | `graph_schema.py` | 抽取输出结构（实体/关系）与模型输出形状的容错解析（紧凑数组 ↔ 完整结构） |
 | `graph_store.py` / `graph_write.py` / `kg_match.py` | 图谱存取：查询侧 mixin / 写入侧 mixin / 检索候选打分（均为 MemoryStore 的 mixin） |
 | `align.py` / `community.py` | 实体对齐、社区发现 |
+| `graph_metrics.py` | 图谱构建质量指标（供 `scripts/eval_graph.py` 用） |
 
 > `memory/store.py` 的 `MemoryStore` 由多个 mixin 组合而成（`KbStore` /
 > `KgStore` / `KgWriteStore` / `AuthStore` / …），共享同一个连接池。所以
@@ -140,12 +176,16 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 `POST /v1/chat` 以 SSE 流式返回：
 
 1. **鉴权**：`AUTH_TOKEN` 非空时校验 `X-API-Key` / Bearer；否则校验用户 token
-2. **装配上下文**：短期记忆（会话窗口）+ 长期记忆（向量召回 TopK）+ 情景记忆 + 画像
-3. **循环**（上限 `MAX_TURNS`）：LLM 决定直接回答还是调工具 → 执行工具 → 结果拼回上下文
-4. **检索**（走 `kb_search` 时）：没填 `files` 时先由**文档路由**按摘要向量选出候选文档（`kb/router.py`，每份文件入库时生成一份摘要并单独 embedding）；填了则按文件名 / 主体名解析。候选范围内再走混合召回（关键词 + 向量 RRF）→ 重排 → 带引用片段。召回名额按主体（公司）保底：够近的主体各先占一个名额，「A 和 B 的营收」这类对比问句两家都出得来。文件数不再限制这套流程——模型不必对着文件清单挑文件
-5. **输出**：增量 token 流式下发，同时写入消息、更新摘要
-6. **记忆落库**：本轮抽取的事实写入长期记忆（相似条目合并），情景与画像增量更新
-7. **中断恢复**：连接断开后凭 `run_id` 调 `POST /v1/chat/resume` 续跑（`checkpoint_store`）
+2. **装配上下文**：短期记忆（会话窗口）+ 长期记忆（向量召回 TopK）+ 情景记忆 + 画像 + 动态「知识库能力」块（按库内实际文档类型给出实体范围与关系谓词，并附库内已有报告期清单）
+3. **图谱预检索**（命中关系词时）：`loop.py` 在模型决策**之前**先跑一遍图谱，把邻域塞进 system message。所以很多关系问句不必再调 `kg_search`；但报表科目金额仍必须走 `kb_search`
+4. **循环**（上限 `MAX_TURNS`）：LLM 决定直接回答还是调工具 → 执行工具 → 结果拼回上下文。问句点名了文件主体或图谱实体时，用 `tool_choice="required"` 强制本轮必须查库，但**选 kb 还是 kg 仍归模型**
+5. **检索**（走 `kb_search` 时）：
+   - **文档路由**（`kb/router.py`）点名与摘要**二选一，不混用**：问句点名了主体/别名/文件名 → 命中即收口，不再用摘要补（补进来的常是别的公司）；一句都没点名 → 才按摘要向量选候选，距离超过 `kb_doc_route_max_distance` 的不进
+   - **作用域收窄**（`kb/scope.py`）：按报告期与主体收敛。**精确实体只在旧文件里时改查那份文件**，避免「没提年份就只看最新一期」把历史期实体切掉
+   - **混合召回**：关键词 + 向量 RRF，按主体保底配额（够近的主体各先占一个名额，「A 和 B 的营收」两家都出得来）→ 重排 → 距离阈值 → 带引用片段
+6. **输出**：增量 token 流式下发，同时写入消息、更新摘要
+7. **记忆落库**（后台线程池，不阻塞 SSE）：门控判断本轮值不值得抽取 → LLM 抽取（每轮 ≤ 2 条）→ 噪声过滤 → 三层去重 → 写入长期记忆 / 情景记忆 / 画像
+8. **中断恢复**：连接断开后凭 `run_id` 调 `POST /v1/chat/resume` 续跑（`checkpoint_store`）
 
 ## 知识库管线
 
@@ -153,17 +193,23 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 分片上传 /v1/kb/files → complete
    → 解析（PDF / DOCX / XLSX / 纯文本，表格与图表单独成片）
    → 章节识别 → 按章切块 → 批量嵌入 → 落库 chunks（向量 + 关键词）
-   → 图谱构建（LLM 抽取实体关系）→ 社区发现 → 实体对齐
+   → 文档摘要单独 embedding（路由依赖它）
+   → 图谱构建（LLM 抽取实体关系）→ 实体对齐 → 社区发现
 ```
 
 ## 记忆系统
 
 | 层 | 模块 | 内容 |
 |---|---|---|
-| 短期 | `short_term.py` | 会话窗口内的最近若干轮，超窗口后滚动摘要 |
-| 长期 | `long_term.py` | 向量化的事实与偏好，召回按相似度阈值过滤，写入时相似条目合并 |
-| 情景 | `episode_store.py` | 带 TTL 的事件片段 |
-| 画像 | `profile.py` / `facets.py` | 用户维度的稳定画像与分面 |
+| 短期 | `short_term.py` | 会话窗口内的最近若干轮，超窗口后滚动摘要；摘要伪装成一轮 user/assistant 注入 |
+| 长期 | `long_term.py` | 向量化的事实与偏好，召回按相似度阈值过滤；写入走门控 → 抽取 → 噪声过滤 → 三层去重 |
+| 情景 | `episode_store.py` / `episode_merge.py` | 带 TTL 的事件片段，支持相近情节合并 |
+| 画像 | `profile.py` / `facets.py` / `profile_store.py` | 用户维度的稳定画像与分面；分面分互斥（覆盖）与累积（追加）两类，删除语义按分面区分 |
+
+写入链路每轮最多产出 2 条，跑在 `_turn_finalizer` 线程池里，不阻塞 SSE。
+门控（`gate.py`）用外部概率模型判断「本轮值不值得抽取」，低于
+`memory_gate_threshold` 就跳过，省掉一次抽取调用；该服务不可用时 fail-open
+（宁可多抽一次，不可静默丢记忆）。
 
 ## 认证与隔离
 
@@ -172,6 +218,21 @@ uv run almost-agent serve     # 生产模式（--host / --port 可覆盖）
 - 隔离：所有业务查询强制带 `user_id` 条件；`/chat/resume` 校验 run 归属，非本人一律 404
 - 可选静态令牌：`AUTH_TOKEN` 非空时 `/v1/**` 需携带
 - 对外暴露前建议 `REGISTRATION_ENABLED=false`，改为管理员建号
+
+### 主要端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/v1/chat` | SSE 流式对话 |
+| POST | `/v1/chat/resume` | 凭 `run_id` 断点续跑 |
+| GET | `/v1/chat/pending_run` | 查询可续跑的 run |
+| GET | `/v1/chat/memory` | 会话历史分页（不是长期记忆管理） |
+|  | `/v1/session`、`/v1/auth`、`/user` | 会话、登录注册、用户信息 |
+|  | `/v1/kb/**` | 知识库上传、切片、标签、维护 |
+|  | `/v1/kg/**` | 图谱查询与维护 |
+
+> 长期记忆目前**没有对外的查看/删除接口**，只有 `search_memory` / `write_memory`
+> 两个工具。做隐私合规前需要先补一个管理端点。
 
 ---
 
@@ -191,6 +252,62 @@ uv run alembic revision -m "说明"    # 新增迁移
 部分测试使用。迁移脚本用 `op.execute` 透传 SQL 并保留 `IF NOT EXISTS` 幂等性；
 `downgrade` 涉及删列删表，执行前先 `pg_dump` 备份。
 
+---
+
+## 评测
+
+三套评测各自测不同的一层，**改动对应能力前先跑一遍，改完再跑一遍**。
+
+| 脚本 | 用例集 | 条数 | 测什么 |
+|---|---|---|---|
+| `scripts/eval_retrieval.py` | `retrieval_eval_cases_corpus.json` | 72 | 知识库检索：hit@1/@3、MRR、recall@10 |
+| `scripts/eval_graph_retrieval.py` | `graph_eval_cases.json` | 31 | 图谱检索：问句能否查到正确的三元组，同时测**工具路径**与**预检索路径**两条 |
+| `scripts/eval_graph.py` | `data/eval/gold_guodian.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
+| `scripts/eval_memory.py` | `memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写 |
+| `scripts/eval_memory.py --recall` | `episode_eval_cases.json` | 2 | 情景记忆召回（写入后检索，用完删除） |
+
+另有 `retrieval_eval_cases.json`（25 条）、`retrieval_eval_cases_3f.json`（20 条）
+是早期小样本集，保留作对照。
+
+```bash
+# 知识库检索（默认关闭重排，跑得稳；--rerank 打开会调 LLM）
+uv run python scripts/eval_retrieval.py --cases scripts/retrieval_eval_cases_corpus.json --top-k 10
+uv run python scripts/eval_retrieval.py --validate        # 先校验用例与语料是否对齐
+
+# 图谱检索（6 秒跑完，--out 落 json）
+uv run python scripts/eval_graph_retrieval.py --validate
+uv run python scripts/eval_graph_retrieval.py --out data/eval/graph_retrieval.json
+
+# 图谱构建质量（只读，但要求库里有金标对应的那份文件；--before 传上次报告可对比）
+uv run python scripts/eval_graph.py --gold data/eval/gold_guodian.json --file-id <id>
+```
+
+### 当前基线（2026-11-03）
+
+知识库检索（72 条语料 / 重排关 / top_k=10）：hit@1 50/72、hit@3 64/72（89%）、
+hit@10 69/72、MRR@10 0.800。通过线 hit@3 ≥ 85%。
+用例集与语料强绑定，换语料（重新解析后）要先跑 `--validate`。
+
+图谱检索（31 条，分 historical / historical_explicit / distractor / alias /
+direct / negative 六组）：
+
+| 分组 | 条数 | 工具路径 | 预检索（仅触发的） |
+|---|---|---|---|
+| `historical` 历史期实体（不提年份） | 8 | 8/8 | 5/5 |
+| `historical_explicit` 明说年份 | 3 | 3/3 | 3/3 |
+| `distractor` 跨公司同类干扰 | 5 | 5/5 | 4/4 |
+| `alias` 别名/简称 | 3 | 3/3 | 2/2 |
+| `direct` 直查关系 | 6 | 6/6 | 2/2 |
+| **`negative` 库里没有的实体** | 6 | **0/6** | 0/3 |
+| 合计 | 31 | 25/31 | 16/19 |
+
+**已知缺口（已被评测量化）**：问库里不存在的实体（「贵州茅台的前十大股东」）时，
+图谱仍会返回别家公司的邻域并带精确数字——6/6 全部复现，不是个案。
+`search_entities` 已返回 `matched` 字段（`name` / `alias` / `keyword` / `vector`）
+可用于判定「库里到底有没有问的那个实体」，修复后这组应从 0/6 变成 6/6，
+且正例 25 条不能掉。**别用调 `kb_graph_min_score` 的方式解决**——正负例的
+score 区间重叠，动阈值必然误伤。
+
 ## 开发命令
 
 ```bash
@@ -200,20 +317,35 @@ uv run ruff check src tests scripts  # lint
 uv run ruff check --fix src          # 自动修复
 uv run alembic upgrade head          # 迁移
 
-# 常用运维脚本（参数见各文件 --help）
-uv run python scripts/kb.py list          # 知识库维护入口
-uv run python scripts/kb.py meta --all    # 存量文件回填主体/报告期（切片跟着刷）
-uv run python scripts/kb.py summary --all # 存量文件补文档摘要索引（文档路由依赖它）
-                          # 子命令：list / reparse / graph / reembed / coverage
-uv run python scripts/eval_retrieval.py   # 检索质量回归评测
-uv run python scripts/eval_memory.py      # 长期记忆抽取评测（会调记忆模型）
-uv run python scripts/eval_memory.py --recall   # 情景记忆召回评测（写入后检索，用完删除）
-uv run python scripts/rebuild_graph.py    # 重建知识图谱
+# 知识库维护入口（参数见 --help）
+uv run python scripts/kb.py list                 # 子命令：list / reparse / graph
+                                                 #       / reembed / meta / summary
+                                                 #       / coverage / lexicon
+uv run python scripts/kb.py meta --all           # 存量文件回填主体/报告期（切片跟着刷）
+uv run python scripts/kb.py summary --all        # 存量文件补文档摘要索引（文档路由依赖它）
+
+# 评测（详见上方「评测」）
+uv run python scripts/eval_retrieval.py
+uv run python scripts/eval_graph_retrieval.py
+uv run python scripts/eval_memory.py             # 会调记忆模型
+uv run python scripts/eval_memory.py --recall    # 情景记忆召回评测（写入后检索，用完删除）
+
+# 图谱
+uv run python scripts/rebuild_graph.py           # 重建知识图谱
+uv run python scripts/check_kg_alignment.py      # 图谱对齐质量检查（清理历史错并的别名）
+uv run python scripts/eval_graph.py              # 图谱构建质量评测
 ```
 
 ## 测试与质量
 
-- 654 个用例，覆盖解析、检索、图谱、记忆、鉴权、并发与 SSE 流程
-- CI/本地建议门槛：`pytest` 全绿 + `ruff` 零告警
+- 885 个用例，覆盖解析、检索、图谱、记忆、鉴权、并发与 SSE 流程
+- CI/本地门槛：`pytest` 全绿 + `ruff` 零告警
 - 解析相关用例取自真实文档（如招股书 PDF），改动抽取规则会立刻在
   `tests/test_kb_pdf_tables.py`、`tests/test_kb.py` 上暴露
+
+**当前 lint 未清零**（4 项，均为存量问题，修掉即可回到零告警）：
+
+| 位置 | 规则 | 说明 |
+|---|---|---|
+| `scripts/eval_retrieval.py:245` ×3 | E702 | 一行多条语句（分号），拆行即可 |
+| `src/ai_agent/kb/graph.py:47` | F401 | `_subject_from_filename` 导入未使用，`--fix` 可自动删 |

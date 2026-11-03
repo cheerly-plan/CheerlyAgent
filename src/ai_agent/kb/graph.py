@@ -13,13 +13,22 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from typing import Callable
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.chunking import Chunk
+from ai_agent.kb.chunking import (
+    Chunk,
+    _HTML_CELL,
+    _HTML_TABLE,
+    _MD_SEPARATOR,
+    _cell_plain,
+    _table_rows,
+)
+from ai_agent.kb.meta import _legal_names, subject_core
 from ai_agent.kb.doc_profiles import (
     DEFAULT_LEVEL,
     build_system_prompt,
@@ -85,11 +94,20 @@ class _GraphAccumulator:
     出现的值，mention_count 累计，描述保留更长的那个。
     """
 
-    def __init__(self, file_id: uuid.UUID, subject: str | None = None) -> None:
+    def __init__(
+        self,
+        file_id: uuid.UUID,
+        subject: str | None = None,
+        *,
+        trim_holders: bool = False,
+    ) -> None:
         self.file_id = file_id
         # 文件主体全称（由文件名推断）：自指名端点落到它身上，见 _resolve
         self.subject_name = subject
         self.subject_norm = normalize_name(subject) if subject else None
+        # 季报才收持股长尾。中间的分次落库不收，最后一次 flush 前再收，
+        # 否则前几批的前 10 名会把后来才出现的大股东挤掉。
+        self.trim_holders = trim_holders
         # 被改写的端点数与「没有主体可落、只能丢」的端点数，收尾时打一行日志
         self.self_ref_hits = 0
         self.entities: dict[str, dict] = {}
@@ -189,6 +207,11 @@ class _GraphAccumulator:
                 dropped.append(item)
         # 收尾是终态：连不上的就到此为止，别留在队列里假装"下次还能补"
         self._pending = []
+        if self.trim_holders:
+            _trim_minor_stakes(self.entities, self.relations, self.mentions, self.subject_norm)
+            for norm in list(self._vectors):
+                if norm not in self.entities:
+                    self._vectors.pop(norm, None)
         if dropped or self.self_ref_hits:
             names = sorted({n for rel, _ in dropped for n in (rel.source, rel.target)})
             logger.info(
@@ -324,6 +347,267 @@ class _GraphAccumulator:
         return {"entities": len(entity_rows), "relations": len(relation_rows)}
 
 
+# 季报股东表只留主要持有人。低于这个比例、又不在前 10 名的，写进说明。
+_MIN_STAKE_PERCENT = 1.0
+_TOP_HOLDERS = 10
+# 小额持有人的全称往往很长（指数基金账户）。说明要比普通实体描述宽，
+# 否则写到一半就被截断，点已经删了，说明里也找不到。
+_HOLDER_NOTE_LIMIT = 800
+_STAKE_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]")
+_STAKE_SHARES = re.compile(r"(\d{1,3}(?:[,，]\d{3})+|\d+)\s*股")
+
+
+def _parse_stake(description: str) -> tuple[float | None, int | None]:
+    """从关系说明里取出持股比例和股数。比例只认 0–100，股数认「12,345股」。"""
+    percent: float | None = None
+    for match in _STAKE_PERCENT.finditer(description or ""):
+        value = float(match.group(1))
+        if 0 < value <= 100:
+            percent = value
+    shares: int | None = None
+    found = _STAKE_SHARES.search(description or "")
+    if found:
+        shares = int(found.group(1).replace(",", "").replace("，", ""))
+    return percent, shares
+
+
+def _trim_minor_stakes(
+    entities: dict[str, dict],
+    relations: dict[tuple[str, str, str], dict],
+    mentions: dict[tuple[str, int], int],
+    subject_norm: str | None,
+) -> None:
+    """收掉小额持股。方向改成持有人指向被持股公司，再按同一家被持股公司分组。
+
+    有比例的按比例，只有股数的用「股数 / 已知名比例」反推比例后参加同一排序。
+    说明里既没有比例也没有股数的留下：看不出大小，不当作长尾删掉。
+    被收掉的持有人记进被持股公司的说明；不再被任何关系用到的点一并去掉。
+    """
+    flipped: dict[tuple[str, str, str], dict] = {}
+    for key, rel in relations.items():
+        src, dst, name = key
+        if name == "持股" and subject_norm and src == subject_norm and dst != subject_norm:
+            src, dst = dst, src
+        new_key = (src, dst, name)
+        current = flipped.get(new_key)
+        if current is None or len(rel.get("description") or "") > len(current.get("description") or ""):
+            flipped[new_key] = {**rel, "source": src, "target": dst}
+    relations.clear()
+    relations.update(flipped)
+
+    grouped: dict[str, list[tuple[tuple[str, str, str], dict]]] = {}
+    for key, rel in relations.items():
+        if key[2] != "持股":
+            continue
+        grouped.setdefault(key[1], []).append((key, rel))
+
+    dropped_names: list[str] = []
+    dropped_norms: set[str] = set()
+    for target, items in grouped.items():
+        sized: list[tuple[tuple[str, str, str], float | None]] = []
+        parsed: list[tuple[float | None, int | None]] = []
+        for key, rel in items:
+            parsed.append(_parse_stake(rel.get("description") or ""))
+        totals = [
+            shares / (percent / 100.0)
+            for percent, shares in parsed
+            if percent and shares
+        ]
+        total = sorted(totals)[len(totals) // 2] if totals else None
+        for (key, _rel), (percent, shares) in zip(items, parsed):
+            size = percent
+            if size is None and shares and total:
+                implied = shares / total * 100.0
+                if 0 < implied <= 100:
+                    size = implied
+            sized.append((key, size))
+        ranked = sorted(
+            (item for item in sized if item[1] is not None),
+            key=lambda item: (-item[1], item[0][0]),
+        )
+        top = {key for key, _size in ranked[:_TOP_HOLDERS]}
+        stake_by_key = {key: parsed[i] for i, (key, _rel) in enumerate(items)}
+        # 没有任何一行同时写出比例和股数时，反推不出总股本。
+        # 只有股数的按股数自己排前 10，不和比例混成一个单位。
+        share_only = sorted(
+            (
+                (key, stake_by_key[key][1])
+                for key, size in sized
+                if size is None and stake_by_key[key][0] is None and stake_by_key[key][1]
+            ),
+            key=lambda item: (-item[1], item[0][0]),
+        )
+        share_top = {key for key, _shares in share_only[:_TOP_HOLDERS]}
+        removed: list[tuple[str, float | None, int | None]] = []
+        for key, size in sized:
+            percent, shares = stake_by_key[key]
+            if size is None and shares is not None and percent is None:
+                keep = key in share_top
+            elif size is None:
+                keep = True
+            else:
+                keep = size >= _MIN_STAKE_PERCENT or key in top
+            if keep:
+                continue
+            relations.pop(key, None)
+            holder = entities.get(key[0], {})
+            removed.append((holder.get("name") or key[0], percent, shares))
+        if removed and target in entities:
+            entities[target]["description"] = _append_holder_note(
+                entities[target].get("description") or "", removed
+            )
+        dropped_names.extend(name for name, _percent, _shares in removed)
+        dropped_norms.update(key[0] for key, _size in sized if key not in relations)
+
+    if not dropped_names:
+        return
+    for norm in dropped_norms:
+        if norm == subject_norm:
+            continue
+        if any(norm in key[:2] for key in relations):
+            continue
+        entities.pop(norm, None)
+    for key in list(mentions):
+        if key[0] not in entities:
+            mentions.pop(key, None)
+    logger.info(
+        "kb 图谱收掉 %d 条小额持股（低于 1%% 且不在前 10 名）：%s",
+        len(dropped_names),
+        "、".join(dropped_names[:8]),
+    )
+
+
+def _append_holder_note(
+    description: str, removed: list[tuple[str, float | None, int | None]]
+) -> str:
+    parts: list[str] = []
+    for name, percent, shares in removed:
+        if percent is not None:
+            parts.append(f"{name} {percent:g}%")
+        elif shares is not None:
+            parts.append(f"{name} {shares:,}股")
+        else:
+            parts.append(name)
+    note = "其余持股：" + "、".join(parts)
+    base = (description or "").strip()
+    if not base or base == "本文档主体":
+        return note[:_HOLDER_NOTE_LIMIT]
+    return f"{base}；{note}"[:_HOLDER_NOTE_LIMIT]
+
+
+# 三大表及权益变动表。表题通常单独成行；续表的列名格里会写成「合并利润表项目」。
+_STATEMENT_TITLE = re.compile(
+    r"资产负债表|利润表|现金流量表|所有者权益变动表|股东权益变动表"
+)
+# 科目表的金额列。股东表的「期末持股数量」不含这些词，不会被当成科目行。
+_STATEMENT_HEADER = re.compile(
+    r"期末余额|期初余额|本期金额|上期金额|本年累计|上年同期|前三季度|本报告期|年初至报告期末"
+)
+_AMOUNT_CELL = re.compile(r"^[\d.,%+\-]+$")
+# 附注列：「七、1」「（三十四）」。不是金额，但仍然是科目行，不是另一家公司。
+_NOTE_REF = re.compile(
+    r"^[（(]?(?:[一二三四五六七八九十百]+|\d+)[）)]?(?:[、.．]\d+)?[）)]?$"
+)
+_BLANK_AMOUNT = {"—", "－", "-", "--", "——", "/", "不适用"}
+
+
+def _chunk_table_rows(text: str) -> list[list[str]]:
+    """取出表格的单元格。HTML 与 Markdown 两种切片都认，其它形态返回空。"""
+    raw = text or ""
+    if _HTML_TABLE.search(raw):
+        rows: list[list[str]] = []
+        for table in _HTML_TABLE.finditer(raw):
+            for row in _table_rows(table.group(0)):
+                cells = [_cell_plain(match.group(2)) for match in _HTML_CELL.finditer(row)]
+                if any(cells):
+                    rows.append(cells)
+        return rows
+    rows = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if "|" not in stripped or _MD_SEPARATOR.match(stripped):
+            continue
+        body = stripped[1:] if stripped.startswith("|") else stripped
+        rows.append([part.strip() for part in re.split(r"(?<!\\)\|", body)])
+    return rows
+
+
+def _is_amount_cell(cell: str) -> bool:
+    text = (cell or "").strip().translate(str.maketrans({"，": ",", "（": "(", "）": ")"}))
+    if not text or text in _BLANK_AMOUNT:
+        return True
+    bare = text.replace(" ", "").strip("()")
+    return bool(_AMOUNT_CELL.fullmatch(bare) or _NOTE_REF.fullmatch(text.replace(" ", "")))
+
+
+def _is_header_row(cells: list[str]) -> bool:
+    filled = [cell for cell in cells if cell]
+    if len(filled) < 2:
+        return False
+    # 「货币资金 | 不适用」是科目行：除第一列外都是金额或空。
+    if all(_is_amount_cell(cell) for cell in cells[1:]):
+        return False
+    if any(_is_amount_cell(cell) and re.search(r"\d", cell) for cell in filled):
+        return False
+    return any(re.search(r"[\u4e00-\u9fff]", cell) for cell in filled)
+
+
+def _is_account_row(cells: list[str]) -> bool:
+    if not cells or not (cells[0] or "").strip():
+        return False
+    return all(_is_amount_cell(cell) for cell in cells[1:])
+
+
+def _looks_like_statement(text: str, rows: list[list[str]]) -> bool:
+    for raw in text.splitlines():
+        line = raw.strip().strip("*")
+        if line and len(line) <= 40 and line[-1] not in "。；，、" and _STATEMENT_TITLE.search(line):
+            return True
+    for cells in rows[:4]:
+        blob = "".join(cells)
+        if _STATEMENT_TITLE.search(blob):
+            return True
+        labeled = any(cell in {"项目", "科目"} or cell.endswith("项目") for cell in cells if cell)
+        if labeled and _STATEMENT_HEADER.search(blob):
+            return True
+    return False
+
+
+def _has_other_company(text: str, subject: str | None) -> bool:
+    """行里有另一家公司全称。文件主体自己出现在表题上不算。"""
+    for name in _legal_names(text):
+        if subject and _same_company(name, subject):
+            continue
+        return True
+    return False
+
+
+def _same_company(name: str, subject: str) -> bool:
+    left, right = normalize_name(name), normalize_name(subject)
+    if left and left == right:
+        return True
+    core_left, core_right = normalize_name(subject_core(name)), normalize_name(subject_core(subject))
+    return len(core_left) >= 2 and core_left == core_right
+
+
+def _is_statement_line(chunk: Chunk, subject: str | None) -> bool:
+    """季报三大表的科目行：第一列是科目，其余是金额或附注，行内没有另一家公司。
+
+    股东表、子公司表的第一列是机构全称，留下。分行业营收的列名是营业收入，
+    不是「本期金额」，也留下。只在 quarterly_report 上调用。
+    """
+    if chunk.kind != "table":
+        return False
+    text = chunk.text or ""
+    rows = _chunk_table_rows(text)
+    if not rows or not _looks_like_statement(text, rows):
+        return False
+    data = [row for row in rows if not _is_header_row(row)]
+    if not data or not all(_is_account_row(row) for row in data):
+        return False
+    return not _has_other_company(text, subject)
+
+
 def _cover_page_text(chunks: list[Chunk]) -> str:
     """封面是页码最小的那一页。没有页码就当封面没有文字，调用方回退文件名。"""
     pages = [chunk.page for chunk in chunks if chunk.page]
@@ -359,6 +643,8 @@ def build_file_graph(
     """
     profile = resolve_profile(doc_type)
     system_prompt = build_system_prompt(profile.key, level)
+    cover = _cover_page_text(chunks)
+    subject = resolve_graph_subject(doc_name, cover)
     kept = [c for c in chunks if _worth_extracting(c.text)]
     if len(kept) < len(chunks):
         logger.info(
@@ -367,6 +653,14 @@ def build_file_graph(
             len(chunks),
             settings.kb_graph_min_chunk_chars,
         )
+    if profile.key == "quarterly_report":
+        before = len(kept)
+        kept = [c for c in kept if not _is_statement_line(c, subject)]
+        if len(kept) < before:
+            logger.info(
+                "kb 图谱跳过 %d 个季报科目行（资产负债表/利润表/现金流量表）",
+                before - len(kept),
+            )
     if not kept:
         logger.info("kb 图谱无可用切片 file_id=%s", file_id)
         return {"entities": 0, "relations": 0}
@@ -376,14 +670,14 @@ def build_file_graph(
     # 批数要按「章节组批」后的实际批数算：进度百分比和分次落库的节奏都
     # 依赖它，用 ceil(片数/批大小) 会在小章节合批后偏高
     total_batches = len(_batch_bounds(kept, batch_size))
-    cover = _cover_page_text(chunks)
-    subject = resolve_graph_subject(doc_name, cover)
     # 封面全称写进 prompt。文件名里的简称会让模型再抽出一个同主体的点。
     # 封面没抽出全称时，prompt 仍用原来的文件名。
     listed = resolve_graph_subject(None, cover)
     prompt_name = listed or doc_name
     logger.info("kb 图谱主体 file_id=%s subject=%s", file_id, subject or "未识别")
-    accumulator = _GraphAccumulator(file_id, subject)
+    accumulator = _GraphAccumulator(
+        file_id, subject, trim_holders=profile.key == "quarterly_report"
+    )
     started = time.perf_counter()
 
     def report(done: int) -> None:

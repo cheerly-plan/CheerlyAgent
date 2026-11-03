@@ -69,6 +69,56 @@ class KgStore:
             ).fetchall()
         return [str(row["name"]) for row in rows if row.get("name")]
 
+    def exact_entity_files(self, query: str) -> list[uuid.UUID]:
+        """问句里最长的那一个实体名或别名，落在哪些文件。
+
+        全库一条包含判断：规范名必须整段出现在问句里，不做模糊。
+        只认最长的那一个名字；并列最长时返回空，调用方不改范围。
+        """
+        from ai_agent.kb.graph_names import normalize_name
+
+        text = normalize_name(query)
+        if len(text) < 2:
+            return []
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT file_id, norm FROM (
+                    SELECT e.file_id, e.norm_name AS norm
+                    FROM agent_kg_entity e
+                    WHERE char_length(e.norm_name) >= 2
+                      AND char_length(e.norm_name) <= char_length(%(q)s)
+                      AND strpos(%(q)s, e.norm_name) > 0
+                    UNION
+                    SELECT a.file_id, a.alias_norm AS norm
+                    FROM agent_kg_alias a
+                    WHERE char_length(a.alias_norm) >= %(alias_min)s
+                      AND char_length(a.alias_norm) <= char_length(%(q)s)
+                      AND strpos(%(q)s, a.alias_norm) > 0
+                ) hits
+                """,
+                {"q": text, "alias_min": _ALIAS_IN_QUERY_MIN},
+            ).fetchall()
+        if not rows:
+            return []
+        best = max(len(str(row["norm"])) for row in rows)
+        norms = {str(row["norm"]) for row in rows if len(str(row["norm"])) == best}
+        if len(norms) != 1:
+            return []
+        chosen = norms.pop()
+        files: list[uuid.UUID] = []
+        seen: set[uuid.UUID] = set()
+        for row in rows:
+            if str(row["norm"]) != chosen:
+                continue
+            raw = row["file_id"]
+            fid = raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+            if fid in seen:
+                continue
+            seen.add(fid)
+            files.append(fid)
+        return files
+
     def list_aligned_aliases(self, file_id: uuid.UUID, subject: str) -> list[str]:
         """这份文件里、属于该主体的对齐别名。"""
         from ai_agent.kb.meta import subject_core

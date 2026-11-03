@@ -256,7 +256,9 @@ class Settings(BaseSettings):
     # ——— 查询改写（多轮对话补全 + 检索增强）———
     # 多轮对话改写：结合上一轮对话把当前追问补全/指代消解成自包含检索词
     # （如「那它去年呢？」补全公司名）。关闭/无上文/失败一律退回原话。
-    kb_rewrite_enabled: bool = True
+    # 默认关闭：对话模型已经看得到上文，调用检索工具时自己会带上主体，
+    # 再单独打一次改写只会增加延迟。需要时再打开。
+    kb_rewrite_enabled: bool = False
     # 空 = 跟随 resolve_llm()（小模型优先，短文本判别不需要大模型）
     kb_rewrite_model: str = ""
     kb_rewrite_timeout_seconds: float = 3.0
