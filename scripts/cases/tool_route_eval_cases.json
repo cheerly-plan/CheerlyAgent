@@ -1,0 +1,79 @@
+[
+  {
+    "query": "中科飞测的注册资本是多少",
+    "group": "kb",
+    "expect": ["kb_search"],
+    "forbid": ["kg_search"],
+    "note": "科目金额。点到主体后必须查库，应选 kb_search"
+  },
+  {
+    "query": "中化装备的董事长年薪是多少",
+    "group": "kb",
+    "expect": ["kb_search"],
+    "forbid": ["kg_search"],
+    "note": "年薪是科目数字。问句里有「董事长」，不能因此改走图谱"
+  },
+  {
+    "query": "中国银行前三季度营业收入是多少",
+    "group": "kb",
+    "expect": ["kb_search"],
+    "forbid": ["kg_search"],
+    "note": "报表科目金额"
+  },
+  {
+    "query": "中科飞测2026年比2025年三季度营业收入增长了多少",
+    "group": "kb",
+    "expect": ["kb_search"],
+    "forbid": ["kg_search"],
+    "note": "同一家两个报告期的科目对比，仍是一次 kb_search 能覆盖的原文问题"
+  },
+  {
+    "query": "中国银行和长安汽车的营业收入分别是多少",
+    "group": "kb",
+    "expect": ["kb_search"],
+    "forbid": ["kg_search"],
+    "note": "两家都是科目金额。提示词要求在这两家文件里查「营业收入」，不要求拆成两次，也不该调 kg_search"
+  },
+  {
+    "query": "2025年中科飞测的前十大股东有哪些",
+    "group": "kg",
+    "expect": ["kg_search"],
+    "forbid": ["kb_search"],
+    "note": "谁持股。点到主体后必须查库，应选 kg_search"
+  },
+  {
+    "query": "中化装备的子公司有哪些",
+    "group": "kg",
+    "expect": ["kg_search"],
+    "forbid": ["kb_search"],
+    "note": "子公司是关系，不是科目金额"
+  },
+  {
+    "query": "益阳橡机被哪家公司收购",
+    "group": "kg",
+    "expect": ["kg_search"],
+    "forbid": ["kb_search"],
+    "note": "收购是关系。简称应能点到图谱里的实体"
+  },
+  {
+    "query": "腾讯控股持有中科飞测多少股份",
+    "group": "kg",
+    "expect": ["kg_search"],
+    "forbid": ["kb_search"],
+    "note": "持股方是编造的，但问的仍是关系。应调 kg_search，由检索结果说明没有这条边"
+  },
+  {
+    "query": "贵州茅台的前十大股东有哪些",
+    "group": "kg",
+    "expect": ["kg_search"],
+    "forbid": ["kb_search"],
+    "note": "库里没有这家公司，问的仍是股东关系，不能改用训练知识直接回答"
+  },
+  {
+    "query": "中科飞测的第一大股东是谁，注册资本是多少",
+    "group": "both",
+    "expect": ["kb_search", "kg_search"],
+    "forbid": [],
+    "note": "关系加科目金额。纪律要求两个都调，科目金额走 kb_search"
+  }
+]
