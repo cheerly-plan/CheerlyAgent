@@ -112,7 +112,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `migrations/` | Alembic 迁移脚本（见下方「数据库与迁移」） |
 | `core/` | 配置（`config.py`）、异常、HTTP 客户端、日志 |
 | `tasks/` | 后台任务：会话标题生成、定期清理 |
-| `scripts/` | 运维与评测脚本：知识库重建/重解析、重嵌入、三套评测、图谱检查 |
+| `scripts/` | 运维与评测脚本。日常维护走 `kb.py`，评测用例在 `scripts/cases/` |
 
 ### 工具一览
 
@@ -260,36 +260,41 @@ uv run alembic revision -m "说明"    # 新增迁移
 
 | 脚本 | 用例集 | 条数 | 测什么 |
 |---|---|---|---|
-| `scripts/eval_retrieval.py` | `retrieval_eval_cases_corpus.json` | 72 | 知识库检索：hit@1/@3、MRR、recall@10 |
-| `scripts/eval_graph_retrieval.py` | `graph_eval_cases.json` | 31 | 图谱检索：问句能否查到正确的三元组，同时测**工具路径**与**预检索路径**两条 |
-| `scripts/eval_graph.py` | `data/eval/gold_guodian.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
-| `scripts/eval_memory.py` | `memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写 |
-| `scripts/eval_memory.py --recall` | `episode_eval_cases.json` | 2 | 情景记忆召回（写入后检索，用完删除） |
+| `scripts/eval_retrieval.py` | `scripts/cases/retrieval_eval_cases_corpus.json` | 69 | 知识库检索：hit@1/@3、MRR、recall@10。一次只问一家 |
+| `scripts/eval_graph_retrieval.py` | `scripts/cases/graph_eval_cases.json` | 29 | 图谱检索：问句能否查到正确的三元组，同时测**工具路径**与**预检索路径**两条 |
+| `scripts/eval_tool_route.py` | `scripts/cases/tool_route_eval_cases.json` | 11 | 模型选工具：科目走 `kb_search`，关系走 `kg_search`，两者都要时两个都调。不执行检索 |
+| `scripts/eval_graph.py` | `scripts/cases/gold_graph.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
+| `scripts/eval_memory.py` | `scripts/cases/memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写 |
+| `scripts/eval_memory.py --recall` | `scripts/cases/episode_eval_cases.json` | 2 | 情景记忆召回（写入后检索，用完删除） |
 
-另有 `retrieval_eval_cases.json`（25 条）、`retrieval_eval_cases_3f.json`（20 条）
-是早期小样本集，保留作对照。
+另有 `scripts/cases/retrieval_eval_cases.json`（22 条，检索脚本的默认集）、
+`scripts/cases/retrieval_eval_cases_3f.json`（20 条）是早期小样本集，保留作对照。
 
 ```bash
 # 知识库检索（默认关闭重排，跑得稳；--rerank 打开会调 LLM）
-uv run python scripts/eval_retrieval.py --cases scripts/retrieval_eval_cases_corpus.json --top-k 10
+uv run python scripts/eval_retrieval.py --cases scripts/cases/retrieval_eval_cases_corpus.json --top-k 10
 uv run python scripts/eval_retrieval.py --validate        # 先校验用例与语料是否对齐
 
 # 图谱检索（6 秒跑完，--out 落 json）
 uv run python scripts/eval_graph_retrieval.py --validate
 uv run python scripts/eval_graph_retrieval.py --out data/eval/graph_retrieval.json
 
+# 工具选择（会调主对话模型；工具结果是桩，不执行检索）
+uv run python scripts/eval_tool_route.py --list
+uv run python scripts/eval_tool_route.py
+
 # 图谱构建质量（只读，但要求库里有金标对应的那份文件；--before 传上次报告可对比）
-uv run python scripts/eval_graph.py --gold data/eval/gold_guodian.json --file-id <id>
+uv run python scripts/eval_graph.py --gold scripts/cases/gold_graph.json --file-id <id>
 ```
 
 ### 当前基线（2026-11-03）
 
-知识库检索（72 条语料 / 重排关 / top_k=10）：hit@1 50/72、hit@3 64/72（89%）、
-hit@10 69/72、MRR@10 0.800。通过线 hit@3 ≥ 85%。
+知识库检索（2026-11-03，当时 72 条、重排关、top_k=10）：hit@1 50/72、hit@3 64/72（89%）、
+hit@10 69/72、MRR@10 0.800。通过线 hit@3 ≥ 85%。两家公司放在同一问里的 3 条已从用例集拿掉：评测只打一次 `kb_search`，工具不会把两个主体拆成两次查询。
 用例集与语料强绑定，换语料（重新解析后）要先跑 `--validate`。
 
-图谱检索（31 条，分 historical / historical_explicit / distractor / alias /
-direct / negative 六组）：
+图谱检索（2026-11-03，当时 31 条，分 historical / historical_explicit / distractor / alias /
+direct / negative 六组）。「中科飞测的注册资本是多少」「中化装备的董事长年薪是多少」已从用例集拿掉：这两问是科目金额，对话里由模型识别后走 `kb_search`，不会调用 `kg_search`。现在剩 29 条，负例 4 条都是库里没有的实体或编造的关系。
 
 | 分组 | 条数 | 工具路径 | 预检索（仅触发的） |
 |---|---|---|---|
@@ -302,9 +307,10 @@ direct / negative 六组）：
 | 合计 | 31 | 25/31 | 16/19 |
 
 **已知缺口（已被评测量化）**：问库里不存在的实体（「贵州茅台的前十大股东」）时，
-图谱仍会返回别家公司的邻域并带精确数字——6/6 全部复现，不是个案。
+图谱仍会返回别家公司的邻域并带精确数字。当时负例 6 条全部复现；拿掉 2 条科目金额后，
+剩下的 4 条（库外实体或编造关系）在那次结果里也是 0/4。
 `search_entities` 已返回 `matched` 字段（`name` / `alias` / `keyword` / `vector`）
-可用于判定「库里到底有没有问的那个实体」，修复后这组应从 0/6 变成 6/6，
+可用于判定「库里到底有没有问的那个实体」，修复后这组应从 0/4 变成 4/4，
 且正例 25 条不能掉。**别用调 `kb_graph_min_score` 的方式解决**——正负例的
 score 区间重叠，动阈值必然误伤。
 
@@ -331,7 +337,7 @@ uv run python scripts/eval_memory.py             # 会调记忆模型
 uv run python scripts/eval_memory.py --recall    # 情景记忆召回评测（写入后检索，用完删除）
 
 # 图谱
-uv run python scripts/rebuild_graph.py           # 重建知识图谱
+uv run python scripts/kb.py graph --name 中行    # 只重建图谱；整份重解析加 --with-graph
 uv run python scripts/check_kg_alignment.py      # 图谱对齐质量检查（清理历史错并的别名）
 uv run python scripts/eval_graph.py              # 图谱构建质量评测
 ```

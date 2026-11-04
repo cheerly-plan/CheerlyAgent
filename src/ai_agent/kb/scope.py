@@ -21,7 +21,7 @@ from contextvars import ContextVar, Token
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.llm.client import LLMError, complete_chat
+from ai_agent.llm.client import LLMError, complete_chat, lightweight_llm
 
 logger = get_logger(__name__)
 
@@ -305,7 +305,7 @@ def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
     prev = [s.strip() for s in prev_turn if s and s.strip()]
     if not prev:
         return user_input
-    model = settings.kb_rewrite_model or settings.resolve_llm()
+    model, client = lightweight_llm(settings.kb_rewrite_model)
     context = "\n".join(f"- {s}" for s in prev)
     try:
         out = complete_chat(
@@ -324,9 +324,11 @@ def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
             timeout=settings.kb_rewrite_timeout_seconds,
             max_retries=0,
             max_tokens=256,
+            client=client,
             extra_body={
                 "enable_thinking": False,
                 "chat_template_kwargs": {"enable_thinking": False},
+                "think": False,
             },
         )
     except LLMError as e:
@@ -367,6 +369,7 @@ def expand_queries(query: str, count: int | None = None) -> list[str]:
     if not settings.kb_multiquery_enabled:
         return [q]
     n = count or settings.kb_multiquery_count
+    model, client = lightweight_llm(settings.kb_multiquery_model)
     try:
         out = complete_chat(
             [
@@ -376,13 +379,15 @@ def expand_queries(query: str, count: int | None = None) -> list[str]:
                     "content": f"请生成 {n} 条检索词变体，每条一行：\n{q}",
                 },
             ],
-            model=settings.kb_multiquery_model or settings.resolve_llm(),
+            model=model,
             timeout=settings.kb_multiquery_timeout_seconds,
             max_retries=0,
             max_tokens=256,
+            client=client,
             extra_body={
                 "enable_thinking": False,
                 "chat_template_kwargs": {"enable_thinking": False},
+                "think": False,
             },
         )
     except Exception:

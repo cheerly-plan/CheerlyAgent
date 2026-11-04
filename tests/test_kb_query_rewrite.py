@@ -327,6 +327,35 @@ def test_mentioned_subjects_single(monkeypatch):
     assert retrieval.mentioned_subjects("中国银行的营收") == {"中国银行"}
 
 
+def test_mentioned_subjects_matches_unique_short_name(monkeypatch):
+    """别名表没有「中科飞测」，全称里独有这一段时也要强制检索。"""
+    import uuid
+
+    from ai_agent.kb import retrieval
+
+    monkeypatch.setattr(
+        retrieval.store,
+        "list_kb_files",
+        lambda **k: [
+            _ready_file(
+                uuid.uuid4(),
+                "深圳中科飞测科技股份有限公司2026年第三季度报告",
+                "深圳中科飞测科技股份有限公司",
+                ["深圳中科飞测科技"],
+            ),
+            _ready_file(
+                uuid.uuid4(),
+                "中国银行2026三季报.pdf",
+                "中国银行股份有限公司",
+                ["中国银行"],
+            ),
+        ],
+    )
+    assert retrieval.mentioned_subjects("中科飞测的注册资本是多少") == {
+        "深圳中科飞测科技"
+    }
+
+
 def test_mentioned_subjects_respects_file_ids(monkeypatch):
     """file_ids 收窄后只在这些文件里数主体。"""
     import uuid

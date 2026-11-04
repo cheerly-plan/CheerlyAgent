@@ -30,6 +30,43 @@ def graph_client() -> OpenAI:
         return _client
     return OpenAI(base_url=url, api_key=key)
 
+
+_small_client: OpenAI | None = None
+_small_client_key: tuple[str, str] | None = None
+
+
+def small_client() -> OpenAI:
+    """轻量任务网关：标题、会话摘要、记忆抽取、检索改写。
+
+    配了 LOCAL_BASE_URL 时走本地 Ollama，和向量、整页 OCR 同一地址。
+    没配则跟主网关，避免只改了模型名却打到没有这个模型的线上。
+    """
+    global _small_client, _small_client_key
+    url, key = settings.local_llm()
+    if url == settings.base_url and key == settings.api_key:
+        return _client
+    ident = (url, key)
+    if _small_client is None or _small_client_key != ident:
+        _small_client = OpenAI(base_url=url, api_key=key)
+        _small_client_key = ident
+    return _small_client
+
+
+def lightweight_llm(business_model: str = "") -> tuple[str, OpenAI]:
+    """轻量任务的模型名和网关。
+
+    显式指定了别的模型（TITLE_MODEL、MEMORY_MODEL、KB_REWRITE_MODEL 等）
+    时仍走主网关，方便单点改回线上。否则用 SMALL_MODEL，请求打到本地网关。
+    SMALL_MODEL 为空时退回主模型 + 主网关。
+    """
+    override = (business_model or "").strip()
+    small = (settings.small_model or "").strip()
+    if override and override != small:
+        return override, _client
+    if small:
+        return small, small_client()
+    return settings.model, _client
+
 # 流式对话专用客户端：显式超时 + 关闭自动重试。
 # 默认客户端 timeout=600s：LLM 挂死时一个并发槽 + SSE 线程被占最长 10 分钟，
 # 并发槽全满后聊天接口整体 429。流式重试还会从断点重复 yield 已发内容，

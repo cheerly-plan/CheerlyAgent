@@ -19,6 +19,7 @@
 --file / --name / --all 选文件；--dry-run 只看会动谁；--all 要加 --yes。
 
 评测和一次性工具不在这里：eval_retrieval.py / eval_graph.py / eval_memory.py / check_kg_alignment.py。
+用例在 scripts/cases/。重解析、重嵌入、页覆盖、重建图谱都走上面的子命令。
 开发启动仍是 ./scripts/dev.sh。
 """
 

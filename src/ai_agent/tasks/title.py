@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.llm.client import complete_chat
+from ai_agent.llm.client import complete_chat, lightweight_llm
 from ai_agent.llm.types import ChatEvent
 from ai_agent.memory.store import DEFAULT_SESSION_TITLE, store
 from ai_agent.prompts.tasks import TITLE_SYSTEM
@@ -36,7 +36,7 @@ def normalize_title(raw: str, fallback: str = "", question: str = "") -> str:
 
 
 def generate_session_title(question: str, answer: str = "") -> str:
-    model = settings.resolve_llm(settings.title_model)
+    model, client = lightweight_llm(settings.title_model)
     try:
         raw = complete_chat(
             [
@@ -47,9 +47,11 @@ def generate_session_title(question: str, answer: str = "") -> str:
             timeout=settings.title_timeout_seconds,
             max_retries=0,
             max_tokens=48,
+            client=client,
             extra_body={
                 "enable_thinking": False,
                 "chat_template_kwargs": {"enable_thinking": False},
+                "think": False,
             },
         )
     except LLMError as e:

@@ -1,7 +1,7 @@
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.llm.client import complete_chat
+from ai_agent.llm.client import complete_chat, lightweight_llm
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.gate import jev_noul_batch
 from ai_agent.memory.short_term import crude_summary, flatten, iter_turns
@@ -46,7 +46,7 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
         user_content = (
             f"{base_content}\n\n{feedback}" if feedback else base_content
         )
-        model = settings.resolve_llm(settings.short_term_summary_model)
+        model, client = lightweight_llm(settings.short_term_summary_model)
         try:
             raw = complete_chat(
                 [
@@ -57,9 +57,11 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
                 timeout=settings.short_term_summary_timeout_seconds,
                 max_retries=0,
                 max_tokens=512,
+                client=client,
                 extra_body={
                     "enable_thinking": False,
                     "chat_template_kwargs": {"enable_thinking": False},
+                    "think": False,
                 },
             )
         except LLMError as e:

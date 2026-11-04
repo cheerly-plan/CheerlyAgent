@@ -45,7 +45,7 @@ from ai_agent.memory.store import store  # noqa: E402
 from ai_agent.tools import kg_search as KS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CASES = ROOT / "scripts" / "graph_eval_cases.json"
+DEFAULT_CASES = ROOT / "scripts" / "cases" / "graph_eval_cases.json"
 
 # 输出行形如：  - 诺安成长混合型证券投资基金 —持股→ 深圳中科飞测科技股份有限公司：持股13,453,255股
 _EDGE_RE = re.compile(r"^- (?P<src>.+?) —(?P<rel>.+?)→ (?P<dst>.+?)(?:：.*)?$")

@@ -14,9 +14,9 @@ class Settings(BaseSettings):
 
     base_url: str
     api_key: str
-    # 向量和整页 OCR 专用网关。空则跟随 BASE_URL / API_KEY。
-    # 对话、重排、视觉、图谱走线上时，这里填本地 Ollama，避免嵌入和 OCR
-    # 被一起带到线上（换嵌入模型等于整库重嵌，小米 OCR 也只在本地）。
+    # 向量、整页 OCR、轻量任务（标题 / 摘要 / 记忆 / 检索改写）的网关。
+    # 空则跟随 BASE_URL / API_KEY。对话、重排、视觉、图谱走线上时，这里填
+    # 本地 Ollama，避免这些调用被一起带到线上。
     local_base_url: str = ""
     local_api_key: str = ""
     model: str
@@ -259,7 +259,7 @@ class Settings(BaseSettings):
     # 默认关闭：对话模型已经看得到上文，调用检索工具时自己会带上主体，
     # 再单独打一次改写只会增加延迟。需要时再打开。
     kb_rewrite_enabled: bool = False
-    # 空 = 跟随 resolve_llm()（小模型优先，短文本判别不需要大模型）
+    # 空 = 跟随 SMALL_MODEL，请求走本地网关（见 lightweight_llm）
     kb_rewrite_model: str = ""
     kb_rewrite_timeout_seconds: float = 3.0
     kb_rewrite_history_turns: int = 2
@@ -267,6 +267,7 @@ class Settings(BaseSettings):
     # 提升对比/口语长问句召回。默认关闭——开启会显著增加检索次数与延迟，
     # 请先用评测验证效果与延迟可接受再用于生产。
     kb_multiquery_enabled: bool = False
+    # 空 = 跟随 SMALL_MODEL，请求走本地网关（见 lightweight_llm）
     kb_multiquery_model: str = ""
     kb_multiquery_count: int = 3
     kb_multiquery_timeout_seconds: float = 3.0
@@ -329,13 +330,14 @@ class Settings(BaseSettings):
     memory_extract_json_mode: str = "off"
 
     def local_llm(self) -> tuple[str, str]:
-        """向量和整页 OCR 的网关。未单独配置时跟主网关。"""
+        """向量、整页 OCR 和轻量任务的网关。未单独配置时跟主网关。"""
         url = (self.local_base_url or "").strip() or self.base_url
         key = (self.local_api_key or "").strip() or self.api_key
         return url, key
 
     def resolve_llm(self, business_model: str = "") -> str:
-        return business_model or self.small_model or self.model
+        """轻量任务的模型名。网关由 llm.client.lightweight_llm 决定，不要只拿这个名字去打主网关。"""
+        return (business_model or "").strip() or self.small_model or self.model
 
     def llm_for_memory(self) -> str:
         return self.resolve_llm(self.memory_model)

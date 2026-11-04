@@ -4,7 +4,7 @@
 都可能悄悄改变召回排序。人眼抽查靠不住，这里用一组「query → 必须命中的
 原文子串」当回归用例：每次改检索相关代码后跑一遍，hit@3 掉了就拦住。
 
-用例存放在 scripts/retrieval_eval_cases.json，与库内真实切片对应；
+用例存放在 scripts/cases/retrieval_eval_cases.json，与库内真实切片对应；
 知识库内容变化（增删文件、重新切片）后需要同步维护用例集——用例失效
 不再伪装成"检索 miss"，由校验环节直接指出。
 
@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from ai_agent.core.config import settings  # noqa: E402
 from ai_agent.memory.store import store  # noqa: E402
 
-CASES_PATH = Path(__file__).resolve().parent / "retrieval_eval_cases.json"
+CASES_PATH = Path(__file__).resolve().parent / "cases" / "retrieval_eval_cases.json"
 # hit@3 低于这条线视为回归：黄金用例都是"应该能查到"的问题，
 # 偶发一两条边缘 miss 可以接受，批量掉分一定是策略或向量出了问题
 HIT3_THRESHOLD = 0.85
@@ -437,7 +437,7 @@ def main() -> int:
         "--cases",
         type=str,
         default=str(CASES_PATH),
-        help="用例集路径（默认黄金集 retrieval_eval_cases.json）",
+        help="用例集路径（默认 scripts/cases/retrieval_eval_cases.json）",
     )
     parser.add_argument(
         "--filters",

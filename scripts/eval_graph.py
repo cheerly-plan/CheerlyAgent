@@ -15,7 +15,7 @@
 用法：
     uv run python scripts/eval_graph.py                        # 按 gold 文件里的文件名找库内文件
     uv run python scripts/eval_graph.py --file-id <uuid>
-    uv run python scripts/eval_graph.py --gold data/eval/gold_guodian.json --out data/eval/report.json
+    uv run python scripts/eval_graph.py --gold scripts/cases/gold_graph.json --out data/eval/report.json
     uv run python scripts/eval_graph.py --before data/eval/report_before.json   # 与上一次对比
 
 退出码：0 正常；1 找不到文件或图谱为空。
@@ -34,7 +34,7 @@ from ai_agent.kb.graph_metrics import evaluate  # noqa: E402
 from ai_agent.memory.store import store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GOLD = ROOT / "data" / "eval" / "gold_guodian.json"
+DEFAULT_GOLD = ROOT / "scripts" / "cases" / "gold_graph.json"
 
 
 def find_file(filename: str) -> dict | None:
