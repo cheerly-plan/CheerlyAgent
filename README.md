@@ -112,7 +112,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `migrations/` | Alembic 迁移脚本（见下方「数据库与迁移」） |
 | `core/` | 配置（`config.py`）、异常、HTTP 客户端、日志 |
 | `tasks/` | 后台任务：会话标题生成、定期清理 |
-| `scripts/` | 运维与评测脚本：知识库重建/重解析、重嵌入、三套评测、图谱检查 |
+| `scripts/` | 运维与评测脚本。日常维护走 `kb.py`，评测用例在 `scripts/cases/` |
 
 ### 工具一览
 
@@ -260,18 +260,18 @@ uv run alembic revision -m "说明"    # 新增迁移
 
 | 脚本 | 用例集 | 条数 | 测什么 |
 |---|---|---|---|
-| `scripts/eval_retrieval.py` | `retrieval_eval_cases_corpus.json` | 72 | 知识库检索：hit@1/@3、MRR、recall@10 |
-| `scripts/eval_graph_retrieval.py` | `graph_eval_cases.json` | 31 | 图谱检索：问句能否查到正确的三元组，同时测**工具路径**与**预检索路径**两条 |
-| `scripts/eval_graph.py` | `data/eval/gold_guodian.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
-| `scripts/eval_memory.py` | `memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写 |
-| `scripts/eval_memory.py --recall` | `episode_eval_cases.json` | 2 | 情景记忆召回（写入后检索，用完删除） |
+| `scripts/eval_retrieval.py` | `scripts/cases/retrieval_eval_cases_corpus.json` | 72 | 知识库检索：hit@1/@3、MRR、recall@10 |
+| `scripts/eval_graph_retrieval.py` | `scripts/cases/graph_eval_cases.json` | 31 | 图谱检索：问句能否查到正确的三元组，同时测**工具路径**与**预检索路径**两条 |
+| `scripts/eval_graph.py` | `scripts/cases/gold_graph.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
+| `scripts/eval_memory.py` | `scripts/cases/memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写 |
+| `scripts/eval_memory.py --recall` | `scripts/cases/episode_eval_cases.json` | 2 | 情景记忆召回（写入后检索，用完删除） |
 
-另有 `retrieval_eval_cases.json`（25 条）、`retrieval_eval_cases_3f.json`（20 条）
-是早期小样本集，保留作对照。
+另有 `scripts/cases/retrieval_eval_cases.json`（25 条，检索脚本的默认集）、
+`scripts/cases/retrieval_eval_cases_3f.json`（20 条）是早期小样本集，保留作对照。
 
 ```bash
 # 知识库检索（默认关闭重排，跑得稳；--rerank 打开会调 LLM）
-uv run python scripts/eval_retrieval.py --cases scripts/retrieval_eval_cases_corpus.json --top-k 10
+uv run python scripts/eval_retrieval.py --cases scripts/cases/retrieval_eval_cases_corpus.json --top-k 10
 uv run python scripts/eval_retrieval.py --validate        # 先校验用例与语料是否对齐
 
 # 图谱检索（6 秒跑完，--out 落 json）
@@ -279,7 +279,7 @@ uv run python scripts/eval_graph_retrieval.py --validate
 uv run python scripts/eval_graph_retrieval.py --out data/eval/graph_retrieval.json
 
 # 图谱构建质量（只读，但要求库里有金标对应的那份文件；--before 传上次报告可对比）
-uv run python scripts/eval_graph.py --gold data/eval/gold_guodian.json --file-id <id>
+uv run python scripts/eval_graph.py --gold scripts/cases/gold_graph.json --file-id <id>
 ```
 
 ### 当前基线（2026-11-03）
@@ -331,7 +331,7 @@ uv run python scripts/eval_memory.py             # 会调记忆模型
 uv run python scripts/eval_memory.py --recall    # 情景记忆召回评测（写入后检索，用完删除）
 
 # 图谱
-uv run python scripts/rebuild_graph.py           # 重建知识图谱
+uv run python scripts/kb.py graph --name 中行    # 只重建图谱；整份重解析加 --with-graph
 uv run python scripts/check_kg_alignment.py      # 图谱对齐质量检查（清理历史错并的别名）
 uv run python scripts/eval_graph.py              # 图谱构建质量评测
 ```

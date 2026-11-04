@@ -42,8 +42,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-CASES_PATH = Path(__file__).resolve().parent / "memory_eval_cases.json"
-EPISODE_CASES_PATH = Path(__file__).resolve().parent / "episode_eval_cases.json"
+CASES_PATH = Path(__file__).resolve().parent / "cases" / "memory_eval_cases.json"
+EPISODE_CASES_PATH = Path(__file__).resolve().parent / "cases" / "episode_eval_cases.json"
 PASS_THRESHOLD = 0.8
 # 评测专用用户，跑完会删掉这个用户的情景和画像，不碰真实用户
 EPISODE_EVAL_USER = "eval-episode"
@@ -401,7 +401,7 @@ def run_episode_recall(data: dict, *, top_k: int) -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="长期记忆评测")
-    parser.add_argument("--cases", help="用例集路径。抽取默认 memory_eval_cases.json，召回默认 episode_eval_cases.json")
+    parser.add_argument("--cases", help="用例集路径。抽取默认 cases/memory_eval_cases.json，召回默认 cases/episode_eval_cases.json")
     parser.add_argument("--case", help="只跑指定 id")
     parser.add_argument("--list", action="store_true", help="只列出用例，不调模型、不写库")
     parser.add_argument("--recall", action="store_true", help="评情景记忆召回，而不是抽取")

@@ -629,7 +629,9 @@ def mentioned_subjects(
 ) -> set[str]:
     """query 里点名的文件主体（subject 核心名）集合。
 
-    主体、别名、文件名去噪后的名字都必须整段出现。简称只认别名表里的写法。
+    主体、别名、文件名去噪后的名字整段出现才算。别名表没有的简称，
+    只要是某一家主体名里独有的一段（「中科飞测」），也算点名——
+    对话靠这个决定要不要强制调用知识库工具。
     """
     text = (query or "").strip()
     if not text:
@@ -653,6 +655,15 @@ def mentioned_subjects(
                 core = _subject_core(name)
                 subjects.add(core or name)
                 break
+    from ai_agent.kb.meta import fragment_subjects
+
+    catalog = [
+        (str(item.get("subject") or ""), list(item.get("subject_aliases") or []))
+        for item in ready
+    ]
+    for subject in fragment_subjects(text, catalog):
+        core = _subject_core(subject)
+        subjects.add(core or subject)
     return subjects
 
 
