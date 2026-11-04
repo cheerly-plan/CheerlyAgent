@@ -5,12 +5,13 @@ import re
 from typing import Any
 
 from ai_agent.core.config import settings
-from ai_agent.llm.client import complete_chat
+from ai_agent.llm.client import complete_chat, lightweight_llm
 from ai_agent.llm.types import ChatMessage
 
 _MEMORY_EXTRA_BODY: dict[str, Any] = {
     "enable_thinking": False,
     "chat_template_kwargs": {"enable_thinking": False},
+    "think": False,
 }
 
 _NUMBER = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
@@ -23,12 +24,14 @@ def complete_memory_chat(
     max_tokens: int,
     response_format: dict[str, Any] | None = None,
 ) -> str:
+    model, client = lightweight_llm(settings.memory_model)
     return complete_chat(
         messages,
-        model=settings.llm_for_memory(),
+        model=model,
         timeout=settings.memory_merge_timeout_seconds,
         max_retries=0,
         max_tokens=max_tokens,
+        client=client,
         extra_body=_MEMORY_EXTRA_BODY,
         response_format=response_format,
     )
