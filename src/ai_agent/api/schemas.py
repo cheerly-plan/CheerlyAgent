@@ -164,6 +164,56 @@ class AuthResponse(BaseModel):
     expires_at: str
     user: AuthUser
 
+class InspectUser(BaseModel):
+    user_id: str
+    user_name: str
+    username: str
+    is_admin: bool = False
+
+
+class InspectUserList(BaseModel):
+    users: list[InspectUser]
+
+
+class InspectSession(BaseModel):
+    session_id: str
+    title: str
+    updated_at: str
+
+
+class InspectSessionList(BaseModel):
+    user_id: str
+    sessions: list[InspectSession]
+
+
+class InspectStep(BaseModel):
+    """一轮提问之后的单步过程。
+
+    tool 是模型发出的一次工具调用，name 是工具名，例如 kb_search。
+    tool_result 是这次调用的返回，arguments 带回同一次调用的参数。
+    llm 是模型当步写下的正文。
+    """
+
+    kind: str
+    name: str = ""
+    tool_call_id: str = ""
+    content: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class InspectTurn(BaseModel):
+    index: int
+    question: str
+    steps: list[InspectStep]
+
+
+class InspectTurns(BaseModel):
+    user_id: str
+    session_id: str
+    title: str
+    turns: list[InspectTurn]
+
+
 class ResumeRequest(BaseModel):
     run_id: str = Field(min_length=8, max_length=64)
     chat_session_id: SafeId = "default"

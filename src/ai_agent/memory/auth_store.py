@@ -148,6 +148,29 @@ class AuthStore:
             created_at=row["created_at"].isoformat(),
         )
 
+    def list_users(self, limit: int = 200) -> list[UserRecord]:
+        """管理员查看对话过程用。不含密码哈希。"""
+        page = min(max(int(limit), 1), 500)
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, username, display_name, created_at
+                FROM agent_user
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (page,),
+            ).fetchall()
+        return [
+            UserRecord(
+                user_id=str(row["id"]),
+                username=row["username"],
+                display_name=row["display_name"] or row["username"],
+                created_at=row["created_at"].isoformat(),
+            )
+            for row in rows
+        ]
+
     def revoke_token(self, token: str) -> None:
         with self._get_pool().connection() as conn:
             conn.execute(

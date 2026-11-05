@@ -10,6 +10,7 @@ from ai_agent.api.middleware.request_id import RequestIdMiddleware
 from ai_agent.api.routers.auth import router as auth_router
 from ai_agent.api.routers.chat import router as chat_router
 from ai_agent.api.routers.health import router as health_router
+from ai_agent.api.routers.inspect import router as inspect_router
 from ai_agent.api.routers.kb import router as kb_router
 from ai_agent.api.routers.kg import router as kg_router
 from ai_agent.api.routers.session import router as session_router
@@ -66,6 +67,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(user_router)
     app.include_router(session_router)
+    app.include_router(inspect_router)
     app.include_router(chat_router)
     app.include_router(kb_router)
     app.include_router(kg_router)
