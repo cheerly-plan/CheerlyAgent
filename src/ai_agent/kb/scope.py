@@ -26,6 +26,8 @@ from ai_agent.llm.client import LLMError, complete_chat, lightweight_llm
 logger = get_logger(__name__)
 
 _SCOPE: ContextVar[tuple[str, ...]] = ContextVar("kb_scope", default=())
+# 本轮用户原句。模型常把检索词收成科目名，圈文件时还要能看到公司名。
+_QUESTION: ContextVar[str] = ContextVar("kb_question", default="")
 # 查询改写上下文：上一轮对话（user 问 + assistant 答）的文本串，供
 # effective_kb_query 补全多轮追问里省略的主体 / 指代。
 _REWRITE_CTX: ContextVar[list[str]] = ContextVar("kb_rewrite_ctx", default=[])
@@ -42,6 +44,18 @@ def reset_kb_scope(token: Token) -> None:
 
 def kb_scope() -> tuple[str, ...]:
     return _SCOPE.get()
+
+
+def set_kb_question(text: str | None) -> Token:
+    return _QUESTION.set((text or "").strip())
+
+
+def reset_kb_question(token: Token) -> None:
+    _QUESTION.reset(token)
+
+
+def current_question() -> str:
+    return _QUESTION.get()
 
 
 def set_rewrite_context(turns: Iterable[str] | None) -> Token:

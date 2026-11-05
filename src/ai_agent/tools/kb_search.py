@@ -23,6 +23,7 @@ from ai_agent.kb.retrieval import (
     SCOPE_PARENT,
 )
 from ai_agent.kb.scope import (
+    current_question,
     effective_kb_query,
     expand_queries,
     kb_scope,
@@ -49,6 +50,36 @@ _NEIGHBOR_CLIP = 200
 
 # 剥离主体名后若只剩这些语气/疑问助词，视为「问的就是全称本身」，回退原句
 _PARTICLE_RE = re.compile(r"^[的是]+|[的是]+$")
+# 「表现」「表示」里的「表」不是在要表格
+_TABLE_ASK = re.compile(r"表格|表中|附表|这张表|(?<![表现态])表(?![现示态])")
+
+
+def _question_names_files_query_lost(tool_query: str, asked: str) -> bool:
+    """用户点了公司，检索词里却没有这些文件。说明公司名被收掉了。"""
+    from ai_agent.kb.router import mentioned_file_ids
+
+    named = {str(fid) for fid in mentioned_file_ids(asked)}
+    if not named:
+        return False
+    kept = {str(fid) for fid in mentioned_file_ids(tool_query)}
+    return not named <= kept
+
+
+def _kinds_user_asked(asked: str, kinds: list[str] | None) -> list[str] | None:
+    """用户没要表格时，丢掉模型自己加的 table。没有原句就保持原参数。"""
+    if not kinds or not asked:
+        return kinds
+    if "table" in kinds and not _TABLE_ASK.search(asked):
+        kinds = [kind for kind in kinds if kind != "table"]
+    return kinds or None
+
+
+def _sections_user_asked(asked: str, sections: list[str] | None) -> list[str] | None:
+    """章节词没有出现在用户原句里，就不当成用户要的范围。"""
+    if not sections or not asked:
+        return sections
+    kept = [section for section in sections if section and section in asked]
+    return kept or None
 
 
 def _strip_scope_subject(query: str, file_ids: list) -> str:
@@ -104,16 +135,15 @@ class KbSearchArgs(BaseModel):
     kinds: list[Literal["text", "table", "figure"]] | None = Field(
         default=None,
         description=(
-            "选填。只检索指定类型的切片：table=表格、figure=图表、text=正文。"
-            "问题明确指向表格数据（如「各公司营业收入」）就传 [\"table\"]，"
-            "能跳过正文、直击数值行。"
+            "选填。只有用户明确只要其中一种时才填：table=表格、figure=图表、text=正文。"
+            "增长、原因、情况这类问题要同时看正文和表格，留空。"
         ),
     )
     sections: list[str] | None = Field(
         default=None,
         description=(
-            "选填。只检索指定章节的切片（模糊匹配，章节名写法多，尽量用关键词），"
-            "如 [\"管理层讨论\"]。配合 files 一起用，进一步缩小范围。"
+            "选填。只有用户点名某一章时才填章节关键词。"
+            "不要自行填章节。"
         ),
     )
 
@@ -131,7 +161,16 @@ def retrieve_for_question(
     返回 (parsed_ids, hits)。parsed_ids 为 [] 表示点了文件但一个都没解析到；
     为 None 表示没圈住，按全库查。检索失败抛异常，由调用方转文案。
     """
-    query = effective_kb_query(query)
+    asked = current_question().strip()
+    # 模型把「中国黄金的营收增长情况」收成「营业收入」后，公司名和「增长」都没了，
+    # 路由会按科目去找别的文件。原句点了名而检索词没点到时，改回原句再圈文件。
+    if asked and not files and _question_names_files_query_lost(query, asked):
+        query = asked
+    else:
+        query = effective_kb_query(query)
+    if asked:
+        kinds = _kinds_user_asked(asked, kinds)
+        sections = _sections_user_asked(asked, sections)
     parsed_ids = resolve_tool_file_ids(files, query=query)
     if parsed_ids == []:
         return [], []

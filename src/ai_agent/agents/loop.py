@@ -17,8 +17,10 @@ from ai_agent.kb.citations import collect_citations, merge_sources
 from ai_agent.kb.doc_profiles import resolve_profile
 from ai_agent.kb.scope import (
     extract_prev_turn,
+    reset_kb_question,
     reset_kb_scope,
     reset_rewrite_context,
+    set_kb_question,
     set_kb_scope,
     set_rewrite_context,
 )
@@ -647,6 +649,7 @@ def run_loop(
             rewrite_token = set_rewrite_context(
                 extract_prev_turn(messages, settings.kb_rewrite_history_turns)
             )
+            question_token = set_kb_question(_latest_user_text(messages))
             try:
                 with collect_citations() as cited:
                     with user_scope(user_id):
@@ -654,6 +657,7 @@ def run_loop(
             finally:
                 reset_kb_scope(scope_token)
                 reset_rewrite_context(rewrite_token)
+                reset_kb_question(question_token)
             turn_sources = merge_sources(turn_sources, cited)
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
             # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾

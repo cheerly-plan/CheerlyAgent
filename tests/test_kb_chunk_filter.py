@@ -6,6 +6,7 @@
 
 import uuid
 
+from ai_agent.kb.scope import reset_kb_question, set_kb_question
 from ai_agent.kb.store import _chunk_meta_where
 from ai_agent.kb.tables import SCOPE_PARENT
 from ai_agent.tools import kb_search
@@ -92,3 +93,57 @@ def test_kb_search_infers_parent_scope(monkeypatch):
     kb_search._kb_search("母公司报表的未分配利润", files=None, top_k=3)
     # 明确提及母公司口径 → scope 硬过滤为 parent；合并口径不硬过滤（沿用软偏好）
     assert captured["filters"]["scopes"] == [SCOPE_PARENT]
+
+
+def test_named_table_keeps_kind_filter():
+    assert kb_search._kinds_user_asked("看利润表里的营业收入", ["table"]) == ["table"]
+    assert kb_search._sections_user_asked("管理层讨论里的增长", ["管理层讨论"]) == ["管理层讨论"]
+
+
+def test_field_only_query_returns_to_the_user_question(monkeypatch):
+    """「中国黄金的营收增长情况」被收成按章节查营业收入时，改回原句。"""
+    gold = uuid.uuid4()
+    captured: dict = {}
+
+    def mentions(text: str):
+        return [gold] if "中国黄金" in text else []
+
+    def resolve(files, query=None):
+        captured["resolve_query"] = query
+        return [gold] if query and "中国黄金" in query else []
+
+    def search(queries, **kwargs):
+        captured["queries"] = queries
+        captured["filters"] = kwargs.get("filters")
+        return []
+
+    monkeypatch.setattr("ai_agent.kb.router.mentioned_file_ids", mentions)
+    monkeypatch.setattr(kb_search, "resolve_tool_file_ids", resolve)
+    monkeypatch.setattr(kb_search, "search_knowledge_multi", search)
+    monkeypatch.setattr(kb_search, "expand_queries", lambda query, count=None: [query])
+    monkeypatch.setattr(kb_search.store, "has_ready_kb_file", lambda: True)
+    monkeypatch.setattr(
+        kb_search.store,
+        "get_kb_file",
+        lambda fid: {
+            "subject": "中国黄金",
+            "subject_aliases": [],
+            "filename": "中国黄金2025年报告.pdf",
+        },
+    )
+    token = set_kb_question("中国黄金的营收增长情况")
+    try:
+        kb_search._kb_search(
+            "营业收入",
+            files=None,
+            top_k=3,
+            kinds=["table"],
+            sections=["管理层讨论"],
+        )
+    finally:
+        reset_kb_question(token)
+
+    assert captured["resolve_query"] == "中国黄金的营收增长情况"
+    assert captured["queries"] == ["营收增长情况"]
+    assert "kinds" not in (captured["filters"] or {})
+    assert "sections" not in (captured["filters"] or {})
