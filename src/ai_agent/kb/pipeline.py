@@ -6,6 +6,7 @@ agent_kb_file.status（parsing → embedding → ready / failed），
 前端轮询文件列表即可看到，不单独建 job 表。
 """
 
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -43,6 +44,9 @@ class KbPipeline:
         self._graph_pool = ThreadPoolExecutor(
             max_workers=max(1, graph_workers), thread_name_prefix="kb-graph"
         )
+        # 同一 file_id 只允许一条解析在途，避免重投把 (file_id, seq) 插重
+        self._inflight: set[str] = set()
+        self._inflight_lock = threading.Lock()
 
     def recover_stuck(self) -> None:
         stuck = store.recover_stuck_kb_files()
@@ -52,9 +56,34 @@ class KbPipeline:
         graphs = store.reset_stuck_graphs()
         if graphs:
             logger.warning("kb 启动恢复：%d 个文件图谱构建中断，标记 failed", graphs)
+        # uploaded + 磁盘已有 PDF：热重载丢掉了 ThreadPool 任务，主动重投
+        try:
+            from ai_agent.kb.fetch_reports import requeue_uploaded_files
+
+            restarted = requeue_uploaded_files()
+            if restarted:
+                logger.warning(
+                    "kb 启动恢复：重投 %d 个仍停在 uploaded 的文件", len(restarted)
+                )
+        except Exception:
+            logger.exception("kb 启动恢复：重投 uploaded 失败")
 
     def submit(self, file_id: uuid.UUID, user_id: str, path: Path) -> None:
-        self._pool.submit(self._process, file_id, user_id, path)
+        key = str(file_id)
+        with self._inflight_lock:
+            if key in self._inflight:
+                logger.info("kb 跳过重复投递 file_id=%s", key)
+                return
+            self._inflight.add(key)
+
+        def _run() -> None:
+            try:
+                self._process(file_id, user_id, path)
+            finally:
+                with self._inflight_lock:
+                    self._inflight.discard(key)
+
+        self._pool.submit(_run)
 
     def submit_graph(self, file_id: uuid.UUID) -> None:
         """只重建图谱（切片已在库里，不重复解析源文件）。"""
@@ -138,6 +167,10 @@ class KbPipeline:
                 file_meta["subject"],
                 library,
             )
+            # 重解析前清掉旧切片：否则 (file_id, seq=0) 唯一约束直接炸
+            cleared = store.clear_kb_chunks(file_id)
+            if cleared:
+                logger.info("kb 重解析清旧切片 file_id=%s n=%d", file_id, cleared)
             done = 0
             batch = settings.kb_embedding_batch
             for seq_start in range(0, len(chunks), batch):

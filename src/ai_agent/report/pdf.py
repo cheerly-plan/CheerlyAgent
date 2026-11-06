@@ -108,6 +108,47 @@ def charts_from_series(series: list[SeriesCompare]) -> list[ChartSpec]:
     return charts
 
 
+def _chart_y_domain(
+    amounts: list[Decimal], *, include_zero: bool
+) -> tuple[Decimal, Decimal]:
+    """折线按数据区间加边距缩放；柱状图仍含 0，否则高低对比会失真。
+
+    旧实现折线也强制从 0 起：净息差 1.26→1.27、营收近邻两期都会贴在图顶，
+    看起来像一条几乎水平的斜线，变化读不出来。
+    """
+    low = min(amounts)
+    high = max(amounts)
+    if include_zero:
+        low = min(low, Decimal(0))
+        high = max(high, Decimal(0))
+    if high == low:
+        pad = abs(high) * Decimal("0.08") if high != 0 else Decimal(1)
+        low, high = low - pad, high + pad
+    else:
+        pad = (high - low) * Decimal("0.18")
+        low, high = low - pad, high + pad
+    if include_zero:
+        low = min(low, Decimal(0))
+        high = max(high, Decimal(0))
+    if high == low:
+        high = low + Decimal(1)
+    return low, high
+
+
+def _chart_display_value(raw: str, unit: str) -> str:
+    text = str(raw).strip()
+    if unit == "%" and text and not text.endswith("%") and not text.endswith("％"):
+        return f"{text}%"
+    return text
+
+
+def _chart_title(title: str, max_chars: int = 42) -> str:
+    text = (title or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
+
+
 def chart_svg(spec: ChartSpec) -> str:
     """按给定数字画柱状图或折线图。读不出的数字跳过，不另编一个值。"""
     rows: list[tuple[str, Decimal, str]] = []
@@ -115,60 +156,131 @@ def chart_svg(spec: ChartSpec) -> str:
         parsed = parse_number(str(raw))
         if parsed is None:
             continue
-        rows.append((str(label), parsed[0], str(raw)))
+        rows.append((str(label), parsed[0], _chart_display_value(str(raw), spec.unit)))
     if not rows:
         return ""
-    width, height = 520, 220
-    left, right, top, bottom = 36, 16, 28, 36
+    kind = "line" if spec.kind in {"line", "趋势"} else "bar"
+    width, height = 520, 268
+    left, right, top, bottom = 52, 24, 40, 44
     plot_w = width - left - right
     plot_h = height - top - bottom
     amounts = [amount for _label, amount, _raw in rows]
-    low = min(min(amounts), Decimal(0))
-    high = max(max(amounts), Decimal(0))
-    if high == low:
-        high = low + Decimal(1)
+    low, high = _chart_y_domain(amounts, include_zero=(kind == "bar"))
 
     def y_of(amount: Decimal) -> float:
         return top + float((high - amount) / (high - low)) * plot_h
 
-    zero = y_of(Decimal(0))
-    kind = "line" if spec.kind in {"line", "趋势"} else "bar"
+    zero_y = y_of(Decimal(0)) if low <= 0 <= high else None
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}">',
-        f'<text x="{left}" y="18" font-family="{_FONT_FAMILY},sans-serif" font-size="12">'
-        f"{html.escape(spec.title)}</text>",
-        f'<line x1="{left}" y1="{zero:.1f}" x2="{width - right}" y2="{zero:.1f}" stroke="#d0d5dd"/>',
+        f'<text x="{left}" y="22" font-family="{_FONT_FAMILY},sans-serif" font-size="12">'
+        f"{html.escape(_chart_title(spec.title))}</text>",
+        # 坐标轴
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#98a2b3" '
+        'stroke-width="1"/>',
+        f'<line x1="{left}" y1="{top + plot_h}" x2="{width - right}" y2="{top + plot_h}" '
+        'stroke="#98a2b3" stroke-width="1"/>',
     ]
+    # 三条浅网格，标出高/中/低，避免「只有一根线、看不出量级」
+    for fraction in (Decimal(0), Decimal("0.5"), Decimal(1)):
+        amount = high - (high - low) * fraction
+        y = y_of(amount)
+        if fraction < 1:
+            parts.append(
+                f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}" '
+                'stroke="#eaecf0" stroke-width="1"/>'
+            )
+        tick = _format_axis_tick(amount, spec.unit, span=high - low)
+        parts.append(
+            f'<text x="{left - 6}" y="{y + 3:.1f}" text-anchor="end" font-size="9" '
+            f'fill="#667085" font-family="{_FONT_FAMILY},sans-serif">'
+            f"{html.escape(tick)}</text>"
+        )
+    if zero_y is not None and kind == "bar":
+        parts.append(
+            f'<line x1="{left}" y1="{zero_y:.1f}" x2="{width - right}" y2="{zero_y:.1f}" '
+            'stroke="#d0d5dd" stroke-width="1"/>'
+        )
+
     slot = plot_w / len(rows)
-    coords: list[str] = []
-    for index, (label, amount, raw) in enumerate(rows):
+    plotted: list[tuple[float, float, str, str]] = []
+    for index, (label, amount, display) in enumerate(rows):
         x_mid = left + (index + 0.5) * slot
         y_val = y_of(amount)
         parts.append(
-            f'<text x="{x_mid:.1f}" y="{height - 12}" text-anchor="middle" font-size="10" '
+            f'<text x="{x_mid:.1f}" y="{height - 14}" text-anchor="middle" font-size="10" '
             f'font-family="{_FONT_FAMILY},sans-serif">{html.escape(label)}</text>'
         )
+        plotted.append((x_mid, y_val, label, display))
+        if kind != "line":
+            baseline = zero_y if zero_y is not None else top + plot_h
+            bar_w = slot * 0.56
+            x = x_mid - bar_w / 2
+            y = min(y_val, baseline)
+            parts.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" '
+                f'height="{abs(baseline - y_val) or 1:.1f}" fill="#1d4e89"/>'
+            )
+            # 柱顶数值：一律放在柱上方，避免压进柱体
+            label_y = y - 6
+            if label_y < top + 10:
+                label_y = y + 14
+            parts.append(
+                f'<text x="{x_mid:.1f}" y="{label_y:.1f}" text-anchor="middle" font-size="9" '
+                f'fill="#344054" font-family="{_FONT_FAMILY},sans-serif">'
+                f"{html.escape(display)}</text>"
+            )
+    if kind == "line" and plotted:
+        coords = " ".join(f"{x:.1f},{y:.1f}" for x, y, _label, _display in plotted)
         parts.append(
-            f'<text x="{x_mid:.1f}" y="{min(y_val, zero) - 4:.1f}" text-anchor="middle" '
-            f'font-size="9" font-family="{_FONT_FAMILY},sans-serif">{html.escape(raw)}</text>'
+            f'<polyline fill="none" stroke="#1d4e89" stroke-width="2.2" '
+            f'stroke-linejoin="round" stroke-linecap="round" points="{coords}"/>'
         )
-        if kind == "line":
-            coords.append(f"{x_mid:.1f},{y_val:.1f}")
-            continue
-        bar_w = slot * 0.56
-        x = x_mid - bar_w / 2
-        y = min(y_val, zero)
-        parts.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{abs(zero - y_val) or 1:.1f}" '
-            'fill="#1d4e89"/>'
-        )
-    if coords:
-        parts.append(
-            f'<polyline fill="none" stroke="#1d4e89" stroke-width="2" points="{" ".join(coords)}"/>'
-        )
+        for x, y, _label, _display in plotted:
+            parts.append(
+                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.6" fill="#ffffff" '
+                'stroke="#1d4e89" stroke-width="2"/>'
+            )
+        # 数值标签上下交错；相邻点纵坐标接近时强制分居两侧，避免叠字压线
+        side_above: list[bool] = []
+        for index, (x, y, _label, display) in enumerate(plotted):
+            if index == 0:
+                above = True
+            elif abs(y - plotted[index - 1][1]) < 28:
+                above = not side_above[-1]
+            else:
+                above = index % 2 == 0
+            side_above.append(above)
+            label_y = y - 14 if above else y + 18
+            if label_y < top + 12:
+                label_y = y + 18
+            if label_y > top + plot_h - 4:
+                label_y = y - 14
+            parts.append(
+                f'<text x="{x:.1f}" y="{label_y:.1f}" text-anchor="middle" font-size="9" '
+                f'fill="#344054" font-family="{_FONT_FAMILY},sans-serif">'
+                f"{html.escape(display)}</text>"
+            )
     parts.append("</svg>")
     return "".join(parts)
+
+
+def _format_axis_tick(amount: Decimal, unit: str, *, span: Decimal | None = None) -> str:
+    """Y 轴刻度：区间很窄时多留小数，避免高/中/低三格显示成同一个数。"""
+    narrow = span is not None and span > 0 and span < Decimal("1")
+    if unit == "%":
+        places = Decimal("0.001") if narrow else Decimal("0.01")
+        text = f"{amount.quantize(places):f}".rstrip("0").rstrip(".")
+        return f"{text}%"
+    if abs(amount) < 1000 or (span is not None and span < 1000):
+        places = Decimal("0.01") if not narrow else Decimal("0.001")
+        text = f"{amount.quantize(places):,}"
+    else:
+        text = f"{amount.to_integral_value():,}"
+    if text.endswith(".00"):
+        text = text[:-3]
+    return text
 
 
 def apply_print_template(

@@ -189,3 +189,52 @@ def test_narrative_extraction_needs_exact_phrase_and_keeps_evidence(monkeypatch)
 
     # 原文里没有拨备覆盖率，就该抽不到，不能拿别的百分比凑数
     assert _narrative_facts("不良贷款拨备覆盖率", "2026Q3", [], by_id) == []
+
+
+def test_narrative_strips_glued_footnote_digits(monkeypatch):
+    """PDF 把上标脚注粘进数字时要剥掉：2958.40→958.40，3250,202.22→250,202.22。"""
+    text = (
+        "成本收入比25.72%。集团资产减值损失2958.40亿元，同比增加153.22亿元，增长19.03%。"
+        "发放贷款和垫款总额3250,202.22亿元，比上年末增加15,667.30亿元。"
+        "2 资产减值损失包括信用减值损失和其他资产减值损失。"
+        "3 发放贷款和垫款总额和吸收存款总额均包括应计利息。"
+    )
+    rows = [
+        {
+            "text": text,
+            "file_id": "f-1",
+            "filename": "q3.txt",
+            "page": 7,
+            "page_end": 7,
+            "section": "三、其他重要信息",
+            "subject": _SUBJECT,
+            "kind": "text",
+        }
+    ]
+    monkeypatch.setattr(
+        "ai_agent.report.extract.store.search_kb_chunks_keyword", lambda *a, **k: rows
+    )
+    by_id = {"f-1": {"subject": _SUBJECT, "filename": "q3.txt"}}
+
+    impairment = _narrative_facts("资产减值损失", "2026Q3", [], by_id)
+    assert len(impairment) == 1
+    assert impairment[0].value == "958.40"
+    assert impairment[0].unit == "亿元"
+
+    loans = _narrative_facts("发放贷款和垫款总额", "2026Q3", [], by_id)
+    assert len(loans) == 1
+    assert loans[0].value == "250,202.22"
+
+    # 没有粘连脚注时不能误剥：958.40 应保持原样
+    clean_rows = [
+        {
+            **rows[0],
+            "text": "集团资产减值损失958.40亿元。发放贷款和垫款总额250,202.22亿元。",
+        }
+    ]
+    monkeypatch.setattr(
+        "ai_agent.report.extract.store.search_kb_chunks_keyword",
+        lambda *a, **k: clean_rows,
+    )
+    assert _narrative_facts("资产减值损失", "2026Q3", [], by_id)[0].value == "958.40"
+    assert _narrative_facts("发放贷款和垫款总额", "2026Q3", [], by_id)[0].value == "250,202.22"

@@ -522,6 +522,16 @@ class KbStore:
             conn.commit()
         return cur.rowcount
 
+    def clear_kb_chunks(self, file_id: uuid.UUID) -> int:
+        """删掉某文件已有切片，供重新解析前腾出 (file_id, seq) 主键。"""
+        with self._get_pool().connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM agent_kb_chunk WHERE file_id = %s",
+                (file_id,),
+            )
+            conn.commit()
+        return int(cur.rowcount or 0)
+
     def insert_kb_chunks(
         self,
         file_id: uuid.UUID,

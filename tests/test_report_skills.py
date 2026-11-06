@@ -48,8 +48,42 @@ def test_resolve_skill_prefers_industry_template_then_generic():
     assert resolve_skill("company", BANK).skill_id == "bank_financial_report"
     assert resolve_skill("company", "").skill_id == "company_financial_report"
     assert resolve_skill("industry", "").skill_id == "industry_report"
+    assert (
+        resolve_skill("industry", "半导体").skill_id
+        == "semiconductor_industry_report"
+    )
     # kind 不认识时按通用公司模板兜底，不抛错
     assert resolve_skill("unknown", "").kind == "company"
+
+
+def test_semiconductor_skill_has_universe_and_outline():
+    skill = get_skill("semiconductor_industry_report")
+    assert skill is not None
+    assert skill.kind == "industry"
+    assert "半导体" in skill.industries
+    codes = {code for _name, code in skill.companies}
+    assert {"688981", "002371", "603501", "688256"} <= codes
+    titles = [title for title, _ in skill.sections]
+    assert titles[0] == "行业概览"
+    assert "重点公司" in titles
+    assert "风险与缺失" in titles
+    assert "估值" not in "".join(titles)
+
+
+def test_semiconductor_empty_kb_uses_skill_companies(monkeypatch):
+    """空库点「半导体行业」仍能定代表公司名单，不报无法确定标的。"""
+    monkeypatch.setattr(
+        "ai_agent.report.parse.store.list_kb_files",
+        lambda **k: [],
+    )
+    plan = parse_request("生成半导体行业2025Q3深度分析研报")
+    assert plan.kind == "industry"
+    assert plan.industry == "半导体"
+    assert plan.skill_id == "semiconductor_industry_report"
+    assert "中芯国际" in plan.subjects
+    assert "寒武纪" in plan.subjects
+    assert not any("无法确定要调取哪些季报" in gap for gap in plan.gaps)
+    assert any(item.title == "重点公司" for item in plan.outline)
 
 
 def test_parse_request_records_routed_skill(monkeypatch):
@@ -306,7 +340,12 @@ def test_skills_endpoint_lists_registry():
     data = resp.json()
     assert data["total"] == len(SKILLS)
     ids = {item["skill_id"] for item in data["skills"]}
-    assert {"bank_financial_report", "company_financial_report", "industry_report"} <= ids
+    assert {
+        "bank_financial_report",
+        "company_financial_report",
+        "industry_report",
+        "semiconductor_industry_report",
+    } <= ids
     bank = next(item for item in data["skills"] if item["skill_id"] == "bank_financial_report")
     assert "净息差" in bank["default_indicators"]
     assert "本期结论" in bank["sections"]

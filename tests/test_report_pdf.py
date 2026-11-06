@@ -107,10 +107,33 @@ def test_chart_uses_the_given_numbers():
     assert "111,000,000" in svg
     assert "100,924,954" in svg
     assert "<polyline" in svg
+    assert "<circle" in svg
     bar = chart_svg(ChartSpec(title="毛利率", kind="bar", labels=["2025Q3"], values=["12.5%"], unit="%"))
     assert "12.5%" in bar
     assert "<rect" in bar
     assert chart_svg(ChartSpec(title="空", kind="bar", labels=["2025Q3"], values=["不适用"])) == ""
+
+
+def test_line_chart_scales_to_data_range_not_zero():
+    """比率两期接近时，Y 轴应按数据区间缩放，不能贴在图顶变成一条平线。"""
+    import re
+
+    svg = chart_svg(
+        ChartSpec(
+            title="净息差",
+            kind="line",
+            labels=["2025Q3", "2026Q3"],
+            values=["1.26%", "1.27%"],
+            unit="%",
+        )
+    )
+    circles = re.findall(r'<circle cx="([\d.]+)" cy="([\d.]+)"', svg)
+    assert len(circles) == 2
+    y0, y1 = float(circles[0][1]), float(circles[1][1])
+    # 旧实现强制从 0 起，两点 cy 都挤在 ~28；修好后应拉开到绘图区中部附近
+    assert abs(y0 - y1) > 20
+    assert min(y0, y1) > 40
+    assert max(y0, y1) < 220
 
 
 def test_pdf_keeps_chinese_and_extracted_number():

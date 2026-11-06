@@ -72,7 +72,30 @@ class Settings(BaseSettings):
 
     # 研报（report pipeline）：正文/溯源附件/人工审核队列/PDF 的落盘目录。
     # 与知识库上传目录分开，下载端点只认这个目录，避免把 uploads 也暴露出去。
+    # 研报不会自动入库；重复生成只堆在本目录，由下面两条策略清理。
     report_output_dir: Path = _PROJECT_ROOT / "data" / "reports"
+    # 同一标题（去掉 _report_id）只留最新 N 版；生成成功后也会立刻裁掉旧版。0=关闭
+    report_keep_latest_per_title: int = 1
+    # 超过 N 天的研报产物（含审核索引条目）定时删除。0=关闭年龄清理
+    report_retention_days: int = 30
+    # 经营解读节：受约束 LLM，只许用已抽取事实 + 季报原文；关闭后写从略句
+    report_analysis_enabled: bool = True
+
+    # 巨潮定期报告补齐：默认开启。generate_report 发现缺原文会自动拉取；单测/离线可关
+    enable_cninfo_fetch: bool = True
+    cninfo_request_interval_seconds: float = 1.0
+    cninfo_stock_cache_ttl_seconds: int = 86400
+    # 全文 PDF 超过该体积（MB）改抓「报告摘要」；摘要没有则仍下全文。
+    # 本地 OCR / 入库对大文件很敏感，4MB 起就优先摘要。
+    cninfo_full_max_mb: float = 4.0
+    # 自动入库后等待解析完成的秒数基线；超时仍继续抽数（可能 gaps）。
+    # 行业研报一次可补十几份 PDF，本地 OCR 很慢，180s 往往只等到前几份。
+    cninfo_ingest_wait_seconds: int = 600
+    # 按本次新补文件数叠加等待：实际等待 = min(cap, max(基线, 每份×份数))
+    cninfo_ingest_wait_per_file_seconds: int = 90
+    cninfo_ingest_wait_cap_seconds: int = 1800
+    # 单次研报最多自动补几份（公司×报告期）；行业代表股+同比基期会超过 4
+    cninfo_auto_fetch_max: int = 16
 
     # 知识库（P1）：文件上传、切片向量化与检索
     kb_upload_dir: Path = _PROJECT_ROOT / "data" / "uploads"

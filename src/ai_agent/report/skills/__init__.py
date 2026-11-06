@@ -50,6 +50,8 @@ class ReportSkill:
     # 默认指标集。银行模板直接展开；通用模板复用 industry.generic 集。
     indicators: tuple[str, ...]
     sections: tuple[tuple[str, str], ...]
+    # 行业宇宙：((公司名, 股票代码), ...)；空 = 仍只从知识库推断主体
+    companies: tuple[tuple[str, str], ...] = ()
 
     def build_outline(self, indicators: list[str]) -> list[tuple[str, str]]:
         """把 {indicators} 占位填成实际选中的指标名列表。"""
@@ -78,6 +80,31 @@ def _parse_industries(raw: str) -> tuple[str, ...]:
     if not text:
         return ()
     return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+def _parse_companies(raw: str) -> tuple[tuple[str, str], ...]:
+    """解析 ``公司名|代码, …``；代码须为 6 位数字。"""
+    text = (raw or "").strip().strip("[]")
+    if not text:
+        return ()
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for part in text.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if "|" not in item:
+            raise ValueError(f"companies 项须为「公司名|代码」：{item!r}")
+        name, _, code = item.partition("|")
+        name = name.strip()
+        code = code.strip()
+        if not name or not re.fullmatch(r"\d{6}", code):
+            raise ValueError(f"companies 项非法：{item!r}")
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append((name, code))
+    return tuple(out)
 
 
 def _parse_sections(body: str) -> tuple[tuple[str, str], ...]:
@@ -117,6 +144,7 @@ def _load_skill(path: Path) -> ReportSkill:
         description=description,
         indicators=tuple(default_indicators(indicator_set)),
         sections=_parse_sections(body),
+        companies=_parse_companies(meta.get("companies", "")),
     )
 
 

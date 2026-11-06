@@ -1,3 +1,4 @@
+import queue
 import re
 import uuid
 from collections.abc import Iterator
@@ -36,7 +37,14 @@ from ai_agent.memory.short_term import (
     short_term_memory,
 )
 from ai_agent.storage.store import store, user_scope
+from ai_agent.tools.progress import reset_progress, set_progress
 from ai_agent.tools.registry import execute_tool, tool_schemas
+
+# 会长时间阻塞（巨潮补齐 + OCR 入库）的工具：丢到工作线程，边跑边推 tool_progress。
+_PROGRESS_TOOLS = frozenset({"generate_report"})
+_tool_progress_pool = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="tool-progress"
+)
 
 from ai_agent.agents.messages import (
     _canonical_args,
@@ -80,6 +88,63 @@ _turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-fin
 def shutdown_turn_finalizer(wait: bool = True) -> None:
     """等待在途的记忆抽取/摘要任务完成后再关停，避免重启丢长期记忆。"""
     _turn_finalizer.shutdown(wait=wait, cancel_futures=False)
+    _tool_progress_pool.shutdown(wait=wait, cancel_futures=False)
+
+
+def _run_tool_with_progress(
+    name: str,
+    arguments: dict,
+    *,
+    user_id: str,
+    kb_file_ids: list[str] | None,
+    messages: list[ChatMessage],
+) -> Iterator[dict]:
+    """在工作线程跑工具，主循环把进度转成 tool_progress；末尾 yield _tool_result。"""
+    progress_q: queue.Queue[str | None] = queue.Queue()
+    prev_turn = extract_prev_turn(messages, settings.kb_rewrite_history_turns)
+    question = _latest_user_text(messages)
+
+    def _emit(message: str) -> None:
+        progress_q.put(message)
+
+    def _worker() -> tuple[str, list[dict]]:
+        scope_token = set_kb_scope(kb_file_ids)
+        rewrite_token = set_rewrite_context(prev_turn)
+        question_token = set_kb_question(question)
+        progress_token = set_progress(_emit)
+        try:
+            with collect_citations() as cited:
+                with user_scope(user_id):
+                    output = execute_tool(name, arguments)
+            return output, list(cited)
+        finally:
+            reset_progress(progress_token)
+            reset_kb_scope(scope_token)
+            reset_rewrite_context(rewrite_token)
+            reset_kb_question(question_token)
+            progress_q.put(None)
+
+    future = _tool_progress_pool.submit(_worker)
+    while True:
+        try:
+            item = progress_q.get(timeout=0.4)
+        except queue.Empty:
+            if future.done():
+                break
+            continue
+        if item is None:
+            break
+        yield {"type": "tool_progress", "name": name, "message": item}
+    while True:
+        try:
+            item = progress_q.get_nowait()
+        except queue.Empty:
+            break
+        if item is None:
+            continue
+        yield {"type": "tool_progress", "name": name, "message": item}
+    output, cited = future.result()
+    yield {"type": "_tool_result", "content": output, "sources": cited}
 
 
 def _attach_sources(messages: list[ChatMessage], turn_sources: list[dict]) -> None:
@@ -660,19 +725,35 @@ def run_loop(
             yield {"type": "tool_start", "name": call["name"]}
             # 范围与查询改写上下文必须在工具执行这一层同栈设置：run_stream 的
             # 生成器会被不同线程轮流 next() 推进，外层设的 contextvar 传不进来
-            scope_token = set_kb_scope(kb_file_ids)
-            rewrite_token = set_rewrite_context(
-                extract_prev_turn(messages, settings.kb_rewrite_history_turns)
-            )
-            question_token = set_kb_question(_latest_user_text(messages))
-            try:
-                with collect_citations() as cited:
-                    with user_scope(user_id):
-                        output = execute_tool(call["name"], call["arguments"])
-            finally:
-                reset_kb_scope(scope_token)
-                reset_rewrite_context(rewrite_token)
-                reset_kb_question(question_token)
+            if call["name"] in _PROGRESS_TOOLS:
+                output = ""
+                cited = []
+                for event in _run_tool_with_progress(
+                    call["name"],
+                    call["arguments"],
+                    user_id=user_id,
+                    kb_file_ids=kb_file_ids,
+                    messages=messages,
+                ):
+                    if event.get("type") == "_tool_result":
+                        output = str(event.get("content") or "")
+                        cited = list(event.get("sources") or [])
+                        continue
+                    yield event  # type: ignore[misc]
+            else:
+                scope_token = set_kb_scope(kb_file_ids)
+                rewrite_token = set_rewrite_context(
+                    extract_prev_turn(messages, settings.kb_rewrite_history_turns)
+                )
+                question_token = set_kb_question(_latest_user_text(messages))
+                try:
+                    with collect_citations() as cited:
+                        with user_scope(user_id):
+                            output = execute_tool(call["name"], call["arguments"])
+                finally:
+                    reset_kb_scope(scope_token)
+                    reset_rewrite_context(rewrite_token)
+                    reset_kb_question(question_token)
             turn_sources = merge_sources(turn_sources, cited)
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
             # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾

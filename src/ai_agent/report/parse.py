@@ -114,9 +114,17 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
     else:
         plan.gaps.append("没有点到知识库里的公司，也没有写行业")
 
-    # skill 路由：显式指定优先；没指定就按 kind + 主体行业路由。
+    # skill 路由：显式指定优先；没指定就按 kind + 行业路由。
     skill = _resolve_plan_skill(plan, skill_id)
     plan.skill_id = skill.skill_id
+    # 行业 skill 自带宇宙名单：空库也能定标的，再靠巨潮补齐原文。
+    if plan.kind == "industry" and not plan.subjects and skill.companies:
+        plan.subjects = [name for name, _code in skill.companies]
+        plan.gaps = [
+            gap
+            for gap in plan.gaps
+            if "无法确定要调取哪些季报" not in gap
+        ]
     plan.indicators = _indicators_in(request, plan.subjects, skill)
     plan.dimensions = _dimensions(plan)
     plan.files = _planned_files(plan, rows)
@@ -133,10 +141,15 @@ def _resolve_plan_skill(plan: ReportPlan, skill_id: str) -> ReportSkill:
             # 显式指定允许覆盖路由出的 kind（比如把公司请求强制走行业模板），
             # 但主体与报告期仍来自需求文本，skill 不改事实、只改写法。
             plan.kind = chosen.kind
+            if chosen.kind == "industry" and chosen.industries and not plan.industry:
+                plan.industry = chosen.industries[0]
             return chosen
         plan.gaps.append(
             f"未知报告类型 {skill_id}（可选：{'、'.join(skill_ids())}），已按需求自动路由"
         )
+    # 行业报告用需求里的行业名（如「半导体」）；公司报告用主体推断的 bank/generic。
+    if plan.kind == "industry":
+        return resolve_skill(plan.kind, plan.industry)
     return resolve_skill(plan.kind, industry_of(plan.subjects))
 
 
@@ -180,12 +193,36 @@ def _mentioned_subjects(text: str, rows: list[dict]) -> list[str]:
 
 
 def _industry_of(text: str) -> str:
+    # 先命中 skill 登记过的行业名，避免「生成半导体行业」被正则吃成「生成半导体」。
+    from ai_agent.report.skills import _load_skills
+
+    known = sorted(
+        {
+            item
+            for skill in _load_skills()
+            for item in skill.industries
+            if item
+        },
+        key=len,
+        reverse=True,
+    )
+    for item in known:
+        if f"{item}行业" in text or item in text:
+            # 单独的「银行」过短且易误伤公司名；仅接受「X行业」或已知多字行业词
+            if len(item) >= 2 and f"{item}行业" in text:
+                return item
+            if len(item) >= 3 and item in text:
+                return item
     match = _INDUSTRY.search(text)
     if not match:
         return ""
     name = match.group(1)
     if name in _INDUSTRY_STOP:
         return ""
+    # 已知行业是捕获串后缀时收回（「生成半导体」→「半导体」）
+    for item in known:
+        if name.endswith(item) and item:
+            return item
     return name
 
 

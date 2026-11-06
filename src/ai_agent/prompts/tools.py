@@ -105,6 +105,7 @@ KB_LIST_DESC = (
     "需要收窄检索范围时，把这里确认的文件名或主体名传给 kb_search / kg_search 的 files；"
     "范围不确定就不要填 files。"
 )
+
 KB_SEARCH_TOPK_DESC = "返回的片段数"
 
 KB_EMPTY_HINT = "知识库为空或还没有处理完成的文件，请提示用户联系管理员上传资料。"

@@ -18,7 +18,11 @@ from ai_agent.kb.ingest.chunking import (
     _html_header_row_count,
     _table_rows,
 )
-from ai_agent.kb.ingest.meta import name_in_text
+from ai_agent.kb.ingest.meta import (
+    extract_subject,
+    is_plausible_subject,
+    name_in_text,
+)
 from ai_agent.kb.ingest.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.report.basis import basis_of, ratio_unit
 from ai_agent.storage.store import store
@@ -90,33 +94,42 @@ _NARRATIVE_PATTERNS: dict[str, tuple[str, str, str]] = {
         r"业务及管理费\s*([\d,]+(?:\.\d+)?)\s*亿元",
         "亿元",
     ),
+    # 正文「集团资产减值损失2958.40亿元」里的前导 2 是上标脚注（见原文脚注
+    # 「2 资产减值损失包括…」），真值是 958.40。只剥「一位脚注 + 三位整数」：
+    # 2958.40→958.40；干净的 958.40 / 带逗号的 2,958.40 不动。
     "资产减值损失": (
         "资产减值损失",
-        r"资产减值损失\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        r"资产减值损失\s*(?:\$\s*\^\{\d+\}\s*\$|(?:[2-9])(?=\d{3}(?:\.\d+)?\s*亿))?\s*"
+        r"([\d,]+(?:\.\d+)?)\s*亿元",
         "亿元",
     ),
-    # 原文这两处中间插了脚注标记「$ ^{3} $」，脚注本身含数字，所以用精确的
-    # 可选组吃掉它，不能用「任意非数字占位」。负向断言挡掉「人民币发放贷款 /
-    # 人民币吸收存款」的境内明细口径；不写宽松跨句匹配，避免吃到下一段别的数。
+    # 原文脚注「$ ^{3} $」或 PDF 抽成「总额3250,202.22」：前导 3 是脚注，
+    # 真值 250,202.22。只剥「一位脚注 + 三位,三位」；干净的 250,202.22 不动。
     "发放贷款和垫款总额": (
         "发放贷款和垫款总额",
-        r"(?<!人民币)发放贷款和垫款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        r"(?<!人民币)发放贷款和垫款总额"
+        r"(?:\s*\$\s*\^\{\d+\}\s*\$|(?:[2-9])(?=\d{3},\d{3}))?\s*"
+        r"([\d,]+(?:\.\d+)?)\s*亿元",
         "亿元",
     ),
     "吸收存款总额": (
         "吸收存款总额",
-        r"(?<!人民币)吸收存款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        r"(?<!人民币)吸收存款总额"
+        r"(?:\s*\$\s*\^\{\d+\}\s*\$|(?:[2-9])(?=\d{3},\d{3}))?\s*"
+        r"([\d,]+(?:\.\d+)?)\s*亿元",
         "亿元",
     ),
 }
 # 利润表里「利息净收入」同时有 7-9 月单季列和 1-9 月累计列，表格抽取容易
 # 选中单季列（110,976 百万元）当成累计值。正文「2026年前三季度…利息净收入
 # 3,596.06亿元」口径明确，这类金额指标一律正文优先，表格只作兜底。
+# 资产减值损失同理：正文有集团合计，利润表拆成信用减值/其他两行，正文优先。
 _NARRATIVE_FIRST = {
     "利息净收入",
     "非利息收入",
     "手续费及佣金净收入",
     "业务及管理费",
+    "资产减值损失",
     "发放贷款和垫款总额",
     "吸收存款总额",
 }
@@ -243,9 +256,13 @@ def extract_indicators(
                 logger.exception("抽取指标时检索失败 indicator=%s", indicator)
                 result.missing.append(f"{indicator}：检索失败")
                 continue
-            picked = _pick_facts(rows, by_id, aliases, indicator, period)
+            picked = _pick_facts(
+                rows, by_id, aliases, indicator, period, requested=names
+            )
         if not picked and indicator in _NARRATIVE_PATTERNS:
-            picked = _narrative_facts(indicator, period, file_ids, by_id)
+            picked = _narrative_facts(
+                indicator, period, file_ids, by_id, requested=names
+            )
         if not picked and indicator in _NARRATIVE_FIRST:
             # 正文也没写，才回到表格（并接受它的列口径）
             try:
@@ -255,7 +272,9 @@ def extract_indicators(
             except Exception:
                 logger.exception("兜底表格抽取失败 indicator=%s", indicator)
                 rows = []
-            picked = _pick_facts(rows, by_id, aliases, indicator, period)
+            picked = _pick_facts(
+                rows, by_id, aliases, indicator, period, requested=names
+            )
         if not picked:
             result.missing.append(f"{indicator}：表格和正文里都没有对上的一行")
             continue
@@ -326,12 +345,46 @@ def _files_for(subjects: list[str], period: str) -> list[dict]:
     return chosen
 
 
+def _fact_subject(
+    meta: dict,
+    row: dict,
+    requested: list[str] | None = None,
+) -> str:
+    """研报展示用主体：优先对齐需求简称，其次文件名，最后才用库里的 subject。
+
+    库内 subject 曾被封面套话污染（公开发行证券 / 股份有限公司），
+    不能直接拿来写正文和做缺口对账。
+    """
+    filename = str(row.get("filename") or meta.get("filename") or "")
+    stored = str(meta.get("subject") or row.get("subject") or "").strip()
+    from_fn = extract_subject(filename)
+    for name in requested or []:
+        token = (name or "").strip()
+        if not token:
+            continue
+        # 需求简称能对上文件名或库内主体时，用简称写正文（缺口也对得上）
+        if (
+            name_in_text(filename, token)
+            or name_in_text(stored, token)
+            or name_in_text(from_fn, token)
+        ):
+            return token
+    # 对不上需求名单时：优先库内合理全称，再退回文件名
+    if is_plausible_subject(stored):
+        return stored
+    if is_plausible_subject(from_fn):
+        return from_fn
+    return from_fn or stored
+
+
 def _pick_facts(
     rows: list[dict],
     files: dict[str, dict],
     aliases: tuple[str, ...],
     indicator: str,
     period: str,
+    *,
+    requested: list[str] | None = None,
 ) -> list[IndicatorFact]:
     """同一份文件只留一条。科目本行优先于明细，合并口径优先于母公司。"""
     found: dict[str, tuple[tuple[int, int], IndicatorFact]] = {}
@@ -356,7 +409,7 @@ def _pick_facts(
             value=value,
         )
         fact = IndicatorFact(
-            subject=str(meta.get("subject") or row.get("subject") or ""),
+            subject=_fact_subject(meta, row, requested),
             period=period,
             name=indicator,
             value=value,
@@ -387,6 +440,8 @@ def _narrative_facts(
     period: str,
     file_ids: list,
     by_id: dict[str, dict],
+    *,
+    requested: list[str] | None = None,
 ) -> list[IndicatorFact]:
     """从正文叙述里抽比率/金额。表格路径优先，这里只做补位。
 
@@ -432,7 +487,7 @@ def _narrative_facts(
         )
         facts.append(
             IndicatorFact(
-                subject=str(meta.get("subject") or row.get("subject") or ""),
+                subject=_fact_subject(meta, row, requested),
                 period=period,
                 name=indicator,
                 value=value,

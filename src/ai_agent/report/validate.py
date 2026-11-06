@@ -22,6 +22,13 @@ _SPACE = re.compile(r"\s+")
 _NUMBER = re.compile(r"-?\d[\d,，]*(?:[ \t\u00a0]\d{3})*(?:\.\d+)?%?")
 _PAGE = re.compile(r"第\s*(\d+)(?:\s*[–-]\s*(\d+))?\s*页")
 _PERIOD_YEAR = re.compile(r"((?:19|20)\d{2})")
+# 短锚点形如 [7b75379b]；经营解读也可能引用非本期指标表里的同文件片段。
+_SHORT_ANCHOR = re.compile(r"\[[0-9a-fA-F]{6,12}\]")
+# 归因词：有则同句须见页码或短锚点，否则进审核队列（warning，不直接 error）。
+_ATTRIBUTION = re.compile(
+    r"(因为|由于|导致|致使|拉动|拖累|归因于|受[^。；;]{0,12}影响|贡献于)"
+)
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？；\n])")
 
 
 @dataclass
@@ -106,6 +113,7 @@ def validate_report(
         _check_facts(result, facts, plan, body)
         _check_body_numbers(result, _body_for_numbers(body, facts, supplemental), allowed)
         _check_citations_in_body(result, facts, plan, body)
+        _check_attribution_anchors(result, body)
 
     result.passed = not any(item.severity == "error" for item in result.findings)
     return result
@@ -373,7 +381,33 @@ def _body_for_numbers(
     for marker in sorted({item for item in markers if item and item.strip()}, key=len, reverse=True):
         text = text.replace(marker, " ")
     text = _PAGE.sub(" ", text)
+    # 经营解读等章节可能挂上指标表未列到的同文件锚点，一律剔除短锚点数字。
+    text = _SHORT_ANCHOR.sub(" ", text)
     return text
+
+
+def _check_attribution_anchors(result: ValidationResult, body: str) -> None:
+    """归因句若同句看不到页码/短锚点 → 进审核队列，不直接当 error。"""
+    if not body:
+        return
+    for sentence in _SENTENCE_SPLIT.split(body):
+        text = sentence.strip()
+        if not text or not _ATTRIBUTION.search(text):
+            continue
+        if _PAGE.search(text) or _SHORT_ANCHOR.search(text):
+            continue
+        # 「不推断 / 未披露」类 gap 句允许无锚点
+        if any(token in text for token in ("未披露", "不推断", "无法判断", "从略", "不构成因果")):
+            continue
+        result.findings.append(
+            Finding(
+                kind="attribution",
+                severity="warning",
+                message=f"归因句缺少出处锚点：{text[:60]}",
+                value=text[:80],
+            )
+        )
+        _review(result, f"归因句缺少出处锚点：{text[:60]}", value=text[:80])
 
 
 def _check_body_numbers(result: ValidationResult, body: str, allowed: set[str]) -> None:

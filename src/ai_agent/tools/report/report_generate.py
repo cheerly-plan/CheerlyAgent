@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from pydantic import BaseModel, Field
 
 from ai_agent.prompts.tools import render_report_generate_desc, render_report_type_desc
@@ -59,7 +61,15 @@ class GenerateReportArgs(BaseModel):
 
 
 def _generate_report(request: str, report_type: str = "", write_pdf: bool = True) -> str:
+    from ai_agent.tools.progress import emit_progress
+
+    emit_progress("正在生成研报…")
     result = run_report(request, skill_id=report_type or "", write_pdf=write_pdf)
+    gaps = len(getattr(result, "gaps", []) or [])
+    if gaps:
+        emit_progress(f"研报已生成（另有 {gaps} 处数据缺口待说明）")
+    else:
+        emit_progress("研报已生成")
     artifacts = result.artifacts
     lines = [
         "研报已由服务端确定性流水线生成（正文数字只来自知识库表格，已过校验门禁）。",
@@ -70,8 +80,10 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
             f"（错误 {sum(1 for item in result.validation.findings if item.severity == 'error')} 条，"
             f"待人工审核 {len(result.validation.review_queue)} 条）"
         ),
-        "把下面的下载链接原样发给用户，并简要说明校验结论与缺口；"
-        "不要自己撰写研报正文、不要复述或改写报告里的数字。",
+        "把下面的 Markdown 下载链接原样发给用户（方括号标题 + 圆括号路径不要改），"
+        "并简要说明校验结论与缺口；不要自己撰写研报正文、不要复述或改写报告里的数字。"
+        "若缺口里出现「入库等待超时」或「尚未 ready」，请明确告诉用户是原文还在解析、"
+        "不是聊天超时；可建议稍后重试或到知识库查看文件状态。",
     ]
     # M2：审核状态决定 PDF 链接是否可点，必须让模型如实转述，别让用户白点。
     review_status = getattr(result, "review_status", PENDING)
@@ -92,7 +104,8 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
     ]
     for label, name in downloads:
         if name:
-            lines.append(f"- {label}：/v1/report/files/{name}")
+            # 前端认 Markdown 链与裸路径；中文文件名做百分号编码，避免空格截断
+            lines.append(f"- [{label}](/v1/report/files/{quote(name, safe='')})")
     if result.pdf_error:
         lines.append(f"PDF 未生成的原因：{result.pdf_error[:150]}")
 

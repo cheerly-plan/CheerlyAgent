@@ -366,12 +366,58 @@ def fragment_subjects(
     return found
 
 
+def is_plausible_subject(name: str) -> bool:
+    """排除封面套话误抽成的「公司名」。
+
+    「公开发行证券」「股份有限公司」曾被 dominant_company / 封面正则当成主体，
+    研报里就会出现整列同名、缺口又按真实简称对不上。
+    """
+    text = (name or "").strip()
+    if len(text) < 2:
+        return False
+    if text in {
+        "公开发行证券",
+        "股份有限公司",
+        "有限责任公司",
+        "有限公司",
+        "集团公司",
+        "上市公司",
+    }:
+        return False
+    # 「…证券/保险/基金」且无「公司」：多半是「公开发行证券」一类套话
+    if text.endswith(("证券", "保险", "基金")) and "公司" not in text:
+        return False
+    return True
+
+
 def resolve_file_identity(filename: str, cover: str = "") -> dict:
-    """文件名规则优先，封面只补文件名里没有的公司名和报告期。"""
+    """文件名规则优先；封面只在文件名抽不出合理主体时补全称。
+
+    短文件名（「北方华创2025年第三季度报告」）没有「股份有限公司」后缀，
+    旧逻辑会改用封面 dominant_company，容易吃到「公开发行证券」。
+    现改为：文件名有字就保留；封面仅在能升级为「含该短名」的全称时替换；
+    文件名为空才用 cover_company。
+    """
     meta = extract_file_meta(filename)
-    if not looks_like_company(meta["subject"]):
-        found = dominant_company(cover)
-        if found:
+    fn_subject = (meta.get("subject") or "").strip()
+    if looks_like_company(fn_subject) and is_plausible_subject(fn_subject):
+        pass
+    elif fn_subject and is_plausible_subject(fn_subject):
+        found = cover_company(cover)
+        if is_plausible_subject(found) and name_in_text(found, fn_subject):
+            # 「北方华创」→ 封面上的「北方华创科技集团股份有限公司」
+            meta["subject"] = found
+            meta["subject_aliases"] = extract_aliases(found)
+        elif is_plausible_subject(found) and not name_in_text(found, fn_subject):
+            # 「扫描件.pdf」这类非公司文件名：改用封面全称
+            meta["subject"] = found
+            meta["subject_aliases"] = extract_aliases(found)
+        else:
+            # 封面没有可用全称（或只有套话）：保留文件名短名
+            meta["subject_aliases"] = extract_aliases(fn_subject)
+    else:
+        found = cover_company(cover)
+        if is_plausible_subject(found):
             meta["subject"] = found
             meta["subject_aliases"] = extract_aliases(found)
     if not meta["period"]:

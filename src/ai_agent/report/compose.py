@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 from dataclasses import dataclass, field
 
+from ai_agent.kb.ingest.meta import name_in_text
 from ai_agent.report.basis import POINT, STOCK, disclosure_note, label as basis_label
 from ai_agent.report.compare import (
     NOT_COMPARABLE_NOTE,
@@ -39,6 +40,25 @@ _READING_NOTE = (
     "知识库文件标识前缀，完整标识与原文片段见溯源附件。",
 )
 
+# 「本期结论」只提炼几条主线，完整指标集留给「主要指标与出处」表。
+# 顺序即优先级；同组里靠前的命中后，靠后的同组名不再重复（如已有归母则不再写净利润）。
+_LEAD_BANK = (
+    "营业收入",
+    "归属于母公司所有者的净利润",
+    "净利润",
+    "净息差",
+    "不良贷款率",
+    "不良贷款拨备覆盖率",
+)
+_LEAD_GENERIC = (
+    "营业收入",
+    "扣非净利润",
+    "净利润",
+    "毛利率",
+)
+_LEAD_MAX = 5
+_LEAD_NET_PROFIT = frozenset({"归属于母公司所有者的净利润", "净利润"})
+
 
 @dataclass
 class ReportDocument:
@@ -60,8 +80,13 @@ def compose_report(
     plan: ReportPlan,
     facts: list[IndicatorFact],
     views: SupplementalResult | None = None,
+    analysis: list[str] | None = None,
 ) -> ReportDocument:
-    """按计划里的大纲逐节填写。某一节没有数据时只写缺失，不留空头结论。"""
+    """按计划里的大纲逐节填写。某一节没有数据时只写缺失，不留空头结论。
+
+    ``analysis`` 为「经营解读」节的段落（通常来自受约束 LLM 后处理）；
+    未传入或为空时写从略句，不阻断整份报告。
+    """
     supplemental = views or SupplementalResult()
     series = compare_measures([_measure(fact) for fact in facts])
     gaps = _gaps(plan, facts, series)
@@ -71,7 +96,18 @@ def compose_report(
     if outline and not any(item.title == "主要指标与出处" for item in outline):
         outline.append(OutlineItem("主要指标与出处", ""))
     sections = [
-        (item.title, _section(item.title, plan, facts, series, gaps, supplemental))
+        (
+            item.title,
+            _section(
+                item.title,
+                plan,
+                facts,
+                series,
+                gaps,
+                supplemental,
+                analysis=analysis,
+            ),
+        )
         for item in outline
     ]
     if not sections:
@@ -105,6 +141,9 @@ def _measure(fact: IndicatorFact) -> Measure:
     )
 
 
+_ANALYSIS_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
+
+
 def _section(
     title: str,
     plan: ReportPlan,
@@ -112,10 +151,11 @@ def _section(
     series: list[SeriesCompare],
     gaps: list[str],
     views: SupplementalResult,
+    analysis: list[str] | None = None,
 ) -> list[str]:
     current = [fact for fact in facts if fact.period == plan.period]
-    if title in {"本期结论", "覆盖范围"}:
-        return _lead(plan, current, series)
+    if title in {"本期结论", "覆盖范围", "行业概览"}:
+        return _lead(plan, current, series, views)
     if title == "主要指标与出处":
         return _indicator_lines(plan, current)
     if title == "同比与环比":
@@ -126,11 +166,36 @@ def _section(
         return _year_end_lines(views)
     if title == "数据观察":
         return _observation_lines(plan, current, views)
+    if title == "经营解读":
+        lines = [line.strip() for line in (analysis or []) if line and line.strip()]
+        return lines or [_ANALYSIS_FALLBACK]
+    if title in {"景气周期", "细分赛道"}:
+        return [
+            f"「{title}」依赖行业级外部数据（规模、稼动率、国产化率等），"
+            "本期流水线未接入该类数据源，本节从略，不推断。"
+        ]
+    if title == "核心主线":
+        return _observation_lines(plan, current, views)
+    if title == "重点公司":
+        peers = _peer_lines(plan, current)
+        table = _indicator_lines(plan, current)
+        if peers == ["同一指标没有两家以上的公司，不做公司间对比。"] and (
+            table == ["没有抽到大纲里的指标。"]
+        ):
+            return ["重点公司本期没有抽到可核对指标。"]
+        lines = []
+        if peers and peers[0] != "同一指标没有两家以上的公司，不做公司间对比。":
+            lines.extend(peers)
+        if table and table[0] != "没有抽到大纲里的指标。":
+            if lines:
+                lines.append("")
+            lines.extend(table)
+        return lines or ["重点公司本期没有抽到可核对指标。"]
     if title == "趋势":
         return _trend_lines(series, plan)
     if title == "公司间对比":
         return _peer_lines(plan, current)
-    if title in {"缺失说明", "缺失与口径"}:
+    if title in {"缺失说明", "缺失与口径", "风险与缺失"}:
         return _gap_lines(plan, current, gaps)
     return ["这一节没有对应的数据，未写。"]
 
@@ -151,30 +216,83 @@ def _prefix(plan: ReportPlan, subject: str, subjects: set[str]) -> str:
 
 
 def _lead(
-    plan: ReportPlan, current: list[IndicatorFact], series: list[SeriesCompare]
+    plan: ReportPlan,
+    current: list[IndicatorFact],
+    series: list[SeriesCompare],
+    views: SupplementalResult | None = None,
 ) -> list[str]:
     if plan.kind == "industry":
         names = "、".join(plan.subjects) if plan.subjects else "没有公司"
         line = f"{plan.industry}行业 {plan.period} 覆盖：{names}。"
-        return [line, *_indicator_sentences(plan, current, series)]
+        return [line, *_conclusion_sentences(plan, current, series, views)]
     if not current:
         return [f"{plan.period} 没有抽到指标。"]
-    return _indicator_sentences(plan, current, series)
+    return _conclusion_sentences(plan, current, series, views)
+
+
+def _conclusion_sentences(
+    plan: ReportPlan,
+    facts: list[IndicatorFact],
+    series: list[SeriesCompare],
+    views: SupplementalResult | None = None,
+) -> list[str]:
+    """本期结论：3–5 句主线提炼，不是指标平铺。
+
+    只写已抽取的数 + 同比／较上年末变动；不写因果、不写「低位／稳健」等主观词。
+    完整清单仍在「主要指标与出处」。
+    """
+    rates: dict[tuple[str, str, str], str] = {}
+    for item in series:
+        for period, change in item.yoy.items():
+            if change.source == "derived" or not change.rate:
+                continue
+            rates[(item.subject, item.name, period)] = change.rate
+    year_end = {
+        item.name: item
+        for item in (views.year_ends if views else [])
+    }
+    by_name: dict[str, IndicatorFact] = {}
+    for fact in facts:
+        by_name.setdefault(fact.name, fact)
+    priority = _LEAD_BANK if any(name in by_name for name in _LEAD_BANK) else _LEAD_GENERIC
+    subjects = {fact.subject for fact in facts}
+    lines: list[str] = []
+    used_profit = False
+    for name in priority:
+        if len(lines) >= _LEAD_MAX:
+            break
+        if name not in by_name:
+            continue
+        if name in _LEAD_NET_PROFIT and used_profit:
+            continue
+        fact = by_name[name]
+        if name in _LEAD_NET_PROFIT:
+            used_profit = True
+        period_text = "" if fact.basis in (POINT, STOCK) else _period_label(fact)
+        bits = [
+            f"{_prefix(plan, fact.subject, subjects)}{period_text}{fact.name}为 "
+            f"{fact.value}{fact.unit}"
+        ]
+        rate = rates.get((fact.subject, fact.name, fact.period), "")
+        if rate:
+            bits.append(f"同比 {rate}")
+        ye = year_end.get(name)
+        if ye and ye.change:
+            bits.append(f"较上年末 {ye.change}")
+        lines.append("，".join(bits) + "。")
+    if lines:
+        return lines
+    # 优先级名单都没命中时，退回前几条，仍限制条数，避免再铺成清单
+    return _indicator_sentences(plan, facts[:_LEAD_MAX], series)
 
 
 def _indicator_sentences(
     plan: ReportPlan, facts: list[IndicatorFact], series: list[SeriesCompare]
 ) -> list[str]:
-    """结论句只写「是什么 + 变化多少」。
-
-    口径、范围、取数列、页码、章节、文件出处全部交给主要指标表和阅读说明；
-    净息差年化之类的特别注记挂在表格下方，不再逐条塞进句子。数值保持
-    原文的值与单位，不换算、不新增。单公司报告省略主语，全称由标题承担。
-    """
+    """兜底：按事实顺序写「是什么 + 变化多少」，条数由调用方截断。"""
     rates: dict[tuple[str, str, str], str] = {}
     for item in series:
         for period, change in item.yoy.items():
-            # 推导值是否放行由 validate 判定，结论句不引入门禁未放行的数字。
             if change.source == "derived" or not change.rate:
                 continue
             rates[(item.subject, item.name, period)] = change.rate
@@ -186,9 +304,6 @@ def _indicator_sentences(
         if key in seen:
             continue
         seen.add(key)
-        # 只有累计/单季金额会被误读成别的期间，前缀必须留在主语里。
-        # 时点比率与期末余额不会和累计混淆，硬加「时点／期间比率」反而像模板；
-        # 它们的口径由阅读说明和主要指标表承担。
         period_text = "" if fact.basis in (POINT, STOCK) else _period_label(fact)
         rate = rates.get((fact.subject, fact.name, fact.period), "")
         change_text = f"，同比 {rate}" if rate else ""
@@ -466,17 +581,31 @@ def _gap_lines(plan: ReportPlan, current: list[IndicatorFact], gaps: list[str]) 
     return lines or ["没有缺失项。"]
 
 
+def _has_indicator(
+    facts: list[IndicatorFact], subject: str, name: str
+) -> bool:
+    """需求简称与事实主体全称可互相包含即视为已抽到。"""
+    for fact in facts:
+        if fact.name != name:
+            continue
+        if fact.subject == subject:
+            return True
+        if name_in_text(fact.subject, subject) or name_in_text(subject, fact.subject):
+            return True
+    return False
+
+
 def _gaps(
     plan: ReportPlan, facts: list[IndicatorFact], series: list[SeriesCompare]
 ) -> list[str]:
     gaps = list(plan.gaps)
-    have = {(fact.subject, fact.name) for fact in facts if fact.period == plan.period}
+    period_facts = [fact for fact in facts if fact.period == plan.period]
     # 单公司报告缺口句省略主语，全称由标题承担
     subjects = {fact.subject for fact in facts} | {item.subject for item in series}
     single = _sole_subject(plan, subjects)
     for subject in plan.subjects:
         for name in plan.indicators:
-            if (subject, name) not in have:
+            if not _has_indicator(period_facts, subject, name):
                 prefix = "" if single else f"{subject} "
                 gaps.append(f"{prefix}没有抽到 {plan.period} {name}")
     # 「不可比」和「时点存量不跨期」是逐指标产生的同一句话，21 个指标会刷出

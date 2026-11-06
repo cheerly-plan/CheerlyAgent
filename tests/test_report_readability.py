@@ -89,13 +89,18 @@ def test_lead_sentences_carry_only_numbers_and_change():
     facts = [
         _fact(),
         _fact("净息差", "1.27", "%", basis=POINT),
+        _fact("不良贷款率", "1.22", "%", basis=POINT),
         _fact("资产总计", "41,108,449", "百万元", basis=STOCK),
     ]
     document = compose_report(_plan("本期结论", "主要指标与出处"), facts)
     lead = _section(document.markdown, "本期结论")
     assert "526,365百万元" in lead
     assert "1.27%" in lead
-    assert "41,108,449百万元" in lead
+    assert "1.22%" in lead
+    # 结论只提炼主线，资产总计进表不进结论
+    assert "41,108,449百万元" not in lead
+    assert "41,108,449百万元" in _section(document.markdown, "主要指标与出处")
+    assert lead.count("。") <= 5
     # 出处、范围、取数列、页码全部不进结论句
     for noise in ("范围未标明", "取数列", FILENAME, ANCHOR, "第2页", "（合并", "时点／期间比率"):
         assert noise not in lead

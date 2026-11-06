@@ -287,6 +287,27 @@ def test_resolve_file_identity_fills_company_and_period_from_cover():
     assert out["meta"] == {}
 
 
+def test_resolve_file_identity_keeps_short_filename_over_cover_boilerplate():
+    """短名文件名不能被封面「公开发行证券」套话覆盖。"""
+    cover = "本公司及全体董事保证信息披露真实准确完整。公开发行证券的公司信息披露编报规则"
+    out = meta.resolve_file_identity("北方华创2025年第三季度报告.pdf", cover)
+    assert out["subject"] == "北方华创"
+    assert out["period"] == "2025Q3"
+
+
+def test_resolve_file_identity_upgrades_short_name_when_cover_has_full_legal():
+    cover = "北方华创科技集团股份有限公司\n2025年第三季度报告"
+    out = meta.resolve_file_identity("北方华创2025年第三季度报告.pdf", cover)
+    assert out["subject"] == "北方华创科技集团股份有限公司"
+
+
+def test_is_plausible_subject_rejects_boilerplate():
+    assert not meta.is_plausible_subject("公开发行证券")
+    assert not meta.is_plausible_subject("股份有限公司")
+    assert meta.is_plausible_subject("北方华创")
+    assert meta.is_plausible_subject("中芯国际集成电路制造有限公司")
+
+
 def test_name_in_text_is_whole_string_not_shared_prefix():
     full = "中国能源建设股份有限公司"
     assert meta.name_in_text("中国能源建设的营业收入", full)

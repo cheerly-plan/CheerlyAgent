@@ -1,11 +1,14 @@
-"""研报流水线编排：把六个确定性步骤串成一次可调用的任务。
+"""研报流水线编排：把确定性步骤串成一次可调用的任务。
 
-设计约束（与 next.md 一致，也是这套模块既有测试的意图）：
+设计约束：
 
-* 全程**不调用 LLM**。需求解析、指标抽取、增减计算、正文撰写、数字校验、
-  PDF 渲染都是规则/代码。因此零 token 成本、零「模型口算」、可重复可回归。
-  模型若要参与润色，必须作为后续可选增强，且润色结果仍要过 validate 门禁
-  （正文里任何不在 allowed 集合里的数字都会被判 error）。
+* **数字路径零 LLM**：需求解析、指标抽取、增减计算、结论/表格/同比撰写、
+  数字校验、PDF 渲染都是规则/代码——零「模型口算」。
+* **分析节可选受约束 LLM**：若大纲含「经营解读」且 ``report_analysis_enabled``，
+  用已抽取事实 + 季报原文证据写解读；数字与引用仍过 validate 门禁
+  （正文里任何不在 allowed 集合里的数字都会被判 error）；失败则从略。
+* **缺原文可自动巨潮补齐**（``enable_cninfo_fetch``）：解析需求后若缺本期/
+  同比基期 PDF，按股票代码拉取并等到 ready，再抽数；不经对话「补文件」。
 * 数字只从知识库表格切片里抽，抽不到就写进 gaps，绝不补一个看起来像的数。
 * PDF 渲染失败（缺中文字体 / WeasyPrint 缺系统库）时**降级为 Markdown 交付**，
   正文、溯源附件、人工审核队列照常产出，不因渲染环境整体失败。
@@ -25,8 +28,10 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.report.analyze import analyze_operations
 from ai_agent.report.compare import Measure, SeriesCompare, compare_measures
 from ai_agent.report.compose import ReportDocument, compose_report
+from ai_agent.report.ensure_filings import ensure_filings_for_report
 from ai_agent.report.extract import IndicatorFact, extract_indicators
 from ai_agent.report.parse import ReportPlan, parse_request
 from ai_agent.report.pdf import PdfFile, charts_from_series, render_report_pdf
@@ -115,7 +120,27 @@ def run_report(
         plan.deliverable = deliverable
     want_pdf = plan.deliverable == "pdf" and write_pdf
 
+    # 缺本期/基期原文时先巨潮补齐，再重新绑定 plan.files，避免空库硬抽。
+    ensure_notes: list[str] = []
+    try:
+        ensured = ensure_filings_for_report(plan, request_text=request)
+        ensure_notes = list(ensured.notes)
+        if ensured.fetched_any:
+            refreshed = (
+                parse_request(request, skill_id=skill_id)
+                if skill_id
+                else parse_request(request)
+            )
+            if deliverable in {"pdf", "markdown"}:
+                refreshed.deliverable = deliverable
+            plan = refreshed
+    except Exception:
+        logger.exception("研报自动补齐原文失败，继续用现有知识库抽数")
+        ensure_notes.append("自动补齐原文失败，已跳过")
+
     facts, missing, views = _extract_all(plan)
+    if ensure_notes:
+        missing = [*ensure_notes, *missing]
     measures = [
         Measure(
             subject=f.subject,
@@ -133,7 +158,13 @@ def run_report(
         for f in facts
     ]
     series = compare_measures(measures)
-    document = compose_report(plan, facts, views=views)
+    analysis = analyze_operations(plan, facts, series=series, views=views)
+    document = compose_report(plan, facts, views=views, analysis=analysis.lines)
+    if analysis.gaps:
+        # 分析节缺口并入 document.gaps，便于审核队列与 gaps 属性统一可见。
+        for gap in analysis.gaps:
+            if gap and gap not in document.gaps:
+                document.gaps.append(gap)
     # series 显式传进去：和撰写用的是同一批 Measure，校验允许的数字集合
     # 才和正文一致，不会出现「正文写了、校验说没算过」的假错。
     # views 也要传：单季列与较上年末变动的数字必须过原文核对。
@@ -177,6 +208,24 @@ def run_report(
     # 产物全部落盘后再登记审核：指纹才覆盖最终字节。登记失败宁可整体抛错，
     # 也不能出现「有 PDF、没有审核记录」的漏网之鱼。
     result.review_status = create_record(result, result.output_dir).status
+    # 同标题旧版当场裁掉，避免「中行 2026Q3」连生成五份堆在目录里。
+    try:
+        from ai_agent.report.cleanup import prune_older_editions
+
+        pruned = prune_older_editions(
+            result.document.title,
+            keep_report_id=result.report_id,
+            output_dir=result.output_dir,
+        )
+        if pruned.deleted_report_ids:
+            logger.info(
+                "研报旧版已清理 title=%s kept=%s removed=%s",
+                result.document.title,
+                result.report_id,
+                ",".join(pruned.deleted_report_ids),
+            )
+    except Exception:
+        logger.exception("研报旧版清理失败（不影响本次生成） report_id=%s", result.report_id)
     return result
 
 

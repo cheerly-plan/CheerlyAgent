@@ -178,6 +178,31 @@ def _save_record(record: ReviewRecord, output_dir: Path | str | None = None) -> 
     return record
 
 
+def list_index_records(output_dir: Path | str | None = None) -> dict[str, dict]:
+    """给清理任务读审核索引；索引损坏时抛 ReviewError，由调用方决定是否继续。"""
+    with _LOCK:
+        return dict(_read_index(output_dir))
+
+
+def remove_records(
+    report_ids: list[str] | tuple[str, ...] | set[str],
+    output_dir: Path | str | None = None,
+) -> int:
+    """从审核索引里摘掉已删除产物对应的记录。返回实际移除条数。"""
+    wanted = {str(item).strip() for item in report_ids if str(item).strip()}
+    if not wanted:
+        return 0
+    with _LOCK:
+        records = _read_index(output_dir)
+        removed = 0
+        for report_id in wanted:
+            if records.pop(report_id, None) is not None:
+                removed += 1
+        if removed:
+            _write_index(records, output_dir)
+        return removed
+
+
 def content_hash(markdown: str, provenance: str, pdf: bytes | None) -> str:
     """对本报告的可交付内容取指纹。PDF 可选：渲染降级时只绑定正文与溯源。"""
     digest = hashlib.sha256()

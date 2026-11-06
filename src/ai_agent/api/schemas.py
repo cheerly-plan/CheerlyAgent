@@ -48,6 +48,30 @@ class KbSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=8)
 
 
+class KbCninfoFetchRequest(BaseModel):
+    """从巨潮按股票代码 + 报告期拉取定期报告 PDF 并入库。"""
+
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+    period: str = Field(
+        min_length=4,
+        max_length=7,
+        description="YYYY / YYYYQn / YYYYH1，如 2025Q3",
+    )
+    max_files: int = Field(default=1, ge=1, le=10)
+
+
+class KbUrlIngestRequest(BaseModel):
+    """管理员粘贴巨潮 PDF 直链入库（仅 static.cninfo.com.cn）。"""
+
+    url: str = Field(min_length=12, max_length=500)
+    filename: str = Field(
+        min_length=1,
+        max_length=120,
+        description="规范名（可不带 .pdf），如 中国银行股份有限公司2025年第三季度报告",
+    )
+    tags: list[str] = Field(default_factory=list, max_length=8)
+
+
 class KgBuildRequest(BaseModel):
     """管理员选文件批量生成图谱。"""
 
