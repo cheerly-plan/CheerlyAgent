@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -217,3 +217,53 @@ class InspectTurns(BaseModel):
 class ResumeRequest(BaseModel):
     run_id: str = Field(min_length=8, max_length=64)
     chat_session_id: SafeId = "default"
+
+
+class ReportRequest(BaseModel):
+    """生成一份研报。
+
+    服务端按确定性流水线跑：解析需求 → 检索抽取 → 计算增减 → 撰写 →
+    校验 → 渲染。正文里的数字只来自知识库表格切片，抽不到的写进 gaps，
+    不补估计值。返回 Markdown 正文、溯源附件、校验结论和人工审核队列；
+    PDF 另落盘，可通过返回的 download_url 下载。
+    """
+
+    request: str = Field(
+        min_length=1,
+        max_length=500,
+        description="一句需求，例如「生成中国能源建设2026Q3财报深度分析PDF研报」",
+    )
+    # 不传时按需求文本推断（含 PDF 字样 → pdf，否则 markdown）
+    deliverable: Literal["pdf", "markdown"] | None = Field(
+        default=None, description="交付形态，留空按需求文本推断"
+    )
+    # 报告类型（skill 层路由）：留空自动路由（银行/通用公司/行业）
+    report_type: str | None = Field(
+        default=None,
+        max_length=40,
+        description=(
+            "报告类型，留空按需求自动路由。"
+            "可选：bank_financial_report / company_financial_report / industry_report"
+        ),
+    )
+    write_pdf: bool = Field(
+        default=True, description="False 时跳过渲染，只出 Markdown（省渲染开销）"
+    )
+
+
+class ReportDecisionRequest(BaseModel):
+    """处置一份研报的人工审核队列（M2）。
+
+    item_ids 留空 = 整批处置；approve 全部完成后才可调用 finalize。
+    reset 把已处置的条目退回 pending，用于审错后的重新核对。
+    """
+
+    action: Literal["approve", "reject", "reset"] = Field(
+        description="approve 批准 / reject 驳回 / reset 退回待审"
+    )
+    item_ids: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="要处置的审核项 id；留空表示整批",
+    )
+    note: str = Field(default="", max_length=500, description="审核备注，写进审计记录")

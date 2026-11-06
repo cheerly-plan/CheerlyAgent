@@ -9,11 +9,18 @@ from ai_agent.tools.kb_list import kb_list_files_tool
 from ai_agent.tools.kb_search import kb_search_tool
 from ai_agent.tools.kg_search import kg_search_tool
 from ai_agent.tools.memory import memory_search_tool, memory_write_tool
+from ai_agent.tools.report_compare import report_compare_tool
+from ai_agent.tools.report_extract import report_extract_tool
+from ai_agent.tools.report_generate import generate_report_tool
+from ai_agent.tools.report_validate import report_validate_tool
 from ai_agent.tools.weather import weather_tool
 from ai_agent.tools.web_search import web_search_tool
 
 logger = get_logger(__name__)
 
+# 研报积木（extract / compare / validate）与 generate_report 一起注册：
+# 积木无路径参数、不写盘，分别承担「抂数、算增减、校验」三个确定性环节。
+# report_pdf 仍不注册——渲染含落盘与 M2 审核门禁，只能由服务端流水线触发。
 TOOLS = [
     weather_tool,
     web_search_tool,
@@ -22,6 +29,10 @@ TOOLS = [
     kb_list_files_tool,
     kb_search_tool,
     kg_search_tool,
+    generate_report_tool,
+    report_extract_tool,
+    report_compare_tool,
+    report_validate_tool,
 ]
 TOOLS_MAP = {t.name: t for t in TOOLS}
 _TOOL_SCHEMAS = [t.schema() for t in TOOLS]

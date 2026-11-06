@@ -13,3 +13,4 @@ data/
 !src/ai_agent/kb/data/**
 # 测试临时目录（沙箱里系统 tmp 不可写，测试改用项目内目录）
 .tmp-kb-test/
+.pytest-tmp/

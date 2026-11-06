@@ -77,6 +77,16 @@ def test_system_prompt_keeps_core_constraints():
     assert "不寒暄、不复读" in prompt
 
 
+def test_report_discipline_is_injected_only_when_kb_is_on():
+    """报告工具和它的提示词必须同开同关，否则模型会追一个不存在的工具。"""
+    with_kb = chat.build_system_prompt(use_kb=True)
+    without_kb = chat.build_system_prompt(use_kb=False)
+    assert "generate_report" in with_kb
+    assert "不要说「无法生成 PDF」" in with_kb
+    assert "generate_report" not in without_kb
+    assert chat.REPORT_DISCIPLINE in with_kb
+
+
 def test_system_prompt_has_no_document_specific_words():
     """主 prompt 是通用的，不许混进某个行业的专有词。"""
     for word in ("招股", "发行人", "募投", "年报", "法律意见书"):
@@ -166,6 +176,10 @@ def test_facet_rules_are_injected_once():
         ("memory_write", tools.MEMORY_WRITE_DESC),
         ("kb_search", tools.KB_SEARCH_DESC),
         ("kg_search", tools.KG_SEARCH_DESC),
+        ("generate_report", tools.REPORT_GENERATE_DESC),
+        ("report_extract_indicators", tools.REPORT_EXTRACT_DESC),
+        ("report_compare", tools.REPORT_COMPARE_DESC),
+        ("report_validate", tools.REPORT_VALIDATE_DESC),
     ],
 )
 def test_tool_descriptions_are_non_empty(name, text):
@@ -175,7 +189,15 @@ def test_tool_descriptions_are_non_empty(name, text):
 
 @pytest.mark.parametrize(
     "text",
-    [tools.MEMORY_SEARCH_DESC, tools.MEMORY_WRITE_DESC, tools.KB_SEARCH_DESC],
+    [
+        tools.MEMORY_SEARCH_DESC,
+        tools.MEMORY_WRITE_DESC,
+        tools.KB_SEARCH_DESC,
+        tools.REPORT_GENERATE_DESC,
+        tools.REPORT_EXTRACT_DESC,
+        tools.REPORT_COMPARE_DESC,
+        tools.REPORT_VALIDATE_DESC,
+    ],
 )
 def test_trigger_conditions_are_declared(text):
     """这几个最容易误触发，必须显式写清何时用、何时不用。"""
@@ -186,6 +208,56 @@ def test_kb_and_kg_files_desc_share_one_source():
     """两个工具的 files 参数说明必须一致，否则模型会按两套规则填。"""
     assert tools.KB_FILES_DESC
     assert "文件名" in tools.KB_FILES_DESC
+
+
+# ——— 4b. 研报 skill 目录与提示词同源 ———
+
+
+@pytest.mark.parametrize(
+    "text,label",
+    [
+        (tools.REPORT_GENERATE_DESC, "generate_report 工具描述"),
+        (tools.REPORT_TYPE_DESC, "report_type 字段描述"),
+        (chat.REPORT_DISCIPLINE, "系统提示词研报纪律节"),
+    ],
+)
+def test_report_prompts_carry_full_skill_catalog(text, label):
+    """三处提示词里的 skill 清单必须逐条来自注册表。
+
+    漂移的两个方向都守：注册新 skill 忘了进提示词（模型永远点不了名）、
+    改名/删 skill 后提示词还留着旧 id（模型会传一个流水线不认识的类型）。
+    """
+    from ai_agent.report.skills import SKILLS
+
+    for skill in SKILLS:
+        assert skill.skill_id in text, f"{label} 缺 skill_id：{skill.skill_id}"
+        assert skill.name in text, f"{label} 缺 skill 名称：{skill.name}"
+
+
+def test_report_prompts_have_no_stale_skill_ids():
+    """提示词里不许残留注册表已不存在的 report_type id。"""
+    import re
+
+    from ai_agent.report.skills import skill_ids
+
+    valid = set(skill_ids())
+    pattern = re.compile(r"[a-z]+(?:_[a-z]+)+")
+    for text in (tools.REPORT_GENERATE_DESC, tools.REPORT_TYPE_DESC, chat.REPORT_DISCIPLINE):
+        # 只盯 snake_case 且带 report 字样的词，避开 generate_report 这类工具名
+        candidates = {
+            token
+            for token in pattern.findall(text)
+            if token.endswith("_report") and token != "generate_report"
+        }
+        stale = candidates - valid
+        assert not stale, f"提示词里有已失效的报告类型 id：{stale}"
+
+
+def test_report_prompts_have_no_leftover_slots():
+    """skill_catalog 渲染完成后不允许残留 {{SKILL_CATALOG}} 槽位。"""
+    assert_rendered(tools.REPORT_GENERATE_DESC)
+    assert_rendered(tools.REPORT_TYPE_DESC)
+    assert_rendered(chat.REPORT_DISCIPLINE)
 
 
 # ——— 5. 构造器行为 ———

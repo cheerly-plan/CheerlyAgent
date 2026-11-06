@@ -4,12 +4,25 @@
 模型什么时候调、参数怎么填。以前它们散在 6 个工具的源码里，改一处措辞要
 翻 6 个文件，且没有任何测试守着。这里集中后由 test_prompts 统一断言。
 
-文案一字未改（含【触发条件】/【禁止条件】这些实测有效的结构化约束）。
+静态文案迁移时一字未改（含【触发条件】/【禁止条件】这些实测有效的结构化
+约束）。例外是研报类型清单：report_type 的可选值不手抄，统一从
+``report/skills.py`` 注册表经 ``skill_catalog()`` 渲染——注册新 skill 即
+自动出现在工具描述和系统提示词里，不需要再同步改这里。
 """
 
 from __future__ import annotations
 
-from ai_agent.prompts.builder import render
+from ai_agent.prompts.builder import assert_rendered, render
+from ai_agent.report.skills import SKILLS
+
+
+def skill_catalog() -> str:
+    """report_type 可选值清单，从注册表渲染——新增 skill 注册即生效。
+
+    清单同时进 generate_report 的工具描述、report_type 字段描述和系统提示词，
+    三处共用这一个函数，杜绝手抄漂移（test_prompts 有断言守着）。
+    """
+    return "、".join(f"{skill.skill_id}（{skill.name}）" for skill in SKILLS)
 
 # ——— 天气 ———
 
@@ -140,6 +153,63 @@ KG_SEARCH_QUERY_DESC = (
 KG_SEARCH_DEPTH_DESC = "从命中实体向外扩展的跳数"
 KG_SEARCH_TOPK_DESC = "参与扩展的种子实体数"
 KG_NO_ENTITY_HINT = "图谱里没有找到相关实体，可以换个说法，或用 kb_search 直接检索原文。"
+
+
+# ——— 研报生成（聊天侧唯一入口，落盘路径由服务端固定） ———
+
+# 报告类型清单从 skills 注册表动态渲染，不在文案里手抄一份：注册表加新 skill
+# 后，工具描述自动带上，模型才知道它的存在（否则流水线路由了、模型也点不了名）。
+_REPORT_GENERATE_TEMPLATE = (
+    "生成一份财报深度分析研报，返回 PDF、Markdown 正文、溯源附件的下载链接。"
+    "【触发条件】用户要求「生成研报」「财报深度分析」「出 PDF 报告」时必须调用，"
+    "把需求原话原样填进 request，不要拆分、改写或自己补指标。"
+    "报告类型默认按公司行业自动路由（银行 / 通用公司）；用户明确点名其他类型时"
+    "才填 report_type（可选：{{SKILL_CATALOG}}），不确定就留空。"
+    "报告由服务端确定性流水线生成：正文数字只从知识库表格抽取并过校验门禁，"
+    "抽不到的写进缺口，不补估计值。"
+    "【禁止条件】不要自己撰写研报正文、不要用检索片段口算同比增减，"
+    "也不要说「我无法生成 PDF」——本工具就是生成 PDF 的。"
+    "不要填任何文件路径，落盘位置由服务端决定。"
+    "工具返回后把下载链接原样发给用户，不要复述或换算报告里的数字。"
+)
+REPORT_GENERATE_DESC = assert_rendered(
+    render(_REPORT_GENERATE_TEMPLATE, SKILL_CATALOG=skill_catalog())
+)
+
+# generate_report 工具 report_type 字段的描述（report_generate.py 引用）。
+# 与工具描述共用 skill_catalog()，两处不会各说各话。
+_REPORT_TYPE_TEMPLATE = (
+    "报告类型，留空按公司行业自动路由。"
+    "可选：{{SKILL_CATALOG}}。用户没明确点名就不要填"
+)
+REPORT_TYPE_DESC = assert_rendered(
+    render(_REPORT_TYPE_TEMPLATE, SKILL_CATALOG=skill_catalog())
+)
+
+# ——— 研报积木：单独抽数 / 算增减 / 校验正文（都不写盘、无路径参数） ———
+
+REPORT_EXTRACT_DESC = (
+    "从知识库财报里抽取指定公司、指定报告期的财务指标，返回原值、单位、口径和出处。"
+    "【触发条件】用户问某个财务指标的具体数字（如「中行 2026Q3 净息差是多少」）、"
+    "或需要为计算准备原始数据时调用；indicators 留空则返回该公司行业的默认指标集。"
+    "【禁止条件】不要用它代替 generate_report 生成整份报告；"
+    "返回的数字必须原样转述或传给 report_compare，禁止换算、四舍五入或口算。"
+)
+
+REPORT_COMPARE_DESC = (
+    "计算已抽取指标的多期同比、环比、增减额与幅度，口径不可比时如实说明不算。"
+    "【触发条件】拿到 report_extract_indicators 返回的多期原值后需要算增减时调用，"
+    "把原值原样传入 points。"
+    "【禁止条件】禁止自己心算后再传入；禁止把不同口径（单季/累计/期末余额）"
+    "或不同覆盖期数的值混在一条序列里。"
+)
+
+REPORT_VALIDATE_DESC = (
+    "校验一段研报正文的数字与引用是否与抽取事实一致，返回校验结论与审核队列。"
+    "【触发条件】在向用户展示自写的财务分析文字之前必须调用，"
+    "正文里每个数字都要能在 facts 里找到出处。"
+    "【禁止条件】校验未通过时不得照发正文；不得自行宣布校验通过。"
+)
 
 
 def build_web_search_max_results_desc(default: int) -> str:

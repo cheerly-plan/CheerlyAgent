@@ -126,4 +126,79 @@ def test_extract_indicators_reports_a_missing_line(monkeypatch):
     )
     result = extract_indicators(["中国黄金"], "2025Q3", ["毛利率"])
     assert result.facts == []
-    assert result.missing == ["毛利率：表格里没有对上的一行"]
+    assert result.missing == ["毛利率：表格和正文里都没有对上的一行"]
+
+
+# 季报「主要财务数据」的真实形态：单季与累计并排，且各自带一列官方同比。
+_DUAL_COLUMN_TABLE = """
+单位：百万元人民币（另有说明者除外）
+<table>
+<tr><td>项目</td><td>本报告期</td><td>本报告期比上年同期增减(%)</td><td>年初至报告期末</td><td>年初至报告期末比上年同期增减(%)</td></tr>
+<tr><td>营业收入</td><td>169,462</td><td>4.48</td><td>526,365</td><td>7.16</td></tr>
+<tr><td>净利润</td><td>67,201</td><td>5.91</td><td>199,232</td><td>5.09</td></tr>
+</table>
+"""
+
+
+def test_dual_column_table_picks_cumulative_value_with_matching_yoy():
+    """研报说「前三季度营收」指累计列，不能报成单季的 169,462。"""
+    got = read_indicator(_DUAL_COLUMN_TABLE, ["营业收入"], period="2026Q3")
+    assert got is not None
+    assert got["value"] == "526,365"
+    assert got["column"] == "年初至报告期末"
+    assert got["reported_yoy"] == "7.16%"
+    assert "169,462" not in got["value"]
+    assert "526,365" in got["quote"] and "7.16" in got["quote"]
+
+
+def test_single_quarter_column_keeps_its_own_yoy():
+    """只有单季列时，同比必须配单季那一列，不能串到累计同比去。"""
+    table = """
+单位：百万元
+<table>
+<tr><td>项目</td><td>本报告期</td><td>本报告期比上年同期增减(%)</td></tr>
+<tr><td>营业收入</td><td>169,462</td><td>4.48</td></tr>
+</table>
+"""
+    got = read_indicator(table, ["营业收入"], period="2026Q3")
+    assert got is not None
+    assert got["value"] == "169,462"
+    assert got["column"] == "本报告期"
+    assert got["reported_yoy"] == "4.48%"
+
+
+def test_extract_indicators_carries_column_and_reported_yoy(monkeypatch):
+    file_id = uuid.uuid4()
+    files = [
+        {
+            "file_id": file_id,
+            "filename": "中国银行股份有限公司2026年第三季度报告.pdf",
+            "status": "ready",
+            "subject": "中国银行股份有限公司",
+            "subject_aliases": ["中国银行"],
+            "period": "2026Q3",
+        }
+    ]
+
+    def search(keywords, **kwargs):
+        return [
+            {
+                "file_id": file_id,
+                "filename": files[0]["filename"],
+                "subject": files[0]["subject"],
+                "page": 2,
+                "page_end": 2,
+                "section": "一、主要财务数据",
+                "scope": "",
+                "text": _DUAL_COLUMN_TABLE,
+            }
+        ]
+
+    monkeypatch.setattr("ai_agent.report.extract.store.list_kb_files", lambda **k: files)
+    monkeypatch.setattr("ai_agent.report.extract.store.search_kb_chunks_keyword", search)
+    result = extract_indicators(["中国银行"], "2026Q3", ["营业收入"])
+    assert len(result.facts) == 1
+    fact = result.facts[0]
+    assert fact.value == "526,365"
+    assert fact.column == "年初至报告期末"
+    assert fact.reported_yoy == "7.16%"

@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # 空 = 没有任何管理员，所有写操作 403（只读浏览不受影响）
     admin_usernames: str = ""
 
+    # 研报（report pipeline）：正文/溯源附件/人工审核队列/PDF 的落盘目录。
+    # 与知识库上传目录分开，下载端点只认这个目录，避免把 uploads 也暴露出去。
+    report_output_dir: Path = _PROJECT_ROOT / "data" / "reports"
+
     # 知识库（P1）：文件上传、切片向量化与检索
     kb_upload_dir: Path = _PROJECT_ROOT / "data" / "uploads"
     kb_max_file_mb: int = 100

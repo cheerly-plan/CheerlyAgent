@@ -13,6 +13,7 @@ from ai_agent.api.routers.health import router as health_router
 from ai_agent.api.routers.inspect import router as inspect_router
 from ai_agent.api.routers.kb import router as kb_router
 from ai_agent.api.routers.kg import router as kg_router
+from ai_agent.api.routers.report import router as report_router
 from ai_agent.api.routers.session import router as session_router
 from ai_agent.api.routers.user import router as user_router
 from ai_agent.core.config import settings
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(kb_router)
     app.include_router(kg_router)
+    app.include_router(report_router)
 
     @app.exception_handler(AgentError)
     async def agent_error(_request: Request, exc: AgentError) -> JSONResponse:

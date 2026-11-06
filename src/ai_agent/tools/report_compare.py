@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, Field
 
+from ai_agent.prompts.tools import REPORT_COMPARE_DESC
 from ai_agent.report.compare import Measure, compare_measures, format_compare
 from ai_agent.tools.base import Tool
 
@@ -15,6 +16,18 @@ class ComparePoint(BaseModel):
     scope: str = Field(
         default="",
         description="口径：consolidated 或 parent。不同口径不要混在同一条里比较",
+    )
+    cumulative: bool = Field(
+        default=False,
+        description="该值是否取自累计列（年初至报告期末）。单季与累计不可混在一条序列",
+    )
+    basis: str = Field(
+        default="",
+        description="口径代码（report_extract_indicators 返回）：cumulative/single/point/stock",
+    )
+    coverage_months: int = Field(
+        default=0,
+        description="覆盖月数（累计口径必填）：Q1=3、H1=6、Q3=9、全年=12",
     )
 
 
@@ -34,6 +47,9 @@ def _report_compare(points: list[dict]) -> str:
             value=item["value"],
             unit=item.get("unit") or "",
             scope=item.get("scope") or "",
+            cumulative=bool(item.get("cumulative", False)),
+            basis=item.get("basis") or "",
+            coverage_months=int(item.get("coverage_months") or 0),
         )
         for item in points
     ]
@@ -42,11 +58,7 @@ def _report_compare(points: list[dict]) -> str:
 
 report_compare_tool = Tool(
     name="report_compare",
-    description=(
-        "计算已抽取指标的同比、环比、增减额、增减幅度和多期趋势。"
-        "必须传入抽取结果里的原始数字，禁止自己心算后再传入。"
-        "比率类指标返回百分点，不返回除以基期得到的增速。"
-    ),
+    description=REPORT_COMPARE_DESC,
     func=_report_compare,
     args_model=ReportCompareArgs,
 )

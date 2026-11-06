@@ -1,0 +1,249 @@
+"""研报流水线编排：把六个确定性步骤串成一次可调用的任务。
+
+设计约束（与 next.md 一致，也是这套模块既有测试的意图）：
+
+* 全程**不调用 LLM**。需求解析、指标抽取、增减计算、正文撰写、数字校验、
+  PDF 渲染都是规则/代码。因此零 token 成本、零「模型口算」、可重复可回归。
+  模型若要参与润色，必须作为后续可选增强，且润色结果仍要过 validate 门禁
+  （正文里任何不在 allowed 集合里的数字都会被判 error）。
+* 数字只从知识库表格切片里抽，抽不到就写进 gaps，绝不补一个看起来像的数。
+* PDF 渲染失败（缺中文字体 / WeasyPrint 缺系统库）时**降级为 Markdown 交付**，
+  正文、溯源附件、人工审核队列照常产出，不因渲染环境整体失败。
+* M2 定稿门禁：校验有 error 时**不渲染 PDF**；生成完成后登记审核记录
+  （report/review.py），PDF 下载只放行已定稿的报告。
+
+输出物统一落在 report_output_dir：正文 .md、溯源附件 .provenance.md、
+人工审核队列 .review.json、可选 .pdf。文件名带 report_id 防覆盖。
+"""
+
+from __future__ import annotations
+
+import re
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ai_agent.core.config import settings
+from ai_agent.core.logging import get_logger
+from ai_agent.report.compare import Measure, SeriesCompare, compare_measures
+from ai_agent.report.compose import ReportDocument, compose_report
+from ai_agent.report.extract import IndicatorFact, extract_indicators
+from ai_agent.report.parse import ReportPlan, parse_request
+from ai_agent.report.pdf import PdfFile, charts_from_series, render_report_pdf
+from ai_agent.report.review import create_record
+from ai_agent.report.supplemental import SupplementalResult, extract_supplemental
+from ai_agent.report.validate import ValidationResult, validate_report
+
+logger = get_logger(__name__)
+
+_ILLEGAL = re.compile(r'[\\/:*?"<>|\s]+')
+_NO_REQUEST = "没有看到研报或财报分析需求"
+
+
+@dataclass
+class ReportArtifacts:
+    """落盘文件名（只给 basename，不给绝对路径，避免把服务端目录结构泄给前端）。"""
+
+    markdown: str = ""
+    provenance: str = ""
+    review: str = ""
+    pdf: str = ""
+
+
+@dataclass
+class ReportResult:
+    request: str
+    plan: ReportPlan
+    document: ReportDocument
+    validation: ValidationResult
+    facts: list[IndicatorFact] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    series: list[SeriesCompare] = field(default_factory=list)
+    views: SupplementalResult = field(default_factory=SupplementalResult)
+    pdf: PdfFile | None = None
+    report_id: str = ""
+    artifacts: ReportArtifacts = field(default_factory=ReportArtifacts)
+    output_dir: Path | None = None
+    # ok / no_request / no_data
+    status: str = "ok"
+    # generated / not_requested / failed / blocked（校验未通过，禁止渲染）
+    pdf_status: str = "not_requested"
+    pdf_error: str = ""
+    # pending / approved / rejected / finalized（由 review.create_record 回填）
+    review_status: str = "pending"
+
+    @property
+    def deliverable(self) -> str:
+        """实际交付形态：PDF 成功才算 pdf，否则是 markdown。"""
+        return "pdf" if self.pdf is not None else "markdown"
+
+    @property
+    def gaps(self) -> list[str]:
+        """计划缺口 + 撰写缺口 + 抽取缺口，去重保序，统一给调用方看。"""
+        merged: list[str] = []
+        for item in (*self.plan.gaps, *self.document.gaps, *self.missing):
+            if item and item not in merged:
+                merged.append(item)
+        return merged
+
+    @property
+    def validation_summary(self) -> str:
+        return self.validation.summary
+
+
+def run_report(
+    request: str,
+    *,
+    skill_id: str = "",
+    deliverable: str | None = None,
+    output_dir: Path | str | None = None,
+    write_pdf: bool = True,
+) -> ReportResult:
+    """跑一次研报生成。同步、确定性、可单测；不触达 /v1/chat 的 Agent 循环。
+
+    skill_id 是报告类型（report/skills.py 注册表）：显式指定时覆盖自动路由，
+    大纲与默认指标集换用该 skill 的版本；抽数/计算/校验/渲染这四块积木
+    对所有 skill 一视同仁，防幻觉门禁不因报告类型放宽。
+
+    deliverable 显式传 "pdf" / "markdown" 时覆盖需求文本的推断；
+    write_pdf=False 用于只要 Markdown 的场景（省掉渲染开销）。
+    """
+    # skill_id 为空时保持旧调用形态（只传 request）：外部对 parse_request
+    # 的替身多为单参数 lambda，统一带 kwarg 会让它们全部 TypeError。
+    plan = parse_request(request, skill_id=skill_id) if skill_id else parse_request(request)
+    if deliverable in {"pdf", "markdown"}:
+        plan.deliverable = deliverable
+    want_pdf = plan.deliverable == "pdf" and write_pdf
+
+    facts, missing, views = _extract_all(plan)
+    measures = [
+        Measure(
+            subject=f.subject,
+            name=f.name,
+            period=f.period,
+            value=f.value,
+            unit=f.unit,
+            scope=f.scope,
+            reported_yoy=f.reported_yoy,
+            cumulative=f.cumulative,
+            basis=f.basis,
+            coverage_months=f.coverage_months,
+            source_key=(f.evidence.file_id or f.evidence.filename or "").strip(),
+        )
+        for f in facts
+    ]
+    series = compare_measures(measures)
+    document = compose_report(plan, facts, views=views)
+    # series 显式传进去：和撰写用的是同一批 Measure，校验允许的数字集合
+    # 才和正文一致，不会出现「正文写了、校验说没算过」的假错。
+    # views 也要传：单季列与较上年末变动的数字必须过原文核对。
+    validation = validate_report(
+        document, facts, plan=plan, series=series, views=views
+    )
+
+    # M2 第一道门禁：正文数字/引用有 error，连 PDF 都不出，避免错误稿被外发。
+    # 审核记录里仍能看到 error 明细，修数据后重新生成即可。
+    blocked = want_pdf and not validation.passed
+    result = ReportResult(
+        request=request,
+        plan=plan,
+        document=document,
+        validation=validation,
+        facts=facts,
+        missing=missing,
+        series=series,
+        views=views,
+        report_id=uuid.uuid4().hex[:10],
+        output_dir=Path(output_dir) if output_dir else settings.report_output_dir,
+        status=_status(plan, facts),
+        pdf_status=("not_requested" if not want_pdf else "blocked" if blocked else "failed"),
+    )
+
+    if blocked:
+        result.pdf_error = "校验未通过：禁止渲染 PDF，请在审核队列处置错误后重新生成"
+        document.deliverable = "markdown"
+    elif want_pdf:
+        try:
+            result.pdf = render_report_pdf(document, charts=charts_from_series(series))
+            result.pdf_status = "generated"
+        except Exception as exc:
+            # 渲染是交付形态，不是数据正确性。缺字体/缺 Pango 时降级，
+            # 但把原因如实写回结果，不能假装 PDF 生成过。
+            result.pdf_error = f"{type(exc).__name__}: {exc}"
+            document.deliverable = "markdown"
+            logger.warning("研报 PDF 渲染失败，降级为 Markdown：%s", result.pdf_error)
+
+    _write_artifacts(result)
+    # 产物全部落盘后再登记审核：指纹才覆盖最终字节。登记失败宁可整体抛错，
+    # 也不能出现「有 PDF、没有审核记录」的漏网之鱼。
+    result.review_status = create_record(result, result.output_dir).status
+    return result
+
+
+def _extract_all(
+    plan: ReportPlan,
+) -> tuple[list[IndicatorFact], list[str], SupplementalResult]:
+    """按计划里出现的报告期逐一抽取（本期 / 同比基期 / 环比基期）。
+
+    plan.files 为空不代表不用抽：库里没登记对应期时也要走一次，
+    好让 extract 明确写出「没有找到 X 的季报」，而不是静默略过。
+    """
+    periods: list[str] = []
+    for source in plan.files:
+        if source.period and source.period not in periods:
+            periods.append(source.period)
+    if not periods and plan.period:
+        periods.append(plan.period)
+    if not plan.subjects or not plan.indicators:
+        return [], ["需求里没有可用的公司或指标，跳过抽取"], SupplementalResult()
+
+    facts: list[IndicatorFact] = []
+    missing: list[str] = []
+    for period in periods:
+        extracted = extract_indicators(plan.subjects, period, plan.indicators)
+        facts.extend(extracted.facts)
+        missing.extend(f"[{period}] {item}" for item in extracted.missing)
+    # 单季/较上年末视图只查本期文件，不跨期拼数；缺口如实回传。
+    views = extract_supplemental(plan.subjects, plan.period, plan.indicators)
+    missing.extend(f"[视图] {item}" for item in views.gaps)
+    return facts, missing, views
+
+
+def _status(plan: ReportPlan, facts: list[IndicatorFact]) -> str:
+    if plan.kind == "unknown" or _NO_REQUEST in plan.gaps:
+        return "no_request"
+    if not facts:
+        return "no_data"
+    return "ok"
+
+
+def _stem(title: str, report_id: str) -> str:
+    cleaned = _ILLEGAL.sub(" ", title or "").strip()[:60]
+    return f"{cleaned or '研报'}_{report_id}"
+
+
+def _write_artifacts(result: ReportResult) -> None:
+    """正文、溯源总是落盘；PDF 只在渲染成功时落盘。
+
+    .review.json 由 review.create_record 在最后统一写完整审核记录（M2），
+    这里只登记文件名，避免同一份文件写两遍、或留下 M1 那种只有数组的快照。
+    """
+    directory = result.output_dir or settings.report_output_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = _stem(result.document.title, result.report_id)
+
+    markdown_name = f"{stem}.md"
+    provenance_name = f"{stem}.provenance.md"
+    review_name = f"{stem}.review.json"
+    (directory / markdown_name).write_text(result.document.markdown, encoding="utf-8")
+    (directory / provenance_name).write_text(
+        result.validation.provenance.markdown, encoding="utf-8"
+    )
+    result.artifacts.markdown = markdown_name
+    result.artifacts.provenance = provenance_name
+    result.artifacts.review = review_name
+
+    if result.pdf is not None:
+        pdf_name = f"{stem}.pdf"
+        (directory / pdf_name).write_bytes(result.pdf.content)
+        result.artifacts.pdf = pdf_name

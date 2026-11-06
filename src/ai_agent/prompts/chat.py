@@ -14,7 +14,8 @@
 
 from __future__ import annotations
 
-from ai_agent.prompts.builder import PromptBuilder
+from ai_agent.prompts.builder import PromptBuilder, assert_rendered, render
+from ai_agent.prompts.tools import skill_catalog
 
 # ——— 分层常量：顺序即注入顺序 ———
 
@@ -59,6 +60,19 @@ MEMORY_DISCIPLINE = """【记忆纪律】
 - 当前任务、正在做的事不必在回答时写入，系统会在本轮结束后自动抽取。
 - 严禁编造记忆中不存在的事实。"""
 
+# 报告类型清单从 skills 注册表渲染（与 generate_report 工具描述同源），
+# 注册新 skill 后这里自动跟进，不需要手抄一份技能名单。
+_REPORT_DISCIPLINE_TEMPLATE = """【研报生成】用户要求生成研报、财报深度分析或 PDF 报告时：
+1. 必须调用 generate_report，把用户需求原话作为 request 传入；本轮若已按检索纪律查过 kb_search，查完仍要调用它。用户明确点名报告类型时才填 report_type，否则留空自动路由。可选类型：{{SKILL_CATALOG}}。
+2. 不要说「无法生成 PDF」，也不要用检索结果自己撰写研报正文、口算同比增减：正文由服务端生成并校验，数字只来自知识库表格。
+3. 只问单个指标数字（如「中行 2026Q3 净息差」）时用 report_extract_indicators，要算增减就把它返回的原值传给 report_compare；数字原样转述，禁止换算或口算。
+4. 工具返回后把下载链接原样发给用户，简要说明校验结论和缺口；不要复述、换算或补写报告里的数字。
+5. 工具报错或状态不是 ok 时如实说明原因，不要用通用知识补位。"""
+
+REPORT_DISCIPLINE = assert_rendered(
+    render(_REPORT_DISCIPLINE_TEMPLATE, SKILL_CATALOG=skill_catalog())
+)
+
 TRUTHFULNESS = """【真实性】不知道就说不知道，缺数据就说明缺什么。编造一个看起来合理的数字、条款或出处，比直接说「没找到」的代价大得多。"""
 
 
@@ -80,6 +94,7 @@ def build_system_prompt(
         .section("format", OUTPUT_FORMAT)
         .section("citation", CITATION, when=use_kb)
         .section("kb", KB_DISCIPLINE, when=use_kb)
+        .section("report", REPORT_DISCIPLINE, when=use_kb)
         .section("memory", MEMORY_DISCIPLINE, when=use_memory)
         .section("truth", TRUTHFULNESS)
         .build()

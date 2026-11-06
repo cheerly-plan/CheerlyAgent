@@ -1247,6 +1247,30 @@ def test_must_call_kb_tool_records_entities_when_subject_also_matches(caplog):
     assert "entities=诺安成长混合型证券投资基金" in caplog.text
 
 
+def test_report_generation_skips_forced_kb_retrieval():
+    """生成研报直接走 generate_report，不必先被强制查一轮 kb_search。"""
+    tools = [{"function": {"name": "kb_search"}}, {"function": {"name": "kg_search"}}]
+    messages = [
+        {"role": "user", "content": "生成中国银行2026Q3财报深度分析PDF研报"}
+    ]
+    with (
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value={"中国银行"}),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
+    ):
+        assert _must_call_kb_tool(messages, tools) is False
+
+
+def test_question_about_a_report_still_forces_retrieval():
+    """「研报里说了什么」是检索题，不能被生成类例外误放行。"""
+    tools = [{"function": {"name": "kb_search"}}]
+    messages = [{"role": "user", "content": "中国银行的研报里营收是多少"}]
+    with (
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value={"中国银行"}),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
+    ):
+        assert _must_call_kb_tool(messages, tools) is True
+
+
 def test_run_loop_requires_kb_tool_when_question_names_entity():
     """问句点名图谱实体（不是文件主体）时，同样强制调用知识库工具。"""
     fake_schemas = [

@@ -1,3 +1,4 @@
+import re
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -60,6 +61,13 @@ logger = get_logger(__name__)
 # 问句点名了库内主体或图谱实体时，第一步只留这两个工具并强制调用。
 # 天气、记忆、联网留在后面的轮次，避免模型用它们应付「必须调一个工具」。
 _KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
+
+# 「生成一份研报」走独立流水线：工具自己会检索、抽取、计算、校验。
+# 这类请求不必先被强制查一轮 kb_search，否则既多烧一次调用，又把原文片段
+# 塞进上下文、诱导模型自己撰写正文而不去调 generate_report。
+# 必须同时有「生成类动词」和「研报类名词」，避免误伤「研报里说了什么」这种检索题。
+_REPORT_VERB = re.compile(r"生成|出一份|做一份|写一份|制作|导出|来一份|给我一份")
+_REPORT_NOUN = re.compile(r"研报|财报深度分析|分析报告|PDF", re.IGNORECASE)
 
 # 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
 # 不再阻塞 SSE 尾部延迟；进程退出时由 lifespan 调 shutdown_turn_finalizer 等待。
@@ -436,6 +444,8 @@ def _must_call_kb_tool(
     text = _latest_user_text(messages).strip()
     if not text:
         return False
+    if _REPORT_VERB.search(text) and _REPORT_NOUN.search(text):
+        return False
     from ai_agent.kb.retrieval import mentioned_entities, mentioned_subjects
 
     file_ids: list[uuid.UUID] | None = None
@@ -483,7 +493,9 @@ def run_loop(
     if not use_web_search:
         excluded.add("web_search")
     if not use_kb:
-        excluded.update({"kb_search", "kg_search"})
+        # 研报积木与入口都依赖知识库表格抽取，知识库关掉时一起下线。
+        # report_compare / report_validate 是纯计算与校验，不触知识库，保留。
+        excluded.update({"kb_search", "kg_search", "generate_report", "report_extract_indicators"})
     tools = [s for s in tool_schemas() if s["function"]["name"] not in excluded]
     if use_kb:
         _attach_kg_prefetch(messages, kb_file_ids)

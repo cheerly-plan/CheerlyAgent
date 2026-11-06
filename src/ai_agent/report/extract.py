@@ -20,6 +20,7 @@ from ai_agent.kb.chunking import (
 )
 from ai_agent.kb.meta import name_in_text
 from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
+from ai_agent.report.basis import basis_of, ratio_unit
 from ai_agent.memory.store import store
 
 logger = get_logger(__name__)
@@ -38,14 +39,110 @@ _INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = {
     "毛利率": ("毛利率", ("毛利率",)),
 }
 
+# 银行季报的资产质量、息差、资本充足率写在「经营情况简要分析」正文里，
+# 不是表格行。这里用**逐指标的显式短语**抽取，要求数字紧跟指标名、单位明确，
+# 并保留原文句子作为证据；匹配不上就写缺口，不用通用正则去猜。
+# 值： (检索关键词, 正则, 单位)。金额类只在正文给出「亿元」。
+_NARRATIVE_PATTERNS: dict[str, tuple[str, str, str]] = {
+    "净息差": ("净息差", r"净息差\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
+    "不良贷款率": ("不良贷款率", r"不良贷款率\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
+    "不良贷款拨备覆盖率": (
+        "拨备覆盖率",
+        r"不良贷款拨备覆盖率\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    "加权平均净资产收益率": (
+        "加权平均净资产收益率",
+        r"加权平均净资产收益率（ROE）\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    "核心一级资本充足率": (
+        "核心一级资本充足率",
+        r"核心一级资本充足率为?\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    # 前面加负向断言，别把「一级资本充足率」「核心一级资本充足率」当成总资本充足率
+    "资本充足率": (
+        "资本充足率",
+        r"(?<!一级)资本充足率为?\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    "利息净收入": ("利息净收入", r"利息净收入\s*([\d,]+(?:\.\d+)?)\s*亿元", "亿元"),
+    "非利息收入": ("非利息收入", r"非利息收入\s*([\d,]+(?:\.\d+)?)\s*亿元", "亿元"),
+    "成本收入比": ("成本收入比", r"成本收入比\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
+    "平均总资产回报率": (
+        "平均总资产回报率",
+        r"平均总资产回报率（ROA）\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    "非利息收入占比": (
+        "在营业收入中占比",
+        r"非利息收入在营业收入中占比为\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    "手续费及佣金净收入": (
+        "手续费及佣金净收入",
+        r"手续费及佣金净收入\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        "亿元",
+    ),
+    "业务及管理费": (
+        "业务及管理费",
+        r"业务及管理费\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        "亿元",
+    ),
+    "资产减值损失": (
+        "资产减值损失",
+        r"资产减值损失\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        "亿元",
+    ),
+    # 原文这两处中间插了脚注标记「$ ^{3} $」，脚注本身含数字，所以用精确的
+    # 可选组吃掉它，不能用「任意非数字占位」。负向断言挡掉「人民币发放贷款 /
+    # 人民币吸收存款」的境内明细口径；不写宽松跨句匹配，避免吃到下一段别的数。
+    "发放贷款和垫款总额": (
+        "发放贷款和垫款总额",
+        r"(?<!人民币)发放贷款和垫款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        "亿元",
+    ),
+    "吸收存款总额": (
+        "吸收存款总额",
+        r"(?<!人民币)吸收存款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*([\d,]+(?:\.\d+)?)\s*亿元",
+        "亿元",
+    ),
+}
+# 利润表里「利息净收入」同时有 7-9 月单季列和 1-9 月累计列，表格抽取容易
+# 选中单季列（110,976 百万元）当成累计值。正文「2026年前三季度…利息净收入
+# 3,596.06亿元」口径明确，这类金额指标一律正文优先，表格只作兜底。
+_NARRATIVE_FIRST = {
+    "利息净收入",
+    "非利息收入",
+    "手续费及佣金净收入",
+    "业务及管理费",
+    "发放贷款和垫款总额",
+    "吸收存款总额",
+}
+
 _LEADING = re.compile(
     r"^(?:其中[:：]?|[加减][:：]?|[-－—]|(?:[一二三四五六七八九十]|\d+)[、.．])\s*"
 )
 _TRAILING_PAREN = re.compile(r"[（(][^）)]*[）)]\s*$")
 _PRIOR_COL = re.compile(r"上年|上期|期初|去年|同比|增减|变动|比上年|比上期")
 _CURRENT_COL = re.compile(r"本报告期|本期|期末|本年|本期末")
-_NUMBER = re.compile(r"^[（(]?\s*-?[\d,，]+(?:\.\d+)?\s*%?\s*[)）]?$")
-_UNIT = re.compile(r"单位[:：]\s*([^\s，,。；;|<]+)")
+# 季报「主要财务数据」常见双列：本报告期(单季) 与 年初至报告期末(累计)。
+# 研报里说的「前三季度营收」指累计列，默认取它，不要把单季数当累计值报出去。
+_CUMULATIVE_COL = re.compile(
+    r"年初至报告期末|年初至本期末|年初至今|年初至|累计|前三季度|上半年|半年度"
+    r"|1[-—至]\d{1,2}月"
+)
+_CHANGE_COL = re.compile(r"比上年同期增减|同比增减|同比|增减|变动")
+# 千分位可能是逗号、空格或不换行空格（半年报摘要里常见「356 903」）。
+# 只允许「数字 + 空白 + 恰好三位」这种分组，避免把「1 2 3」当成一个数。
+_NUMBER = re.compile(
+    r"^[（(]?\s*-?\d[\d,，]*(?:[ \t\u00a0]\d{3})*(?:\.\d+)?\s*%?\s*[)）]?$"
+)
+# 单位说明常带括号尾巴：「百万元人民币（另有说明者除外）」。
+# 只保留可换算的单位词，别把整句注记写进研报正文。
+_UNIT = re.compile(r"单位[:：]\s*([^\s，,。；;|<（(]+)")
+_UNIT_KEY = re.compile(r"^(亿元|百万元|万元|元)")
 _MD_SEPARATOR = re.compile(r"^\|[\s:\-|]+\|$")
 
 
@@ -59,6 +156,18 @@ class Evidence:
     quote: str
 
 
+def citation_anchor(file_id: str) -> str:
+    """正文引用的短锚点，形如 ``[7b75379b]``。
+
+    完整 file_id 只留在溯源附件和 JSON 里：正文每条结论都跟一串 36 字符
+    UUID 会把数字淹没。短锚点是全 ID 的前 8 位前缀，仍可回查溯源表；
+    带方括号是为了让校验器在扫数字前能整体剔除，否则 ``75379`` 这类片段
+    会被当成一个没授权过的金额。
+    """
+    short = (file_id or "").strip()[:8]
+    return f"[{short}]" if short else ""
+
+
 @dataclass
 class IndicatorFact:
     subject: str
@@ -69,6 +178,16 @@ class IndicatorFact:
     column: str
     scope: str
     evidence: Evidence
+    # 季报原文自带的「比上年同期增减(%)」。它是披露值，不是我们算出来的，
+    # 只在缺少跨期绝对值、无法自行重算同比时作为兜底写进正文。
+    reported_yoy: str = ""
+    # 数值取自累计列（年初至报告期末 / 1-6月）。compare 靠它判断能否
+    # 用相邻累计值相减还原单季，避免把单季数当累计去减。
+    cumulative: bool = False
+    # 口径指纹，见 report/basis.py。空串表示调用方手工构造的 fact 没标口径，
+    # compare 会回退到 cumulative 布尔值，保持旧调用兼容。
+    basis: str = ""
+    coverage_months: int = 0
 
 
 @dataclass
@@ -111,20 +230,34 @@ def extract_indicators(
 
     for indicator in wanted:
         keyword, aliases = _indicator_spec(indicator)
-        try:
-            rows = store.search_kb_chunks_keyword(
-                [keyword],
-                file_ids=file_ids,
-                top_k=20,
-                kinds=["table"],
-            )
-        except Exception:
-            logger.exception("抽取指标时检索失败 indicator=%s", indicator)
-            result.missing.append(f"{indicator}：检索失败")
-            continue
-        picked = _pick_facts(rows, by_id, aliases, indicator, period)
+        picked: list[IndicatorFact] = []
+        if indicator not in _NARRATIVE_FIRST:
+            try:
+                rows = store.search_kb_chunks_keyword(
+                    [keyword],
+                    file_ids=file_ids,
+                    top_k=20,
+                    kinds=["table"],
+                )
+            except Exception:
+                logger.exception("抽取指标时检索失败 indicator=%s", indicator)
+                result.missing.append(f"{indicator}：检索失败")
+                continue
+            picked = _pick_facts(rows, by_id, aliases, indicator, period)
+        if not picked and indicator in _NARRATIVE_PATTERNS:
+            picked = _narrative_facts(indicator, period, file_ids, by_id)
+        if not picked and indicator in _NARRATIVE_FIRST:
+            # 正文也没写，才回到表格（并接受它的列口径）
+            try:
+                rows = store.search_kb_chunks_keyword(
+                    [keyword], file_ids=file_ids, top_k=20, kinds=["table"]
+                )
+            except Exception:
+                logger.exception("兜底表格抽取失败 indicator=%s", indicator)
+                rows = []
+            picked = _pick_facts(rows, by_id, aliases, indicator, period)
         if not picked:
-            result.missing.append(f"{indicator}：表格里没有对上的一行")
+            result.missing.append(f"{indicator}：表格和正文里都没有对上的一行")
             continue
         result.facts.extend(picked)
     return result
@@ -147,8 +280,11 @@ def read_indicator(
             rank = _row_rank(cells[0], aliases)
             if rank <= best_rank:
                 continue
-            column, value = _current_value(headers, cells, period)
-            if not value or not _value_in_source(value, text):
+            picked = _pick_value_column(headers, cells, period)
+            if not picked:
+                continue
+            index, column, value, cumulative = picked
+            if not _value_in_source(value, text):
                 continue
             best_rank = rank
             best = {
@@ -157,6 +293,8 @@ def read_indicator(
                 "unit": _unit_of(text),
                 "quote": _quote(headers, cells, text),
                 "rank": rank,
+                "reported_yoy": _reported_yoy(headers, cells, index, column),
+                "cumulative": cumulative,
             }
     return best
 
@@ -207,14 +345,28 @@ def _pick_facts(
         scope_rank = 2 if scope == SCOPE_CONSOLIDATED else 1 if scope != SCOPE_PARENT else 0
         # 科目本行优先于「其中」明细，合并口径优先于母公司口径
         rank = (parsed["rank"], scope_rank)
+        value = parsed["value"]
+        # 报表统一写「单位：百万元人民币（百分比除外）」，比率行不能套金额单位。
+        unit = ratio_unit(indicator, parsed["unit"], value)
+        basis, months = basis_of(
+            period,
+            cumulative=bool(parsed.get("cumulative", False)),
+            name=indicator,
+            unit=unit,
+            value=value,
+        )
         fact = IndicatorFact(
             subject=str(meta.get("subject") or row.get("subject") or ""),
             period=period,
             name=indicator,
-            value=parsed["value"],
-            unit=parsed["unit"],
+            value=value,
+            unit=unit,
             column=parsed["column"],
             scope=scope,
+            reported_yoy=parsed.get("reported_yoy", ""),
+            cumulative=bool(parsed.get("cumulative", False)),
+            basis=basis,
+            coverage_months=months,
             evidence=Evidence(
                 file_id=file_id,
                 filename=str(row.get("filename") or meta.get("filename") or ""),
@@ -228,6 +380,87 @@ def _pick_facts(
         if previous is None or rank > previous[0]:
             found[file_id] = (rank, fact)
     return [item[1] for item in found.values()]
+
+
+def _narrative_facts(
+    indicator: str,
+    period: str,
+    file_ids: list,
+    by_id: dict[str, dict],
+) -> list[IndicatorFact]:
+    """从正文叙述里抽比率/金额。表格路径优先，这里只做补位。
+
+    每份文件至多一条，必须能回指到原文句子与页码；数字和单位写死在模式里，
+    不允许「看起来像」就取。抽不到返回空列表，由调用方写缺口。
+    """
+    keyword, pattern, unit = _NARRATIVE_PATTERNS[indicator]
+    try:
+        rows = store.search_kb_chunks_keyword(
+            [keyword], file_ids=file_ids, top_k=10, kinds=["text"]
+        )
+    except Exception:
+        logger.exception("抽取正文指标时检索失败 indicator=%s", indicator)
+        return []
+    regex = re.compile(pattern)
+    facts: list[IndicatorFact] = []
+    # 同一份文件会被切成多个 chunk，经营分析章节常常横跨两块。不去重的话
+    # 一个指标会出两条互斥的数字（集团总额 / 人民币明细 / 脚注后的另一个数）。
+    seen_files: set[str] = set()
+    for row in rows:
+        text = str(row.get("text") or "")
+        match = regex.search(text)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if not _value_in_source(value, text):
+            continue
+        quote = _sentence_around(text, match.start(), match.end())
+        if not _value_in_source(value, quote):
+            quote = text[max(0, match.start() - 40) : min(len(text), match.end() + 40)].strip()
+        file_id = str(row.get("file_id") or "")
+        if file_id in seen_files:
+            continue
+        seen_files.add(file_id)
+        meta = by_id.get(file_id, {})
+        is_amount = unit != "%"
+        basis, months = basis_of(
+            period,
+            cumulative=is_amount,
+            name=indicator,
+            unit=unit,
+            value=value,
+        )
+        facts.append(
+            IndicatorFact(
+                subject=str(meta.get("subject") or row.get("subject") or ""),
+                period=period,
+                name=indicator,
+                value=value,
+                unit=unit,
+                column="经营情况简要分析（正文叙述）",
+                scope="",
+                cumulative=is_amount,
+                basis=basis,
+                coverage_months=months,
+                evidence=Evidence(
+                    file_id=file_id,
+                    filename=str(row.get("filename") or meta.get("filename") or ""),
+                    page=row.get("page"),
+                    page_end=row.get("page_end"),
+                    section=str(row.get("section") or ""),
+                    quote=quote,
+                ),
+            )
+        )
+    return facts
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """取包含命中的整句作为证据片段，避免只给一个孤立数字。"""
+    left = max(text.rfind("。", 0, start), text.rfind("\n", 0, start))
+    right = text.find("。", end)
+    stop = right + 1 if right >= 0 else len(text)
+    return text[left + 1 : stop].strip()[:300]
 
 
 def _tables(text: str) -> list[tuple[list[str], list[list[str]]]]:
@@ -330,27 +563,64 @@ def _label_rank(label: str, aliases: tuple[str, ...] | list[str]) -> int:
     return rank
 
 
-def _current_value(
+def _pick_value_column(
     headers: list[str], cells: list[str], period: str
-) -> tuple[str, str]:
+) -> tuple[int, str, str, bool] | None:
+    """在同一行里挑出本期的数值列，返回 (列下标, 列表头, 数值, 是否累计)。
+
+    优先级：累计列 > 本期列 > 未标明的数字列。季报常把「本报告期」(单季)
+    和「年初至报告期末」(累计) 并排，研报默认说的是累计值，取错列会差好几倍。
+    上年同期、同比增减、以及表头里写着另一个年份的列一律不参与挑选。
+    同优先级保留靠前的列，这样原来只有单列「本报告期」的表格行为不变。
+
+    「是否累计」随数值一起带出去：compare 只有确认三期都是累计口径，
+    才允许用相邻累计值相减还原单季，避免把单季数当累计去减。
+    """
     year = period[:4] if len(period) >= 4 else ""
-    current: tuple[str, str] | None = None
-    unknown: tuple[str, str] | None = None
+    best: tuple[int, int, str, str, bool] | None = None
     for index, cell in enumerate(cells):
         if index == 0 or not _NUMBER.match(cell.strip()):
             continue
         header = headers[index] if index < len(headers) else ""
-        if _PRIOR_COL.search(header):
+        if _PRIOR_COL.search(header) or _CHANGE_COL.search(header):
             continue
-        if (year and year in header) or _CURRENT_COL.search(header):
-            current = (header, cell.strip())
-            break
-        if unknown is None:
-            unknown = (header, cell.strip())
-    chosen = current or unknown
-    if not chosen:
-        return "", ""
-    return chosen
+        other_year = re.search(r"((?:19|20)\d{2})", header)
+        if year and other_year and other_year.group(1) != year:
+            continue
+        cumulative = bool(_CUMULATIVE_COL.search(header))
+        if cumulative:
+            priority = 3
+        elif (year and year in header) or _CURRENT_COL.search(header):
+            priority = 2
+        else:
+            priority = 1
+        if best is None or priority > best[0]:
+            best = (priority, index, header, cell.strip(), cumulative)
+    if best is None:
+        return None
+    return best[1], best[2], best[3], best[4]
+
+
+def _reported_yoy(
+    headers: list[str], cells: list[str], chosen_index: int, chosen_header: str
+) -> str:
+    """取与所选数值列同口径的「比上年同期增减」列，作为原文披露的同比。
+
+    只认表头以所选列名开头的那一列（例如选了「年初至报告期末」，就配
+    「年初至报告期末比上年同期增减(%)」），避免把单季同比配到累计值上。
+    单元格里通常不带 %（表头已写单位），这里补回去。
+    """
+    base = (chosen_header or "").strip()
+    for index in range(chosen_index + 1, len(cells)):
+        header = headers[index] if index < len(headers) else ""
+        if not header or not _CHANGE_COL.search(header):
+            continue
+        if base and not (header.startswith(base) or base.startswith(header)):
+            continue
+        if index >= len(cells) or not _NUMBER.match(cells[index].strip()):
+            continue
+        return f"{cells[index].strip().rstrip('%')}%"
+    return ""
 
 
 def _value_in_source(value: str, source: str) -> bool:
@@ -362,7 +632,11 @@ def _value_in_source(value: str, source: str) -> bool:
 
 def _unit_of(text: str) -> str:
     found = _UNIT.search(text or "")
-    return found.group(1) if found else ""
+    if not found:
+        return ""
+    raw = found.group(1)
+    matched = _UNIT_KEY.match(raw)
+    return matched.group(1) if matched else raw
 
 
 def _quote(headers: list[str], cells: list[str], text: str) -> str:
