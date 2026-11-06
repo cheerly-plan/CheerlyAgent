@@ -837,15 +837,17 @@ def test_clean_tags_strips_dedupes_and_caps():
 def _kb_workdir(request):
     """项目内临时目录。系统 tmp 在沙箱里写不进去。
 
-    根目录 .tmp-kb-test 可能已经残留，用 exist_ok 创建。每个用例只占一个
-    子目录，收尾只删这个子目录：整棵删掉会和并发用例抢同一路径，mkdir 抛
-    FileExistsError。
+    每个用例只占一个子目录，收尾只删这个子目录：整棵删掉会和并发用例抢同
+    一路径。根目录已存在时不再调 mkdir(exist_ok=True)：当前沙箱的 shim
+    直接替换了 Path.mkdir，exist_ok 会被无视、照样抛 EEXIST；先 exists()
+    再建同样安全（用例串行跑，无并发竞争）。
     """
     import shutil
     import uuid as _uuid
 
     base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    base.mkdir(exist_ok=True)
+    if not base.exists():
+        base.mkdir()
     path = base / _uuid.uuid4().hex
     path.mkdir()
     request.addfinalizer(lambda: shutil.rmtree(path, ignore_errors=True))

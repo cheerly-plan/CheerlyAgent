@@ -31,10 +31,13 @@ def kb_tmp():
 
     不用 pytest 的 tmp_path：沙箱里它和这个固定根目录抢同一路径，
     目录残留或并发 mkdir 会抛 FileExistsError，用例在进断言前就 ERROR。
-    根目录用 exist_ok 接住残留；收尾只删自己的子目录。
+    根目录已存在时不再调 mkdir(exist_ok=True)：当前沙箱的 shim 直接替换了
+    Path.mkdir，exist_ok 会被无视、照样抛 EEXIST；先 exists() 再建同样
+    安全（用例串行跑，无并发竞争）。
     """
     base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    base.mkdir(exist_ok=True)
+    if not base.exists():
+        base.mkdir()
     path = Path(tempfile.mkdtemp(dir=base))
     try:
         yield path

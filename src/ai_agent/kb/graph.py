@@ -44,12 +44,12 @@ from ai_agent.kb.graph_names import (
     _claimed_offset,
     _clean_type,
     _locate_chunk,
-    _subject_from_filename,
     resolve_graph_subject,
     _usable_name,
     display_name,
     normalize_name,
 )
+from ai_agent.kb.graph_names import _subject_from_filename  # noqa: F401  # test_kg 按旧路径访问
 from ai_agent.kb.graph_schema import _Extraction, _Relation
 from ai_agent.memory.embeddings import embed_texts_parallel
 from ai_agent.memory.store import store
