@@ -245,6 +245,16 @@ def _allowed(
         for gap in plan.gaps:
             for match in _NUMBER.finditer(gap):
                 allowed.add(_compact(match.group(0)))
+        # 技能名单里的证券代码可出现在阅读说明／脚注，不算未核对数字。
+        if plan.skill_id:
+            from ai_agent.report.skills import get_skill
+
+            skill = get_skill(plan.skill_id)
+            if skill is not None:
+                for _name, code, _segment in skill.companies:
+                    key = _compact(code or "")
+                    if key:
+                        allowed.add(key)
     return allowed
 
 
@@ -442,6 +452,11 @@ def _check_citations_in_body(
     seen: set[tuple[str, str, str, str]] = set()
     for fact in facts:
         if focus and fact.period != focus:
+            continue
+        # 赛道均值等推算项：数字已在白名单，不要求正文再挂出处锚点。
+        if fact.scope == "derived" or (fact.evidence.filename or "").startswith(
+            "derived."
+        ):
             continue
         key = (fact.subject, fact.name, fact.period, fact.scope)
         if key in seen:

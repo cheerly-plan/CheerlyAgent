@@ -12,8 +12,10 @@ from __future__ import annotations
 
 BANK = "bank"
 GENERIC = "generic"
+SEMICONDUCTOR = "semiconductor"
 
-_GENERIC_INDICATORS = ["营业收入", "扣非净利润", "毛利率"]
+_GENERIC_INDICATORS = ["营业收入", "扣非净利润", "毛利率", "研发费用率"]
+_SEMICONDUCTOR_INDICATORS = ["营业收入", "扣非净利润", "毛利率", "研发费用率"]
 _BANK_INDICATORS = [
     "营业收入",
     "净利润",
@@ -75,7 +77,11 @@ def industry_of(subjects: list[str]) -> str:
 
 
 def default_indicators(industry: str) -> list[str]:
-    return list(_BANK_INDICATORS if industry == BANK else _GENERIC_INDICATORS)
+    if industry == BANK:
+        return list(_BANK_INDICATORS)
+    if industry in {SEMICONDUCTOR, "半导体"}:
+        return list(_SEMICONDUCTOR_INDICATORS)
+    return list(_GENERIC_INDICATORS)
 
 
 def normalize_indicator(text: str) -> str:

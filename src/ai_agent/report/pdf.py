@@ -16,6 +16,9 @@ from pathlib import Path
 
 from ai_agent.report.compare import SeriesCompare, parse_number
 from ai_agent.report.compose import ReportDocument
+from ai_agent.report.extract import IndicatorFact
+from ai_agent.report.parse import ReportPlan
+from ai_agent.report.skills import get_skill
 
 _FONT_FAMILY = "ReportCJK"
 _KNOWN_FONTS = (
@@ -96,10 +99,14 @@ def charts_from_series(series: list[SeriesCompare]) -> list[ChartSpec]:
             "point": "（比率，单位 %）",
             "stock": "（期末时点余额，非累计）",
         }.get(basis_key.split(":", 1)[0], "")
+        # 两点／三点画柱状，避免「折线伪趋势」；至少四期同口径才画折线。
+        n = len(points)
+        kind = "line" if n >= 4 else "bar"
+        shape = "多期趋势" if kind == "line" else "两点对比" if n == 2 else "多期对比"
         charts.append(
             ChartSpec(
-                title=f"{item.subject} {item.name}{suffix}",
-                kind="line",
+                title=f"{item.subject} {item.name}{suffix}（{shape}）",
+                kind=kind,
                 labels=[period for period, _value in points],
                 values=[value for _period, value in points],
                 unit=item.unit,
@@ -108,16 +115,88 @@ def charts_from_series(series: list[SeriesCompare]) -> list[ChartSpec]:
     return charts
 
 
+def charts_for_report(
+    plan: ReportPlan,
+    facts: list[IndicatorFact],
+    series: list[SeriesCompare],
+) -> list[ChartSpec]:
+    """行业赛道报告优先画「组内横比」柱状图；其它报告沿用多期对比图。"""
+    if plan.skill_id == "semiconductor_industry_report" or any(
+        item.title == "组内对比" for item in plan.outline
+    ):
+        peer = _segment_peer_charts(plan, facts)
+        if peer:
+            return peer
+    return charts_from_series(series)
+
+
+def _segment_peer_charts(
+    plan: ReportPlan, facts: list[IndicatorFact]
+) -> list[ChartSpec]:
+    """每赛道每指标一张横比柱状图（公司作 X 轴）；单公司赛道跳过。"""
+    skill = get_skill(plan.skill_id) if plan.skill_id else None
+    if skill is None or not skill.companies:
+        return []
+    current = [fact for fact in facts if fact.period == plan.period]
+    indicators = [
+        name
+        for name in (plan.indicators or ["营业收入", "毛利率", "研发费用率", "扣非净利润"])
+        if name in {"营业收入", "扣非净利润", "毛利率", "研发费用率"}
+    ]
+    charts: list[ChartSpec] = []
+    for segment, names in skill.companies_by_segment():
+        if len(names) < 2:
+            continue
+        for indicator in indicators:
+            rows: list[tuple[str, str, str]] = []
+            for company in names:
+                match = next(
+                    (
+                        fact
+                        for fact in current
+                        if fact.name == indicator
+                        and (
+                            fact.subject == company
+                            or company in fact.subject
+                            or fact.subject in company
+                        )
+                    ),
+                    None,
+                )
+                if match is None:
+                    continue
+                rows.append((company, match.value, match.unit))
+            if len(rows) < 2:
+                continue
+            units = {unit for _n, _v, unit in rows}
+            unit = next(iter(units)) if len(units) == 1 else rows[0][2]
+            # 单位不齐时跳过该图，避免元/千元横比误导
+            if len(units) > 1 and unit != "%":
+                continue
+            charts.append(
+                ChartSpec(
+                    title=f"{segment}·{indicator}（组内横比）",
+                    kind="bar",
+                    labels=[name for name, _v, _u in rows],
+                    values=[value for _n, value, _u in rows],
+                    unit=unit,
+                )
+            )
+    return charts
+
+
 def _chart_y_domain(
     amounts: list[Decimal], *, include_zero: bool
 ) -> tuple[Decimal, Decimal]:
     """折线按数据区间加边距缩放；柱状图仍含 0，否则高低对比会失真。
 
+    全部为正的柱状图：下沿钉在 0，禁止「pad 后出现负刻度」导致柱高失真。
     旧实现折线也强制从 0 起：净息差 1.26→1.27、营收近邻两期都会贴在图顶，
     看起来像一条几乎水平的斜线，变化读不出来。
     """
     low = min(amounts)
     high = max(amounts)
+    all_nonneg = min(amounts) >= 0
     if include_zero:
         low = min(low, Decimal(0))
         high = max(high, Decimal(0))
@@ -128,7 +207,10 @@ def _chart_y_domain(
         pad = (high - low) * Decimal("0.18")
         low, high = low - pad, high + pad
     if include_zero:
-        low = min(low, Decimal(0))
+        if all_nonneg:
+            low = Decimal(0)
+        else:
+            low = min(low, Decimal(0))
         high = max(high, Decimal(0))
     if high == low:
         high = low + Decimal(1)
@@ -161,11 +243,14 @@ def chart_svg(spec: ChartSpec) -> str:
         return ""
     kind = "line" if spec.kind in {"line", "趋势"} else "bar"
     width, height = 520, 268
-    left, right, top, bottom = 52, 24, 40, 44
-    plot_w = width - left - right
-    plot_h = height - top - bottom
     amounts = [amount for _label, amount, _raw in rows]
     low, high = _chart_y_domain(amounts, include_zero=(kind == "bar"))
+    # 金额轴用紧凑刻度时左边距可小一些；超大整数刻度需加宽以免裁字。
+    sample_tick = _format_axis_tick(high, spec.unit, span=high - low)
+    left = 72 if len(sample_tick) > 8 else 52
+    right, top, bottom = 24, 40, 44
+    plot_w = width - left - right
+    plot_h = height - top - bottom
 
     def y_of(amount: Decimal) -> float:
         return top + float((high - amount) / (high - low)) * plot_h
@@ -273,6 +358,11 @@ def _format_axis_tick(amount: Decimal, unit: str, *, span: Decimal | None = None
         places = Decimal("0.001") if narrow else Decimal("0.01")
         text = f"{amount.quantize(places):f}".rstrip("0").rstrip(".")
         return f"{text}%"
+    # 亿元级金额用紧凑刻度，避免「27,301,379,657」挤爆左边距。
+    if unit in {"", "元", "人民币元"} and abs(amount) >= Decimal("100000000"):
+        yi = amount / Decimal("100000000")
+        text = f"{yi.quantize(Decimal('0.01')):f}".rstrip("0").rstrip(".")
+        return f"{text}亿"
     if abs(amount) < 1000 or (span is not None and span < 1000):
         places = Decimal("0.01") if not narrow else Decimal("0.001")
         text = f"{amount.quantize(places):,}"
@@ -455,9 +545,9 @@ def _write_pdf(source: str) -> bytes:
 
 
 def _page_count(content: bytes) -> int:
-    import fitz
+    import pymupdf
 
-    document = fitz.open(stream=content, filetype="pdf")
+    document = pymupdf.open(stream=content, filetype="pdf")
     try:
         return document.page_count
     finally:

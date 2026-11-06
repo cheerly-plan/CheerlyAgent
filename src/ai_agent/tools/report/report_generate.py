@@ -56,7 +56,11 @@ class GenerateReportArgs(BaseModel):
     )
     write_pdf: bool = Field(
         default=True,
-        description="是否渲染 PDF；渲染环境不可用时自动降级为 Markdown，不会整体失败",
+        description=(
+            "是否渲染 PDF，默认 True。"
+            "仅当用户明确只要 Markdown / 不要 PDF 时才传 False；"
+            "渲染环境不可用时自动降级为 Markdown，不会整体失败"
+        ),
     )
 
 

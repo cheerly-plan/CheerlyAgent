@@ -21,6 +21,7 @@ from ai_agent.report.compare import (
 )
 from ai_agent.report.extract import IndicatorFact, citation_anchor
 from ai_agent.report.parse import OutlineItem, ReportPlan
+from ai_agent.report.skills import get_skill
 from ai_agent.report.supplemental import SupplementalResult
 
 _SCOPE = {"consolidated": "合并", "parent": "母公司"}
@@ -33,11 +34,21 @@ _UNKNOWN_SCOPE_CELL = "—"
 # 文案里不出现阿拉伯数字，避免被 validate 的数字扫描当成未核对数值。
 _READING_NOTE = (
     "阅读说明：本文数值均按财报原文披露值引用，不自行折算单位、不由累计值倒推单季；"
-    "期间口径、合并／母公司范围与取数列逐项列在「主要指标与出处」表，不以统一口径概括。",
+    "期间口径、合并／母公司范围与取数列逐项列在指标表，不以统一口径概括。",
     "表中「范围」记为「—」表示原文未注明合并或母公司范围，不代为推断；"
     "期末时点余额与期间比率不按累计值理解。",
     "每项数值的页码、章节与文件出处集中在表格「出处」列；方括号内的短标识为"
     "知识库文件标识前缀，完整标识与原文片段见溯源附件。",
+)
+
+_READING_NOTE_SEGMENT = (
+    "阅读说明：本文为半导体代表公司财报对比分析（赛道分组版），数值按财报原文披露值引用；"
+    "同表若原披露单位不同（如元与千元），不折算混比，并在表下注明单位不齐。",
+    "名单备注：韦尔股份现名豪威集团（股票代码 603501）；表头沿用技能名单「韦尔股份」，"
+    "出处文件名以披露主体「豪威集团」为准。",
+    "三级归因边界：①已抽取的数据事实可写；②原文经营说明须标出处后方可引用；"
+    "③无出处的第三方推断（如未披露的「AI 订单驱动」）一律不写。",
+    "表中「范围」记为「—」表示原文未注明合并或母公司范围；完整标识与原文片段见溯源附件。",
 )
 
 # 「本期结论」只提炼几条主线，完整指标集留给「主要指标与出处」表。
@@ -93,8 +104,16 @@ def compose_report(
     # 结论句已不再自带出处，出处全靠主要指标表承载。大纲若缺这一节（外部
     # 构造的 ReportPlan 可能没有），补上，避免产出一份全文无出处的报告。
     outline = list(plan.outline)
-    if outline and not any(item.title == "主要指标与出处" for item in outline):
+    # 赛道分组版已用「组内对比」承载指标表，不再追加「主要指标与出处」以免重复。
+    if (
+        outline
+        and not any(item.title == "主要指标与出处" for item in outline)
+        and not any(item.title == "组内对比" for item in outline)
+    ):
         outline.append(OutlineItem("主要指标与出处", ""))
+    note = _READING_NOTE_SEGMENT if _is_segment_report(plan) else _READING_NOTE
+    # 大纲自带「阅读说明」时不再额外 prepend 通用阅读注，避免双份。
+    prepend_note = note if outline and not any(item.title == "阅读说明" for item in outline) else ()
     sections = [
         (
             item.title,
@@ -112,8 +131,8 @@ def compose_report(
     ]
     if not sections:
         sections = [("正文", ["没有大纲，未写正文。"])]
-    # 无效请求不该套一份财报阅读说明。
-    note = _READING_NOTE if outline else ()
+    # 无效请求不该套一份财报阅读说明；大纲已含「阅读说明」时也不再 prepend。
+    note = prepend_note if outline else ()
     title = plan.title or "研报"
     markdown = _markdown(title, sections, note)
     return ReportDocument(
@@ -143,6 +162,18 @@ def _measure(fact: IndicatorFact) -> Measure:
 
 _ANALYSIS_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
 
+_NEXT_PERIOD_NOTE = (
+    "景气周期（全球半导体销售额增速、晶圆厂稼动率、存储／模拟价格等）"
+    "依赖外部数据源（WSTS／SEMI／协会），本期流水线未接入，不推断周期位置。",
+    "下一期预告需明确：数据源清单、入库表结构、更新频率；接入前本报告只做公司财报赛道分组对比。",
+)
+
+
+def _is_segment_report(plan: ReportPlan) -> bool:
+    return plan.skill_id == "semiconductor_industry_report" or any(
+        item.title in {"赛道分组", "组内对比"} for item in plan.outline
+    )
+
 
 def _section(
     title: str,
@@ -154,6 +185,10 @@ def _section(
     analysis: list[str] | None = None,
 ) -> list[str]:
     current = [fact for fact in facts if fact.period == plan.period]
+    if title == "阅读说明":
+        return list(
+            _READING_NOTE_SEGMENT if _is_segment_report(plan) else _READING_NOTE
+        )
     if title in {"本期结论", "覆盖范围", "行业概览"}:
         return _lead(plan, current, series, views)
     if title == "主要指标与出处":
@@ -169,11 +204,17 @@ def _section(
     if title == "经营解读":
         lines = [line.strip() for line in (analysis or []) if line and line.strip()]
         return lines or [_ANALYSIS_FALLBACK]
+    if title == "赛道分组":
+        return _segment_roster_lines(plan, current)
+    if title == "组内对比":
+        return _segment_peer_lines(plan, current)
+    if title == "趋势与对比图":
+        return _chart_guide_lines(series, plan, current)
+    if title == "下期预告":
+        return list(_NEXT_PERIOD_NOTE)
     if title in {"景气周期", "细分赛道"}:
-        return [
-            f"「{title}」依赖行业级外部数据（规模、稼动率、国产化率等），"
-            "本期流水线未接入该类数据源，本节从略，不推断。"
-        ]
+        # 旧大纲兜底：宏观从略，并指向下期预告语义
+        return list(_NEXT_PERIOD_NOTE)
     if title == "核心主线":
         return _observation_lines(plan, current, views)
     if title == "重点公司":
@@ -545,6 +586,261 @@ def _trend_lines(series: list[SeriesCompare], plan: ReportPlan | None = None) ->
     return ["没有多期数据，不写趋势。"]
 
 
+def _skill_segments(plan: ReportPlan) -> list[tuple[str, list[str]]]:
+    skill = get_skill(plan.skill_id) if plan.skill_id else None
+    if skill and skill.companies:
+        groups = skill.companies_by_segment()
+        if plan.subjects:
+            wanted = plan.subjects
+            filtered: list[tuple[str, list[str]]] = []
+            for segment, names in groups:
+                keep = [
+                    name
+                    for name in names
+                    if any(
+                        name == subject or name in subject or subject in name
+                        for subject in wanted
+                    )
+                ]
+                if keep:
+                    filtered.append((segment, keep))
+            return filtered or groups
+        return groups
+    if plan.subjects:
+        return [("未分组", list(plan.subjects))]
+    return []
+
+
+def _facts_for_subjects(
+    current: list[IndicatorFact], subjects: list[str]
+) -> list[IndicatorFact]:
+    rows: list[IndicatorFact] = []
+    for fact in current:
+        if any(
+            name_in_text(fact.subject, name)
+            or name_in_text(name, fact.subject)
+            or fact.subject == name
+            for name in subjects
+        ):
+            rows.append(fact)
+    return rows
+
+
+def _normalize_unit_label(unit: str) -> str:
+    text = (unit or "").strip()
+    if text in {"", "元", "人民币元"}:
+        return "元"
+    if text in {"千元", "人民币千元"}:
+        return "千元"
+    if text in {"万元", "人民币万元"}:
+        return "万元"
+    if text in {"亿元", "人民币亿元"}:
+        return "亿元"
+    return text
+
+
+def _peer_table_block(
+    title: str, rows: list[IndicatorFact], *, min_subjects: int = 1
+) -> list[str]:
+    """组内对比表：数值保持原披露，不做千元→元换算（换算值校验不过）。"""
+    subjects = {row.subject for row in rows}
+    if len(subjects) < min_subjects:
+        return []
+    units = {_normalize_unit_label(row.unit) for row in rows if row.unit}
+    lines = [title, "| 公司 | 数值 | 出处 |", "| --- | --- | --- |"]
+    for row in rows:
+        lines.append(f"| {row.subject} | {row.value}{row.unit} | {_cite(row)} |")
+    money = units & {"元", "千元", "万元", "亿元"}
+    if len(money) > 1:
+        lines.append(
+            f"注：本表金额单位未统一（{'／'.join(sorted(money))}），"
+            "按各行原披露单位阅读，不折算后对比。"
+        )
+    return lines
+
+
+def _segment_roster_lines(
+    plan: ReportPlan, current: list[IndicatorFact]
+) -> list[str]:
+    groups = _skill_segments(plan)
+    if not groups:
+        return ["没有可分组的代表公司。"]
+    lines = [
+        f"{plan.industry or ''}行业 {plan.period} 按赛道覆盖如下（只列名单与是否抽到本期财报，不写赛道景气度）。".strip()
+    ]
+    for segment, names in groups:
+        bits: list[str] = []
+        for name in names:
+            ready = any(
+                name_in_text(fact.subject, name) or name_in_text(name, fact.subject)
+                for fact in current
+            )
+            bits.append(f"{name}（{'已抽到本期' if ready else '本期未抽到'}）")
+        lines.append(f"**{segment}**：{'；'.join(bits)}。")
+    return lines
+
+
+def _cell_with_unit(fact: IndicatorFact | None, *, indicator: str = "") -> str:
+    if fact is None:
+        return "—"
+    unit = (fact.unit or "").strip()
+    if unit == "%":
+        return f"{fact.value}%"
+    if unit:
+        return f"{fact.value}{unit}"
+    # 金额类缺单位时默认补「元」，避免同行带单位、本格裸数字。
+    if indicator in {"营业收入", "扣非净利润"}:
+        return f"{fact.value}元"
+    return str(fact.value)
+
+
+def _find_fact(
+    facts: list[IndicatorFact], subject: str, indicator: str
+) -> IndicatorFact | None:
+    for fact in facts:
+        if fact.name != indicator:
+            continue
+        if (
+            fact.subject == subject
+            or name_in_text(fact.subject, subject)
+            or name_in_text(subject, fact.subject)
+        ):
+            return fact
+    return None
+
+
+def _wide_segment_table(
+    segment: str,
+    names: list[str],
+    facts: list[IndicatorFact],
+    indicators: list[str],
+) -> list[str]:
+    """行=公司、列=指标的赛道宽表；金额格带原单位，缺数用 —。"""
+    header = "| 公司 | " + " | ".join(indicators) + " |"
+    sep = "| --- | " + " | ".join("---" for _ in indicators) + " |"
+    lines = [header, sep]
+    money_units: set[str] = set()
+    for company in names:
+        cells = [company]
+        for indicator in indicators:
+            fact = _find_fact(facts, company, indicator)
+            cells.append(_cell_with_unit(fact, indicator=indicator))
+            if fact and indicator in {"营业收入", "扣非净利润"}:
+                money_units.add(_normalize_unit_label(fact.unit or "元"))
+        lines.append("| " + " | ".join(cells) + " |")
+    if len(names) < 2:
+        lines.append("注：本组仅 1 家代表公司，不做组内横比，仅列示本期已抽到指标。")
+    money = money_units & {"元", "千元", "万元", "亿元"}
+    if len(money) > 1:
+        lines.append(
+            f"注：金额列单位未统一（{'／'.join(sorted(money))}），"
+            "各格已带原披露单位，不折算后直接比大小。"
+        )
+    # 出处脚注：每公司一行，避免宽表塞满出处列
+    cites: list[str] = []
+    for company in names:
+        bits: list[str] = []
+        for indicator in indicators:
+            fact = _find_fact(facts, company, indicator)
+            if fact is None:
+                continue
+            bits.append(f"{indicator}←{_cite(fact)}")
+        if bits:
+            cites.append(f"{company}：{'；'.join(bits)}")
+    for cite in cites:
+        lines.append(f"出处：{cite}。")
+    if any(name == "韦尔股份" for name in names):
+        lines.append(
+            "注：韦尔股份现名豪威集团（603501）；表头沿用技能名单，出处以披露主体为准。"
+        )
+    return lines
+
+
+def _margin_ladder_table(current: list[IndicatorFact]) -> list[str]:
+    """全行业毛利率梯队总表（一眼可比）。"""
+    from ai_agent.report.compare import parse_number
+
+    rows: list[tuple[object, str, IndicatorFact]] = []
+    for fact in current:
+        if fact.name != "毛利率":
+            continue
+        parsed = parse_number(fact.value)
+        if parsed is None:
+            continue
+        rows.append((parsed[0], fact.subject, fact))
+    if len(rows) < 2:
+        return []
+    rows.sort(key=lambda item: item[0], reverse=True)
+    lines = [
+        "### 全行业毛利率梯队",
+        "| 名次 | 公司 | 毛利率 | 出处 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for index, (_amount, subject, fact) in enumerate(rows, start=1):
+        lines.append(
+            f"| {index} | {subject} | {fact.value}% | {_cite(fact)} |"
+        )
+    return lines
+
+
+def _segment_peer_lines(
+    plan: ReportPlan, current: list[IndicatorFact]
+) -> list[str]:
+    groups = _skill_segments(plan)
+    if not groups:
+        return _peer_lines(plan, current)
+    preferred = ["营业收入", "扣非净利润", "毛利率", "研发费用率"]
+    indicators = [name for name in preferred if name in (plan.indicators or preferred)]
+    if not indicators:
+        indicators = plan.indicators or preferred
+    lines: list[str] = []
+    ladder = _margin_ladder_table(current)
+    if ladder:
+        lines.extend(ladder)
+        lines.append("")
+    for segment, names in groups:
+        segment_facts = _facts_for_subjects(current, names)
+        lines.append(f"### {segment}")
+        if not segment_facts:
+            lines.append("本期未抽到该赛道代表公司指标。")
+            lines.append("")
+            continue
+        lines.extend(_wide_segment_table(segment, names, segment_facts, indicators))
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines or ["组内没有可对比的已抽取指标。"]
+
+
+def _chart_guide_lines(
+    series: list[SeriesCompare],
+    plan: ReportPlan | None = None,
+    facts: list[IndicatorFact] | None = None,
+) -> list[str]:
+    lines = [
+        "PDF 附图规则：赛道报告以「组内横比」柱状图为主（同赛道、同指标、公司并列）；"
+        "单公司多期仅两期用柱状两点对比，至少四期同口径才画折线，避免伪趋势。"
+        "柱状图仅出现在 PDF 交付件；本 Markdown 只列将生成的图题。",
+    ]
+    if plan is not None and plan.skill_id == "semiconductor_industry_report":
+        from ai_agent.report.pdf import charts_for_report
+
+        charts = charts_for_report(plan, facts or [], series)
+        if charts:
+            lines.append("本期 PDF 将附以下组内横比柱状图：")
+            for index, chart in enumerate(charts, start=1):
+                lines.append(f"{index}. {chart.title}")
+        else:
+            lines.append("本期重点看设备／设计赛道的营收、毛利率、研发费用率横比图。")
+        return lines
+    comparable = sum(1 for item in series if len(item.points) >= 2)
+    if comparable:
+        lines.append(f"本期另有 {comparable} 组多期序列可作附录对照。")
+    else:
+        lines.append("本期无可用同口径多期序列时，不附伪趋势折线。")
+    return lines
+
+
 def _peer_lines(plan: ReportPlan, current: list[IndicatorFact]) -> list[str]:
     grouped: dict[tuple[str, str], list[IndicatorFact]] = {}
     for fact in current:
@@ -556,11 +852,10 @@ def _peer_lines(plan: ReportPlan, current: list[IndicatorFact]) -> list[str]:
         subjects = {row.subject for row in rows}
         if len(subjects) < 2:
             continue
-        lines.append(f"{name}（{_scope(scope)}）")
-        lines.append("| 公司 | 数值 | 出处 |")
-        lines.append("| --- | --- | --- |")
-        for row in rows:
-            lines.append(f"| {row.subject} | {row.value}{row.unit} | {_cite(row)} |")
+        block = _peer_table_block(f"{name}（{_scope(scope)}）", rows, min_subjects=2)
+        if lines and block:
+            lines.append("")
+        lines.extend(block)
     return lines or ["同一指标没有两家以上的公司，不做公司间对比。"]
 
 

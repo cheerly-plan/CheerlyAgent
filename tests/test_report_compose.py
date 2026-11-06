@@ -79,3 +79,65 @@ def test_peer_table_needs_two_companies():
     assert "中国黄金集团黄金珠宝股份有限公司" in document.markdown
     assert "100,924,954元" in document.markdown
     assert "不做公司间对比" not in document.markdown
+
+
+def test_segment_peer_tables_group_by_skill_segment():
+    plan = ReportPlan(
+        title="半导体行业 2025Q3 财报对比分析（赛道分组版）",
+        kind="industry",
+        deliverable="markdown",
+        skill_id="semiconductor_industry_report",
+        industry="半导体",
+        subjects=["中芯国际", "北方华创", "中微公司", "韦尔股份"],
+        period="2025Q3",
+        indicators=["营业收入"],
+        outline=[
+            OutlineItem("阅读说明", ""),
+            OutlineItem("赛道分组", ""),
+            OutlineItem("组内对比", ""),
+            OutlineItem("下期预告", ""),
+        ],
+    )
+
+    def make(subject: str, value: str, unit: str = "元") -> IndicatorFact:
+        fact = _fact("2025Q3", value)
+        fact.subject = subject
+        fact.unit = unit
+        fact.evidence.file_id = subject
+        return fact
+
+    plan.indicators = ["营业收入", "扣非净利润", "毛利率", "研发费用率"]
+
+    def make_more(subject: str, name: str, value: str, unit: str = "%") -> IndicatorFact:
+        fact = _fact("2025Q3", value, name=name)
+        fact.subject = subject
+        fact.unit = unit
+        fact.evidence.file_id = f"{subject}-{name}"
+        return fact
+
+    document = compose_report(
+        plan,
+        [
+            make("中芯国际", "49,510,416", "千元"),
+            make("北方华创", "27,301,379,656.81"),
+            make("中微公司", "8,062,565,115.42"),
+            make("韦尔股份", "21,782,627,742.87"),
+            make_more("北方华创", "毛利率", "41.41"),
+            make_more("中微公司", "毛利率", "39.1"),
+            make_more("韦尔股份", "毛利率", "30.43"),
+            make_more("中芯国际", "毛利率", "25.5"),
+        ],
+    )
+    text = document.markdown
+    assert "三级归因" in text
+    assert "### 全行业毛利率梯队" in text
+    assert "| 名次 | 公司 | 毛利率 | 出处 |" in text
+    assert "### 设备" in text
+    assert "| 公司 | 营业收入 | 扣非净利润 | 毛利率 | 研发费用率 |" in text
+    assert "北方华创" in text and "中微公司" in text
+    assert "千元" in text and "不折算" in text
+    assert "WSTS" in text
+    assert "深度分析" not in plan.title
+    assert "49,510,416,000" not in text
+    # 不再按指标拆成多张三列表标题
+    assert "营业收入（合并）" not in text

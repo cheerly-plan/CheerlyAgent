@@ -192,23 +192,27 @@ def test_llm_error_falls_back_without_blocking():
         evidence=_evidence(),
     )
     assert section.used_llm is False
-    assert section.lines == [_FALLBACK]
+    assert section.lines != [_FALLBACK]
+    assert any("1.27%" in line for line in section.lines)
+    assert any("不构成无出处的因果归因" in line for line in section.lines)
 
     document = compose_report(plan, facts, analysis=section.lines)
     result = validate_report(document, facts, plan=plan)
     assert result.passed
     assert "## 经营解读" in document.markdown
-    assert _FALLBACK in document.markdown
+    assert _FALLBACK not in document.markdown
 
 
-def test_analysis_disabled_writes_fallback():
+def test_analysis_disabled_writes_deterministic_facts():
     section = analyze_operations(
         _plan("经营解读"),
         [_fact()],
         enabled=False,
         complete=lambda *_a: (_ for _ in ()).throw(AssertionError("不应调用")),
+        evidence=_evidence(),
     )
-    assert section.lines == [_FALLBACK]
+    assert any("1.27%" in line for line in section.lines)
+    assert _FALLBACK not in section.lines
 
 
 def test_attribution_without_anchor_goes_to_review_queue():

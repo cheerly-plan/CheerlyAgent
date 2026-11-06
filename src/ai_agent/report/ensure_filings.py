@@ -106,7 +106,7 @@ def _missing_targets(
     pairs: list[tuple[str, str]] = []  # subject_label, code
     skill = get_skill(plan.skill_id) if plan.skill_id else None
     if skill and skill.companies:
-        for name, code in skill.companies:
+        for name, code, _segment in skill.companies:
             if plan.subjects and name not in plan.subjects:
                 # 需求若已收窄主体，只补名单交集
                 if not any(name in subject or subject in name for subject in plan.subjects):

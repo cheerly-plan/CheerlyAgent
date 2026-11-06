@@ -274,6 +274,8 @@ def test_chart_skips_incomparable_periods_marks_comparable_ones():
     assert len(charts) == 1
     assert "累计口径，非单季" in charts[0].title
     assert charts[0].labels == ["2025Q3", "2026Q3"]
+    assert charts[0].kind == "bar"
+    assert "两点对比" in charts[0].title
 
 
 # ——— 推导值门禁 ———

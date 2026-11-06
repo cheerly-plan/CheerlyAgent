@@ -50,13 +50,35 @@ class ReportSkill:
     # 默认指标集。银行模板直接展开；通用模板复用 industry.generic 集。
     indicators: tuple[str, ...]
     sections: tuple[tuple[str, str], ...]
-    # 行业宇宙：((公司名, 股票代码), ...)；空 = 仍只从知识库推断主体
-    companies: tuple[tuple[str, str], ...] = ()
+    # 行业宇宙：((公司名, 股票代码, 赛道), ...)；赛道可空；空元组 = 仍只从知识库推断主体
+    companies: tuple[tuple[str, str, str], ...] = ()
 
     def build_outline(self, indicators: list[str]) -> list[tuple[str, str]]:
         """把 {indicators} 占位填成实际选中的指标名列表。"""
         joined = "、".join(indicators) if indicators else "已点名的指标"
         return [(title, brief.replace("{indicators}", joined)) for title, brief in self.sections]
+
+    def segment_of(self, subject: str) -> str:
+        """按公司名（或包含关系）查赛道；未标注返回空串。"""
+        token = (subject or "").strip()
+        if not token:
+            return ""
+        for name, _code, segment in self.companies:
+            if name == token or name in token or token in name:
+                return segment
+        return ""
+
+    def companies_by_segment(self) -> list[tuple[str, list[str]]]:
+        """按赛道稳定分组：[(赛道, [公司名…]), …]；无赛道的放「未分组」。"""
+        order: list[str] = []
+        buckets: dict[str, list[str]] = {}
+        for name, _code, segment in self.companies:
+            key = segment or "未分组"
+            if key not in buckets:
+                order.append(key)
+                buckets[key] = []
+            buckets[key].append(name)
+        return [(key, buckets[key]) for key in order]
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -82,28 +104,28 @@ def _parse_industries(raw: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
-def _parse_companies(raw: str) -> tuple[tuple[str, str], ...]:
-    """解析 ``公司名|代码, …``；代码须为 6 位数字。"""
+def _parse_companies(raw: str) -> tuple[tuple[str, str, str], ...]:
+    """解析 ``公司名|代码`` 或 ``公司名|代码|赛道``；代码须为 6 位数字。"""
     text = (raw or "").strip().strip("[]")
     if not text:
         return ()
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for part in text.split(","):
         item = part.strip()
         if not item:
             continue
-        if "|" not in item:
-            raise ValueError(f"companies 项须为「公司名|代码」：{item!r}")
-        name, _, code = item.partition("|")
-        name = name.strip()
-        code = code.strip()
+        pieces = [p.strip() for p in item.split("|")]
+        if len(pieces) not in {2, 3}:
+            raise ValueError(f"companies 项须为「公司名|代码」或「公司名|代码|赛道」：{item!r}")
+        name, code = pieces[0], pieces[1]
+        segment = pieces[2] if len(pieces) == 3 else ""
         if not name or not re.fullmatch(r"\d{6}", code):
             raise ValueError(f"companies 项非法：{item!r}")
         if code in seen:
             continue
         seen.add(code)
-        out.append((name, code))
+        out.append((name, code, segment))
     return tuple(out)
 
 

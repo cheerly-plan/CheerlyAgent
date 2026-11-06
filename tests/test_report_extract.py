@@ -99,7 +99,8 @@ def test_extract_indicators_keeps_file_and_page(monkeypatch):
     assert [fact.value for fact in result.facts] == ["100,924,954", "12.30%"]
     assert result.missing == []
     revenue = result.facts[0]
-    assert revenue.subject == "中国能源建设股份有限公司"
+    # 需求简称「中国能建」能对上库内别名时，正文主体用简称，便于缺口对账
+    assert revenue.subject == "中国能建"
     assert revenue.period == "2025Q3"
     assert revenue.evidence.file_id == str(file_id)
     assert revenue.evidence.page == 12
@@ -127,6 +128,55 @@ def test_extract_indicators_reports_a_missing_line(monkeypatch):
     result = extract_indicators(["中国黄金"], "2025Q3", ["毛利率"])
     assert result.facts == []
     assert result.missing == ["毛利率：表格和正文里都没有对上的一行"]
+
+
+def test_extract_gross_margin_from_narrative_when_table_missing(monkeypatch):
+    """中芯等季报常把毛利率写在经营分析正文，主表没有独立行。"""
+    file_id = uuid.uuid4()
+    files = [
+        {
+            "file_id": file_id,
+            "filename": "中芯国际2025年第三季度报告.pdf",
+            "status": "ready",
+            "subject": "中芯国际",
+            "subject_aliases": ["中芯国际"],
+            "period": "2025Q3",
+        }
+    ]
+    prose = (
+        "三季度，公司整体实现营业收入人民币171.62亿元，环比增长6.9%；"
+        "公司毛利率为25.5%，环比上升4.8个百分点；产能利用率上升至95.8%。"
+    )
+
+    def search(keywords, **kwargs):
+        kinds = kwargs.get("kinds") or []
+        if kinds == ["table"]:
+            return []
+        return [
+            {
+                "file_id": file_id,
+                "filename": files[0]["filename"],
+                "subject": files[0]["subject"],
+                "page": 8,
+                "page_end": 8,
+                "section": "经营情况讨论与分析",
+                "scope": "",
+                "text": prose,
+            }
+        ]
+
+    monkeypatch.setattr("ai_agent.report.extract.store.list_kb_files", lambda **k: files)
+    monkeypatch.setattr(
+        "ai_agent.report.extract.store.search_kb_chunks_keyword", search
+    )
+    result = extract_indicators(["中芯国际"], "2025Q3", ["毛利率"])
+    assert len(result.facts) == 1
+    fact = result.facts[0]
+    assert fact.name == "毛利率"
+    assert fact.value == "25.5"
+    assert fact.unit == "%"
+    assert fact.evidence.page == 8
+    assert "25.5" in fact.evidence.quote
 
 
 # 季报「主要财务数据」的真实形态：单季与累计并排，且各自带一列官方同比。

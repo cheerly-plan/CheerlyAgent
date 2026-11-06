@@ -257,9 +257,9 @@ class ReportRequest(BaseModel):
         max_length=500,
         description="一句需求，例如「生成中国能源建设2026Q3财报深度分析PDF研报」",
     )
-    # 不传时按需求文本推断（含 PDF 字样 → pdf，否则 markdown）
+    # 不传时默认 pdf；需求写明只要 Markdown / 不要 PDF 才降为 markdown
     deliverable: Literal["pdf", "markdown"] | None = Field(
-        default=None, description="交付形态，留空按需求文本推断"
+        default=None, description="交付形态，留空默认 pdf"
     )
     # 报告类型（skill 层路由）：留空自动路由（银行/通用公司/行业）
     report_type: str | None = Field(

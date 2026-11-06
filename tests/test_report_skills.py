@@ -61,13 +61,20 @@ def test_semiconductor_skill_has_universe_and_outline():
     assert skill is not None
     assert skill.kind == "industry"
     assert "半导体" in skill.industries
-    codes = {code for _name, code in skill.companies}
+    codes = {code for _name, code, _seg in skill.companies}
     assert {"688981", "002371", "603501", "688256"} <= codes
+    assert skill.segment_of("中芯国际") == "制造"
+    assert skill.segment_of("寒武纪") == "设计"
     titles = [title for title, _ in skill.sections]
-    assert titles[0] == "行业概览"
-    assert "重点公司" in titles
-    assert "风险与缺失" in titles
+    assert titles[0] == "阅读说明"
+    assert "赛道分组" in titles
+    assert "组内对比" in titles
+    assert "经营解读" in titles
+    assert "缺失与口径" in titles
+    assert "下期预告" in titles
+    assert "景气周期" not in titles
     assert "估值" not in "".join(titles)
+    assert "研发费用率" in skill.indicators
 
 
 def test_semiconductor_empty_kb_uses_skill_companies(monkeypatch):
@@ -83,7 +90,8 @@ def test_semiconductor_empty_kb_uses_skill_companies(monkeypatch):
     assert "中芯国际" in plan.subjects
     assert "寒武纪" in plan.subjects
     assert not any("无法确定要调取哪些季报" in gap for gap in plan.gaps)
-    assert any(item.title == "重点公司" for item in plan.outline)
+    assert any(item.title == "组内对比" for item in plan.outline)
+    assert any(item.title == "经营解读" for item in plan.outline)
 
 
 def test_parse_request_records_routed_skill(monkeypatch):

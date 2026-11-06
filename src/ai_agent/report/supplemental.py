@@ -19,7 +19,14 @@ from dataclasses import dataclass, field
 
 from ai_agent.core.logging import get_logger
 from ai_agent.storage.store import store
-from ai_agent.report.extract import Evidence, _as_uuid, _files_for, _unit_of
+from ai_agent.report.extract import (
+    Evidence,
+    _as_uuid,
+    _files_for,
+    _indicator_spec,
+    _row_rank,
+    _unit_of,
+)
 
 logger = get_logger(__name__)
 
@@ -153,8 +160,9 @@ def _quarter_views(
         for cells in body:
             if not cells:
                 continue
-            name = cells[0].strip()
-            if name not in wanted or (name, unit) in seen:
+            row_name = cells[0].strip()
+            matched = _match_wanted_indicator(row_name, wanted)
+            if not matched or (matched, unit) in seen:
                 continue
             quarter = _cell(cells, q_i)
             cumulative = _cell(cells, c_i)
@@ -164,7 +172,7 @@ def _quarter_views(
             meta = by_id.get(file_id, {})
             views.append(
                 QuarterView(
-                    name=name,
+                    name=matched,
                     unit=unit,
                     cumulative_value=cumulative,
                     cumulative_yoy=_percent(_cell(cells, c_yoy_i)),
@@ -180,21 +188,70 @@ def _quarter_views(
                     ),
                 )
             )
-            seen.add((name, unit))
+            seen.add((matched, unit))
     return views
 
 
+def _match_wanted_indicator(row_name: str, wanted: set[str]) -> str:
+    """把主表行名对回计划指标简称（如扣非净利润 ← 归属于…扣除非经常性损益的净利润）。"""
+    if row_name in wanted:
+        return row_name
+    best = ""
+    best_rank = 0
+    for indicator in wanted:
+        _keyword, aliases = _indicator_spec(indicator)
+        rank = _row_rank(row_name, aliases)
+        if rank > best_rank:
+            best_rank = rank
+            best = indicator
+    return best
+
+
 def _year_end_views(file_ids: list, files: list[dict]) -> list[YearEndView]:
+    """较上年末：先读资产负债主表（本报告期末／上年度末），再读经营分析正文。"""
+    by_id = {str(row.get("file_id")): row for row in files}
+    views: list[YearEndView] = []
+    found: set[str] = set()
+
+    try:
+        table_chunks = store.search_kb_chunks_keyword(
+            ["上年度末"], file_ids=file_ids, top_k=10, kinds=["table"]
+        )
+    except Exception:
+        logger.exception("检索较上年末资产负债表失败")
+        table_chunks = []
+    for chunk in table_chunks:
+        text = str(chunk.get("text") or "")
+        for item in _balance_year_end_rows(text):
+            if item.name in found:
+                continue
+            file_id = str(chunk.get("file_id") or "")
+            meta = by_id.get(file_id, {})
+            views.append(
+                YearEndView(
+                    name=item.name,
+                    value=item.value,
+                    unit=item.unit or _unit_of(text) or "元",
+                    change=item.change,
+                    evidence=Evidence(
+                        file_id=file_id,
+                        filename=str(chunk.get("filename") or meta.get("filename") or ""),
+                        page=chunk.get("page"),
+                        page_end=chunk.get("page_end"),
+                        section=str(chunk.get("section") or ""),
+                        quote=item.quote,
+                    ),
+                )
+            )
+            found.add(item.name)
+
     try:
         chunks = store.search_kb_chunks_keyword(
             ["比上年末"], file_ids=file_ids, top_k=10, kinds=["text"]
         )
     except Exception:
         logger.exception("检索较上年末变动失败")
-        return []
-    by_id = {str(row.get("file_id")): row for row in files}
-    views: list[YearEndView] = []
-    found: set[str] = set()
+        chunks = []
     for chunk in chunks:
         text = str(chunk.get("text") or "")
         for name, pattern, unit in _YEAR_END_SPECS:
@@ -227,6 +284,76 @@ def _year_end_views(file_ids: list, files: list[dict]) -> list[YearEndView]:
             )
             found.add(name)
     return views
+
+
+@dataclass
+class _BalanceYearEnd:
+    name: str
+    value: str
+    change: str
+    unit: str = ""
+    quote: str = ""
+
+
+def _balance_year_end_rows(text: str) -> list[_BalanceYearEnd]:
+    """读「本报告期末｜上年度末｜比上年度末增减」表，常见于非金融公司季报第 1–2 页。"""
+    wanted = ("总资产", "归属于上市公司股东的所有者权益", "归属于上市公司股东的净资产")
+    found: list[_BalanceYearEnd] = []
+    for table in _TABLE.finditer(text):
+        block = table.group(0)
+        rows = [
+            [_clean(cell.group(1)) for cell in _CELL.finditer(row.group(1))]
+            for row in _ROW.finditer(block)
+        ]
+        if len(rows) < 2:
+            continue
+        headers = rows[0]
+        flat = "".join(headers)
+        if "上年度末" not in flat or "本报告期末" not in flat:
+            continue
+        end_i = _column(headers, lambda h: h == "本报告期末" or h.endswith("本报告期末"))
+        # 表头第一列常为空，用「上年度末」定位后一列增减
+        change_i = _column(
+            headers,
+            lambda h: "比上年度末" in h or "较上年度末" in h or "比上年末" in h,
+        )
+        if end_i is None or change_i is None:
+            continue
+        for cells in rows[1:]:
+            if not cells:
+                continue
+            name = cells[0].strip()
+            if name not in wanted:
+                continue
+            value = _cell(cells, end_i)
+            change_raw = _cell(cells, change_i)
+            if not value or not change_raw:
+                continue
+            change = _percent(change_raw)
+            if not change:
+                continue
+            # 表内增减未带方向词时，正数记为 +、负数保留 -
+            if not change.startswith(("+", "-")):
+                change = f"+{change}"
+            # 校验要求片段里能见到「增加/减少」方向词；表头只有「增减幅度」，
+            # 按数值符号写成方向词，并保留原百分比数字。
+            direction = "减少" if change.startswith("-") else "增加"
+            pct = change.lstrip("+-")
+            quote = (
+                f"{name} 本报告期末 {value}，"
+                f"本报告期末比上年度末增减变动幅度(%) {change_raw}，"
+                f"比上年度末{direction}{pct}"
+            )
+            found.append(
+                _BalanceYearEnd(
+                    name=name,
+                    value=value,
+                    change=change,
+                    unit=_unit_of(text) or "元",
+                    quote=quote,
+                )
+            )
+    return found
 
 
 def _change_after(text: str, start: int) -> str:

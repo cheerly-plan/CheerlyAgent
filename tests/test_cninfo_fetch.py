@@ -124,7 +124,7 @@ def test_search_switches_to_summary_when_full_too_large(monkeypatch):
         "request_form",
         lambda *a, **k: _announcements_payload(full_size=20_000_000),
     )
-    monkeypatch.setattr(settings, "cninfo_full_max_mb", 4.0)
+    monkeypatch.setattr(settings, "cninfo_full_max_mb", 1.0)
     rows = cninfo.search_announcements("601988", "2025Q3")
     assert len(rows) == 1
     assert rows[0].announcement_id == "2"
@@ -166,7 +166,7 @@ def test_half_year_uses_summary_when_full_huge(monkeypatch):
         }
 
     monkeypatch.setattr(cninfo.http, "request_form", form)
-    monkeypatch.setattr(settings, "cninfo_full_max_mb", 4.0)
+    monkeypatch.setattr(settings, "cninfo_full_max_mb", 1.0)
     rows = cninfo.search_announcements("601988", "2025H1")
     assert len(rows) == 1
     assert rows[0].announcement_id == "sum"

@@ -86,8 +86,8 @@ class Settings(BaseSettings):
     cninfo_request_interval_seconds: float = 1.0
     cninfo_stock_cache_ttl_seconds: int = 86400
     # 全文 PDF 超过该体积（MB）改抓「报告摘要」；摘要没有则仍下全文。
-    # 本地 OCR / 入库对大文件很敏感，4MB 起就优先摘要。
-    cninfo_full_max_mb: float = 4.0
+    # 本地 OCR / 入库对大文件很敏感，1MB 起就优先摘要。
+    cninfo_full_max_mb: float = 1.0
     # 自动入库后等待解析完成的秒数基线；超时仍继续抽数（可能 gaps）。
     # 行业研报一次可补十几份 PDF，本地 OCR 很慢，180s 往往只等到前几份。
     cninfo_ingest_wait_seconds: int = 600

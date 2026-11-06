@@ -2,7 +2,7 @@
 
 import base64
 
-import fitz
+import pymupdf
 
 from ai_agent.report.compare import Measure, compare_measures
 from ai_agent.report.compose import ReportDocument, compose_report
@@ -106,12 +106,50 @@ def test_chart_uses_the_given_numbers():
     )
     assert "111,000,000" in svg
     assert "100,924,954" in svg
-    assert "<polyline" in svg
-    assert "<circle" in svg
+    # 两点同比一律柱状，禁止折线伪趋势
+    assert "<rect" in svg
+    assert "<polyline" not in svg
+    charts = charts_from_series(
+        compare_measures(
+            [
+                Measure("中国能源建设股份有限公司", "营业收入", "2024Q3", "111,000,000", "元"),
+                Measure("中国能源建设股份有限公司", "营业收入", "2025Q3", "100,924,954", "元"),
+            ]
+        )
+    )
+    assert charts[0].kind == "bar"
+    assert "两点对比" in charts[0].title
     bar = chart_svg(ChartSpec(title="毛利率", kind="bar", labels=["2025Q3"], values=["12.5%"], unit="%"))
     assert "12.5%" in bar
     assert "<rect" in bar
     assert chart_svg(ChartSpec(title="空", kind="bar", labels=["2025Q3"], values=["不适用"])) == ""
+
+
+def test_bar_chart_y_axis_does_not_go_negative_for_positive_values():
+    """全为正的柱状图：下沿钉在 0，不再 pad 出负刻度。"""
+    import re
+
+    from ai_agent.report.pdf import _chart_y_domain
+    from decimal import Decimal
+
+    low, high = _chart_y_domain(
+        [Decimal("100"), Decimal("200")], include_zero=True
+    )
+    assert low == 0
+    assert high > 200
+
+    svg = chart_svg(
+        ChartSpec(
+            title="营收",
+            kind="bar",
+            labels=["2024Q3", "2025Q3"],
+            values=["1000000", "2000000"],
+            unit="元",
+        )
+    )
+    ticks = re.findall(r">(-?[\d,]+(?:\.\d+)?)<", svg)
+    assert any(t.replace(",", "") == "0" or t == "0" for t in ticks)
+    assert not any(t.startswith("-") for t in ticks if t not in {"-"})
 
 
 def test_line_chart_scales_to_data_range_not_zero():
@@ -187,7 +225,7 @@ def test_tool_writes_pdf_and_stays_off_the_chat_loop(tmp_path):
 
 
 def _text(content: bytes) -> str:
-    document = fitz.open(stream=content, filetype="pdf")
+    document = pymupdf.open(stream=content, filetype="pdf")
     try:
         return "".join(page.get_text() for page in document)
     finally:

@@ -40,7 +40,8 @@ _INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     "归母净利润": ("归属于上市公司股东的净利润", ("归属于上市公司股东的净利润",)),
     "净利润": ("净利润", ("净利润",)),
-    "毛利率": ("毛利率", ("毛利率",)),
+    "毛利率": ("毛利率", ("毛利率", "综合毛利率")),
+    "研发费用率": ("研发费用率", ("研发费用率", "研发投入占比")),
 }
 
 # 银行季报的资产质量、息差、资本充足率写在「经营情况简要分析」正文里，
@@ -48,6 +49,14 @@ _INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = {
 # 并保留原文句子作为证据；匹配不上就写缺口，不用通用正则去猜。
 # 值： (检索关键词, 正则, 单位)。金额类只在正文给出「亿元」。
 _NARRATIVE_PATTERNS: dict[str, tuple[str, str, str]] = {
+    # 半导体等制造业季报常把毛利率写在经营分析正文，主表未必有独立行。
+    "毛利率": ("毛利率", r"毛利率为?\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
+    "研发费用率": (
+        "研发",
+        r"(?:研发费用率|研发投入占营业收入(?:的比例)?|研发费用占营业收入(?:的比例)?)"
+        r"为?\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
     "净息差": ("净息差", r"净息差\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
     "不良贷款率": ("不良贷款率", r"不良贷款率\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
     "不良贷款拨备覆盖率": (
@@ -358,15 +367,25 @@ def _fact_subject(
     filename = str(row.get("filename") or meta.get("filename") or "")
     stored = str(meta.get("subject") or row.get("subject") or "").strip()
     from_fn = extract_subject(filename)
+    aliases = [
+        str(item).strip()
+        for item in (meta.get("subject_aliases") or row.get("subject_aliases") or [])
+        if str(item).strip()
+    ]
     for name in requested or []:
         token = (name or "").strip()
         if not token:
             continue
-        # 需求简称能对上文件名或库内主体时，用简称写正文（缺口也对得上）
+        # 需求简称能对上文件名、库内主体或别名时，用简称写正文（缺口也对得上）
+        # 例：需求「韦尔股份」、库内「豪威集团」且 aliases 含韦尔 → 仍写韦尔股份
         if (
             name_in_text(filename, token)
             or name_in_text(stored, token)
             or name_in_text(from_fn, token)
+            or any(
+                name_in_text(alias, token) or name_in_text(token, alias)
+                for alias in aliases
+            )
         ):
             return token
     # 对不上需求名单时：优先库内合理全称，再退回文件名

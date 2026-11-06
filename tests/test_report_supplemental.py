@@ -180,6 +180,93 @@ def test_year_end_changes_stay_with_their_own_indicator(env):
     assert changes["不良贷款拨备覆盖率"] == "-2.07个百分点"
 
 
+_BALANCE_TABLE = """单位：元
+<table>
+<tr><td></td><td>本报告期末</td><td>上年度末</td><td>本报告期末比上年度末增减变动幅度(%)</td></tr>
+<tr><td>总资产</td><td>87,654,926,728.13</td><td>21,396,579,783.85</td><td>309.67</td></tr>
+<tr><td>归属于上市公司股东的所有者权益</td><td>76,828,535,308.48</td><td>19,007,782,130.79</td><td>304.20</td></tr>
+</table>
+"""
+
+
+def test_balance_sheet_year_end_table_is_read(monkeypatch):
+    """非金融季报：较上年末在资产负债表，不在经营分析正文。"""
+    file_id = uuid.uuid4()
+    filename = "兆易创新2026年第三季度报告"
+    files = [
+        {
+            "file_id": file_id,
+            "filename": filename,
+            "status": "ready",
+            "subject": "兆易创新科技集团股份有限公司",
+            "subject_aliases": ["兆易创新"],
+            "period": "2026Q3",
+        }
+    ]
+    monkeypatch.setattr(
+        "ai_agent.report.supplemental.store.list_kb_files", lambda: files
+    )
+
+    def search(keywords, **kwargs):
+        kinds = kwargs.get("kinds") or ["text"]
+        text = _BALANCE_TABLE if "table" in kinds else ""
+        if not text:
+            return []
+        return [
+            {
+                "file_id": file_id,
+                "filename": filename,
+                "page": 2,
+                "page_end": None,
+                "section": "一、主要财务数据",
+                "text": text,
+                "kind": "table",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "ai_agent.report.supplemental.store.search_kb_chunks_keyword", search
+    )
+    views = extract_supplemental(["兆易创新科技集团股份有限公司"], "2026Q3", [])
+    changes = {item.name: item.change for item in views.year_ends}
+    assert changes["总资产"] == "+309.67%"
+    assert changes["归属于上市公司股东的所有者权益"] == "+304.20%"
+
+
+def test_quarter_view_maps_koufei_alias(env, monkeypatch):
+    """计划写「扣非净利润」时，应对上主表长行名。"""
+    file_id, filename = env
+
+    def search(keywords, **kwargs):
+        text = """单位：元
+<table>
+<tr><td>项目</td><td>本报告期</td><td>本报告期比上年同期增减(%)</td><td>年初至报告期末</td><td>年初至报告期末比上年同期增减(%)</td></tr>
+<tr><td>归属于上市公司股东的扣除非经常性损益的净利润</td><td>4,550,927,442.96</td><td>814.39</td><td>9,433,960,921.89</td><td>805.26</td></tr>
+</table>
+"""
+        return [
+            {
+                "file_id": file_id,
+                "filename": filename,
+                "page": 1,
+                "page_end": None,
+                "section": "一、主要财务数据",
+                "text": text,
+                "kind": "table",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "ai_agent.report.supplemental.store.search_kb_chunks_keyword", search
+    )
+    views = extract_supplemental(
+        ["中国银行股份有限公司"], "2026Q3", ["扣非净利润"]
+    )
+    assert len(views.quarters) == 1
+    assert views.quarters[0].name == "扣非净利润"
+    assert views.quarters[0].quarter_value == "4,550,927,442.96"
+
+
 def test_year_end_prefers_growth_rate_over_amount_increment(env):
     views = extract_supplemental(["中国银行股份有限公司"], "2026Q3", [])
     changes = {item.name: item.change for item in views.year_ends}

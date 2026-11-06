@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.ingest.meta import name_in_text
+from ai_agent.kb.ingest.meta import fragment_subjects, is_plausible_subject, name_in_text
 from ai_agent.storage.store import store
 from ai_agent.report.compare import cumulative_base_periods, qoq_period, yoy_period
 from ai_agent.report.industry import indicator_aliases, industry_of
@@ -25,7 +25,13 @@ _PERIOD_HALF = re.compile(r"((?:19|20)\d{2})\s*年?\s*(?:半年度|半年报|中
 _PERIOD_YEAR = re.compile(r"((?:19|20)\d{2})\s*年(?:度报告|年报|度)?")
 _INDUSTRY = re.compile(r"([0-9A-Za-z\u4e00-\u9fff]{2,12})行业")
 _REPORT = re.compile(r"研报|财报|深度分析|分析报告")
-_PDF = re.compile(r"PDF|pdf")
+# 默认出 PDF；只有明确只要 Markdown / 不要 PDF 才降级（聊天侧常不写「PDF」二字）
+_MARKDOWN_ONLY = re.compile(
+    r"(只要|仅要|仅出|只要出|仅生成|只要生成)\s*(Markdown|markdown|MD\b|md\b)"
+    r"|不要\s*PDF|无需\s*PDF|跳过\s*PDF|不需要\s*PDF"
+    r"|Markdown\s*即可|只要\s*正文",
+    re.I,
+)
 # 长名称放前面，避免「净利润」从「扣非净利润」里再认一次
 _INDICATOR_KEYS = (
     ("扣非净利润", ("扣非净利润", "扣非")),
@@ -81,7 +87,7 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
     plan = ReportPlan(
         title="",
         kind="unknown",
-        deliverable="pdf" if _PDF.search(request) else "markdown",
+        deliverable="markdown" if _MARKDOWN_ONLY.search(request) else "pdf",
     )
     if not request or not _REPORT.search(request):
         plan.gaps.append("没有看到研报或财报分析需求")
@@ -119,7 +125,7 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
     plan.skill_id = skill.skill_id
     # 行业 skill 自带宇宙名单：空库也能定标的，再靠巨潮补齐原文。
     if plan.kind == "industry" and not plan.subjects and skill.companies:
-        plan.subjects = [name for name, _code in skill.companies]
+        plan.subjects = [name for name, _code, _segment in skill.companies]
         plan.gaps = [
             gap
             for gap in plan.gaps
@@ -181,13 +187,26 @@ def _period_sort(period: str) -> tuple[int, int]:
 
 
 def _mentioned_subjects(text: str, rows: list[dict]) -> list[str]:
+    """点名公司：全称／别名整段命中，或主体核心名里的独有片段（如「中科飞测」）。
+
+    库里误标成「股份有限公司」「公开发行证券」的脏 subject 直接跳过，
+    避免需求里写了真全称时被套话主体一起带上。
+    """
     found: list[str] = []
+    catalog: list[tuple[str, list[str]]] = []
     for row in rows:
         subject = str(row.get("subject") or "").strip()
-        if not subject or subject in found:
+        if not subject or not is_plausible_subject(subject):
             continue
-        names = [subject, *list(row.get("subject_aliases") or []), str(row.get("filename") or "")]
+        aliases = [str(item) for item in (row.get("subject_aliases") or []) if item]
+        catalog.append((subject, aliases))
+        if subject in found:
+            continue
+        names = [subject, *aliases, str(row.get("filename") or "")]
         if any(name and name_in_text(text, str(name)) for name in names):
+            found.append(subject)
+    for subject in fragment_subjects(text, catalog):
+        if subject not in found and is_plausible_subject(subject):
             found.append(subject)
     return found
 
@@ -352,6 +371,8 @@ def _outline(plan: ReportPlan, skill: ReportSkill) -> list[OutlineItem]:
 
 def _title(plan: ReportPlan) -> str:
     if plan.kind == "industry" and plan.industry and plan.period:
+        if plan.skill_id == "semiconductor_industry_report":
+            return f"{plan.industry}行业 {plan.period} 财报对比分析（赛道分组版）"
         return f"{plan.industry}行业 {plan.period} 深度分析"
     if plan.subjects and plan.period:
         names = "、".join(plan.subjects)

@@ -9,7 +9,8 @@
   （正文里任何不在 allowed 集合里的数字都会被判 error）；失败则从略。
 * **缺原文可自动巨潮补齐**（``enable_cninfo_fetch``）：解析需求后若缺本期/
   同比基期 PDF，按股票代码拉取并等到 ready，再抽数；不经对话「补文件」。
-* 数字只从知识库表格切片里抽，抽不到就写进 gaps，绝不补一个看起来像的数。
+* 数字优先从知识库表格/正文抽取；半导体等行业 skill 对仍缺的比率类指标
+  可用 akshare 结构化摘要补齐（带出处 quote），绝不凭空编造。
 * PDF 渲染失败（缺中文字体 / WeasyPrint 缺系统库）时**降级为 Markdown 交付**，
   正文、溯源附件、人工审核队列照常产出，不因渲染环境整体失败。
 * M2 定稿门禁：校验有 error 时**不渲染 PDF**；生成完成后登记审核记录
@@ -34,7 +35,8 @@ from ai_agent.report.compose import ReportDocument, compose_report
 from ai_agent.report.ensure_filings import ensure_filings_for_report
 from ai_agent.report.extract import IndicatorFact, extract_indicators
 from ai_agent.report.parse import ReportPlan, parse_request
-from ai_agent.report.pdf import PdfFile, charts_from_series, render_report_pdf
+from ai_agent.report.market_finance import supplement_facts_from_market
+from ai_agent.report.pdf import PdfFile, charts_for_report, render_report_pdf
 from ai_agent.report.review import create_record
 from ai_agent.report.supplemental import SupplementalResult, extract_supplemental
 from ai_agent.report.validate import ValidationResult, validate_report
@@ -159,6 +161,8 @@ def run_report(
     ]
     series = compare_measures(measures)
     analysis = analyze_operations(plan, facts, series=series, views=views)
+    if analysis.derived_facts:
+        facts = [*facts, *analysis.derived_facts]
     document = compose_report(plan, facts, views=views, analysis=analysis.lines)
     if analysis.gaps:
         # 分析节缺口并入 document.gaps，便于审核队列与 gaps 属性统一可见。
@@ -195,7 +199,9 @@ def run_report(
         document.deliverable = "markdown"
     elif want_pdf:
         try:
-            result.pdf = render_report_pdf(document, charts=charts_from_series(series))
+            result.pdf = render_report_pdf(
+                document, charts=charts_for_report(plan, facts, series)
+            )
             result.pdf_status = "generated"
         except Exception as exc:
             # 渲染是交付形态，不是数据正确性。缺字体/缺 Pango 时降级，
@@ -252,6 +258,8 @@ def _extract_all(
         extracted = extract_indicators(plan.subjects, period, plan.indicators)
         facts.extend(extracted.facts)
         missing.extend(f"[{period}] {item}" for item in extracted.missing)
+    # PDF 抽不到的毛利率等比率：用结构化摘要补本期缺口（行业名单或巨潮代码）。
+    facts, missing = supplement_facts_from_market(plan, facts, missing)
     # 单季/较上年末视图只查本期文件，不跨期拼数；缺口如实回传。
     views = extract_supplemental(plan.subjects, plan.period, plan.indicators)
     missing.extend(f"[视图] {item}" for item in views.gaps)
