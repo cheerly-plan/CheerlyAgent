@@ -1,6 +1,6 @@
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.parse import complete_memory_chat
+from ai_agent.memory.llm_calls import complete_memory_chat
 from ai_agent.prompts.memory import MERGE_SYSTEM, build_merge_user
 
 logger = get_logger(__name__)

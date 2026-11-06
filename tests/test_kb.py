@@ -24,12 +24,12 @@ from ai_agent.api.routers.kb import (
 from ai_agent.api.routers.kg import build_graphs, entity_chunks, file_graph, global_graph, rebuild_graph, search_graph
 from ai_agent.api.routers.user import user_info
 from ai_agent.core.config import settings
-from ai_agent.kb import vision
-from ai_agent.kb.chunking import chunk_segments, chunk_text
-from ai_agent.kb.parsing import Segment, parse_segments, supported
+from ai_agent.kb.ingest import vision
+from ai_agent.kb.ingest.chunking import chunk_segments, chunk_text
+from ai_agent.kb.ingest.parsing import Segment, parse_segments, supported
 from ai_agent.kb.pipeline import KbPipeline
-from ai_agent.memory.db import UserRecord
-from ai_agent.tools.kb_search import _format_hit
+from ai_agent.storage.db import UserRecord
+from ai_agent.tools.kb.kb_search import _format_hit
 from ai_agent.tools.registry import TOOLS, tool_schemas
 
 
@@ -508,7 +508,7 @@ def test_captioned_html_table_does_not_count_caption_as_table():
 
 
 def test_long_html_table_splits_by_row_and_repeats_header():
-    from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
+    from ai_agent.kb.ingest.chunking import TABLE_GROUP_CHARS, html_table_plain
 
     header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
     rows = "".join(
@@ -1029,7 +1029,7 @@ def _admin():
 
 def test_embed_texts_parallel_keeps_order(monkeypatch):
     """多批并发执行，但结果顺序与输入严格一致（写错位会毁掉全部检索）。"""
-    from ai_agent.memory import embeddings
+    from ai_agent.storage import embeddings
 
     def fake_embed(texts):
         return [[len(t), 0] for t in texts]
@@ -1042,7 +1042,7 @@ def test_embed_texts_parallel_keeps_order(monkeypatch):
 
 def test_embed_texts_parallel_single_batch_passthrough(monkeypatch):
     """不足两批直接走串行路径，不开线程池。"""
-    from ai_agent.memory import embeddings
+    from ai_agent.storage import embeddings
 
     called = []
     monkeypatch.setattr(
@@ -1058,7 +1058,7 @@ def test_embed_texts_parallel_failure_propagates(monkeypatch):
     import pytest as _pytest
 
     from ai_agent.core.exceptions import LLMError
-    from ai_agent.memory import embeddings
+    from ai_agent.storage import embeddings
 
     def flaky(texts):
         if texts and texts[0] == "t10":
@@ -1072,7 +1072,7 @@ def test_embed_texts_parallel_failure_propagates(monkeypatch):
 
 def test_describe_parallel_keeps_order(monkeypatch):
     """视觉并行：结果顺序与输入一致（页码归属不能乱）。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     def fake_describe(blob, mime):
         return f"desc-{blob.decode()}"
@@ -1114,14 +1114,14 @@ def test_chart_page_skips_dense_text_page():
     实测 331 页招股书按「路径数 ≥ 150」误判 124 页，20 页预算全烧在
     目录和财务报表上，每页还要等一次视觉调用。
     """
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(drawings=215, images=[(80, 60)])
     assert figures._page_has_chart(page, text_len=1085) is False
 
 
 def test_chart_page_accepts_large_image_with_little_text():
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(images=[(500, 600)])  # 占页面大半
     assert figures._page_has_chart(page, text_len=180) is True
@@ -1129,7 +1129,7 @@ def test_chart_page_accepts_large_image_with_little_text():
 
 def test_chart_page_ignores_logo_sized_image():
     """页眉 logo / 装饰线不算图表：面积占比够不上阈值。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(images=[(60, 40)], drawings=3)
     assert figures._page_has_chart(page, text_len=200) is False
@@ -1137,7 +1137,7 @@ def test_chart_page_ignores_logo_sized_image():
 
 def test_chart_page_accepts_vector_only_chart():
     """ECharts 走 SVG 导出时没有位图，靠路径数识别（但要求文字少）。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(drawings=200)
     assert figures._page_has_chart(page, text_len=120) is True
@@ -1145,7 +1145,7 @@ def test_chart_page_accepts_vector_only_chart():
 
 def test_chart_page_survives_broken_page():
     """单页取图信息报错不能把整份解析带崩。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(drawings="boom")
     assert figures._page_has_chart(page, text_len=100) is False
@@ -1200,7 +1200,7 @@ def test_rebuild_graph_reads_chunks_from_db(monkeypatch):
 
 def test_format_hit_renders_page_range_and_section():
     """跨页切片按「第134–135页 · 第十节 …」展示：只写起始页会误导溯源。"""
-    from ai_agent.tools.kb_search import _format_hit
+    from ai_agent.tools.kb.kb_search import _format_hit
 
     assert _format_hit(
         {

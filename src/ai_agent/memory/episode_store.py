@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.db import Database, MemoryItem, current_user_id
-from ai_agent.memory.embeddings import embed_query, embed_texts
+from ai_agent.storage.db import Database, MemoryItem, current_user_id
+from ai_agent.storage.embeddings import embed_query, embed_texts
 from ai_agent.memory.episode_merge import compact_episode_texts
 from pgvector import Vector
 from psycopg import Connection

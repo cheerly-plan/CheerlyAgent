@@ -5,24 +5,16 @@
 翻 6 个文件，且没有任何测试守着。这里集中后由 test_prompts 统一断言。
 
 静态文案迁移时一字未改（含【触发条件】/【禁止条件】这些实测有效的结构化
-约束）。例外是研报类型清单：report_type 的可选值不手抄，统一从
-``report/skills.py`` 注册表经 ``skill_catalog()`` 渲染——注册新 skill 即
-自动出现在工具描述和系统提示词里，不需要再同步改这里。
+约束）。例外是研报类型清单：report_type 的可选值不手抄，模板留
+``{{SKILL_CATALOG}}`` 槽位，由**调用方**（tools / agents 组装层）注入
+`report.skills.skill_catalog()` 渲染——注册新 skill 即自动出现在工具描述
+和系统提示词里。本模块刻意不 import 业务域：prompts 是文案层，方向只能
+被上层依赖，不能反向依赖 report / kb / memory。
 """
 
 from __future__ import annotations
 
 from ai_agent.prompts.builder import assert_rendered, render
-from ai_agent.report.skills import SKILLS
-
-
-def skill_catalog() -> str:
-    """report_type 可选值清单，从注册表渲染——新增 skill 注册即生效。
-
-    清单同时进 generate_report 的工具描述、report_type 字段描述和系统提示词，
-    三处共用这一个函数，杜绝手抄漂移（test_prompts 有断言守着）。
-    """
-    return "、".join(f"{skill.skill_id}（{skill.name}）" for skill in SKILLS)
 
 # ——— 天气 ———
 
@@ -157,9 +149,10 @@ KG_NO_ENTITY_HINT = "图谱里没有找到相关实体，可以换个说法，�
 
 # ——— 研报生成（聊天侧唯一入口，落盘路径由服务端固定） ———
 
-# 报告类型清单从 skills 注册表动态渲染，不在文案里手抄一份：注册表加新 skill
-# 后，工具描述自动带上，模型才知道它的存在（否则流水线路由了、模型也点不了名）。
-_REPORT_GENERATE_TEMPLATE = (
+# 报告类型清单不在文案里手抄：模板留 {{SKILL_CATALOG}} 槽位，由 tools 组装层
+# 注入 report.skills.skill_catalog() 渲染。注册表加新 skill 后工具描述自动
+# 带上，模型才知道它的存在（否则流水线路由了、模型也点不了名）。
+REPORT_GENERATE_DESC_TEMPLATE = (
     "生成一份财报深度分析研报，返回 PDF、Markdown 正文、溯源附件的下载链接。"
     "【触发条件】用户要求「生成研报」「财报深度分析」「出 PDF 报告」时必须调用，"
     "把需求原话原样填进 request，不要拆分、改写或自己补指标。"
@@ -172,19 +165,24 @@ _REPORT_GENERATE_TEMPLATE = (
     "不要填任何文件路径，落盘位置由服务端决定。"
     "工具返回后把下载链接原样发给用户，不要复述或换算报告里的数字。"
 )
-REPORT_GENERATE_DESC = assert_rendered(
-    render(_REPORT_GENERATE_TEMPLATE, SKILL_CATALOG=skill_catalog())
-)
 
-# generate_report 工具 report_type 字段的描述（report_generate.py 引用）。
-# 与工具描述共用 skill_catalog()，两处不会各说各话。
-_REPORT_TYPE_TEMPLATE = (
+
+# generate_report 工具 report_type 字段的描述模板（tools/report_generate.py
+# 引用）。与工具描述共用同一个 catalog 注入，两处不会各说各话。
+REPORT_TYPE_DESC_TEMPLATE = (
     "报告类型，留空按公司行业自动路由。"
     "可选：{{SKILL_CATALOG}}。用户没明确点名就不要填"
 )
-REPORT_TYPE_DESC = assert_rendered(
-    render(_REPORT_TYPE_TEMPLATE, SKILL_CATALOG=skill_catalog())
-)
+
+
+def render_report_generate_desc(catalog: str) -> str:
+    """工具描述：catalog 由调用方传 report.skills.skill_catalog()。"""
+    return assert_rendered(render(REPORT_GENERATE_DESC_TEMPLATE, SKILL_CATALOG=catalog))
+
+
+def render_report_type_desc(catalog: str) -> str:
+    """report_type 字段描述：catalog 由调用方传 report.skills.skill_catalog()。"""
+    return assert_rendered(render(REPORT_TYPE_DESC_TEMPLATE, SKILL_CATALOG=catalog))
 
 # ——— 研报积木：单独抽数 / 算增减 / 校验正文（都不写盘、无路径参数） ———
 

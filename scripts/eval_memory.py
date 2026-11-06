@@ -367,7 +367,7 @@ def render_recall(rows: list[dict], summary: dict) -> str:
 
 def run_episode_recall(data: dict, *, top_k: int) -> list[dict]:
     """把黄金情景写入评测用户，逐条查询，最后删掉这个用户的长期记忆。"""
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     store.clear_long_term(user_id=EPISODE_EVAL_USER)
     try:

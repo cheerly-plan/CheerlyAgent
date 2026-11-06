@@ -2,7 +2,7 @@ from threading import Event, Thread
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.store import store
+from ai_agent.storage.store import store
 
 logger = get_logger(__name__)
 

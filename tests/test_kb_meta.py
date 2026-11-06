@@ -8,9 +8,9 @@
 import uuid
 from contextlib import contextmanager
 
-from ai_agent.kb import meta
-from ai_agent.kb.kg_match import take_by_subject
-from ai_agent.memory.store import store
+from ai_agent.kb.ingest import meta
+from ai_agent.kb.graph.kg_match import take_by_subject
+from ai_agent.storage.store import store
 
 
 # ---------- 元数据抽取 ----------
@@ -367,7 +367,7 @@ def test_assign_chunk_subjects_splits_only_when_two_companies_appear():
 
 
 def test_extract_table_indicators_keeps_line_items_only():
-    from ai_agent.kb.chunking import extract_table_indicators
+    from ai_agent.kb.ingest.chunking import extract_table_indicators
 
     text = """母公司利润表
 单位：万元
@@ -383,7 +383,7 @@ def test_extract_table_indicators_keeps_line_items_only():
 
 
 def test_extract_table_indicators_reads_html_first_column():
-    from ai_agent.kb.chunking import extract_table_indicators
+    from ai_agent.kb.ingest.chunking import extract_table_indicators
 
     text = (
         "<table><tr><td>项目</td><td>本期</td></tr>"
@@ -407,7 +407,7 @@ def test_keyword_search_also_matches_indicator_names(monkeypatch):
 
 
 def test_rerank_boosts_chunk_whose_indicator_is_named():
-    from ai_agent.kb.retrieval import _boost_indicator_hits
+    from ai_agent.kb.retrieval.retrieval import _boost_indicator_hits
 
     rows = [
         {"indicators": ["营业成本"]},

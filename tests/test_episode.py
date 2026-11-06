@@ -20,7 +20,7 @@ def test_compact_episode_texts_falls_back_to_small_model(monkeypatch):
         captured.update(kwargs)
         return "用户正在用 Koa 做 Node.js BFF 数据聚合"
 
-    with patch("ai_agent.memory.parse.complete_chat", side_effect=fake_complete):
+    with patch("ai_agent.memory.llm_calls.complete_chat", side_effect=fake_complete):
         compact_episode_texts(RELATED)
     assert captured["model"] == "qwen-small"
 
@@ -33,7 +33,7 @@ def test_compact_episode_texts_uses_memory_model(monkeypatch):
         captured.update(kwargs)
         return "用户正在用 Koa 做 Node.js BFF 数据聚合"
 
-    with patch("ai_agent.memory.parse.complete_chat", side_effect=fake_complete):
+    with patch("ai_agent.memory.llm_calls.complete_chat", side_effect=fake_complete):
         compact_episode_texts(RELATED)
     assert captured["model"] == "qwen-memory"
 

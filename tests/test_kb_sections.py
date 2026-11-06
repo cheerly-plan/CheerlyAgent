@@ -4,8 +4,8 @@
 真实场景——正是原型阶段踩坑最狠的地方，必须回归住。
 """
 
-from ai_agent.kb.chunking import Chunk, chunk_segments, chunk_text
-from ai_agent.kb.parsing import (
+from ai_agent.kb.ingest.chunking import Chunk, chunk_segments, chunk_text
+from ai_agent.kb.ingest.parsing import (
     FIGURE,
     TEXT,
     Segment,
@@ -15,7 +15,7 @@ from ai_agent.kb.parsing import (
     _merge_wrapped,
     normalize_choices,
 )
-from ai_agent.kb.sections import (
+from ai_agent.kb.ingest.sections import (
     Line,
     Section,
     body_size,

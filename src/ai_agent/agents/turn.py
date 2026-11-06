@@ -11,7 +11,7 @@ from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.long_term import capture_long_term
 from ai_agent.memory.short_term import compress, short_term_memory
-from ai_agent.memory.store import store
+from ai_agent.storage.store import store
 from ai_agent.memory.summarize import summarize_session
 
 logger = get_logger(__name__)

@@ -1,7 +1,7 @@
 """对比计算不调用模型：同比、环比、百分点和单位换算都是确定的。"""
 
 from ai_agent.report.compare import Measure, compare_measures, format_compare
-from ai_agent.tools.report_compare import report_compare_tool
+from ai_agent.tools.report.report_compare import report_compare_tool
 
 
 def _row(period: str, value: str, unit: str = "元", name: str = "营业收入") -> Measure:

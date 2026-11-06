@@ -1,8 +1,8 @@
 from fastapi import Depends, HTTPException, Request
 
 from ai_agent.core.config import settings
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.store import store
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.store import store
 
 _BEARER_PREFIX = "bearer "
 

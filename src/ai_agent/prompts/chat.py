@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 from ai_agent.prompts.builder import PromptBuilder, assert_rendered, render
-from ai_agent.prompts.tools import skill_catalog
 
 # ——— 分层常量：顺序即注入顺序 ———
 
@@ -60,8 +59,10 @@ MEMORY_DISCIPLINE = """【记忆纪律】
 - 当前任务、正在做的事不必在回答时写入，系统会在本轮结束后自动抽取。
 - 严禁编造记忆中不存在的事实。"""
 
-# 报告类型清单从 skills 注册表渲染（与 generate_report 工具描述同源），
-# 注册新 skill 后这里自动跟进，不需要手抄一份技能名单。
+# 报告类型清单模板：{{SKILL_CATALOG}} 槽位由组装方（agents/loop.py）注入
+# report.skills.skill_catalog() 渲染。与 generate_report 工具描述同源，
+# 注册新 skill 后自动跟进，不需要手抄一份技能名单。这里不 import report——
+# prompts 是文案层，业务数据由上层注入。
 _REPORT_DISCIPLINE_TEMPLATE = """【研报生成】用户要求生成研报、财报深度分析或 PDF 报告时：
 1. 必须调用 generate_report，把用户需求原话作为 request 传入；本轮若已按检索纪律查过 kb_search，查完仍要调用它。用户明确点名报告类型时才填 report_type，否则留空自动路由。可选类型：{{SKILL_CATALOG}}。
 2. 不要说「无法生成 PDF」，也不要用检索结果自己撰写研报正文、口算同比增减：正文由服务端生成并校验，数字只来自知识库表格。
@@ -69,9 +70,11 @@ _REPORT_DISCIPLINE_TEMPLATE = """【研报生成】用户要求生成研报、�
 4. 工具返回后把下载链接原样发给用户，简要说明校验结论和缺口；不要复述、换算或补写报告里的数字。
 5. 工具报错或状态不是 ok 时如实说明原因，不要用通用知识补位。"""
 
-REPORT_DISCIPLINE = assert_rendered(
-    render(_REPORT_DISCIPLINE_TEMPLATE, SKILL_CATALOG=skill_catalog())
-)
+
+def build_report_discipline(catalog: str) -> str:
+    """渲染研报纪律节；catalog 传 report.skills.skill_catalog()。"""
+    return assert_rendered(render(_REPORT_DISCIPLINE_TEMPLATE, SKILL_CATALOG=catalog))
+
 
 TRUTHFULNESS = """【真实性】不知道就说不知道，缺数据就说明缺什么。编造一个看起来合理的数字、条款或出处，比直接说「没找到」的代价大得多。"""
 
@@ -80,12 +83,17 @@ def build_system_prompt(
     *,
     use_kb: bool = True,
     use_memory: bool = True,
+    report_catalog: str = "",
 ) -> str:
     """按本轮实际挂载的能力组装 system prompt。
 
     分层按需组装不只是省 token：给一个没挂知识库的会话讲「必须先调用
     kb_search」，模型要么困惑，要么去调一个根本不存在的工具。工具列表本身
     已经在 ``loop.py`` 按开关裁剪了，提示词这边必须同步。
+
+    ``report_catalog`` 由调用方（agents/loop.py）传
+    ``report.skills.skill_catalog()``：报告类型清单是业务数据，prompts 层
+    不反向 import report；留空时清单位置为空串，纪律节其余内容照常注入。
     """
     return (
         PromptBuilder()
@@ -94,7 +102,7 @@ def build_system_prompt(
         .section("format", OUTPUT_FORMAT)
         .section("citation", CITATION, when=use_kb)
         .section("kb", KB_DISCIPLINE, when=use_kb)
-        .section("report", REPORT_DISCIPLINE, when=use_kb)
+        .section("report", build_report_discipline(report_catalog), when=use_kb)
         .section("memory", MEMORY_DISCIPLINE, when=use_memory)
         .section("truth", TRUTHFULNESS)
         .build()
@@ -102,7 +110,8 @@ def build_system_prompt(
 
 
 # 全能力默认版：保持向后兼容 —— 旧代码直接 import SYSTEM_PROMPT 的行为不变。
-# 新代码应优先用 build_system_prompt(use_kb=..., use_memory=...)。
+# 新代码应优先用 build_system_prompt(use_kb=..., use_memory=..., report_catalog=...)
+# （catalog 由组装方传 report.skills.skill_catalog()，留空则类型清单为空）。
 SYSTEM_PROMPT = build_system_prompt()
 
 

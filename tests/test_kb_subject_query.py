@@ -8,8 +8,8 @@ files 参数现接受主体名（含简称/别名），底层按 subject 元数�
 import uuid
 
 from ai_agent.agents import loop as loop_mod
-from ai_agent.kb import retrieval
-from ai_agent.kb.scope import resolve_tool_file_ids
+from ai_agent.kb.retrieval import retrieval
+from ai_agent.kb.retrieval.scope import resolve_tool_file_ids
 
 
 def _ready(file_id, filename, subject="", aliases=None, period=""):
@@ -172,9 +172,9 @@ def test_exact_entity_in_older_file_overrides_latest(monkeypatch):
         _ready(other, "中国银行2026年第三季度报告.pdf", "中国银行股份有限公司", [], "2026Q3"),
     ]
     monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
-    monkeypatch.setattr("ai_agent.kb.router.route_files", lambda *a, **k: [])
+    monkeypatch.setattr("ai_agent.kb.retrieval.router.route_files", lambda *a, **k: [])
     monkeypatch.setattr(
-        "ai_agent.memory.store.store.exact_entity_files", lambda query: [older]
+        "ai_agent.storage.store.store.exact_entity_files", lambda query: [older]
     )
     assert resolve_tool_file_ids(None, query="诺安成长混合型证券投资基金") == [older]
 
@@ -188,9 +188,9 @@ def test_exact_entity_already_in_latest_keeps_period_scope(monkeypatch):
         _ready(older, "中科飞测2025年第三季度报告.pdf", "深圳中科飞测科技股份有限公司", [], "2025Q3"),
     ]
     monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
-    monkeypatch.setattr("ai_agent.kb.router.route_files", lambda *a, **k: [])
+    monkeypatch.setattr("ai_agent.kb.retrieval.router.route_files", lambda *a, **k: [])
     monkeypatch.setattr(
-        "ai_agent.memory.store.store.exact_entity_files", lambda query: [latest, older]
+        "ai_agent.storage.store.store.exact_entity_files", lambda query: [latest, older]
     )
     assert resolve_tool_file_ids(None, query="营业收入") == [latest]
 
@@ -217,7 +217,7 @@ def test_exact_entity_does_not_override_named_period_or_explicit_other_file(monk
     ]
     monkeypatch.setattr(retrieval.store, "list_kb_files", lambda **k: rows)
     monkeypatch.setattr(
-        "ai_agent.memory.store.store.exact_entity_files", lambda query: [older]
+        "ai_agent.storage.store.store.exact_entity_files", lambda query: [older]
     )
     assert resolve_tool_file_ids(["中国能源建设"], query="2026年营收") == [latest]
     # 只点了 2026 这份，旧文件不在候选里，精确实体不能把范围换成它

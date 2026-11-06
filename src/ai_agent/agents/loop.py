@@ -11,12 +11,15 @@ from ai_agent.prompts.chat import (
     RUNTIME_EMPTY_ANSWER,
     build_system_prompt,
 )
+# 报告类型清单是业务数据，由编排层注入系统提示词（prompts 层不反向依赖
+# report 域）。skills 注册表是轻叶子（只读 SKILL.md），模块级 import 无碍。
+from ai_agent.report.skills import skill_catalog
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.citations import collect_citations, merge_sources
-from ai_agent.kb.doc_profiles import resolve_profile
-from ai_agent.kb.scope import (
+from ai_agent.kb.retrieval.citations import collect_citations, merge_sources
+from ai_agent.kb.ingest.doc_profiles import resolve_profile
+from ai_agent.kb.retrieval.scope import (
     extract_prev_turn,
     reset_kb_question,
     reset_kb_scope,
@@ -32,7 +35,7 @@ from ai_agent.memory.short_term import (
     assemble,
     short_term_memory,
 )
-from ai_agent.memory.store import store, user_scope
+from ai_agent.storage.store import store, user_scope
 from ai_agent.tools.registry import execute_tool, tool_schemas
 
 from ai_agent.agents.messages import (
@@ -158,7 +161,7 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
 
 def _period_inventory(ready: list[dict]) -> str:
     """库里实际有哪些报告期。模型容易按训练截止日判断某年财报还没披露。"""
-    from ai_agent.kb.meta import period_rank
+    from ai_agent.kb.ingest.meta import period_rank
 
     counts: dict[str, int] = {}
     for row in ready:
@@ -183,7 +186,7 @@ def _system_prompt(
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
-    core = build_system_prompt(use_kb=use_kb)
+    core = build_system_prompt(use_kb=use_kb, report_catalog=skill_catalog())
     # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
     # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。
     block = _profile_prompt(user_id)
@@ -411,7 +414,7 @@ def _attach_kg_prefetch(
     text = _latest_user_text(messages).strip()
     if not text:
         return
-    from ai_agent.tools.kg_search import prefetch_neighborhood
+    from ai_agent.tools.kb.kg_search import prefetch_neighborhood
 
     scope_token = set_kb_scope(kb_file_ids)
     try:

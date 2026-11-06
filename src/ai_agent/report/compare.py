@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 
-from ai_agent.kb.meta import period_rank
+from ai_agent.kb.ingest.meta import period_rank
 from ai_agent.report.basis import POINT, STOCK
 
 _PERIOD = re.compile(r"^((?:19|20)\d{2})(Q([1-4])|H1)?$")

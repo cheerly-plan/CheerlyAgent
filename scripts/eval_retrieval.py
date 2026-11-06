@@ -48,7 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ai_agent.core.config import settings  # noqa: E402
-from ai_agent.memory.store import store  # noqa: E402
+from ai_agent.storage.store import store  # noqa: E402
 
 CASES_PATH = Path(__file__).resolve().parent / "cases" / "retrieval_eval_cases.json"
 # hit@3 低于这条线视为回归：黄金用例都是"应该能查到"的问题，
@@ -165,7 +165,7 @@ def infer_filters(query: str, case: dict) -> dict | None:
     黄金集按当前语料维护；filters 字段只写在「答案确实落在对应类型切片」的用例上
     （如表格指标 → kinds=["table"]），避免把无关过滤强加给检索、伪造精度提升。
     """
-    from ai_agent.kb.retrieval import _PARENT_INTENT, SCOPE_PARENT
+    from ai_agent.kb.retrieval.retrieval import _PARENT_INTENT, SCOPE_PARENT
 
     filters: dict = {}
     explicit = case.get("filters")
@@ -191,8 +191,8 @@ def run_evaluation(
     检索；打开时预热避免首例冷启动。窗口至少 10 以计算 recall@10/MRR@10。
     查询向量走进程内 lru_cache，对照时「开」轮不会重复付 embedding。
     """
-    from ai_agent.memory.embeddings import embed_texts
-    from ai_agent.tools.kb_search import retrieve_for_question
+    from ai_agent.storage.embeddings import embed_texts
+    from ai_agent.tools.kb.kb_search import retrieve_for_question
 
     if not rerank:
         settings.kb_rerank_enabled = False
@@ -351,8 +351,8 @@ def _clear_retrieval_caches() -> None:
     否则进程内 lru_cache（embed_query）与 _rerank_cache 会在同进程重复运行
     时掩盖 LLM / 向量底座的非确定输出，使分数恒为 1.0、测不出真实抖动。
     """
-    from ai_agent.kb import retrieval
-    from ai_agent.memory.embeddings import _cached_query_vector
+    from ai_agent.kb.retrieval import retrieval
+    from ai_agent.storage.embeddings import _cached_query_vector
 
     try:
         retrieval._rerank_cache.clear()
@@ -375,12 +375,12 @@ def evaluate_stability(
     no_cache=True 时每次运行前清掉 embed / rerank 缓存，逼出真实冷调用抖动；
     默认 False 则复现「同进程重复同问」的生产缓存表现——两者要分开看。
     """
-    from ai_agent.tools.kb_search import retrieve_for_question
+    from ai_agent.tools.kb.kb_search import retrieve_for_question
 
     if not rerank:
         settings.kb_rerank_enabled = False
     else:
-        from ai_agent.memory.embeddings import embed_texts
+        from ai_agent.storage.embeddings import embed_texts
 
         embed_texts(["预热"])
 

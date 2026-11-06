@@ -6,10 +6,10 @@
 
 import uuid
 
-from ai_agent.kb.scope import reset_kb_question, set_kb_question
+from ai_agent.kb.retrieval.scope import reset_kb_question, set_kb_question
 from ai_agent.kb.store import _chunk_meta_where
-from ai_agent.kb.tables import SCOPE_PARENT
-from ai_agent.tools import kb_search
+from ai_agent.kb.ingest.tables import SCOPE_PARENT
+from ai_agent.tools.kb import kb_search
 
 
 def test_chunk_meta_where_kinds_exact():
@@ -117,7 +117,7 @@ def test_field_only_query_returns_to_the_user_question(monkeypatch):
         captured["filters"] = kwargs.get("filters")
         return []
 
-    monkeypatch.setattr("ai_agent.kb.router.mentioned_file_ids", mentions)
+    monkeypatch.setattr("ai_agent.kb.retrieval.router.mentioned_file_ids", mentions)
     monkeypatch.setattr(kb_search, "resolve_tool_file_ids", resolve)
     monkeypatch.setattr(kb_search, "search_knowledge_multi", search)
     monkeypatch.setattr(kb_search, "expand_queries", lambda query, count=None: [query])

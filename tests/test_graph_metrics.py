@@ -1,6 +1,6 @@
 """图谱质量指标的纯函数用例（P3 金标评测的地基）。"""
 
-from ai_agent.kb.graph_metrics import evaluate, norm
+from ai_agent.kb.graph.graph_metrics import evaluate, norm
 
 
 def node(i, name):

@@ -13,19 +13,19 @@ from pathlib import Path
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.align import align_file_graph
-from ai_agent.kb.chunking import Chunk, chunk_segments, embedding_input
-from ai_agent.kb.graph import build_file_graph
-from ai_agent.kb.meta import (
+from ai_agent.kb.graph.align import align_file_graph
+from ai_agent.kb.ingest.chunking import Chunk, chunk_segments, embedding_input
+from ai_agent.kb.graph.graph import build_file_graph
+from ai_agent.kb.ingest.meta import (
     assign_chunk_subjects,
     extract_aliases,
     pick_chunk_subject,
     resolve_file_identity,
 )
-from ai_agent.kb.summary import index_file_summary
-from ai_agent.kb.parsing import parse_segments
-from ai_agent.memory.embeddings import embed_texts_parallel
-from ai_agent.memory.store import store
+from ai_agent.kb.ingest.summary import index_file_summary
+from ai_agent.kb.ingest.parsing import parse_segments
+from ai_agent.storage.embeddings import embed_texts_parallel
+from ai_agent.storage.store import store
 
 logger = get_logger(__name__)
 

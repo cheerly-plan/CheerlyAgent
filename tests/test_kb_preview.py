@@ -6,8 +6,8 @@ import pytest
 from fastapi import HTTPException
 
 from ai_agent.api.schemas import KbSearchRequest
-from ai_agent.kb.retrieval import Hit
-from ai_agent.memory.db import UserRecord
+from ai_agent.kb.retrieval.retrieval import Hit
+from ai_agent.storage.db import UserRecord
 
 
 _USER = UserRecord(user_id="u1", username="u1", display_name="u1")

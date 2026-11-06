@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.store import store
+from ai_agent.storage.store import store
 from ai_agent.report.extract import Evidence, _as_uuid, _files_for, _unit_of
 
 logger = get_logger(__name__)

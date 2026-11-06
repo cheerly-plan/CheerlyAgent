@@ -7,8 +7,8 @@
 import uuid
 
 from ai_agent import tools as tools_pkg
-from ai_agent.tools import kb_search
-from ai_agent.memory import store as kb_store
+from ai_agent.tools.kb import kb_search
+from ai_agent.storage import store as kb_store
 
 
 def _fake_file(subject, aliases, filename):
@@ -20,7 +20,7 @@ def _fake_file(subject, aliases, filename):
 
 
 def _patch_file(monkeypatch, fake):
-    # kb_search 模块内 `from ai_agent.memory.store import store`，直接替 store 的该方法
+    # kb_search 模块内 `from ai_agent.storage.store import store`，直接替 store 的该方法
     monkeypatch.setattr(kb_store.store, "get_kb_file", lambda _id: fake)
 
 

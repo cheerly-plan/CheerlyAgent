@@ -1,4 +1,4 @@
-from ai_agent.memory.auth_store import hash_password, hash_token, verify_password
+from ai_agent.storage.auth_store import hash_password, hash_token, verify_password
 
 
 def test_password_hash_roundtrip() -> None:

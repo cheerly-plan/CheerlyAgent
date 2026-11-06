@@ -24,12 +24,12 @@ from ai_agent.api.dependencies import get_current_user, require_admin
 from ai_agent.api.schemas import KgBuildRequest, KgRebuildRequest
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.community import detect_communities, summarize
-from ai_agent.kb.doc_profiles import list_profiles
+from ai_agent.kb.graph.community import detect_communities, summarize
+from ai_agent.kb.ingest.doc_profiles import list_profiles
 from ai_agent.kb.pipeline import kb_pipeline
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.embeddings import embed_query
-from ai_agent.memory.store import store
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.embeddings import embed_query
+from ai_agent.storage.store import store
 
 router = APIRouter(prefix="/v1/kg", tags=["kg"])
 

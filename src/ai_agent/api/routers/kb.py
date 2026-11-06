@@ -45,15 +45,15 @@ from ai_agent.api.schemas import (
 )
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.chunking import embedding_input
-from ai_agent.kb.otsl import render_otsl
-from ai_agent.kb.parsing import supported, supported_label
+from ai_agent.kb.ingest.chunking import embedding_input
+from ai_agent.kb.ingest.otsl import render_otsl
+from ai_agent.kb.ingest.parsing import supported, supported_label
 from ai_agent.kb.pipeline import kb_pipeline
-from ai_agent.kb.citations import clip_visible
-from ai_agent.kb.retrieval import preview_search
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.embeddings import embed_texts
-from ai_agent.memory.store import store
+from ai_agent.kb.retrieval.citations import clip_visible
+from ai_agent.kb.retrieval.retrieval import preview_search
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.embeddings import embed_texts
+from ai_agent.storage.store import store
 
 router = APIRouter(prefix="/v1/kb", tags=["kb"])
 

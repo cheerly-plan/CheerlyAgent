@@ -5,7 +5,7 @@ from ai_agent.report.extract import Evidence, IndicatorFact
 from ai_agent.report.parse import OutlineItem, ReportPlan
 from ai_agent.report.validate import format_validation, validate_report
 from ai_agent.tools.registry import TOOLS
-from ai_agent.tools.report_validate import report_validate_tool
+from ai_agent.tools.report.report_validate import report_validate_tool
 
 
 def _fact(

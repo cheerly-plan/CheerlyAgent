@@ -1,7 +1,7 @@
 """kb_list_files 工具：模型按需查询知识库文件清单（替代原目录注入）。"""
 
-from ai_agent.tools import kb_list
-from ai_agent.tools.kb_list import _kb_list_files
+from ai_agent.tools.kb import kb_list
+from ai_agent.tools.kb.kb_list import _kb_list_files
 
 
 def test_kb_list_filters_to_ready_and_shows_description(monkeypatch):

@@ -11,8 +11,8 @@ prefetch 被移除（185fa6e/bb47db6）后连带丢失，effective_kb_query 退�
 """
 
 from ai_agent.core.config import settings
-from ai_agent.kb import scope
-from ai_agent.kb.scope import (
+from ai_agent.kb.retrieval import scope
+from ai_agent.kb.retrieval.scope import (
     effective_kb_query,
     expand_queries,
     extract_prev_turn,
@@ -33,7 +33,7 @@ def test_effective_kb_query_returns_original_without_context(monkeypatch):
 
     monkeypatch.setattr(scope, "complete_chat", fake_chat)
     # 确保 contextvar 干净
-    from ai_agent.kb.scope import rewrite_context
+    from ai_agent.kb.retrieval.scope import rewrite_context
 
     assert rewrite_context() == []
     out = effective_kb_query("它去年营收是多少")
@@ -44,7 +44,7 @@ def test_effective_kb_query_returns_original_without_context(monkeypatch):
 def test_effective_kb_query_uses_rewrite_context(monkeypatch):
     """设置了上一轮对话后，改写真正生效并把补全结果返回。"""
     monkeypatch.setattr(settings, "kb_rewrite_enabled", True)
-    from ai_agent.kb.scope import reset_rewrite_context, set_rewrite_context
+    from ai_agent.kb.retrieval.scope import reset_rewrite_context, set_rewrite_context
 
     def fake_chat(messages, **kwargs):
         return "中国能源建设股份有限公司2025年营业收入"
@@ -61,7 +61,7 @@ def test_effective_kb_query_uses_rewrite_context(monkeypatch):
 def test_effective_kb_query_disabled_returns_original(monkeypatch):
     """开关关闭时直接退回原话，不碰 LLM。"""
     monkeypatch.setattr(settings, "kb_rewrite_enabled", False)
-    from ai_agent.kb.scope import reset_rewrite_context, set_rewrite_context
+    from ai_agent.kb.retrieval.scope import reset_rewrite_context, set_rewrite_context
 
     called = {"n": 0}
 
@@ -82,7 +82,7 @@ def test_effective_kb_query_disabled_returns_original(monkeypatch):
 def test_effective_kb_query_falls_back_on_llm_error(monkeypatch):
     """LLM 抛错（超时/限流）时退回原话，不向上抛。"""
     monkeypatch.setattr(settings, "kb_rewrite_enabled", True)
-    from ai_agent.kb.scope import reset_rewrite_context, set_rewrite_context
+    from ai_agent.kb.retrieval.scope import reset_rewrite_context, set_rewrite_context
     from ai_agent.llm.client import LLMError
 
     def boom(messages, **kwargs):
@@ -100,7 +100,7 @@ def test_effective_kb_query_falls_back_on_llm_error(monkeypatch):
 def test_effective_kb_query_falls_back_when_unchanged(monkeypatch):
     """模型返回空或等于原句时，退回原话（避免空查询或无效改写）。"""
     monkeypatch.setattr(settings, "kb_rewrite_enabled", True)
-    from ai_agent.kb.scope import reset_rewrite_context, set_rewrite_context
+    from ai_agent.kb.retrieval.scope import reset_rewrite_context, set_rewrite_context
 
     monkeypatch.setattr(scope, "complete_chat", lambda messages, **kwargs: "   ")
     token = set_rewrite_context(["上一轮"])
@@ -120,7 +120,7 @@ def test_effective_kb_query_falls_back_when_unchanged(monkeypatch):
 def test_effective_kb_query_strips_quotes(monkeypatch):
     """模型输出带引号包裹时，剥掉引号。"""
     monkeypatch.setattr(settings, "kb_rewrite_enabled", True)
-    from ai_agent.kb.scope import reset_rewrite_context, set_rewrite_context
+    from ai_agent.kb.retrieval.scope import reset_rewrite_context, set_rewrite_context
 
     monkeypatch.setattr(scope, "complete_chat", lambda messages, **kwargs: '"中国银行营收"')
     token = set_rewrite_context(["中国银行2026三季报"])
@@ -246,7 +246,7 @@ def test_expand_queries_empty_query_returns_empty():
 
 def test_search_knowledge_multi_single_query_delegates(monkeypatch):
     """单条 query 退化为 search_knowledge，行为一致。"""
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     def fake_single(query, *, file_ids=None, top_k=3, filters=None, **_kwargs):
         assert query == "唯一查询"
@@ -258,7 +258,7 @@ def test_search_knowledge_multi_single_query_delegates(monkeypatch):
 
 def test_search_knowledge_multi_skips_failed_embedding(monkeypatch):
     """某个变体向量化失败只跳过该变体，不影响其他。"""
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     def fake_embed(q):
         if q == "坏变体":
@@ -296,7 +296,7 @@ def test_mentioned_subjects_detects_multiple(monkeypatch):
     """对比问句点名两个主体，返回两个主体核心名。"""
     import uuid
 
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     a, b = uuid.uuid4(), uuid.uuid4()
     monkeypatch.setattr(
@@ -315,7 +315,7 @@ def test_mentioned_subjects_single(monkeypatch):
     """单主体问句只返回一个主体。"""
     import uuid
 
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     monkeypatch.setattr(
         retrieval.store,
@@ -331,7 +331,7 @@ def test_mentioned_subjects_matches_unique_short_name(monkeypatch):
     """别名表没有「中科飞测」，全称里独有这一段时也要强制检索。"""
     import uuid
 
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     monkeypatch.setattr(
         retrieval.store,
@@ -360,7 +360,7 @@ def test_mentioned_subjects_respects_file_ids(monkeypatch):
     """file_ids 收窄后只在这些文件里数主体。"""
     import uuid
 
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     a, b = uuid.uuid4(), uuid.uuid4()
     monkeypatch.setattr(
@@ -379,7 +379,7 @@ def test_mentioned_subjects_respects_file_ids(monkeypatch):
 
 def test_mentioned_entities_reads_graph_names(monkeypatch):
     """图谱里的人名整段出现在问句里时返回该名字。"""
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     seen = {}
 
@@ -394,7 +394,7 @@ def test_mentioned_entities_reads_graph_names(monkeypatch):
 
 
 def test_mentioned_entities_swallows_store_errors(monkeypatch):
-    from ai_agent.kb import retrieval
+    from ai_agent.kb.retrieval import retrieval
 
     def boom(query, file_ids=None):
         raise RuntimeError("db down")

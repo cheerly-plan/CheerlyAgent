@@ -20,9 +20,9 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import AgentError
 from ai_agent.core.logging import setup_logging
 from ai_agent.kb.pipeline import kb_pipeline
-from ai_agent.memory.db import run_migrations
+from ai_agent.storage.db import run_migrations
 from ai_agent.memory.short_term import short_term_memory
-from ai_agent.memory.store import store
+from ai_agent.storage.store import store
 from ai_agent.tasks.cleanup import maintenance_cleaner
 from ai_agent.tasks.title import shutdown_title_jobs
 
@@ -32,7 +32,7 @@ async def lifespan(_app: FastAPI):
     # schema 迁移走 Alembic（版本化、可回滚）；ensure_schema 保留作回滚锚点
     run_migrations()
     # 重排后端自检：默认 local_ce，未装依赖/无权重时显式告警并退回 LLM
-    from ai_agent.kb.rerank import probe_reranker
+    from ai_agent.kb.retrieval.rerank import probe_reranker
 
     probe_reranker()
     # 上次进程异常退出时卡在 parsing/embedding 的知识库文件标 failed

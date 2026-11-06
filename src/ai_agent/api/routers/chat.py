@@ -15,8 +15,8 @@ from ai_agent.api.schemas import (
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import AgentError
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.store import store
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.store import store
 from ai_agent.tasks.title import start_title_job
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse

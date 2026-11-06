@@ -24,8 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ai_agent.kb import align  # noqa: E402
-from ai_agent.memory.store import store  # noqa: E402
+from ai_agent.kb.graph import align# noqa: E402
+from ai_agent.storage.store import store  # noqa: E402
 
 
 def load_aliases() -> list[dict]:

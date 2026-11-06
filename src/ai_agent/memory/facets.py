@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable
 from typing import TypeVar
 
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.db import MemoryItem
+from ai_agent.storage.db import MemoryItem
 from ai_agent.prompts.memory import PROFILE_BLOCK_HEADER
 
 logger = get_logger(__name__)

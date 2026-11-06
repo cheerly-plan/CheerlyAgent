@@ -17,7 +17,7 @@ import ai_agent.api.routers.report as router
 import ai_agent.report.pipeline as pipeline
 from ai_agent.api.schemas import ReportDecisionRequest
 from ai_agent.core.config import settings
-from ai_agent.memory.db import UserRecord
+from ai_agent.storage.db import UserRecord
 from ai_agent.report import review
 from ai_agent.report.extract import Evidence, ExtractResult, IndicatorFact
 from ai_agent.report.parse import OutlineItem, ReportPlan, SourceFile

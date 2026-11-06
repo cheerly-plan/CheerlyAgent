@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_agent.kb import doc_profiles
-from ai_agent.kb.doc_profiles import (
+from ai_agent.kb.ingest import doc_profiles
+from ai_agent.kb.ingest.doc_profiles import (
     _BASE_SYSTEM,
     DEFAULT_LEVEL,
     LEVELS,

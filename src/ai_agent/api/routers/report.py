@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse
 from ai_agent.api.dependencies import get_current_user
 from ai_agent.api.schemas import ReportDecisionRequest, ReportRequest
 from ai_agent.core.config import settings
-from ai_agent.memory.db import UserRecord
+from ai_agent.storage.db import UserRecord
 from ai_agent.report.pipeline import ReportResult, run_report
 from ai_agent.report import review as review_store
 from ai_agent.report.review import FINALIZED, ReviewError, ReviewForbidden, ReviewNotFound

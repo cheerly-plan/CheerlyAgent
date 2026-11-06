@@ -5,16 +5,15 @@ from typing import Union, get_args, get_origin
 from pydantic import ValidationError
 
 from ai_agent.core.logging import get_logger
-from ai_agent.tools.kb_list import kb_list_files_tool
-from ai_agent.tools.kb_search import kb_search_tool
-from ai_agent.tools.kg_search import kg_search_tool
+from ai_agent.tools.kb import kb_list_files_tool, kb_search_tool, kg_search_tool
 from ai_agent.tools.memory import memory_search_tool, memory_write_tool
-from ai_agent.tools.report_compare import report_compare_tool
-from ai_agent.tools.report_extract import report_extract_tool
-from ai_agent.tools.report_generate import generate_report_tool
-from ai_agent.tools.report_validate import report_validate_tool
-from ai_agent.tools.weather import weather_tool
-from ai_agent.tools.web_search import web_search_tool
+from ai_agent.tools.misc import weather_tool, web_search_tool
+from ai_agent.tools.report import (
+    generate_report_tool,
+    report_compare_tool,
+    report_extract_tool,
+    report_validate_tool,
+)
 
 logger = get_logger(__name__)
 

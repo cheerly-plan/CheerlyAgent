@@ -6,10 +6,10 @@ p13「合并现金流量表」期末现金 77,436,294，差 28 倍。两片都�
 向量相似度反而更高——不区分口径就会把单体数当集团数答出去。
 """
 
-from ai_agent.kb.chunking import Chunk, chunk_segments
-from ai_agent.kb.parsing import Segment
-from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT, _table_scope
-from ai_agent.kb.retrieval import _apply_scope_preference, _prefer_scope
+from ai_agent.kb.ingest.chunking import Chunk, chunk_segments
+from ai_agent.kb.ingest.parsing import Segment
+from ai_agent.kb.ingest.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT, _table_scope
+from ai_agent.kb.retrieval.retrieval import _apply_scope_preference, _prefer_scope
 
 
 # ——— 表题 → 口径 ———

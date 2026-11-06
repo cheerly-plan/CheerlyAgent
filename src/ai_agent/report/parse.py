@@ -10,8 +10,8 @@ import re
 from dataclasses import dataclass, field
 
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.meta import name_in_text
-from ai_agent.memory.store import store
+from ai_agent.kb.ingest.meta import name_in_text
+from ai_agent.storage.store import store
 from ai_agent.report.compare import cumulative_base_periods, qoq_period, yoy_period
 from ai_agent.report.industry import indicator_aliases, industry_of
 from ai_agent.report.skills import ReportSkill, get_skill, resolve_skill, skill_ids
@@ -162,7 +162,7 @@ def _periods_in(text: str) -> list[str]:
 
 
 def _period_sort(period: str) -> tuple[int, int]:
-    from ai_agent.kb.meta import period_rank
+    from ai_agent.kb.ingest.meta import period_rank
 
     return period_rank(period)
 

@@ -11,17 +11,17 @@ import uuid
 from dataclasses import dataclass, field
 
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.chunking import (
+from ai_agent.kb.ingest.chunking import (
     _HTML_CELL,
     _HTML_COLSPAN,
     _cell_plain,
     _html_header_row_count,
     _table_rows,
 )
-from ai_agent.kb.meta import name_in_text
-from ai_agent.kb.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
+from ai_agent.kb.ingest.meta import name_in_text
+from ai_agent.kb.ingest.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.report.basis import basis_of, ratio_unit
-from ai_agent.memory.store import store
+from ai_agent.storage.store import store
 
 logger = get_logger(__name__)
 

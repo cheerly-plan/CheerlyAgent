@@ -1,5 +1,5 @@
 from ai_agent.llm.types import ChatMessage
-from ai_agent.memory.db import Database
+from ai_agent.storage.db import Database
 from psycopg import errors as pg_errors
 from psycopg.types.json import Jsonb
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 
 from ai_agent.llm.types import ChatMessage
-from ai_agent.memory.db import (
+from ai_agent.storage.db import (
     DEFAULT_SESSION_TITLE,
     ChatHistoryPage,
     Database,

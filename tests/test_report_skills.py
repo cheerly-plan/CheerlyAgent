@@ -172,7 +172,7 @@ def test_extract_tool_returns_facts_with_basis_and_missing(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "ai_agent.tools.report_extract.extract_indicators", fake_extract
+        "ai_agent.tools.report.report_extract.extract_indicators", fake_extract
     )
     out = execute_tool(
         "report_extract_indicators",
@@ -195,7 +195,7 @@ def test_extract_tool_default_indicators_use_skill_template(monkeypatch):
         return ExtractResult(missing=[])
 
     monkeypatch.setattr(
-        "ai_agent.tools.report_extract.extract_indicators", fake_extract
+        "ai_agent.tools.report.report_extract.extract_indicators", fake_extract
     )
     execute_tool(
         "report_extract_indicators",
@@ -210,7 +210,7 @@ def test_extract_tool_reports_empty_result_without_inventing(monkeypatch):
     from ai_agent.report.extract import ExtractResult
 
     monkeypatch.setattr(
-        "ai_agent.tools.report_extract.extract_indicators",
+        "ai_agent.tools.report.report_extract.extract_indicators",
         lambda *a, **k: ExtractResult(missing=["没有找到 2025Q4 的对应季报"]),
     )
     out = execute_tool(
@@ -258,7 +258,7 @@ def test_compare_tool_passes_basis_through(monkeypatch):
 
 def test_generate_report_tool_accepts_report_type(monkeypatch):
     """generate_report 降级为通用入口：report_type 透传给 run_report。"""
-    import ai_agent.tools.report_generate as rg
+    import ai_agent.tools.report.report_generate as rg
 
     captured: dict = {}
 

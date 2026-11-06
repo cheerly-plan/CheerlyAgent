@@ -20,9 +20,9 @@ import argparse
 import time
 
 from ai_agent.core.config import settings
-from ai_agent.kb.chunking import chunk_segments
-from ai_agent.kb.parsing import parse_segments
-from ai_agent.memory.store import store
+from ai_agent.kb.ingest.chunking import chunk_segments
+from ai_agent.kb.ingest.parsing import parse_segments
+from ai_agent.storage.store import store
 
 
 def _backfill_one(fid: str, filename: str, dry_run: bool) -> dict:

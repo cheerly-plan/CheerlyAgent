@@ -173,3 +173,12 @@ def get_skill(skill_id: str) -> ReportSkill | None:
 def skill_ids() -> list[str]:
     """给 API / 提示词 / 报错信息用的可选类型清单。"""
     return [skill.skill_id for skill in _load_skills()]
+
+
+def skill_catalog() -> str:
+    """report_type 可选值清单（skill_id（名称） 顿号分隔），供提示词渲染。
+
+    消费方是 tools 层与 agents 层（组装工具描述、系统提示词时注入）；
+    prompts 层刻意不 import 这里——文案层不反向依赖业务域。
+    """
+    return "、".join(f"{skill.skill_id}（{skill.name}）" for skill in _load_skills())

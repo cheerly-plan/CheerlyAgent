@@ -17,7 +17,7 @@ from ai_agent.report.pdf import (
     render_report_pdf,
 )
 from ai_agent.tools.registry import TOOLS
-from ai_agent.tools.report_pdf import report_pdf_tool
+from ai_agent.tools.report.report_pdf import report_pdf_tool
 
 
 def _fact(period: str, value: str, name: str = "营业收入") -> IndicatorFact:

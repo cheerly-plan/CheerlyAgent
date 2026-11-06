@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             f"dim={settings.embedding_dim}  llm={settings.model} @ {settings.base_url}  "
             f"graph={graph} @ {graph_url}"
         )
-    from ai_agent.memory.store import store  # noqa: E402
+    from ai_agent.storage.store import store  # noqa: E402
 
     store.ensure_schema()
     return args.handler(args)
@@ -161,7 +161,7 @@ def _add_embed_override(parser: argparse.ArgumentParser) -> None:
 
 
 def _pick_files(name: str | None, file_id: str | None, all_files: bool) -> list[dict]:
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     with store._get_pool().connection() as conn:
         if file_id:
@@ -224,7 +224,7 @@ def _upload_path(rec: dict) -> Path | None:
 
 
 def _clear_chunks_and_graph(file_id) -> None:
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     with store._get_pool().connection() as conn:
         conn.execute("DELETE FROM agent_kb_chunk WHERE file_id = %s", (file_id,))
@@ -236,7 +236,7 @@ def _clear_chunks_and_graph(file_id) -> None:
 
 def _reparse_one(rec: dict, dry_run: bool) -> bool:
     from ai_agent.kb.pipeline import kb_pipeline
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     path = _upload_path(rec)
     print(f"  {rec['filename']}  (原件 {path.name if path else '缺失'})")
@@ -272,7 +272,7 @@ def _graph_one(
     rec: dict, dry_run: bool, doc_type: str = "", level: str = ""
 ) -> None:
     from ai_agent.kb.pipeline import kb_pipeline
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     print(
         f"  {rec['filename']}  切片 {rec['chunk_count']}  图谱 {rec['graph_status']}"
@@ -302,7 +302,7 @@ def _graph_one(
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     with store._get_pool().connection() as conn:
         sql = (
@@ -340,7 +340,7 @@ def _cmd_reparse(args: argparse.Namespace) -> int:
         ok = _reparse_one(rec, args.dry_run)
         parsed = parsed or ok
         if ok and args.with_graph:
-            from ai_agent.memory.store import store
+            from ai_agent.storage.store import store
 
             with store._get_pool().connection() as conn:
                 row = conn.execute(
@@ -354,8 +354,8 @@ def _cmd_reparse(args: argparse.Namespace) -> int:
 
 
 def _refresh_lexicon() -> None:
-    from ai_agent.kb.lexicon import rebuild_short_words
-    from ai_agent.memory.store import store
+    from ai_agent.kb.ingest.lexicon import rebuild_short_words
+    from ai_agent.storage.store import store
 
     try:
         words = rebuild_short_words(store)
@@ -367,8 +367,8 @@ def _refresh_lexicon() -> None:
 
 
 def _cmd_lexicon(args: argparse.Namespace) -> int:
-    from ai_agent.kb.lexicon import rebuild_short_words
-    from ai_agent.memory.store import store
+    from ai_agent.kb.ingest.lexicon import rebuild_short_words
+    from ai_agent.storage.store import store
 
     words = rebuild_short_words(store, write=not args.dry_run)
     if args.dry_run:
@@ -392,9 +392,9 @@ def _cmd_graph(args: argparse.Namespace) -> int:
 
 
 def _cmd_reembed(args: argparse.Namespace) -> int:
-    from ai_agent.kb.chunking import embedding_input
-    from ai_agent.memory.embeddings import embed_texts
-    from ai_agent.memory.store import store
+    from ai_agent.kb.ingest.chunking import embedding_input
+    from ai_agent.storage.embeddings import embed_texts
+    from ai_agent.storage.store import store
 
     targets = (
         ("chunks", "episodes", "entities")
@@ -483,7 +483,7 @@ def _cmd_meta(args: argparse.Namespace) -> int:
 
     文件名不规范（「最终版.pdf」）时规则抽不出主体，用 --subject 手填。
     """
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     files = _require_files(args)
     if files is None:
@@ -500,7 +500,7 @@ def _cmd_meta(args: argparse.Namespace) -> int:
             f"{row['subject'] or '(空)'}/{row['period'] or '(空)'}" if row else "?"
         )
         if args.dry_run:
-            from ai_agent.kb.meta import extract_file_meta
+            from ai_agent.kb.ingest.meta import extract_file_meta
 
             meta = extract_file_meta(rec["filename"])
             new = f"{meta['subject'] or '(空)'}/{meta['period'] or '(空)'}"
@@ -527,8 +527,8 @@ def _cmd_summary(args: argparse.Namespace) -> int:
 
     只改摘要不改切片，跑几次结果一样，随时可重跑。
     """
-    from ai_agent.kb.summary import build_file_summary, doc_type_label, index_file_summary
-    from ai_agent.memory.store import store
+    from ai_agent.kb.ingest.summary import build_file_summary, doc_type_label, index_file_summary
+    from ai_agent.storage.store import store
 
     files = _require_files(args)
     if files is None:
@@ -575,7 +575,7 @@ def _cmd_summary(args: argparse.Namespace) -> int:
 
 
 def _cmd_coverage(args: argparse.Namespace) -> int:
-    from ai_agent.memory.store import store
+    from ai_agent.storage.store import store
 
     if not args.file and not args.name:
         return _cmd_list(argparse.Namespace(name=None))

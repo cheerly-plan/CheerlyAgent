@@ -16,8 +16,8 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from ai_agent.core.config import settings
-from ai_agent.kb.chunking import Chunk, extract_table_indicators
-from ai_agent.kb.meta import COMPANY_SUFFIX, extract_aliases, extract_file_meta
+from ai_agent.kb.ingest.chunking import Chunk, extract_table_indicators
+from ai_agent.kb.ingest.meta import COMPANY_SUFFIX, extract_aliases, extract_file_meta
 from pgvector import Vector
 
 # 检索分桶键：按主体（公司）分桶，每个主体的头名在相关性带宽内保底一个

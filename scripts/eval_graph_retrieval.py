@@ -41,8 +41,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ai_agent.memory.store import store  # noqa: E402
-from ai_agent.tools import kg_search as KS  # noqa: E402
+from ai_agent.storage.store import store  # noqa: E402
+from ai_agent.tools.kb import kg_search as KS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "scripts" / "cases" / "graph_eval_cases.json"

@@ -17,12 +17,12 @@ import ai_agent.api.routers.report as report_router
 import ai_agent.report.pipeline as pipeline
 from ai_agent.api.schemas import ReportRequest
 from ai_agent.core.config import settings
-from ai_agent.memory.db import UserRecord
+from ai_agent.storage.db import UserRecord
 from ai_agent.report.compose import compose_report
 from ai_agent.report.extract import Evidence, ExtractResult, IndicatorFact
 from ai_agent.report.parse import OutlineItem, ReportPlan, SourceFile
 from ai_agent.tools.registry import TOOLS, TOOLS_MAP
-from ai_agent.tools.report_generate import generate_report_tool
+from ai_agent.tools.report.report_generate import generate_report_tool
 
 _USER = UserRecord(user_id="u-1", username="tester", display_name="tester")
 _SUBJECT = "中国能源建设股份有限公司"
@@ -226,7 +226,7 @@ def test_generate_report_tool_returns_links_not_body_numbers(monkeypatch):
         pdf_error="",
         gaps=["没有找到 2025Q3 的季报，同比基期的绝对值无法调取，无法跨期重算"],
     )
-    monkeypatch.setattr("ai_agent.tools.report_generate.run_report", lambda *a, **k: fake)
+    monkeypatch.setattr("ai_agent.tools.report.report_generate.run_report", lambda *a, **k: fake)
     text = generate_report_tool.run(request="生成中国银行2026Q3财报深度分析PDF研报")
 
     assert "/v1/report/files/bank.pdf" in text

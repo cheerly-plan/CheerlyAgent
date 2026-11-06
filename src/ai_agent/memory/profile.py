@@ -5,7 +5,7 @@ from typing import Literal
 
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.db import MemoryItem, current_user_id
+from ai_agent.storage.db import MemoryItem, current_user_id
 from ai_agent.memory.facets import (
     FACET_LABELS,
     coalesce_by_facet,
@@ -14,8 +14,9 @@ from ai_agent.memory.facets import (
     normalize_facet,
 )
 from ai_agent.memory.gate import jev_noul_batch
-from ai_agent.memory.parse import complete_memory_chat, load_llm_json
-from ai_agent.memory.store import store
+from ai_agent.llm.json_utils import load_llm_json
+from ai_agent.memory.llm_calls import complete_memory_chat
+from ai_agent.storage.store import store
 from ai_agent.prompts.memory import (
     DUP_INSTRUCTIONS,
     LABEL_EXISTING_PROFILE,

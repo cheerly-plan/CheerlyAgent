@@ -15,8 +15,9 @@ import json
 from types import SimpleNamespace
 
 from ai_agent.core.config import settings
-from ai_agent.kb import align, graph, graph_extract, retrieval
-from ai_agent.kb.chunking import Chunk
+from ai_agent.kb.graph import align, graph, graph_extract
+from ai_agent.kb.retrieval import retrieval
+from ai_agent.kb.ingest.chunking import Chunk
 from ai_agent.llm import client
 
 

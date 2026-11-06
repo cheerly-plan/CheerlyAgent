@@ -14,8 +14,8 @@ from ai_agent.api.schemas import (
 )
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import AgentError
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.store import store
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.store import store
 
 router = APIRouter(prefix="/v1/inspect", tags=["inspect"])
 

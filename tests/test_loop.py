@@ -14,7 +14,7 @@ from ai_agent.agents.loop import (
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.short_term import SUMMARY_USER_PREFIX, short_term_memory
-from ai_agent.memory.store import MemoryItem
+from ai_agent.storage.store import MemoryItem
 
 
 def _fake_summarize(previous, overflow):
@@ -81,7 +81,7 @@ def test_loop_runs_weather_tool():
         yield ("text", tool_msg["content"])
         yield ("result", {"content": tool_msg["content"], "tool_calls": []})
 
-    from ai_agent.tools import weather as wt
+    from ai_agent.tools.misc import weather as wt
 
     with (
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
@@ -1306,7 +1306,7 @@ def test_run_loop_requires_kb_tool_when_question_names_entity():
         patch("ai_agent.agents.loop.execute_tool", return_value="命中实体：金仙"),
         patch("ai_agent.kb.retrieval.mentioned_subjects", return_value=set()),
         patch("ai_agent.kb.retrieval.mentioned_entities", return_value=["金仙"]),
-        patch("ai_agent.tools.kg_search.prefetch_neighborhood", return_value=""),
+        patch("ai_agent.tools.kb.kg_search.prefetch_neighborhood", return_value=""),
     ):
         events = list(run_loop([{"role": "user", "content": "金仙的任职"}]))
 
@@ -1329,7 +1329,7 @@ def test_run_loop_injects_graph_neighborhood_before_tools():
         patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
         patch("ai_agent.agents.loop.tool_schemas", return_value=[]),
         patch(
-            "ai_agent.tools.kg_search.prefetch_neighborhood",
+            "ai_agent.tools.kb.kg_search.prefetch_neighborhood",
             return_value=block,
         ) as prefetch,
     ):
@@ -1343,7 +1343,7 @@ def test_run_loop_injects_graph_neighborhood_before_tools():
         patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
         patch("ai_agent.agents.loop.tool_schemas", return_value=[]),
         patch(
-            "ai_agent.tools.kg_search.prefetch_neighborhood",
+            "ai_agent.tools.kb.kg_search.prefetch_neighborhood",
             return_value="",
         ),
     ):
@@ -1911,7 +1911,7 @@ def test_mid_stream_error_is_reported_instead_of_killing_the_stream():
 def test_execute_tool_clamps_out_of_range_args():
     """模型传 depth=3（schema 上限 2）时，夹回边界重试，而不是整次失败。"""
     from ai_agent.tools.registry import _clamp_out_of_range_args
-    from ai_agent.tools.kg_search import KgSearchArgs
+    from ai_agent.tools.kb.kg_search import KgSearchArgs
 
     clamped = _clamp_out_of_range_args(
         KgSearchArgs, {"query": "安克创新", "depth": 3, "top_k": 10}
@@ -1922,7 +1922,7 @@ def test_execute_tool_clamps_out_of_range_args():
 
 def test_clamp_only_touches_out_of_range_numeric_fields():
     from ai_agent.tools.registry import _clamp_out_of_range_args
-    from ai_agent.tools.kg_search import KgSearchArgs
+    from ai_agent.tools.kb.kg_search import KgSearchArgs
 
     clamped = _clamp_out_of_range_args(
         KgSearchArgs, {"query": "安克创新", "depth": 0, "top_k": 99}
