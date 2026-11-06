@@ -1,8 +1,9 @@
 {
   "_说明": [
-    "抽取配置示例：复制成 data/kb_doc_profiles.json 后生效（该文件存在时，同 key 覆盖内置、新 key 追加）。",
-    "内置已有：prospectus / annual_report / legal_opinion / due_diligence / announcement / general，这里只演示怎么加一种新文档，以及怎么覆盖已有配置。",
-    "改完不用重启：后端下次建图时按需读取（进程内缓存，重启或调用 reload_profiles() 后刷新）。",
+    "运行时覆盖示例：复制成 data/kb_doc_profiles.json 后生效（同 key 覆盖内置 skill、新 key 追加）。",
+    "内置文档类型在 kb/skills/<doc_type>/SKILL.md：prospectus / annual_report / quarterly_report / legal_opinion / due_diligence / announcement / general。",
+    "新增常用类型优先加 SKILL.md 目录；本 JSON 适合业务侧临时覆盖或追加、不必发版。",
+    "改完调用 reload_profiles() 或重启后生效。",
     "entity_scope = 重点实体范围（不是硬白名单）；predicates = 推荐谓词（允许合理新增）；aliases = 原文写法 → 标准名。"
   ],
   "profiles": [

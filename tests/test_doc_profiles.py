@@ -38,6 +38,29 @@ def test_builtin_profiles_have_required_fields():
         assert profile.key == profile.key.strip().lower()
 
 
+def test_builtin_profiles_load_from_skill_md():
+    """每种文档类型对应 kb/skills/<id>/SKILL.md，不再写死在 Python 注册表里。"""
+    root = Path(doc_profiles._SKILLS_ROOT)
+    assert root.is_dir()
+    for profile in list_profiles():
+        # JSON 覆盖可能追加非 skill 类型；只断言内置那批有文件
+        if profile.key not in {
+            "prospectus",
+            "annual_report",
+            "quarterly_report",
+            "legal_opinion",
+            "due_diligence",
+            "announcement",
+            "general",
+        }:
+            continue
+        skill_md = root / profile.key / "SKILL.md"
+        assert skill_md.is_file(), f"缺少 {skill_md}"
+        text = skill_md.read_text(encoding="utf-8")
+        assert f"name: {profile.key}" in text
+        assert f"label: {profile.label}" in text
+
+
 def test_general_profile_is_last_and_fallback():
     profiles = list_profiles()
     assert profiles[-1].key == "general"

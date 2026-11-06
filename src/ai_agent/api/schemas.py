@@ -61,9 +61,9 @@ class KgBuildRequest(BaseModel):
 class KgRebuildRequest(BaseModel):
     """重建单文件图谱时可选携带抽取配置（文档类型 + 粒度）。
 
-    doc_type 是配置 key（prospectus / annual_report / legal_opinion /
-    due_diligence / announcement / general，或 data/kb_doc_profiles.json
-    里自定义的），不是中文名——后端按 key 找配置块。
+    doc_type 是配置 key（kb/skills 内置：prospectus / annual_report /
+    quarterly_report / legal_opinion / due_diligence / announcement / general，
+    或 data/kb_doc_profiles.json 覆盖/追加），不是中文名——后端按 key 找配置块。
     空串 = 清成全局默认的通用配置。
     """
 

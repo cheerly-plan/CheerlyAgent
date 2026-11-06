@@ -190,7 +190,7 @@ class Settings(BaseSettings):
     kb_graph_min_score: float = 0.55
 
     # 抽取 prompt 的文档配置（通用底座 + 可插拔配置块，见 kb/ingest/doc_profiles.py）。
-    # 路径不存在就只用内置配置；业务方加新文档类型改这个 JSON 即可，不用改代码。
+    # 内置在 kb/skills/*/SKILL.md；本 JSON 同 key 覆盖、新 key 追加（可不发版临时改）。
     # 格式见 kb/ingest/doc_profiles.example.json（复制成该路径即生效）
     kb_doc_profiles_path: Path = _PROJECT_ROOT / "data" / "kb_doc_profiles.json"
     # 没指定文档类型时的兜底：通用配置（不限白名单、不锁谓词）

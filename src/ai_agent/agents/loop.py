@@ -116,7 +116,7 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
 
     静态提示词只讲「怎么选工具」（关系→kg_search、数字→kb_search），具体
     图谱覆盖哪些实体/关系由本块按库内实际文档类型动态生成——加公告、年报
-    等新类型时无需改提示词，只要 doc_profiles 里配好即可，提示词不再只针对季报。
+    等新类型时无需改提示词，只要 kb/skills 或 doc_profiles 覆盖里配好即可，提示词不再只针对季报。
     这样模型按问题选对应类型的关系，而不是被硬编码的季报语义带偏。
     """
     try:

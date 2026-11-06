@@ -9,14 +9,17 @@
 的部分（实体范围、谓词偏好、别名归一、补充约束）在运行时按 doc_type 注入。
 抽取器只有一份，换文件是换配置，不是维护 N 份 system prompt。
 
-配置来源：内置几套常用类型（见 _BUILTIN），再用 data/kb_doc_profiles.json
-覆盖或追加——业务方要加「债券募集说明书」这类新类型，改 JSON 就行，
-不用改代码、不用发版。
+配置来源：
+1. 内置 ``kb/skills/<doc_type>/SKILL.md``（与报告 skill 同构：加类型 = 加目录）；
+2. 可选 ``data/kb_doc_profiles.json`` 覆盖或追加——业务方临时改类型可不发版。
+
+skill 只决定「抽什么」；清洗、对齐、落库、名称门禁仍是确定性代码。
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -50,6 +53,18 @@ _BASE_SYSTEM = GRAPH_BASE_SYSTEM
 # 不需要每个零散供应商都变成一个点。
 LEVELS = {"full": "完整", "light": "轻量"}
 DEFAULT_LEVEL = "full"
+
+_SKILLS_ROOT = Path(__file__).resolve().parent.parent / "skills"
+_FRONTMATTER_RE = re.compile(
+    r"\A---\s*\n(?P<meta>.*?)\n---\s*\n(?P<body>.*)\Z",
+    re.DOTALL,
+)
+_SECTION_RE = re.compile(
+    r"^##\s+(?P<title>\S.*?)\s*\n(?P<body>.*?)(?=^##\s+|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_BULLET_RE = re.compile(r"^[-*]\s+(.+)$", re.MULTILINE)
+_ALIAS_RE = re.compile(r"^(.+?)\s*→\s*(.+)$")
 
 
 @dataclass(frozen=True)
@@ -87,250 +102,93 @@ class DocProfile:
         }
 
 
-# ——— 内置配置：覆盖资本市场最常见的几类文档 ———
+def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        raise ValueError("SKILL.md 必须以 --- YAML frontmatter --- 开头")
+    meta: dict[str, str] = {}
+    for raw in match.group("meta").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            raise ValueError(f"frontmatter 行缺少冒号：{raw!r}")
+        key, _, value = line.partition(":")
+        meta[key.strip()] = value.strip()
+    return meta, match.group("body")
 
-# 年报配置单独提出来：季度报告与它几乎同构（同一家上市公司的定期报告，
-# 主体/子公司/财务指标/分季度分行业数据都一样），直接复用它的实体范围、
-# 谓词与别名，避免复制一份后调年报规则时要同步改两份。
-_ANNUAL_REPORT = DocProfile(
-    key="annual_report",
-    label="上市公司年报",
-    doc_name="上市公司年度报告",
-    entity_scope=(
-        "上市公司及其子公司",
-        "参股主体与联营企业",
-        "董事、监事与高管",
-        "业务板块",
-        "产品与服务",
-        "主要客户与供应商",
-        "财务指标",
-        "重大投资项目",
-        "对外担保与诉讼",
-    ),
-    predicates=(
-        "控股",
-        "参股",
-        "子公司",
-        "销售给",
-        "采购自",
-        "投资",
-        "营收来自",
-        "属于",
-        "计提",
-        "担保",
-        "任职",
-        "披露",
-    ),
-    notes=(
-        "客户/供应商若原文只写「第一名客户」「前五大供应商」，就用原文称呼，"
-        "不要编造具体公司名。",
-        "分季度、分行业、分地区的数据归到同一个指标实体，不要拆成多个名字相近的点。",
-        "「本公司」「公司」指上市公司本身，统一用其全称。",
-    ),
-)
 
-# 季报不复用年报那份「财务指标尽量抽全」。季报要回答的是股份、营收来自谁、
-# 机构和资金往来；把利润表每一行建成孤立的 metric，图上没有边，也答不了这些。
-_QUARTERLY_REPORT = DocProfile(
-    key="quarterly_report",
-    label="上市公司季报",
-    doc_name="上市公司季度报告（含半年报/中报）",
-    entity_scope=(
-        "上市公司本身",
-        "股东与持股机构（含基金、资管计划）",
-        "子公司、参股公司与联营公司",
-        "董事、监事、高管与会计机构负责人",
-        "营业收入的业务或主体来源",
-        "有对手方的资金往来（借款、担保、重大理财）",
-    ),
-    predicates=(
-        "持股",
-        "控股",
-        "参股",
-        "子公司",
-        "任职",
-        "营收来自",
-        "借款",
-        "担保",
-        "投资",
-    ),
-    notes=(
-        "只抽股份、营收来源、机构和资金往来。资产负债表、利润表、现金流量表的科目"
-        "（货币资金、应收账款、净利润、经营活动现金流、每股收益等）不要建成实体。",
-        "持股的方向是持有人指向被持股公司：主体是股东或机构，客体是上市公司。"
-        "股数和比例写在说明里，不要单独成点，也不要写成公司持股股东。",
-        "「营收来自」的客体只能是业务板块、产品或子公司，不要连到「营业收入」这个科目名，"
-        "也不要连到在手订单、新签订单。",
-        "资金只抽能指出对手方的往来（向谁借款、为谁担保、买了谁的理财），金额写在说明里。"
-        "没有对手方的科目余额不抽。",
-        "「本公司」「公司」指这份季报封面的上市公司全称，不要用其他文档里的公司名。",
-        "客户或供应商若原文只写「第一名客户」，就用原文称呼，不要编造公司名。",
-        "季报没披露的关系不要脑补。",
-    ),
-)
+def _section_bullets(body: str, title: str) -> tuple[str, ...]:
+    for match in _SECTION_RE.finditer(body):
+        if match.group("title").strip() != title:
+            continue
+        return tuple(
+            item.strip()
+            for item in _BULLET_RE.findall(match.group("body"))
+            if item.strip()
+        )
+    return ()
 
-_BUILTIN: tuple[DocProfile, ...] = (
-    DocProfile(
-        key="prospectus",
-        label="招股意向书",
-        doc_name="IPO 招股意向书 / 招股说明书",
-        entity_scope=(
-            "发行人及其子公司",
-            "控股股东与实际控制人",
-            "董事、监事、高管与核心技术人员",
-            "主要产品与型号",
-            "原材料与生产设备",
-            "募投项目",
-            "资质许可与专利",
-            "监管与审批单位",
-            "财务指标",
-            "重大风险事项",
-            "中介机构",
-        ),
-        predicates=(
-            "控股",
-            "全资子公司",
-            "参股",
-            "聘请",
-            "生产",
-            "采购",
-            "供应",
-            "销售",
-            "募投包含",
-            "拥有资质",
-            "持有专利",
-            "投资",
-            "审批",
-            "属于",
-            "担任",
-            "依赖",
-            "应用于",
-            "同比增长",
-        ),
-        notes=(
-            "concept 只用于行业赛道（如「民爆行业」「风电运营」），不要用于普通业务抽象词。",
-            "财务指标抽指标名（「营业收入」「装机容量」），不要抽成「营业收入 120 亿元」"
-            "或「62,200万千瓦」这种带数值的整句；具体数字和年份写进说明。"
-            "不要把「流动资产」「其他流动资产」这类科目名单独当实体。",
-            "母公司与子公司是不同实体，不要把子公司并进发行人。",
-        ),
-    ),
-    _ANNUAL_REPORT,
-    _QUARTERLY_REPORT,
-    DocProfile(
-        key="legal_opinion",
-        label="法律意见书",
-        doc_name="法律意见书",
-        entity_scope=(
-            "委托人及发行主体",
-            "自然人（股东、董监高、实际控制人）",
-            "标的公司与标的资产",
-            "合同与协议",
-            "权利与义务",
-            "证照、批复与许可",
-            "诉讼与仲裁",
-            "监管机构",
-            "签字律师与律师事务所",
-        ),
-        predicates=(
-            "持有",
-            "签署",
-            "涉及",
-            "取得",
-            "有效",
-            "出资",
-            "担保",
-            "诉讼对象",
-            "批准",
-            "任职",
-        ),
-        notes=(
-            "「经核查」「本所律师认为」「截至本意见书出具日」是程序性表述，"
-            "不要抽成实体或关系。",
-            "文号、日期、条款序号是限定语，不是实体。",
-            "同一主体在正文与附件里写法可能不同（简称/全称），统一到全称。",
-        ),
-    ),
-    DocProfile(
-        key="due_diligence",
-        label="尽调报告",
-        doc_name="尽职调查报告",
-        entity_scope=(
-            "标的企业",
-            "股东与实际控制人",
-            "关联方",
-            "核心人员",
-            "资质与知识产权",
-            "主要资产",
-            "重大合同",
-            "客户与供应商",
-            "财务与税务事项",
-            "诉讼、处罚与合规风险",
-        ),
-        predicates=(
-            "持有",
-            "控制",
-            "关联",
-            "签署",
-            "供应",
-            "采购",
-            "抵押",
-            "质押",
-            "涉诉",
-            "处罚",
-            "承诺",
-            "依赖",
-            "出资",
-        ),
-        notes=(
-            "问题清单里的「存在……风险」要连到具体主体或资产，不要只留一个抽象风险词。",
-            "访谈记录、资料清单里的一问一答不要当关系抽，只取陈述性事实。",
-        ),
-    ),
-    DocProfile(
-        key="announcement",
-        label="公司公告",
-        doc_name="上市公司公告",
-        entity_scope=(
-            "上市公司",
-            "交易对方",
-            "标的资产或标的公司",
-            "董事、监事与高管",
-            "股东",
-            "担保与借款",
-            "监管机构",
-            "中介机构",
-        ),
-        predicates=(
-            "收购",
-            "出售",
-            "增资",
-            "减持",
-            "质押",
-            "担保",
-            "聘任",
-            "辞职",
-            "审议通过",
-            "披露",
-            "停牌",
-        ),
-        notes=(
-            "「本公司」「公司」指上市公司本身，统一用其全称。",
-            "金额与时点只在构成关系时顺带写进说明，不单独成实体。",
-        ),
-    ),
-    DocProfile(
-        key="general",
-        label="通用（其他文档）",
-        doc_name="通用商业文档",
-        notes=(
-            "不限定实体白名单：按基础规则抽原文中的专有名词与关键业务概念。",
-            "谓词简洁即可，不强制套用词表；不做别名映射。",
-        ),
-    ),
-)
 
-_GENERAL = next(p for p in _BUILTIN if p.key == "general")
+def _section_aliases(body: str) -> tuple[tuple[str, str], ...]:
+    aliases: list[tuple[str, str]] = []
+    for item in _section_bullets(body, "别名"):
+        matched = _ALIAS_RE.match(item)
+        if matched is None:
+            logger.warning("kb skill 别名行无法解析，已跳过：%s", item)
+            continue
+        src, dst = matched.group(1).strip(), matched.group(2).strip()
+        if src and dst:
+            aliases.append((src, dst))
+    return tuple(aliases)
+
+
+def _load_skill_md(path: Path) -> DocProfile:
+    meta, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    key = meta.get("name", "").strip()
+    label = meta.get("label", "").strip()
+    doc_name = meta.get("doc_name", "").strip()
+    if not key or not label or not doc_name:
+        raise ValueError(f"{path}: frontmatter 需要 name/label/doc_name")
+    if path.parent.name != key:
+        raise ValueError(f"{path}: 目录名 {path.parent.name!r} 须与 name {key!r} 一致")
+    return DocProfile(
+        key=key,
+        label=label,
+        doc_name=doc_name,
+        entity_scope=_section_bullets(body, "实体范围"),
+        predicates=_section_bullets(body, "推荐谓词"),
+        aliases=_section_aliases(body),
+        notes=_section_bullets(body, "补充约束"),
+    )
+
+
+def _skill_order(path: Path) -> tuple[int, str]:
+    """按 frontmatter 的 order 排序；缺省靠后，同 order 按目录名。"""
+    try:
+        meta, _body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+        order_raw = meta.get("order", "500").strip() or "500"
+        order = int(order_raw)
+    except Exception:
+        order = 500
+    return order, path.parent.name
+
+
+@lru_cache(maxsize=1)
+def _builtin_profiles() -> tuple[DocProfile, ...]:
+    """扫描 kb/skills/*/SKILL.md。读坏单份只记日志跳过，不能拖垮建图。"""
+    if not _SKILLS_ROOT.is_dir():
+        logger.error("kb skills 目录不存在：%s", _SKILLS_ROOT)
+        return ()
+    loaded: list[DocProfile] = []
+    for skill_md in sorted(_SKILLS_ROOT.glob("*/SKILL.md"), key=_skill_order):
+        try:
+            loaded.append(_load_skill_md(skill_md))
+        except Exception:
+            logger.exception("kb skill 读取失败，已跳过：%s", skill_md)
+    if not any(p.key == "general" for p in loaded):
+        logger.error("kb skills 缺少 general 兜底，建图未知类型将无配置可回落")
+    return tuple(loaded)
 
 
 def _from_json(raw: dict) -> DocProfile | None:
@@ -389,13 +247,21 @@ def _overrides() -> tuple[DocProfile, ...]:
         return ()
 
 
+def _general_fallback() -> DocProfile:
+    for profile in _builtin_profiles():
+        if profile.key == "general":
+            return profile
+    # skills 目录损坏时的最后兜底：空范围 + 空谓词，仍能跑通底座
+    return DocProfile(key="general", label="通用（其他文档）", doc_name="通用商业文档")
+
+
 def list_profiles() -> list[DocProfile]:
-    """内置 + 覆盖，同 key 覆盖、新 key 追加、general 永远在最后。"""
-    merged: dict[str, DocProfile] = {p.key: p for p in _BUILTIN}
+    """内置 skill + JSON 覆盖，同 key 覆盖、新 key 追加、general 永远在最后。"""
+    merged: dict[str, DocProfile] = {p.key: p for p in _builtin_profiles()}
     for item in _overrides():
         merged[item.key] = item
     ordered = [p for key, p in merged.items() if key != "general"]
-    ordered.append(merged.get("general", _GENERAL))
+    ordered.append(merged.get("general", _general_fallback()))
     return ordered
 
 
@@ -403,12 +269,12 @@ def resolve_profile(key: str | None) -> DocProfile:
     """按 key 取配置；未知/空 key 一律回落到通用模式（换陌生文档也能跑）。"""
     wanted = (key or "").strip()
     if not wanted:
-        return _GENERAL
+        return _general_fallback()
     for profile in list_profiles():
         if profile.key == wanted:
             return profile
     logger.warning("kb 未知文档类型 %s，回落到通用配置", wanted)
-    return _GENERAL
+    return _general_fallback()
 
 
 def normalize_level(level: str | None) -> str:
@@ -457,5 +323,6 @@ def build_system_prompt(doc_type: str | None, level: str = DEFAULT_LEVEL) -> str
 
 
 def reload_profiles() -> None:
-    """运维改完 JSON 后调一次即可生效（不必重启服务）。"""
+    """运维改完 skill / JSON 后调一次即可生效（不必重启服务）。"""
+    _builtin_profiles.cache_clear()
     _overrides.cache_clear()
