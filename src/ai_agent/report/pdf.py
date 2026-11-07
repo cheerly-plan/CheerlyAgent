@@ -123,8 +123,9 @@ def charts_for_report(
 ) -> list[ChartSpec]:
     """行业赛道报告优先画「组内横比」柱状图；其它报告沿用多期对比图。"""
     from ai_agent.report import sections as report_sections
+    from ai_agent.report.skills import is_segment_skill
 
-    if plan.skill_id == "semiconductor_industry_report" or report_sections.outline_has(
+    if is_segment_skill(plan.skill_id) or report_sections.outline_has(
         plan.outline, "segment_peer"
     ):
         peer = _segment_peer_charts(plan, facts)

@@ -562,11 +562,21 @@ classification:
     - cyclical
   - - 有色
     - cyclical
+  - - 机器人
+    - robotics
+  - - 谐波
+    - manufacturing
+  - - 减速器
+    - manufacturing
   segment_to_type:
     设计: fabless
     制造: foundry
     设备: equipment
     封测: packaging
+    本体: manufacturing
+    减速器: manufacturing
+    伺服控制: equipment
+    系统集成: manufacturing
 aliases:
 - - 加权平均净资产收益率
   - 加权平均净资产收益率

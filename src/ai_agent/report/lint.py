@@ -14,9 +14,11 @@
 6. sections.yaml 里的 id 都有 renderer（拼错 id 不该降级成占位句）；
 7. 章节降级快照 ``sections_defaults.py`` 与 sections.yaml 语义一致；
 8. 该快照是脚本的最新生成物（手工改过 / 忘了跑同步脚本）；
-9. registry 内置分类兜底与 indicators.yaml 的 classification 一致；
+9. 分类降级快照 ``classification_defaults.py`` 是脚本的最新生成物；
 10. SKILL.md 全量可解析、frontmatter 与指标集有效；
-11. SKILL.md 里 ``section:`` 声明的 id 都已注册（原先只会运行时 warning）。
+11. SKILL.md 里 ``section:`` 声明的 id 都已注册（原先只会运行时 warning）；
+12. 行业档案完整性：花名册赛道都有 segment_to_type 映射、indicator_set
+    指向已登记 profile、定性文案不含数字（**验收「新增一个行业」**）。
 
 行为取舍：默认 **只记 ERROR 日志，不阻断启动**。运行时本来就有降级路径，
 多租户服务端不该因为一份 YAML 拼错整体不可用；但错误必须显眼、可查。
@@ -30,7 +32,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ai_agent.core.logging import get_logger
-from ai_agent.report import registry, sections, sections_snapshot
+from ai_agent.report import (
+    classification_snapshot,
+    registry,
+    sections,
+    sections_snapshot,
+)
 
 logger = get_logger(__name__)
 
@@ -133,17 +140,51 @@ def lint_report_config(
     if config_dir is None:
         run("sections_snapshot_sync", check_sections_snapshot_sync)
 
-    def check_classification_builtin_sync() -> None:
-        shipped = registry.validate_registry(indicators).classification
-        builtin = registry.ClassificationRules(
-            registry._BUILTIN_NAME_HINTS, registry._BUILTIN_SEGMENT_TO_TYPE
+    def check_classification_snapshot_sync() -> None:
+        """生成物是包内固定路径，与临时配置目录无关，只在默认路径下校验新鲜度。"""
+        expected = classification_snapshot.render_defaults(
+            indicators, root / "industries.yaml"
         )
-        if shipped != builtin:
+        path = classification_snapshot.DEFAULTS_PY
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        if current != expected:
             raise ValueError(
-                "registry._BUILTIN_* 分类兜底与 indicators.yaml 的 classification 不一致"
+                "classification_defaults.py 不是最新生成物，请运行 "
+                "uv run python scripts/sync_indicators_snapshot.py"
             )
 
-    run("classification_builtin_sync", check_classification_builtin_sync)
+    if config_dir is None:
+        run("classification_snapshot_sync", check_classification_snapshot_sync)
+
+    def check_industry_integrity() -> None:
+        """新增行业完整性：赛道有映射、指标集已登记、定性文案不含数字。
+
+        这是「加一个行业只改配置」的验收门禁：漏配赛道以前会静默回退到
+        半导体模板，现在必须变成一条显式 issue。
+        """
+        from ai_agent.report import industry, skills
+
+        known = industry.known_company_types()
+        segments = dict(registry.segment_map())
+        problems: list[str] = []
+        for skill in skills._load_skills():
+            if skill.kind != "industry":
+                continue
+            if skill.indicator_set and skill.indicator_set not in known:
+                problems.append(
+                    f"{skill.skill_id}: indicator_set {skill.indicator_set!r} 未登记 profile"
+                )
+            for _name, _code, segment, _aka in skill.companies:
+                seg = (segment or "").strip()
+                if seg and seg not in segments:
+                    problems.append(
+                        f"{skill.skill_id}: 赛道 {seg!r} 缺 segment_to_type 映射"
+                    )
+        if problems:
+            raise ValueError("行业档案不完整：" + "；".join(sorted(set(problems))))
+
+    if config_dir is None:
+        run("industry_integrity", check_industry_integrity)
 
     def check_skill_frontmatter() -> None:
         # 延迟导入：skills 模块导入即扫描 SKILL.md，坏了也要变成一条 issue

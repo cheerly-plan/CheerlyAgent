@@ -54,6 +54,7 @@ def test_resolve_skill_prefers_industry_template_then_generic():
         resolve_skill("industry", "半导体").skill_id
         == "semiconductor_industry_report"
     )
+    assert resolve_skill("industry", "机器人").skill_id == "robotics_industry_report"
     # kind 不认识时按通用公司模板兜底，不抛错
     assert resolve_skill("unknown", "").kind == "company"
 
@@ -137,6 +138,35 @@ def test_semiconductor_empty_kb_uses_skill_companies(monkeypatch):
     assert not any("无法确定要调取哪些季报" in gap for gap in plan.gaps)
     assert any(item.title == "组内对比" for item in plan.outline)
     assert any(item.title == "经营解读" for item in plan.outline)
+
+
+def test_robotics_skill_has_universe_and_routes(monkeypatch):
+    """机器人行业：skill 花名册 + 空库路由 + 赛道分组大纲。"""
+    from ai_agent.report.skills import is_segment_skill, reload_skills
+
+    reload_skills()
+    skill = get_skill("robotics_industry_report")
+    assert skill is not None
+    assert skill.kind == "industry"
+    assert "机器人" in skill.industries
+    assert is_segment_skill(skill.skill_id)
+    assert skill.segment_of("绿的谐波") == "减速器"
+    assert skill.segment_of("汇川技术") == "伺服控制"
+    assert skill.segment_of("机器人") == "本体"  # 又名 → 新松
+    assert "合同负债" in skill.indicators
+    monkeypatch.setattr(
+        "ai_agent.report.parse.store.list_kb_files",
+        lambda **k: [],
+    )
+    plan = parse_request("生成机器人行业2025Q3财报对比分析")
+    assert plan.kind == "industry"
+    assert plan.industry == "机器人"
+    assert plan.skill_id == "robotics_industry_report"
+    assert "赛道分组版" in plan.title
+    assert "汇川技术" in plan.subjects
+    assert "绿的谐波" in plan.subjects
+    assert any(item.title == "组内对比" for item in plan.outline)
+    assert any(item.section_id == "segment_peer" for item in plan.outline)
 
 
 def test_parse_request_records_routed_skill(monkeypatch):

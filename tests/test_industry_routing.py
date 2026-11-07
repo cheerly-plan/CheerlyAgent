@@ -8,6 +8,8 @@ from ai_agent.report.industry import (
     FABLESS,
     FOUNDRY,
     GENERIC,
+    MANUFACTURING,
+    ROBOTICS,
     _INDUSTRIES_YAML,
     _load_profiles,
     _normalize_key,
@@ -41,6 +43,13 @@ def test_classify_semiconductor_roster():
     assert classify_subject("中芯国际") == FOUNDRY
     assert classify_subject("深圳中科飞测科技股份有限公司") == EQUIPMENT
     assert classify_subject("中国银行股份有限公司") == BANK
+
+
+def test_classify_robotics_roster_and_profile():
+    assert classify_subject("绿的谐波") == MANUFACTURING
+    assert classify_subject("汇川技术") == EQUIPMENT
+    assert "合同负债" in default_indicators(ROBOTICS)
+    assert _normalize_key("机器人") == ROBOTICS
 
 
 def test_equipment_indicators_prefer_order_side():

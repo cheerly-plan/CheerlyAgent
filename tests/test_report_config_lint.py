@@ -35,9 +35,10 @@ _CHECK_NAMES = {
     "renderer_bindings",
     "builtin_aliases_sync",
     "sections_snapshot_sync",
-    "classification_builtin_sync",
+    "classification_snapshot_sync",
     "skill_frontmatter",
     "skill_section_ids",
+    "industry_integrity",
 }
 
 
@@ -199,12 +200,116 @@ def test_sections_snapshot_freshness_is_detected(monkeypatch, tmp_path_fallback)
     assert any(issue.startswith("sections_snapshot_sync:") for issue in report.issues)
 
 
-def test_classification_builtin_drift_is_detected(monkeypatch):
-    from ai_agent.report import registry
+def test_classification_snapshot_freshness_is_detected(monkeypatch, tmp_path_fallback):
+    """改了配置忘跑同步脚本 / 手工改了生成物，都要被单独拦住。"""
+    from ai_agent.report import classification_snapshot
 
-    monkeypatch.setattr(registry, "_BUILTIN_NAME_HINTS", registry._BUILTIN_NAME_HINTS[:-1])
+    monkeypatch.setattr(
+        classification_snapshot, "DEFAULTS_PY", tmp_path_fallback / "stale.py"
+    )
     report = lint_report_config()
-    assert any(issue.startswith("classification_builtin_sync:") for issue in report.issues)
+    assert any(
+        issue.startswith("classification_snapshot_sync:") for issue in report.issues
+    )
+
+
+def test_industry_integrity_detects_unmapped_segment(monkeypatch):
+    """新增行业花名册里的赛道漏配 segment_to_type：必须显式报错，不再静默串行业。"""
+    fake = SimpleNamespace(
+        skill_id="fake_industry",
+        kind="industry",
+        indicator_set="semiconductor",
+        companies=(("某公司", "000001", "全新赛道", ""),),
+        section_ids=(),
+    )
+    monkeypatch.setattr(skills, "_load_skills", lambda: (fake,))
+    report = lint_report_config()
+    assert any(
+        issue.startswith("industry_integrity:") and "全新赛道" in issue
+        for issue in report.issues
+    )
+
+
+def test_industry_integrity_detects_unknown_indicator_set(monkeypatch):
+    fake = SimpleNamespace(
+        skill_id="fake_industry",
+        kind="industry",
+        indicator_set="not_a_profile",
+        companies=(),
+        section_ids=(),
+    )
+    monkeypatch.setattr(skills, "_load_skills", lambda: (fake,))
+    report = lint_report_config()
+    assert any(
+        issue.startswith("industry_integrity:") and "not_a_profile" in issue
+        for issue in report.issues
+    )
+
+
+def test_industry_notes_reject_injected_numbers(config_dir):
+    """行业定性文案不能夹带未经 facts 校验的数字。"""
+    from ai_agent.report import industry
+
+    _edit(
+        config_dir / "industries.yaml",
+        lambda raw: raw["profiles"]["robotics"]["notes"]["next_period"].append(
+            "预计增长 30%"
+        ),
+    )
+    with pytest.raises(ValueError, match="数字"):
+        industry.validate_industries(config_dir / "industries.yaml")
+
+
+def test_third_industry_is_config_only(monkeypatch):
+    """验收：新增第三个行业只改 industries.yaml，零 Python 改动即全链路生效。"""
+    from ai_agent.report import industry, registry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "industries.yaml"
+        raw = yaml.safe_load(
+            (_CONFIG_DIR / "industries.yaml").read_text(encoding="utf-8")
+        )
+        raw["aliases"]["光伏"] = "photovoltaics"
+        raw["aliases"]["photovoltaics"] = "photovoltaics"
+        raw["profiles"]["photovoltaics"] = {
+            "include": list(raw["profiles"]["semiconductor"]["include"]),
+            "exclude": list(raw["profiles"]["semiconductor"]["exclude"]),
+            "notes": {
+                "next_period": ["景气周期待接入外部数据源，本期不推断。"],
+                "rnd_gloss": "只陈述本期数字结构。",
+            },
+        }
+        target.write_text(
+            yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with monkeypatch.context() as patch:
+            patch.setattr(industry, "_INDUSTRIES_YAML", target)
+            patch.setattr(registry, "_INDUSTRIES_YAML", target)
+            patch.setattr(
+                skills,
+                "get_skill",
+                lambda _sid: SimpleNamespace(indicator_set="photovoltaics"),
+            )
+            industry._profiles.cache_clear()
+            industry._aliases.cache_clear()
+
+            assert industry._normalize_key("光伏") == "photovoltaics"
+            assert "photovoltaics" in industry.known_company_types()
+            assert "photovoltaics" in registry._known_company_types()
+            assert len(industry.default_indicators("光伏")) == 5
+            plan = SimpleNamespace(
+                skill_id="photovoltaics_industry_report", industry="光伏"
+            )
+            assert industry.notes_for_plan(plan).next_period == (
+                "景气周期待接入外部数据源，本期不推断。",
+            )
+            # 未登记赛道不再静默套用半导体模板
+            assert industry.type_for_segment("硅料") == industry.GENERIC
+
+        industry._profiles.cache_clear()
+        industry._aliases.cache_clear()
 
 
 def test_broken_skill_frontmatter_is_detected(monkeypatch, tmp_path_fallback):

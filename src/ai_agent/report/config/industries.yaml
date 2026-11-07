@@ -1,6 +1,38 @@
-# 行业指标 bundle：按 company_type 选取 include / exclude（中文报表术语）。
-# 分类逻辑仍在 industry.py；本文件只声明指标组合。
+# 行业档案：新增一个行业只需在这里加一段 profile（可选 aliases / notes）。
+# 本文件是「公司类型白名单、行业名别名、指标集、行业定性文案」的单一数据源；
+# classification_defaults.py 由 scripts/sync_indicators_snapshot.py 自动导出，
+# 是主配置读不到时的只读降级快照，请勿手工编辑。
+# 铁律：notes 里只能写定性句，不得含阿拉伯数字或百分比；数字一律由 facts 提供。
 # sets 可被 profiles.exclude_refs 引用，避免重复粘贴银行专属指标。
+
+# 行业名 / 公司简称 → profile key。新增行业在这里补一行中文别名即可，
+# 不用再往 industry.py 的 Python 字典里加常量。
+aliases:
+  bank: bank
+  银行: bank
+  generic: generic
+  manufacturing: manufacturing
+  一般制造: manufacturing
+  制造业: manufacturing
+  semiconductor: semiconductor
+  半导体: semiconductor
+  robotics: robotics
+  机器人: robotics
+  fabless: fabless
+  设计: fabless
+  foundry: foundry
+  制造: foundry
+  equipment: equipment
+  设备: equipment
+  packaging: packaging
+  封测: packaging
+  software: software
+  软件: software
+  real_estate: real_estate
+  地产: real_estate
+  cyclical: cyclical
+  周期: cyclical
+  industry_shared: industry_shared
 
 sets:
   bank_only: &bank_only
@@ -146,14 +178,40 @@ profiles:
     exclude: [研发费用率, 大客户集中度]
 
   # 行业横比共用集：各赛道都能对上的少数指标；组内细项由 segment 模板补。
-  semiconductor:
-    include:
+  # 显式命名，不再借 semiconductor profile 当共用集（改半导体指标不会连带改所有行业）。
+  industry_shared:
+    include: &shared_include
       - 营业收入
       - 扣非净利润
       - 毛利率
       - 研发费用率
       - 经营活动产生的现金流量净额
     exclude: *bank_only
+
+  # notes 是可选定性文案：不写就用 Python 里的通用兜底句，新增行业无需改代码。
+  semiconductor:
+    include: *shared_include
+    exclude: *bank_only
+    notes:
+      next_period:
+        - "景气周期（全球半导体销售额增速、晶圆厂稼动率、存储／模拟价格等）依赖外部数据源（WSTS／SEMI／协会），本期流水线未接入，不推断周期位置。"
+        - "下一期预告需明确：数据源清单、入库表结构、更新频率；接入前本报告只做公司财报赛道分组对比。"
+      margin_gloss: "设计／设备链路高于制造／封测；越靠产业链上游毛利率越高，越靠下游重资产环节毛利率越低——此为已抽取数字的横向关系，不构成外部归因。"
+      rnd_gloss: "上游设计／设备研发强度整体高于下游封测——同样只陈述本期数字结构。"
+
+  robotics:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 研发费用率
+      - 经营活动产生的现金流量净额
+      - 合同负债
+    exclude: *bank_only
+    notes:
+      next_period:
+        - "景气周期（工业机器人产量、人形／协作出货、减速器／伺服价格等）依赖外部数据源，本期流水线未接入，不推断周期位置。"
+        - "下一期预告需明确：数据源清单、入库表结构、更新频率；接入前本报告只做公司财报赛道分组对比。"
 
   generic:
     include:

@@ -59,6 +59,9 @@ class ReportSkill:
     companies: tuple[tuple[str, str, str, str], ...] = ()
     # 与 sections 平行的 renderer id；空串表示该节按标题别名回退。
     section_ids: tuple[str, ...] = ()
+    # 行业指标档案 key（industries.yaml 的 profile key）；用于按行业取定性文案，
+    # 渲染层不需要按 skill_id 写分支。
+    indicator_set: str = ""
 
     def build_outline(self, indicators: list[str]) -> list[tuple[str, str, str]]:
         """把 {indicators} / {companies} 占位填成实际数据，并带上 renderer id。"""
@@ -227,6 +230,7 @@ def _load_skill(path: Path) -> ReportSkill:
         sections=tuple((section_title, brief) for section_title, brief, _ in parsed),
         companies=_parse_companies(meta.get("companies", "")),
         section_ids=tuple(section_id for _, _, section_id in parsed),
+        indicator_set=indicator_set,
     )
 
 
@@ -278,6 +282,14 @@ def get_skill(skill_id: str) -> ReportSkill | None:
         if skill.skill_id == skill_id:
             return skill
     return None
+
+
+def is_segment_skill(skill_id: str) -> bool:
+    """花名册含赛道标注 → 走赛道分组报告路径（半导体／机器人等共用）。"""
+    skill = get_skill(skill_id) if skill_id else None
+    if skill is None or not skill.companies:
+        return False
+    return any((segment or "").strip() for _name, _code, segment, _aka in skill.companies)
 
 
 def skill_ids() -> list[str]:

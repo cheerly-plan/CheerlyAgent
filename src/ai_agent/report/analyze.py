@@ -23,6 +23,7 @@ from ai_agent.report.extract import (
     _as_uuid,
     _files_for,
 )
+from ai_agent.report.industry import notes_for_plan
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.supplemental import SupplementalResult
 from ai_agent.report.validate import _allowed, _measure, _number_key
@@ -96,9 +97,11 @@ def analyze_operations(
     if not current:
         return AnalysisSection(lines=[_FALLBACK], gaps=["本期没有可解读的抽取指标"])
 
-    # 半导体赛道报告：用已抽取数字写梯队与结构关系，不跑 LLM 复述/乱引模板条款。
-    if plan.skill_id == "semiconductor_industry_report":
-        lines, derived = _semiconductor_structure_lines(plan, current)
+    # 赛道分组报告：用已抽取数字写梯队与结构关系，不跑 LLM 复述/乱引模板条款。
+    from ai_agent.report.skills import is_segment_skill
+
+    if is_segment_skill(plan.skill_id):
+        lines, derived = _segment_structure_lines(plan, current)
         if lines:
             return AnalysisSection(lines=lines, used_llm=False, derived_facts=derived)
         return AnalysisSection(lines=[_FALLBACK], gaps=["缺少可排序的毛利率或研发费用率"])
@@ -168,7 +171,7 @@ def analyze_operations(
     return AnalysisSection(lines=lines, gaps=gaps, used_llm=True)
 
 
-def _semiconductor_structure_lines(
+def _segment_structure_lines(
     plan: ReportPlan, facts: list[IndicatorFact]
 ) -> tuple[list[str], list[IndicatorFact]]:
     """用已授权毛利率/研发费用率写梯队与结构关系（①级数据关系，非第三方因果）。"""
@@ -177,6 +180,8 @@ def _semiconductor_structure_lines(
 
     skill = get_skill(plan.skill_id) if plan.skill_id else None
     segment_of = skill.segment_of if skill else (lambda _name: "")
+    # 行业专属的定性 gloss 来自 industries.yaml；未配置则用通用句。
+    notes = notes_for_plan(plan)
 
     def _ranked(indicator: str) -> list[tuple[str, str, str, object]]:
         rows: list[tuple[str, str, str, object]] = []
@@ -232,26 +237,25 @@ def _semiconductor_structure_lines(
     if len(margin_seg) >= 2:
         detail = " / ".join(f"{seg}≈{_fmt_avg(avg)}%" for seg, avg in margin_seg)
         order = " > ".join(seg for seg, _ in margin_seg)
-        lines.append(
-            f"按赛道看毛利率均值排序为 {order}（{detail}）："
-            "设计／设备链路高于制造／封测；越靠产业链上游毛利率越高，"
-            "越靠下游重资产环节毛利率越低——此为已抽取数字的横向关系，不构成外部归因。"
-        )
+        gloss = notes.margin_gloss or "此为已抽取数字的横向关系，不构成外部归因。"
+        lines.append(f"按赛道看毛利率均值排序为 {order}（{detail}）：{gloss}")
         derived.extend(
             _segment_avg_fact(plan.period, "毛利率", seg, avg) for seg, avg in margin_seg
         )
     if len(rd_seg) >= 2:
         detail = " / ".join(f"{seg}≈{_fmt_avg(avg)}%" for seg, avg in rd_seg)
         order = " > ".join(seg for seg, _ in rd_seg)
-        lines.append(
-            f"按赛道看研发费用率均值排序为 {order}（{detail}）："
-            "上游设计／设备研发强度整体高于下游封测——同样只陈述本期数字结构。"
-        )
+        gloss = notes.rnd_gloss or "同样只陈述本期数字结构，不引入无出处因果。"
+        lines.append(f"按赛道看研发费用率均值排序为 {order}（{detail}）：{gloss}")
         derived.extend(
             _segment_avg_fact(plan.period, "研发费用率", seg, avg) for seg, avg in rd_seg
         )
     lines.append("以上判断仅基于本期已抽取或结构化补齐的比率，不引入无出处的订单／景气推断。")
     return lines, derived
+
+
+# 兼容旧测试名。
+_semiconductor_structure_lines = _segment_structure_lines
 
 
 def _fmt_avg(amount: object) -> str:
@@ -295,8 +299,10 @@ def _deterministic_lines(
 
     不写第三方推断。证据不足时返回空，由调用方落从略句。
     """
-    if plan.skill_id == "semiconductor_industry_report":
-        lines, _derived = _semiconductor_structure_lines(plan, facts)
+    from ai_agent.report.skills import is_segment_skill
+
+    if is_segment_skill(plan.skill_id):
+        lines, _derived = _segment_structure_lines(plan, facts)
         return lines
 
     lines: list[str] = []

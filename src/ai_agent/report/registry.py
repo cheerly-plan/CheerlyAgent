@@ -88,41 +88,39 @@ _ORDERING_TYPES: dict[str, type | tuple[type, ...]] = {
     "yoy_frame": list,
 }
 
-_KNOWN_COMPANY_TYPES = frozenset(
-    {
-        "bank",
-        "generic",
-        "semiconductor",
-        "fabless",
-        "foundry",
-        "equipment",
-        "packaging",
-        "manufacturing",
-        "software",
-        "real_estate",
-        "cyclical",
-    }
-)
-# 最后一道兜底：连降级镜像都读不到时，至少别让分类规则彻底消失。
-_BUILTIN_NAME_HINTS: tuple[tuple[str, str], ...] = (
-    ("银行", "bank"),
-    ("置业", "real_estate"),
-    ("地产", "real_estate"),
-    ("房地产", "real_estate"),
-    ("软件", "software"),
-    ("互联", "software"),
-    ("云", "software"),
-    ("钢铁", "cyclical"),
-    ("化工", "cyclical"),
-    ("煤炭", "cyclical"),
-    ("有色", "cyclical"),
-)
-_BUILTIN_SEGMENT_TO_TYPE: tuple[tuple[str, str], ...] = (
-    ("设计", "fabless"),
-    ("制造", "foundry"),
-    ("设备", "equipment"),
-    ("封测", "packaging"),
-)
+# 分类规则的降级快照：由 scripts/sync_indicators_snapshot.py 从配置自动生成，
+# 不再是手工维护的第三份名单。保留最后一层 try/except，打包漏文件时也不至于
+# 让整个 report 包无法导入。
+try:
+    from ai_agent.report.classification_defaults import (
+        COMPANY_TYPES as _BUILTIN_COMPANY_TYPES,
+        NAME_HINTS as _BUILTIN_NAME_HINTS,
+        SEGMENT_TO_TYPE as _BUILTIN_SEGMENT_TO_TYPE,
+    )
+except ImportError:  # pragma: no cover - 仅打包缺生成物时触发
+    _BUILTIN_COMPANY_TYPES = frozenset({"bank", "generic"})
+    _BUILTIN_NAME_HINTS: tuple[tuple[str, str], ...] = (("银行", "bank"),)
+    _BUILTIN_SEGMENT_TO_TYPE: tuple[tuple[str, str], ...] = ()
+
+_INDUSTRIES_YAML = _CONFIG_DIR / "industries.yaml"
+
+
+def _known_company_types() -> frozenset[str]:
+    """公司类型白名单的唯一数据源是 industries.yaml 的 profile keys。
+
+    刻意不读生成物常量：否则「新增行业 → 旧白名单拒绝新 classification」会变成
+    先有鸡还是先有蛋。只有连 industries.yaml 都读不到时才回退内置快照。
+    """
+    try:
+        raw = yaml.safe_load(_INDUSTRIES_YAML.read_text(encoding="utf-8")) or {}
+        profiles = raw.get("profiles") or {}
+        if isinstance(profiles, dict) and profiles:
+            return frozenset(str(key) for key in profiles)
+    except Exception:
+        logger.exception("industries.yaml 读取失败，公司类型回退内置快照")
+    return _BUILTIN_COMPANY_TYPES
+
+
 _MIN_ORDERING: dict[str, Any] = {"lead_max": 3, "segment_table_core": 6}
 
 
@@ -357,8 +355,9 @@ def _load(path: Path) -> Registry:
             )
             for k, v in raw_segments.items()
         )
+    known_types = _known_company_types()
     for hint_key, company_type in (*hints, *segments):
-        if company_type not in _KNOWN_COMPANY_TYPES:
+        if company_type not in known_types:
             raise ValueError(f"{path}: 未知公司类型 {company_type}（{hint_key}）")
 
     return Registry(

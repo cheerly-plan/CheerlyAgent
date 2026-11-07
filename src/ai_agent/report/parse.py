@@ -391,7 +391,9 @@ def _outline(plan: ReportPlan, skill: ReportSkill) -> list[OutlineItem]:
 
 def _title(plan: ReportPlan) -> str:
     if plan.kind == "industry" and plan.industry and plan.period:
-        if plan.skill_id == "semiconductor_industry_report":
+        from ai_agent.report.skills import is_segment_skill
+
+        if is_segment_skill(plan.skill_id):
             return f"{plan.industry}行业 {plan.period} 财报对比分析（赛道分组版）"
         return f"{plan.industry}行业 {plan.period} 深度分析"
     if plan.subjects and plan.period:

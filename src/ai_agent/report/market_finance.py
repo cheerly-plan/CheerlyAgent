@@ -80,11 +80,14 @@ def supplement_facts_from_market(
     col = period_column(plan.period)
     if not col:
         return facts, missing
+    from ai_agent.report.skills import is_segment_skill
+
+    # 赛道横比报告统一用财务摘要累计口径覆盖正文单季叙述（毛利率等）。
     prefer_market = (
         registry.names_with(
             "prefer_market", fallback=_SEMICONDUCTOR_PREFER_MARKET
         )
-        if plan.skill_id == "semiconductor_industry_report"
+        if is_segment_skill(plan.skill_id)
         else frozenset()
     )
 

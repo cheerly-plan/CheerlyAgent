@@ -25,13 +25,15 @@ from ai_agent.report.compare import (
 from ai_agent.report.extract import IndicatorFact, citation_anchor, ensure_amount_units
 from ai_agent.report.industry import (
     BANK,
+    INDUSTRY_SHARED,
     default_indicators,
     industry_of,
     is_excluded,
+    notes_for_plan,
     type_for_segment,
 )
 from ai_agent.report.parse import OutlineItem, ReportPlan
-from ai_agent.report.skills import get_skill
+from ai_agent.report.skills import get_skill, is_segment_skill
 from ai_agent.report.features import Features, compute_features
 from ai_agent.report.meta import infer_scope, scope_label
 from ai_agent.report.rules import (
@@ -59,8 +61,7 @@ _READING_NOTE = (
     "方括号短标识为知识库文件前缀，完整出处见溯源附件。",
 )
 
-_READING_NOTE_SEGMENT = (
-    "阅读说明：本文为半导体代表公司财报对比分析（赛道分组版）；"
+_READING_NOTE_SEGMENT_TAIL = (
     "金额默认统一为元，主表范围按季报模板推定为合并，期间按列名区分单季／累计／时点。",
     "三级归因边界：已抽取的数据事实可写；原文经营说明须标出处后方可引用；"
     "无出处的第三方推断一律不写。完整标识与原文片段见溯源附件。",
@@ -117,7 +118,7 @@ def compose_report(
         outline, "indicator_table", "segment_peer"
     ):
         outline.append(OutlineItem("主要指标与出处", "", "indicator_table"))
-    note = _READING_NOTE_SEGMENT if _is_segment_report(plan) else _READING_NOTE
+    note = _segment_reading_note(plan) if _is_segment_report(plan) else _READING_NOTE
     # 大纲自带「阅读说明」时不再额外 prepend 通用阅读注，避免双份。
     prepend_note = (
         note
@@ -163,17 +164,24 @@ def _measure(fact: IndicatorFact) -> Measure:
 # 与 analyze.ANALYSIS_FALLBACK 同文；compose 不反向 import analyze（避免环依赖）。
 _ANALYSIS_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
 
+# 行业专属的「下期预告」定性句来自 industries.yaml 的 profile.notes；
+# 没配 notes 的行业用这份通用兜底句，新增行业不必往这里加常量或 if 分支。
 _NEXT_PERIOD_NOTE = (
-    "景气周期（全球半导体销售额增速、晶圆厂稼动率、存储／模拟价格等）"
-    "依赖外部数据源（WSTS／SEMI／协会），本期流水线未接入，不推断周期位置。",
+    "景气周期依赖外部数据源，本期流水线未接入，不推断周期位置。",
     "下一期预告需明确：数据源清单、入库表结构、更新频率；接入前本报告只做公司财报赛道分组对比。",
 )
 
 
 def _is_segment_report(plan: ReportPlan) -> bool:
-    return plan.skill_id == "semiconductor_industry_report" or report_sections.outline_has(
+    return is_segment_skill(plan.skill_id) or report_sections.outline_has(
         plan.outline, "segment_roster", "segment_peer"
     )
+
+
+def _segment_reading_note(plan: ReportPlan) -> tuple[str, ...]:
+    industry = (plan.industry or "").strip() or "行业"
+    head = f"阅读说明：本文为{industry}代表公司财报对比分析（赛道分组版）；"
+    return (head + _READING_NOTE_SEGMENT_TAIL[0],) + _READING_NOTE_SEGMENT_TAIL[1:]
 
 
 # —— 章节 renderer 注册表 ——
@@ -182,7 +190,9 @@ def _is_segment_report(plan: ReportPlan) -> bool:
 # 新增章节：写一个 renderer + 注册一次；或直接在 SKILL.md 里复用已有 id。
 @report_sections.register("reading_note")
 def _render_reading_note(ctx: report_sections.SectionContext) -> list[str]:
-    lines = list(_READING_NOTE_SEGMENT if _is_segment_report(ctx.plan) else _READING_NOTE)
+    lines = list(
+        _segment_reading_note(ctx.plan) if _is_segment_report(ctx.plan) else _READING_NOTE
+    )
     # 改名备注唯一来源：skill.companies 第 4 段「披露又名」，只在阅读说明写一次。
     rename = _roster_rename_note_lines(ctx.plan)
     if rename:
@@ -247,7 +257,9 @@ def _render_chart_guide(ctx: report_sections.SectionContext) -> list[str]:
 @report_sections.register("next_period")
 def _render_next_period(ctx: report_sections.SectionContext) -> list[str]:
     # 「景气周期」「细分赛道」等旧大纲标题也映射到这里：宏观从略，指向下期预告。
-    return list(_NEXT_PERIOD_NOTE)
+    # 行业文案按 indicator_set 从配置取，配置只提供定性句、不提供数字。
+    notes = notes_for_plan(ctx.plan)
+    return list(notes.next_period or _NEXT_PERIOD_NOTE)
 
 
 @report_sections.register("key_companies")
@@ -1156,7 +1168,7 @@ def _segment_peer_lines(
     if not groups:
         return _peer_lines(plan, current)
     # 组内对比按赛道类型路由指标；共享集作兜底，避免把 Fabless 指标硬套 Foundry。
-    shared = plan.indicators or default_indicators("semiconductor")
+    shared = plan.indicators or default_indicators(INDUSTRY_SHARED)
     lines: list[str] = []
     ladder = _margin_ladder_table(current)
     if ladder:
@@ -1189,7 +1201,7 @@ def _chart_guide_lines(
         "单公司多期仅两期用柱状两点对比，至少四期同口径才画折线，避免伪趋势。"
         "柱状图仅出现在 PDF 交付件；本 Markdown 只列将生成的图题。",
     ]
-    if plan is not None and plan.skill_id == "semiconductor_industry_report":
+    if plan is not None and _is_segment_report(plan):
         from ai_agent.report.pdf import charts_for_report
 
         charts = charts_for_report(plan, facts or [], series)
@@ -1198,7 +1210,7 @@ def _chart_guide_lines(
             for index, chart in enumerate(charts, start=1):
                 lines.append(f"{index}. {chart.title}")
         else:
-            lines.append("本期重点看设备／设计赛道的营收、毛利率、研发费用率横比图。")
+            lines.append("本期无足够的同赛道横比数据时，不附组内柱状图。")
         return lines
     comparable = sum(1 for item in series if len(item.points) >= 2)
     if comparable:
