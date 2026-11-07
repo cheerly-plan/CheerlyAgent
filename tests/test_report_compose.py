@@ -132,6 +132,9 @@ def test_segment_peer_tables_group_by_skill_segment():
     )
     text = document.markdown
     assert "三级归因" in text
+    assert text.count("名单备注：") == 1
+    assert "韦尔股份现名豪威集团（603501）" in text
+    assert "股票代码暂略" not in text
     assert "### 全行业毛利率梯队" in text
     assert "| 名次 | 公司 | 毛利率 | 出处 |" in text
     assert "### 设备" in text

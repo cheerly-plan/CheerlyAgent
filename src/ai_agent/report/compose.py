@@ -60,8 +60,6 @@ _READING_NOTE = (
 _READING_NOTE_SEGMENT = (
     "阅读说明：本文为半导体代表公司财报对比分析（赛道分组版）；"
     "金额默认统一为元，主表范围按季报模板推定为合并，期间按列名区分单季／累计／时点。",
-    "名单备注：韦尔股份现名豪威集团（股票代码暂略）；表头沿用技能名单「韦尔股份」，"
-    "出处文件名以披露主体「豪威集团」为准。",
     "三级归因边界：已抽取的数据事实可写；原文经营说明须标出处后方可引用；"
     "无出处的第三方推断一律不写。完整标识与原文片段见溯源附件。",
 )
@@ -191,7 +189,15 @@ def _is_segment_report(plan: ReportPlan) -> bool:
 # 新增章节：写一个 renderer + 注册一次；或直接在 SKILL.md 里复用已有 id。
 @sections.register("reading_note")
 def _render_reading_note(ctx: sections.SectionContext) -> list[str]:
-    return list(_READING_NOTE_SEGMENT if _is_segment_report(ctx.plan) else _READING_NOTE)
+    lines = list(_READING_NOTE_SEGMENT if _is_segment_report(ctx.plan) else _READING_NOTE)
+    # 改名备注唯一来源：skill.companies 第 4 段「披露又名」，只在阅读说明写一次。
+    rename = _roster_rename_note_lines(ctx.plan)
+    if rename:
+        # 插在归因边界之前：通用说明末句仍收尾。
+        insert_at = max(len(lines) - 1, 0)
+        for offset, line in enumerate(rename):
+            lines.insert(insert_at + offset, line)
+    return lines
 
 
 @sections.register("lead")
@@ -932,6 +938,17 @@ def _trend_lines(series: list[SeriesCompare], plan: ReportPlan | None = None) ->
     return ["没有多期数据，不写趋势。"]
 
 
+def _roster_rename_note_lines(plan: ReportPlan) -> list[str]:
+    """花名册「披露又名」→ 阅读说明改名备注；无又名则空。"""
+    skill = get_skill(plan.skill_id) if plan.skill_id else None
+    if skill is None:
+        return []
+    notes = skill.rename_notes()
+    if not notes:
+        return []
+    return [f"名单备注：{'；'.join(notes)}。"]
+
+
 def _skill_segments(plan: ReportPlan) -> list[tuple[str, list[str]]]:
     skill = get_skill(plan.skill_id) if plan.skill_id else None
     if skill and skill.companies:
@@ -1111,10 +1128,6 @@ def _wide_segment_table(
             cites.append(f"{company}：{'；'.join(bits)}")
     for cite in cites:
         lines.append(f"出处：{cite}。")
-    if any(name == "韦尔股份" for name in names):
-        lines.append(
-            "注：韦尔股份现名豪威集团（603501）；表头沿用技能名单，出处以披露主体为准。"
-        )
     return lines
 
 

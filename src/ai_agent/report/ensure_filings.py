@@ -155,7 +155,7 @@ def _plan_name_keys(plan: ReportPlan) -> list[str]:
             names.append(key)
     skill = get_skill(plan.skill_id) if plan.skill_id else None
     if skill and skill.companies:
-        for name, code, _segment in skill.companies:
+        for name, code, _segment, _aka in skill.companies:
             for key in (name, code):
                 text = (key or "").strip()
                 if text and text not in seen:
@@ -175,7 +175,7 @@ def _missing_targets(
     pairs: list[tuple[str, str]] = []  # subject_label, code
     skill = get_skill(plan.skill_id) if plan.skill_id else None
     if skill and skill.companies:
-        for name, code, _segment in skill.companies:
+        for name, code, _segment, _aka in skill.companies:
             if plan.subjects and name not in plan.subjects:
                 # 需求若已收窄主体，只补名单交集
                 if not any(name in subject or subject in name for subject in plan.subjects):

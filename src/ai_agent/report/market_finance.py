@@ -154,7 +154,7 @@ def _market_roster(
     """返回 (展示名, 6 位代码)。行业 skill 用宇宙名单；公司单报用巨潮解析。"""
     if skill is not None and skill.companies:
         rows: list[tuple[str, str]] = []
-        for name, code, _segment in skill.companies:
+        for name, code, _segment, _aka in skill.companies:
             if plan.subjects and not any(
                 name == subject or name in subject or subject in name
                 for subject in plan.subjects

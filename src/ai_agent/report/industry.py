@@ -239,7 +239,7 @@ def _semiconductor_roster() -> dict[str, str]:
     if skill is None or not skill.companies:
         return {}
     out: dict[str, str] = {}
-    for name, _code, segment in skill.companies:
+    for name, _code, segment, _aka in skill.companies:
         company_type = registry.segment_map().get((segment or "").strip())
         if company_type:
             out[name] = company_type

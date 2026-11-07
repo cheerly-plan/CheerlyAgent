@@ -28,7 +28,13 @@ from ai_agent.tasks.title import shutdown_title_jobs
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(app: FastAPI):
+    # 研报配置纯读文件、不依赖 DB，放在最前：坏配置要么立刻拦住（strict），
+    # 要么在降级生效前留下一条醒目的 ERROR 日志。结果挂到 app.state，
+    # 供 /health 与管理员诊断端点查询，不必翻启动日志。
+    from ai_agent.report.lint import lint_report_config
+
+    app.state.report_config_lint = lint_report_config(strict=settings.report_config_strict)
     # schema 迁移走 Alembic（版本化、可回滚）；ensure_schema 保留作回滚锚点
     run_migrations()
     # 重排后端自检：默认 local_ce，未装依赖/无权重时显式告警并退回 LLM

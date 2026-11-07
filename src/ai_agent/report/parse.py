@@ -129,7 +129,7 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
     plan.skill_id = skill.skill_id
     # 行业 skill 自带宇宙名单：空库也能定标的，再靠巨潮补齐原文。
     if plan.kind == "industry" and not plan.subjects and skill.companies:
-        plan.subjects = [name for name, _code, _segment in skill.companies]
+        plan.subjects = [name for name, _code, _segment, _aka in skill.companies]
         plan.gaps = [
             gap
             for gap in plan.gaps

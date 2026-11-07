@@ -63,10 +63,14 @@ def test_semiconductor_skill_has_universe_and_outline():
     assert skill is not None
     assert skill.kind == "industry"
     assert "半导体" in skill.industries
-    codes = {code for _name, code, _seg in skill.companies}
+    codes = {code for _name, code, _seg, _aka in skill.companies}
     assert {"688981", "002371", "603501", "688256"} <= codes
     assert skill.segment_of("中芯国际") == "制造"
     assert skill.segment_of("寒武纪") == "设计"
+    assert skill.segment_of("豪威集团") == "设计"
+    notes = skill.rename_notes()
+    assert len(notes) == 1
+    assert "韦尔股份现名豪威集团（603501）" in notes[0]
     titles = [title for title, _ in skill.sections]
     assert titles[0] == "阅读说明"
     assert "赛道分组" in titles
@@ -103,8 +107,10 @@ def test_semiconductor_skill_md_has_no_duplicate_roster():
         / "SKILL.md"
     )
     text = path.read_text(encoding="utf-8")
-    for name, _code, _segment in skill.companies:
+    for name, _code, _segment, aka in skill.companies:
         assert text.count(name) == 1, f"{name} 在 SKILL.md 出现 {text.count(name)} 次"
+        if aka:
+            assert text.count(aka) == 1, f"{aka} 在 SKILL.md 出现 {text.count(aka)} 次"
 
 
 def test_semiconductor_empty_kb_uses_skill_companies(monkeypatch):

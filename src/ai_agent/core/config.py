@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     report_retention_days: int = 30
     # 经营解读节：受约束 LLM，只许用已抽取事实 + 季报原文；关闭后写从略句
     report_analysis_enabled: bool = True
+    # 启动时研报配置 lint 的严格模式：true = 配置有错直接拒绝启动（预发布/CI 用），
+    # false = 只记 ERROR 日志并走既有降级路径，避免一份 YAML 拼错让全站不可用。
+    report_config_strict: bool = False
 
     # 巨潮定期报告补齐：默认开启。generate_report 发现缺原文会自动拉取；单测/离线可关
     enable_cninfo_fetch: bool = True

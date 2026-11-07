@@ -1,6 +1,6 @@
 """管理员查看任意用户的会话，以及每一问后面的 agent 过程。"""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ai_agent.api.dependencies import require_admin
 from ai_agent.api.inspect_turns import turns_from_messages
@@ -64,6 +64,27 @@ def list_user_sessions(
             for row in rows
         ],
     )
+
+
+@router.get("/report-config")
+def report_config_lint(
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> dict:
+    """管理员查启动 lint 结果：不用翻日志就能看到哪几项配置没过。
+
+    结果在 lifespan 里算一次并挂到 app.state，这里是只读快照；要重跑就重启服务
+    或调用 ``lint_report_config()``。未执行过 lifespan（例如单测）返回 503。
+    """
+    report = getattr(request.app.state, "report_config_lint", None)
+    if report is None:
+        raise HTTPException(status_code=503, detail="启动配置 lint 尚未执行")
+    return {
+        "ok": report.ok,
+        "strict": settings.report_config_strict,
+        "checked": list(report.checked),
+        "issues": list(report.issues),
+    }
 
 
 @router.get("/turns", response_model=InspectTurns)

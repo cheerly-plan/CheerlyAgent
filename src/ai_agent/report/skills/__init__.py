@@ -54,8 +54,9 @@ class ReportSkill:
     # 默认指标集。银行模板直接展开；通用模板复用 industry.generic 集。
     indicators: tuple[str, ...]
     sections: tuple[tuple[str, str], ...]
-    # 行业宇宙：((公司名, 股票代码, 赛道), ...)；赛道可空；空元组 = 仍只从知识库推断主体
-    companies: tuple[tuple[str, str, str], ...] = ()
+    # 行业宇宙：((名单名, 代码, 赛道, 披露又名), ...)；赛道／又名可空。
+    # 又名用于「表头沿用名单、出处为现名」类备注，由 compose 统一渲染一次。
+    companies: tuple[tuple[str, str, str, str], ...] = ()
     # 与 sections 平行的 renderer id；空串表示该节按标题别名回退。
     section_ids: tuple[str, ...] = ()
 
@@ -73,12 +74,15 @@ class ReportSkill:
         ]
 
     def segment_of(self, subject: str) -> str:
-        """按公司名（或包含关系）查赛道；未标注返回空串。"""
+        """按名单名／披露又名（或包含关系）查赛道；未标注返回空串。"""
         token = (subject or "").strip()
         if not token:
             return ""
-        for name, _code, segment in self.companies:
-            if name == token or name in token or token in name:
+        for name, _code, segment, aka in self.companies:
+            aliases = (name, aka) if aka else (name,)
+            if any(
+                alias == token or alias in token or token in alias for alias in aliases
+            ):
                 return segment
         return ""
 
@@ -86,13 +90,26 @@ class ReportSkill:
         """按赛道稳定分组：[(赛道, [公司名…]), …]；无赛道的放「未分组」。"""
         order: list[str] = []
         buckets: dict[str, list[str]] = {}
-        for name, _code, segment in self.companies:
+        for name, _code, segment, _aka in self.companies:
             key = segment or "未分组"
             if key not in buckets:
                 order.append(key)
                 buckets[key] = []
             buckets[key].append(name)
         return [(key, buckets[key]) for key in order]
+
+    def rename_notes(self) -> list[str]:
+        """花名册里声明了披露又名的条目 → 阅读说明用的改名备注（含代码）。"""
+        notes: list[str] = []
+        for name, code, _segment, aka in self.companies:
+            aka_name = (aka or "").strip()
+            if not aka_name or aka_name == name:
+                continue
+            notes.append(
+                f"{name}现名{aka_name}（{code}）；表头沿用技能名单「{name}」，"
+                f"出处以披露主体「{aka_name}」为准"
+            )
+        return notes
 
     def roster_text(self) -> str:
         """把 frontmatter 的 companies 花名册按赛道渲染成一句话。
@@ -132,28 +149,32 @@ def _parse_industries(raw: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
-def _parse_companies(raw: str) -> tuple[tuple[str, str, str], ...]:
-    """解析 ``公司名|代码`` 或 ``公司名|代码|赛道``；代码须为 6 位数字。"""
+def _parse_companies(raw: str) -> tuple[tuple[str, str, str, str], ...]:
+    """解析 ``名|代码`` / ``名|代码|赛道`` / ``名|代码|赛道|披露又名``；代码须 6 位。"""
     text = (raw or "").strip().strip("[]")
     if not text:
         return ()
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str, str]] = []
     seen: set[str] = set()
     for part in text.split(","):
         item = part.strip()
         if not item:
             continue
         pieces = [p.strip() for p in item.split("|")]
-        if len(pieces) not in {2, 3}:
-            raise ValueError(f"companies 项须为「公司名|代码」或「公司名|代码|赛道」：{item!r}")
+        if len(pieces) not in {2, 3, 4}:
+            raise ValueError(
+                "companies 项须为「名|代码」／「名|代码|赛道」／"
+                f"「名|代码|赛道|披露又名」：{item!r}"
+            )
         name, code = pieces[0], pieces[1]
-        segment = pieces[2] if len(pieces) == 3 else ""
+        segment = pieces[2] if len(pieces) >= 3 else ""
+        aka = pieces[3] if len(pieces) == 4 else ""
         if not name or not re.fullmatch(r"\d{6}", code):
             raise ValueError(f"companies 项非法：{item!r}")
         if code in seen:
             continue
         seen.add(code)
-        out.append((name, code, segment))
+        out.append((name, code, segment, aka))
     return tuple(out)
 
 

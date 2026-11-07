@@ -292,7 +292,7 @@ def _allowed(
 
             skill = get_skill(plan.skill_id)
             if skill is not None:
-                for _name, code, _segment in skill.companies:
+                for _name, code, _segment, _aka in skill.companies:
                     key = _compact(code or "")
                     if key:
                         allowed.add(key)

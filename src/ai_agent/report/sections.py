@@ -9,10 +9,11 @@
   renderer，优先级高于标题别名。新增一个行业 / 报告类型，要么复用已有
   renderer（只加 SKILL.md），要么写一个 renderer 并注册一次；不必再往
   compose.py 里补 if，也不必在十几个文件里补名单。
-* **读坏不拖垮服务，但也不静默。** 配置损坏记 exception 日志并降级到内置
-  别名表（与 yaml 同步）；``validate_sections()`` 是显式 fail-fast 入口，
+* **读坏不拖垮服务，但也不静默。** 配置损坏记 exception 日志并降级到
+  ``sections_defaults.py``——由 ``sections.yaml`` 自动生成的静态快照，不是
+  第二份手工名单。``validate_sections()`` 是显式 fail-fast 入口，
   ``validate_bindings()`` 检查配置里的 id 是否都有 renderer，供 CI / 启动
-  lint 调用。
+  lint 调用；启动 lint 还会校验生成物与主配置同步。
 """
 
 from __future__ import annotations
@@ -34,33 +35,25 @@ from ai_agent.report.features import Features
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.supplemental import SupplementalResult
 
+try:
+    from ai_agent.report.sections_defaults import ALIASES as _BUILTIN_ALIASES
+    from ai_agent.report.sections_defaults import NOTE as _BUILTIN_NOTE
+except ImportError:
+    # 最后一道兜底：生成物被打包漏掉时别让整个 report 包无法导入。
+    # 此时所有章节只能写占位句，启动 lint 的 sections_snapshot_sync 会报错。
+    get_logger(__name__).exception("章节降级快照缺失，章节分派将全部写占位句")
+    _BUILTIN_ALIASES = ()
+    _BUILTIN_NOTE = "这一节没有对应的数据，未写。"
+
 logger = get_logger(__name__)
 
 _SECTIONS_YAML = Path(__file__).resolve().parent / "config" / "sections.yaml"
 _SECTION_ID_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
 _MAX_NOTE_CHARS = 200
 
-# 配置缺失/损坏时的内置兜底，和 sections.yaml 保持同步。只用于降级，
-# 正常路径永远以 yaml 为准——改配置不需要动这里。
-_BUILTIN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("reading_note", ("阅读说明",)),
-    ("lead", ("本期结论", "覆盖范围", "行业概览")),
-    ("indicator_table", ("主要指标与出处",)),
-    ("change", ("同比与环比",)),
-    ("quarter", ("单季节奏",)),
-    ("year_end", ("较上年末变动",)),
-    ("observation", ("数据观察", "核心主线")),
-    ("analysis", ("经营解读",)),
-    ("segment_roster", ("赛道分组",)),
-    ("segment_peer", ("组内对比",)),
-    ("chart_guide", ("趋势与对比图",)),
-    ("next_period", ("下期预告", "景气周期", "细分赛道")),
-    ("key_companies", ("重点公司",)),
-    ("trend", ("趋势",)),
-    ("peer", ("公司间对比",)),
-    ("gaps", ("缺失说明", "缺失与口径", "风险与缺失")),
-)
-_BUILTIN_NOTE = "这一节没有对应的数据，未写。"
+# 配置缺失/损坏时的兜底来自 sections_defaults.py——那是 sections.yaml 的
+# 自动生成快照，不再手工维护第二份名单。纯 Python 字面量，降级路径不依赖
+# YAML 解析。改章节别名只改 sections.yaml + 跑一次同步脚本，lint 会拦漂移。
 
 
 @dataclass(frozen=True)
