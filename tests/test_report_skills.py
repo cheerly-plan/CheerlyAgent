@@ -112,7 +112,9 @@ def test_generic_company_routes_to_generic_skill(monkeypatch):
     )
     plan = parse_request("生成中国能源建设2026Q3财报深度分析PDF研报")
     assert plan.skill_id == "company_financial_report"
-    assert plan.indicators == ["营业收入", "扣非净利润", "毛利率"]
+    assert "营业收入" in plan.indicators
+    assert "毛利率" in plan.indicators
+    assert "净息差" not in plan.indicators
 
 
 def test_outline_comes_from_skill_registry(monkeypatch):

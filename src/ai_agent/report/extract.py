@@ -42,6 +42,12 @@ _INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = {
     "净利润": ("净利润", ("净利润",)),
     "毛利率": ("毛利率", ("毛利率", "综合毛利率")),
     "研发费用率": ("研发费用率", ("研发费用率", "研发投入占比")),
+    "经营活动产生的现金流量净额": (
+        "经营活动产生的现金流量净额",
+        ("经营活动产生的现金流量净额",),
+    ),
+    "合同负债": ("合同负债", ("合同负债",)),
+    "存货": ("存货", ("存货",)),
 }
 
 # 银行季报的资产质量、息差、资本充足率写在「经营情况简要分析」正文里，
@@ -57,6 +63,24 @@ _NARRATIVE_PATTERNS: dict[str, tuple[str, str, str]] = {
         r"为?\s*([\d,]+(?:\.\d+)?)\s*%",
         "%",
     ),
+    "存货周转率": (
+        "存货周转",
+        r"存货周转率(?:（次）)?为?\s*([\d,]+(?:\.\d+)?)",
+        "次",
+    ),
+    "资产负债率": ("资产负债率", r"资产负债率为?\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
+    "产能利用率": (
+        "产能利用",
+        r"(?:产能利用率|稼动率)为?\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    "大客户集中度": (
+        "客户",
+        r"(?:前五名客户合计(?:销售)?占比|客户集中度|向前五名客户销售(?:额)?占(?:年度)?销售(?:总额)?的比例)"
+        r"为?\s*([\d,]+(?:\.\d+)?)\s*%",
+        "%",
+    ),
+    "合同负债": ("合同负债", r"合同负债\s*([\d,]+(?:\.\d+)?)\s*亿元", "亿元"),
     "净息差": ("净息差", r"净息差\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
     "不良贷款率": ("不良贷款率", r"不良贷款率\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
     "不良贷款拨备覆盖率": (
@@ -420,6 +444,19 @@ def _pick_facts(
         value = parsed["value"]
         # 报表统一写「单位：百万元人民币（百分比除外）」，比率行不能套金额单位。
         unit = ratio_unit(indicator, parsed["unit"], value)
+        # 现金流量表等把「编制单位：公司名」误读时 unit 为空；金额类默认元。
+        if not unit and indicator in {
+            "营业收入",
+            "扣非净利润",
+            "净利润",
+            "利润总额",
+            "经营活动产生的现金流量净额",
+            "合同负债",
+            "存货",
+            "资本开支",
+            "折旧",
+        }:
+            unit = "元"
         basis, months = basis_of(
             period,
             cumulative=bool(parsed.get("cumulative", False)),
@@ -662,6 +699,14 @@ def _pick_value_column(
         if year and other_year and other_year.group(1) != year:
             continue
         cumulative = bool(_CUMULATIVE_COL.search(header))
+        # 一季报通常只有「本报告期」列，覆盖即为 1–3 月，与「年初至报告期末」等价；
+        # 不标成累计会导致 Q3 环比推导误报「Q1/H1 需同为累计口径」。
+        if (
+            not cumulative
+            and period.endswith("Q1")
+            and _CURRENT_COL.search(header)
+        ):
+            cumulative = True
         if cumulative:
             priority = 3
         elif (year and year in header) or _CURRENT_COL.search(header):
@@ -705,12 +750,16 @@ def _value_in_source(value: str, source: str) -> bool:
 
 
 def _unit_of(text: str) -> str:
+    """只认金额／比率单位词。现金流量表常把编制单位写成「单位：公司全称」，不能当计量单位。"""
     found = _UNIT.search(text or "")
     if not found:
         return ""
     raw = found.group(1)
     matched = _UNIT_KEY.match(raw)
-    return matched.group(1) if matched else raw
+    if matched:
+        return matched.group(1)
+    # 未命中已知单位词 → 空串，由 compose 对金额类补「元」，避免公司名污染。
+    return ""
 
 
 def _quote(headers: list[str], cells: list[str], text: str) -> str:

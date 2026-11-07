@@ -4,12 +4,15 @@ kind: company
 title: 公司财报深度分析
 industries:
 indicator_set: generic
-description: 非银行公司财报：营业收入、扣非净利润、毛利率等通用口径指标
+description: 非银行公司财报：指标集按公司类型（Fabless／Foundry／制造等）路由，不套银行口径
 ---
 
 # 公司财报深度分析
 
-管「写什么」：大纲与默认指标集。抽数、同比环比、数字校验、PDF 落盘仍走确定性工具，本 skill 不改写防幻觉门禁。
+管「写什么」：大纲。默认指标集由 `industry.company_type_of` 按主体细类型路由
+（Fabless 看毛利率／研发／存货周转；Foundry 看稼动率／CAPEX…），本 skill 的
+`indicator_set: generic` 仅作兜底。抽数、同比环比、数字校验、PDF 落盘仍走确定性
+工具，不改写防幻觉门禁。
 
 空 `industries` = 该 kind 下的通用兜底模板（非银行主体走这里）。
 

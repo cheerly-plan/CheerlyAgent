@@ -46,7 +46,9 @@ def test_company_request_names_period_files_and_outline(monkeypatch):
     assert plan.deliverable == "pdf"
     assert plan.period == "2025Q3"
     assert plan.subjects == ["中国能源建设股份有限公司"]
-    assert plan.indicators == ["营业收入", "扣非净利润", "毛利率"]
+    assert "营业收入" in plan.indicators
+    assert "毛利率" in plan.indicators
+    assert "净息差" not in plan.indicators
     assert plan.dimensions == ["同比", "环比"]
     roles = {(item.period, item.role) for item in plan.files}
     assert ("2025Q3", "本期") in roles

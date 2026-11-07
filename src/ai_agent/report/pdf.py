@@ -468,6 +468,8 @@ thead {{ display: table-header-group; }}
 tr, th, td {{ break-inside: avoid; page-break-inside: avoid; }}
 th, td {{ border: 0.3pt solid #d0d5dd; padding: 1.4mm 2mm; font-size: 9pt; vertical-align: top; }}
 th {{ background: #f2f4f7; }}
+/* 千分位长数字禁止中途断行，避免被读成逗号错位 */
+td, p, li {{ word-break: keep-all; overflow-wrap: anywhere; }}
 .page-logo {{ position: running(page-logo); height: 8mm; }}
 figure {{ break-inside: avoid; page-break-inside: avoid; margin: 4mm 0; }}
 </style>

@@ -15,6 +15,7 @@ import re
 from functools import lru_cache
 
 from ai_agent.core.logging import get_logger
+from ai_agent.report.basis import CUMULATIVE, basis_of, cumulative_months
 from ai_agent.report.extract import Evidence, IndicatorFact
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.skills import get_skill
@@ -249,8 +250,27 @@ def _abstract_fact(
     if formatted is None:
         return None
     value, display_unit = formatted
+    # 财务摘要报告期列是期末累计口径（Q3=前三季度），毛利率等同列比率也是累计。
+    is_amount = indicator in _AMOUNT_INDICATORS
+    is_ytd_ratio = indicator == "毛利率"
+    if is_ytd_ratio:
+        basis, months = CUMULATIVE, cumulative_months(period)
+        cumulative = True
+    else:
+        basis, months = basis_of(
+            period,
+            cumulative=is_amount,
+            name=indicator,
+            unit=display_unit,
+            value=value,
+        )
+        cumulative = is_amount
     # quote 必须含正文采用的展示值，否则 validate 会报「数值未出现在原文片段」
-    quote = f"{source_name} 报告期列{col} 原值={raw} 采用={value}{display_unit}（{_SOURCE}）"
+    scope_note = "前三季度累计" if is_ytd_ratio and period.endswith("Q3") else "报告期累计"
+    quote = (
+        f"{source_name} 报告期列{col} 原值={raw} 采用={value}{display_unit}"
+        f"（{_SOURCE}，{scope_note}口径）"
+    )
     return IndicatorFact(
         subject=subject,
         period=period,
@@ -259,7 +279,9 @@ def _abstract_fact(
         unit=display_unit,
         column="结构化财务摘要",
         scope="consolidated",
-        cumulative=indicator in _AMOUNT_INDICATORS,
+        cumulative=cumulative,
+        basis=basis,
+        coverage_months=months,
         evidence=Evidence(
             file_id=_synthetic_id(code, period, indicator),
             filename=_SOURCE,
@@ -300,9 +322,12 @@ def _rd_rate_fact(
         return None
     rate = rd / rev * 100.0
     value = f"{rate:.2f}"
+    # 利润表单期行是报告期末累计（年初至报告期末），费用率同属累计口径。
+    basis, months = CUMULATIVE, cumulative_months(period)
+    scope_note = "前三季度累计" if period.endswith("Q3") else "报告期累计"
     quote = (
         f"RESEARCH_EXPENSE={research} / TOTAL_OPERATE_INCOME={revenue} "
-        f"报告期{stamp} 采用研发费用率={value}%（{_SOURCE_RD}）"
+        f"报告期{stamp} 采用研发费用率={value}%（{_SOURCE_RD}，{scope_note}口径）"
     )
     return IndicatorFact(
         subject=subject,
@@ -312,7 +337,9 @@ def _rd_rate_fact(
         unit="%",
         column="利润表推算研发费用率",
         scope="consolidated",
-        cumulative=False,
+        cumulative=True,
+        basis=basis,
+        coverage_months=months,
         evidence=Evidence(
             file_id=_synthetic_id(code, period, "研发费用率"),
             filename=_SOURCE_RD,

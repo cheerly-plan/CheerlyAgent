@@ -15,8 +15,7 @@ from pydantic import BaseModel, Field
 from ai_agent.prompts.tools import REPORT_EXTRACT_DESC
 from ai_agent.report.basis import label as basis_label
 from ai_agent.report.extract import citation_anchor, extract_indicators
-from ai_agent.report.industry import industry_of
-from ai_agent.report.skills import resolve_skill
+from ai_agent.report.industry import company_type_of, default_indicators
 from ai_agent.tools.base import Tool
 
 # execute_tool 会把返回截到 3000 字符：事实超量时截断并如实计数，
@@ -41,7 +40,7 @@ class ReportExtractArgs(BaseModel):
         max_length=15,
         description=(
             "要抽的指标名（报表原文术语，如 利息净收入、不良贷款率）。"
-            "留空时按公司行业用默认指标集（银行 21 项 / 通用 3 项）"
+            "留空时按公司细类型路由默认指标集（银行／Fabless／制造等）"
         ),
     )
 
@@ -49,8 +48,8 @@ class ReportExtractArgs(BaseModel):
 def _report_extract(subjects: list[str], period: str, indicators: list[str]) -> str:
     wanted = [item for item in (indicators or []) if item and item.strip()]
     if not wanted:
-        # 指标留空 → skill 层默认指标集（银行/通用模板）
-        wanted = list(resolve_skill("company", industry_of(subjects)).indicators)
+        # 指标留空 → 按公司细类型模板（bank/fabless/foundry…），禁止跨行业通吃。
+        wanted = default_indicators(company_type_of(subjects))
     result = extract_indicators(subjects, period, wanted)
     lines: list[str] = []
     if not result.facts:

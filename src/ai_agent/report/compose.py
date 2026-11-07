@@ -20,6 +20,13 @@ from ai_agent.report.compare import (
     parse_number,
 )
 from ai_agent.report.extract import IndicatorFact, citation_anchor
+from ai_agent.report.industry import (
+    BANK,
+    default_indicators,
+    industry_of,
+    is_excluded,
+    type_for_segment,
+)
 from ai_agent.report.parse import OutlineItem, ReportPlan
 from ai_agent.report.skills import get_skill
 from ai_agent.report.supplemental import SupplementalResult
@@ -376,8 +383,9 @@ def _indicator_lines(plan: ReportPlan, current: list[IndicatorFact]) -> list[str
         # 范围未知时只留破折号，含义已在开头阅读说明里统一声明。
         scope = _SCOPE.get(fact.scope, _UNKNOWN_SCOPE_CELL)
         subject_cell = f"{fact.subject} | " if with_subject else ""
+        display = _cell_with_unit(fact, indicator=fact.name)
         lines.append(
-            f"| {subject_cell}{fact.name} | {fact.value}{fact.unit} | "
+            f"| {subject_cell}{fact.name} | {display} | "
             f"{_period_label(fact)}／{scope}／{_column(fact)} | {_cite(fact)} |"
         )
     # 个别指标的特别注记（如净息差未注明年化）跟在表格下面当脚注，
@@ -465,14 +473,28 @@ def _observation_lines(
     stocks = sorted(
         {fact.name for fact in current if fact.basis == STOCK and fact.period == plan.period}
     )
+    if not stocks and views.year_ends:
+        # 制造业季报「较上年末」表常只进 supplemental，不进 IndicatorFact；
+        # 仍须标明期末存量，避免读者把 +300% 当成期间发生额取错。
+        stocks = [item.name for item in views.year_ends]
     if stocks:
         lines.append(
-            f"{'、'.join(stocks)}为期末时点余额，不是累计发生额，不与前三季度累计值相减。"
+            f"{'、'.join(stocks)}为期末时点余额（较上年末变动为季报原文披露值），"
+            "不是累计发生额，不与前三季度累计值相减。"
         )
-    lines.append(
-        "以上只并列原文披露的数字关系，不构成因果归因。季报未披露单季净息差拆分"
-        "所需的平均生息资产，也未披露拨备前利润（PPOP）的统一口径，两项均不推算。"
-    )
+    # 银行专属口径注记只挂银行报告；其它类型模板严禁写净息差／PPOP。
+    company_type = getattr(plan, "company_type", "") or industry_of(plan.subjects)
+    if (
+        company_type == BANK
+        or industry_of(plan.subjects) == BANK
+        or plan.skill_id == "bank_financial_report"
+    ):
+        lines.append(
+            "以上只并列原文披露的数字关系，不构成因果归因。季报未披露单季净息差拆分"
+            "所需的平均生息资产，也未披露拨备前利润（PPOP）的统一口径，两项均不推算。"
+        )
+    else:
+        lines.append("以上只并列原文披露的数字关系，不构成因果归因。")
     return lines or ["没有可核对的数字关系，不写观察。"]
 
 
@@ -689,9 +711,23 @@ def _cell_with_unit(fact: IndicatorFact | None, *, indicator: str = "") -> str:
     if unit:
         return f"{fact.value}{unit}"
     # 金额类缺单位时默认补「元」，避免同行带单位、本格裸数字。
-    if indicator in {"营业收入", "扣非净利润"}:
+    money = {
+        "营业收入",
+        "扣非净利润",
+        "经营活动产生的现金流量净额",
+        "合同负债",
+        "存货",
+        "资本开支",
+        "折旧",
+    }
+    if indicator in money or (not unit and _looks_like_money(fact.value)):
         return f"{fact.value}元"
     return str(fact.value)
+
+
+def _looks_like_money(value: str) -> bool:
+    text = (value or "").replace(",", "")
+    return bool(text) and text.replace(".", "", 1).isdigit() and "," in (value or "")
 
 
 def _find_fact(
@@ -789,10 +825,8 @@ def _segment_peer_lines(
     groups = _skill_segments(plan)
     if not groups:
         return _peer_lines(plan, current)
-    preferred = ["营业收入", "扣非净利润", "毛利率", "研发费用率"]
-    indicators = [name for name in preferred if name in (plan.indicators or preferred)]
-    if not indicators:
-        indicators = plan.indicators or preferred
+    # 组内对比按赛道类型路由指标；共享集作兜底，避免把 Fabless 指标硬套 Foundry。
+    shared = plan.indicators or default_indicators("semiconductor")
     lines: list[str] = []
     ladder = _margin_ladder_table(current)
     if ladder:
@@ -805,6 +839,9 @@ def _segment_peer_lines(
             lines.append("本期未抽到该赛道代表公司指标。")
             lines.append("")
             continue
+        typed = default_indicators(type_for_segment(segment))
+        # 赛道专属指标优先；抽不到的列在宽表里留空，缺口进「缺失」节。
+        indicators = (typed or list(shared))[:6]
         lines.extend(_wide_segment_table(segment, names, segment_facts, indicators))
         lines.append("")
     while lines and lines[-1] == "":
@@ -898,8 +935,12 @@ def _gaps(
     # 单公司报告缺口句省略主语，全称由标题承担
     subjects = {fact.subject for fact in facts} | {item.subject for item in series}
     single = _sole_subject(plan, subjects)
+    company_type = getattr(plan, "company_type", "") or industry_of(plan.subjects)
     for subject in plan.subjects:
         for name in plan.indicators:
+            # 类型排除项不报假缺失（银行毛利率、Fabless 净息差等）。
+            if is_excluded(company_type, name):
+                continue
             if not _has_indicator(period_facts, subject, name):
                 prefix = "" if single else f"{subject} "
                 gaps.append(f"{prefix}没有抽到 {plan.period} {name}")

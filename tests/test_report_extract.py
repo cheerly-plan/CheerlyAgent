@@ -215,6 +215,23 @@ def test_single_quarter_column_keeps_its_own_yoy():
     assert got["value"] == "169,462"
     assert got["column"] == "本报告期"
     assert got["reported_yoy"] == "4.48%"
+    assert got["cumulative"] is False
+
+
+def test_q1_benbaogaoqi_counts_as_cumulative():
+    """一季报「本报告期」覆盖即 1–3 月，应视同累计口径，供 Q3 环比推导。"""
+    table = """
+单位：元
+<table>
+<tr><td>项目</td><td>本报告期</td><td>上年同期</td><td>本报告期比上年同期增减变动幅度(%)</td></tr>
+<tr><td>营业收入</td><td>4,188,075,574.04</td><td>1,909,062,290.61</td><td>119.38</td></tr>
+</table>
+"""
+    got = read_indicator(table, ["营业收入"], period="2026Q1")
+    assert got is not None
+    assert got["value"] == "4,188,075,574.04"
+    assert got["column"] == "本报告期"
+    assert got["cumulative"] is True
 
 
 def test_extract_indicators_carries_column_and_reported_yoy(monkeypatch):

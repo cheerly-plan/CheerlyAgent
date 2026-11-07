@@ -296,26 +296,8 @@ def _deterministic_lines(
         return lines
 
     lines: list[str] = []
-    priority = ("毛利率", "营业收入", "扣非净利润", "研发费用率")
-    ordered = sorted(
-        facts,
-        key=lambda fact: (
-            priority.index(fact.name) if fact.name in priority else 99,
-            fact.subject,
-        ),
-    )
-    allowed_keys = {_number_key(f"{fact.value}") for fact in facts}
-    allowed_keys |= {_number_key(f"{fact.value}%") for fact in facts if fact.unit == "%"}
-    for fact in ordered[:8]:
-        anchor = citation_anchor(fact.evidence.file_id)
-        source = fact.evidence.filename or "出处"
-        page = f"第{fact.evidence.page}页" if fact.evidence.page is not None else ""
-        cite = " ".join(part for part in (page, anchor) if part)
-        extra = f"（{cite}）" if cite else f"（{source}）"
-        lines.append(
-            f"{fact.subject}{plan.period}{fact.name}为 {fact.value}{fact.unit}{extra}。"
-        )
-    # ② 原文：优先引述变动原因／经营叙述；去掉 HTML，避免半截数字进正文。
+    # ① 有经营原文明文时，不再用「长主语 + 已出现数字」复述；先写原文，再补一句
+    # 可指回原文的结构关系（比率须已在 facts 中）。
     keys = ("量价", "存储", "出货", "毛利润增加", "经营业绩", "产能", "研发")
     ban = ("被合并方", "合并日", "指引", "预期", "前瞻", "净利润为0", "净利润为 0", "是否经审计")
     used = 0
@@ -325,7 +307,6 @@ def _deterministic_lines(
             continue
         if any(token in quote for token in ban):
             continue
-        # 引述经营原因时去掉变动比例数字，只保留原因句，避免无关百分比进白名单校验。
         quote = _reason_only(quote)
         if len(quote) < 20:
             continue
@@ -335,10 +316,56 @@ def _deterministic_lines(
         used += 1
         if used >= 2:
             break
+    structure = _company_structure_line(plan, facts, has_narrative=bool(lines))
+    if structure:
+        lines.append(structure)
+    if not lines:
+        # 无原文可引时才退回数字并列，避免空节。
+        priority = ("毛利率", "营业收入", "扣非净利润", "研发费用率")
+        ordered = sorted(
+            facts,
+            key=lambda fact: (
+                priority.index(fact.name) if fact.name in priority else 99,
+                fact.subject,
+            ),
+        )
+        for fact in ordered[:4]:
+            anchor = citation_anchor(fact.evidence.file_id)
+            source = fact.evidence.filename or "出处"
+            page = f"第{fact.evidence.page}页" if fact.evidence.page is not None else ""
+            cite = " ".join(part for part in (page, anchor) if part)
+            extra = f"（{cite}）" if cite else f"（{source}）"
+            lines.append(
+                f"{fact.subject}{plan.period}{fact.name}为 {fact.value}{fact.unit}{extra}。"
+            )
     if not lines:
         return []
     lines.append("以上仅并列已授权数字与原文表述，不构成无出处的因果归因。")
     return lines
+
+
+def _company_structure_line(
+    plan: ReportPlan, facts: list[IndicatorFact], *, has_narrative: bool
+) -> str:
+    """有「量价齐升／毛利润增加」类原文时，用已授权毛利率做一句结构并列（非外部归因）。"""
+    if not has_narrative:
+        return ""
+    margin = next((f for f in facts if f.name == "毛利率" and f.period == plan.period), None)
+    if margin is None:
+        return ""
+    anchor = citation_anchor(margin.evidence.file_id)
+    source = margin.evidence.filename or ""
+    # akshare 财务摘要列是报告期末累计口径，须写明，避免与单季营收混读。
+    if source.startswith("akshare."):
+        scope = "前三季度累计口径" if plan.period.endswith("Q3") else "结构化摘要累计口径"
+        cite = f"（{scope} {anchor}）" if anchor else f"（{scope}）"
+    else:
+        page = f"第{margin.evidence.page}页" if margin.evidence.page is not None else ""
+        cite = f"（{page} {anchor}）" if page or anchor else ""
+    return (
+        f"与原文「量价齐升／毛利润增加」并列：本期毛利率为 {margin.value}%"
+        f"{cite}——只陈述已授权比率与原文用语的共现，不构成外部归因。"
+    )
 
 
 def _plain_evidence_quote(raw: str) -> str:

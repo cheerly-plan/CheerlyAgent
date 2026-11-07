@@ -150,7 +150,12 @@ def test_generic_company_keeps_the_old_manufacturing_template(monkeypatch):
         ],
     )
     plan = parse_request("生成中国能源建设2025Q3财报深度分析PDF研报")
-    assert plan.indicators == ["营业收入", "扣非净利润", "毛利率"]
+    # 一般制造／generic：核心经营指标，不含银行息差／拨备，也不强塞半导体研发。
+    assert plan.company_type in {"generic", "manufacturing"}
+    assert "营业收入" in plan.indicators
+    assert "毛利率" in plan.indicators
+    assert "净息差" not in plan.indicators
+    assert "不良贷款拨备覆盖率" not in plan.indicators
 
 
 def test_narrative_extraction_needs_exact_phrase_and_keeps_evidence(monkeypatch):

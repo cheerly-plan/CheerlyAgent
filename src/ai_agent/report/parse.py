@@ -13,7 +13,12 @@ from ai_agent.core.logging import get_logger
 from ai_agent.kb.ingest.meta import fragment_subjects, is_plausible_subject, name_in_text
 from ai_agent.storage.store import store
 from ai_agent.report.compare import cumulative_base_periods, qoq_period, yoy_period
-from ai_agent.report.industry import indicator_aliases, industry_of
+from ai_agent.report.industry import (
+    company_type_of,
+    default_indicators,
+    indicator_aliases,
+    industry_of,
+)
 from ai_agent.report.skills import ReportSkill, get_skill, resolve_skill, skill_ids
 
 logger = get_logger(__name__)
@@ -66,6 +71,8 @@ class ReportPlan:
     deliverable: str
     subjects: list[str] = field(default_factory=list)
     industry: str = ""
+    # 细粒度公司类型（fabless/foundry/bank…），决定指标模板；与 industry 粗路由分离。
+    company_type: str = ""
     period: str = ""
     dimensions: list[str] = field(default_factory=list)
     indicators: list[str] = field(default_factory=list)
@@ -131,7 +138,13 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
             for gap in plan.gaps
             if "无法确定要调取哪些季报" not in gap
         ]
-    plan.indicators = _indicators_in(request, plan.subjects, skill)
+    if plan.kind == "company":
+        plan.company_type = company_type_of(plan.subjects)
+    elif skill.industries:
+        plan.company_type = skill.industries[0]
+    else:
+        plan.company_type = plan.industry or ""
+    plan.indicators = _indicators_in(request, plan.subjects, skill, plan.company_type)
     plan.dimensions = _dimensions(plan)
     plan.files = _planned_files(plan, rows)
     plan.outline = _outline(plan, skill)
@@ -267,7 +280,9 @@ def _industry_subjects(industry: str, rows: list[dict], period: str) -> list[str
     return found
 
 
-def _indicators_in(text: str, subjects: list[str], skill: ReportSkill) -> list[str]:
+def _indicators_in(
+    text: str, subjects: list[str], skill: ReportSkill, company_type: str = ""
+) -> list[str]:
     found: list[str] = []
     occupied: list[tuple[int, int]] = []
     for name, keys in _INDICATOR_KEYS:
@@ -285,8 +300,13 @@ def _indicators_in(text: str, subjects: list[str], skill: ReportSkill) -> list[s
     for alias, canonical in indicator_aliases():
         if alias in text and canonical not in found:
             found.append(canonical)
-    # 没点名指标就落回 skill 携带的默认指标集（skill 层的「写什么」）
-    return found or list(skill.indicators)
+    if found:
+        return found
+    # 公司单报：按细类型模板取数，不吃 skill 里过时的「通吃」集。
+    # 行业报告仍用 skill.indicator_set（赛道横比共用集）。
+    if skill.kind == "company" and company_type:
+        return default_indicators(company_type)
+    return list(skill.indicators)
 
 
 def _dimensions(plan: ReportPlan) -> list[str]:
