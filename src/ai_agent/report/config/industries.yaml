@@ -1,8 +1,13 @@
-# 行业档案：新增一个行业只需在这里加一段 profile（可选 aliases / notes）。
-# 本文件是「公司类型白名单、行业名别名、指标集、行业定性文案」的单一数据源；
+# 行业档案：新增一个行业只需在这里加一段 profile（可选 aliases / notes / segments）。
+# 本文件是「公司类型白名单、行业名别名、指标集、行业定性文案、赛道语义」的单一数据源；
 # classification_defaults.py 由 scripts/sync_indicators_snapshot.py 自动导出，
 # 是主配置读不到时的只读降级快照，请勿手工编辑。
 # 铁律：notes 里只能写定性句，不得含阿拉伯数字或百分比；数字一律由 facts 提供。
+#
+# segments 是「该行业赛道名 → 公司类型（本文件 profile key）」的映射：
+# 声明了 segments 的行业只用自己这份，不再回退 indicators.yaml 的全局
+# classification.segment_to_type。这样不同行业的同名赛道（如都叫「设备」）
+# 可以指向不同指标模板，不会串味；全局字典只服务没有行业上下文的调用。
 # sets 可被 profiles.exclude_refs 引用，避免重复粘贴银行专属指标。
 
 # 行业名 / 公司简称 → profile key。新增行业在这里补一行中文别名即可，
@@ -57,6 +62,8 @@ sets:
     - 合同负债
 
 profiles:
+  # 银行指标集：单公司 bank_financial_report 与行业 bank_industry_report 共用。
+  # segments 只做横比分组（国有大行／股份制／城商行），全部仍指向本 profile，不改指标。
   bank:
     include:
       - 营业收入
@@ -81,6 +88,15 @@ profiles:
       - 核心一级资本充足率
       - 资本充足率
     exclude_refs: [bank_exclude]
+    segments:
+      国有大行: bank
+      股份制: bank
+      城商行: bank
+    notes:
+      next_period:
+        - "景气周期（信贷增速、净息差走势、资产质量迁徙等）依赖外部宏观与监管数据，本期流水线未接入，不推断周期位置。"
+        - "下一期预告需明确：数据源清单、入库表结构、更新频率；接入前本报告只做代表银行财报分组对比。"
+      observation: "以上只并列原文披露的数字关系，不构成因果归因。季报未披露单季净息差拆分所需的平均生息资产，也未披露拨备前利润（PPOP）的统一口径，两项均不推算。"
 
   fabless:
     include:
@@ -189,9 +205,15 @@ profiles:
     exclude: *bank_only
 
   # notes 是可选定性文案：不写就用 Python 里的通用兜底句，新增行业无需改代码。
+  # segments 是行业级赛道语义（权威）；声明后不再读全局 segment_to_type。
   semiconductor:
     include: *shared_include
     exclude: *bank_only
+    segments:
+      设计: fabless
+      制造: foundry
+      设备: equipment
+      封测: packaging
     notes:
       next_period:
         - "景气周期（全球半导体销售额增速、晶圆厂稼动率、存储／模拟价格等）依赖外部数据源（WSTS／SEMI／协会），本期流水线未接入，不推断周期位置。"
@@ -208,6 +230,11 @@ profiles:
       - 经营活动产生的现金流量净额
       - 合同负债
     exclude: *bank_only
+    segments:
+      本体: manufacturing
+      减速器: manufacturing
+      伺服控制: equipment
+      系统集成: manufacturing
     notes:
       next_period:
         - "景气周期（工业机器人产量、人形／协作出货、减速器／伺服价格等）依赖外部数据源，本期流水线未接入，不推断周期位置。"

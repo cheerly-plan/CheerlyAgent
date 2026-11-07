@@ -6,7 +6,8 @@ registry / industry**，避免「生成物要读被生成模块」的鸡生蛋�
 单一数据源是两份配置：
 
 * ``config/indicators.yaml`` 的 ``classification``（name_hints / segment_to_type）；
-* ``config/industries.yaml`` 的 ``profiles``（公司类型白名单）与 ``aliases``（行业名别名）。
+* ``config/industries.yaml`` 的 ``profiles``（公司类型白名单、行业级赛道语义
+  ``segments``）与 ``aliases``（行业名别名）。
 
 生成物是纯 Python 字面量，主配置与 YAML 镜像都读不到时仍能完成分类；
 由 ``scripts/sync_indicators_snapshot.py`` 导出，lint 校验它不是过期生成物。
@@ -60,6 +61,22 @@ def render_defaults(indicators: Path, industries: Path) -> str:
     aliases = industry_raw.get("aliases") or {}
     company_types = sorted({str(key) for key in profiles})
 
+    # 行业级赛道语义也要进降级快照：主配置读不到时不能退化成「所有行业共用
+    # 一份全局映射」，否则同名赛道又会在降级路径里串味。
+    industry_segments = {
+        str(key): {
+            str(segment): str(value)
+            for segment, value in (entry.get("segments") or {}).items()
+        }
+        for key, entry in profiles.items()
+        if isinstance(entry, dict) and entry.get("segments")
+    }
+    segments_literal = "\n".join(
+        ["INDUSTRY_SEGMENTS = {"]
+        + [f"    {key!r}: {value!r}," for key, value in industry_segments.items()]
+        + ["}"]
+    )
+
     type_aliases = "\n".join(
         ["TYPE_ALIASES = {"]
         + [f"    {str(key)!r}: {str(value)!r}," for key, value in aliases.items()]
@@ -77,5 +94,6 @@ def render_defaults(indicators: Path, industries: Path) -> str:
             type_aliases,
             _render_pairs("NAME_HINTS", name_hints),
             _render_pairs("SEGMENT_TO_TYPE", segment_to_type),
+            segments_literal,
         ]
     ) + "\n"

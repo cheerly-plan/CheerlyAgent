@@ -102,9 +102,18 @@ def test_apply_produces_config_that_existing_code_can_read(monkeypatch):
 
             assert industry._normalize_key("光伏") == "photovoltaics"
             assert "photovoltaics" in industry.known_company_types()
-            assert industry.type_for_segment("组件") == "manufacturing"
-            assert industry.type_for_segment("硅料") == "cyclical"
+            # 赛道语义属于这个行业自己的 profile.segments
+            own = industry.segment_map_for("photovoltaics")
+            assert own == {"组件": "manufacturing", "硅料": "cyclical"}
+            assert industry.type_for_segment("组件", "photovoltaics") == "manufacturing"
+            assert industry.type_for_segment("硅料", "photovoltaics") == "cyclical"
+            # 且**没有污染全局字典**：无行业上下文时仍解析不到新赛道
+            assert "组件" not in registry.segment_map()
+            assert industry.type_for_segment("组件") == industry.GENERIC
             assert "营业收入" in industry.default_indicators("光伏")
+
+        # 新行业的赛道语义不串到既有行业
+        assert industry.type_for_segment("组件", "semiconductor") == industry.GENERIC
 
         industry._profiles.cache_clear()
         industry._aliases.cache_clear()

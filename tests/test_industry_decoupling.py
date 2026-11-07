@@ -32,11 +32,14 @@ def test_industry_skill_profile_is_consistent(skill):
 
 @pytest.mark.parametrize("skill", _SEGMENT_SKILLS, ids=lambda s: s.skill_id)
 def test_roster_segments_all_have_type_mapping(skill):
-    """花名册赛道漏配 segment_to_type 会静默跨行业污染，必须由 lint 提前拦住。"""
-    known = dict(registry.segment_map())
+    """赛道必须登记在**该行业自己的** segments 里，不能靠全局字典凑数。"""
+    assert industry.profile_of(skill.indicator_set).segments, (
+        f"{skill.skill_id} 的 profile 未声明 segments，会回退全局字典串味"
+    )
+    own = industry.segment_map_for(skill.indicator_set)
     for name, _code, segment, _aka in skill.companies:
         seg = (segment or "").strip()
-        assert seg in known, f"{skill.skill_id} 的 {name} 赛道 {seg!r} 未登记"
+        assert seg in own, f"{skill.skill_id} 的 {name} 赛道 {seg!r} 未在本行业登记"
 
 
 @pytest.mark.parametrize("skill", _SEGMENT_SKILLS, ids=lambda s: s.skill_id)
@@ -78,6 +81,8 @@ def test_render_layer_has_no_industry_specific_branches():
         for banned in (
             "semiconductor_industry_report",
             "robotics_industry_report",
+            "bank_industry_report",
+            "bank_financial_report",
             "_NEXT_PERIOD_NOTE_SEMICONDUCTOR",
             "_NEXT_PERIOD_NOTE_ROBOTICS",
         ):

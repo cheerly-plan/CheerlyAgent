@@ -17,8 +17,9 @@
 9. 分类降级快照 ``classification_defaults.py`` 是脚本的最新生成物；
 10. SKILL.md 全量可解析、frontmatter 与指标集有效；
 11. SKILL.md 里 ``section:`` 声明的 id 都已注册（原先只会运行时 warning）；
-12. 行业档案完整性：花名册赛道都有 segment_to_type 映射、indicator_set
-    指向已登记 profile、定性文案不含数字（**验收「新增一个行业」**）。
+12. 行业档案完整性：indicator_set 指向已登记 profile、带赛道花名册的行业
+    必须自己声明 segments 且覆盖全部赛道、定性文案不含数字
+    （**验收「新增一个行业」**，并拦住同名赛道跨行业串模板）。
 
 行为取舍：默认 **只记 ERROR 日志，不阻断启动**。运行时本来就有降级路径，
 多租户服务端不该因为一份 YAML 拼错整体不可用；但错误必须显眼、可查。
@@ -157,29 +158,43 @@ def lint_report_config(
         run("classification_snapshot_sync", check_classification_snapshot_sync)
 
     def check_industry_integrity() -> None:
-        """新增行业完整性：赛道有映射、指标集已登记、定性文案不含数字。
+        """新增行业完整性：只认行业自己的 segments，不看全局字典。
 
-        这是「加一个行业只改配置」的验收门禁：漏配赛道以前会静默回退到
-        半导体模板，现在必须变成一条显式 issue。
+        这是「加一个行业只改配置」的验收门禁：带赛道花名册的行业若没声明
+        segments，会回退到全局字典，同名赛道可能套上别的行业的指标模板。
+        漏配必须变成一条显式 issue，不能静默串味。
         """
         from ai_agent.report import industry, skills
 
         known = industry.known_company_types()
-        segments = dict(registry.segment_map())
         problems: list[str] = []
         for skill in skills._load_skills():
             if skill.kind != "industry":
                 continue
-            if skill.indicator_set and skill.indicator_set not in known:
+            key = (skill.indicator_set or "").strip()
+            if key and key not in known:
                 problems.append(
-                    f"{skill.skill_id}: indicator_set {skill.indicator_set!r} 未登记 profile"
+                    f"{skill.skill_id}: indicator_set {key!r} 未登记 profile"
                 )
-            for _name, _code, segment, _aka in skill.companies:
-                seg = (segment or "").strip()
-                if seg and seg not in segments:
-                    problems.append(
-                        f"{skill.skill_id}: 赛道 {seg!r} 缺 segment_to_type 映射"
-                    )
+            roster = {
+                (segment or "").strip()
+                for _name, _code, segment, _aka in skill.companies
+                if (segment or "").strip()
+            }
+            if not roster:
+                continue
+            own = dict(industry.profile_of(key).segments)
+            if not own:
+                problems.append(
+                    f"{skill.skill_id}: 花名册含赛道，但 profile {key!r} 未声明 "
+                    "segments（会回退全局字典，可能串到别的行业模板）"
+                )
+                continue
+            missing = sorted(roster - set(own))
+            if missing:
+                problems.append(
+                    f"{skill.skill_id}: 赛道 {missing} 缺行业级 segments 映射"
+                )
         if problems:
             raise ValueError("行业档案不完整：" + "；".join(sorted(set(problems))))
 

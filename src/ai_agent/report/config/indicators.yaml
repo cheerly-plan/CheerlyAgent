@@ -538,6 +538,9 @@ ordering:
   - 亏损持平
   - 扭亏为盈
   - 由盈转亏
+# 全局分类兜底：行业级「赛道 → 指标模板」已迁到 industries.yaml 的
+# profile.segments（声明了 segments 的行业不会读下面这份）。这里保留的
+# segment_to_type 只服务没有行业上下文的调用，新增行业不必、也不应往这里加赛道。
 classification:
   name_hints:
   - - 银行

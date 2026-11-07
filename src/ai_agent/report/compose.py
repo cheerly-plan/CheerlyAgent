@@ -30,6 +30,7 @@ from ai_agent.report.industry import (
     industry_of,
     is_excluded,
     notes_for_plan,
+    profile_key_for_plan,
     type_for_segment,
 )
 from ai_agent.report.parse import OutlineItem, ReportPlan
@@ -379,11 +380,11 @@ def _conclusion_sentences(
     by_name: dict[str, IndicatorFact] = {}
     for fact in facts:
         by_name.setdefault(fact.name, fact)
-    is_bank = _is_bank_lead(plan, by_name)
+    uses_bank_lead = _uses_bank_metric_lead(plan, by_name)
     subjects = {fact.subject for fact in facts}
     lines: list[str] = []
 
-    if not is_bank:
+    if not uses_bank_lead:
         # 经营主线压成一句：营收／扣非／经营现金流并列，避免结论只剩一句营收。
         operating = _operating_lead_clause(plan, by_name, yoy_changes, subjects)
         if operating:
@@ -398,7 +399,7 @@ def _conclusion_sentences(
     # 配置降级时回退 _LEAD_GENERIC 原有后缀，行为不变。
     priority = (
         _LEAD_BANK
-        if is_bank
+        if uses_bank_lead
         else (*_LEAD_GENERIC[:4], *registry.lead_names(fallback=_LEAD_GENERIC[4:]))
     )
     used_profit = False
@@ -429,17 +430,18 @@ def _conclusion_sentences(
     return _indicator_sentences(plan, facts[:_LEAD_MAX], series)
 
 
-def _is_bank_lead(plan: ReportPlan, by_name: dict[str, IndicatorFact]) -> bool:
-    """银行结论走息差／资产质量优先级；不能仅凭「有营业收入」就判成银行。"""
-    if getattr(plan, "company_type", "") == BANK:
+def _uses_bank_metric_lead(
+    plan: ReportPlan, by_name: dict[str, IndicatorFact]
+) -> bool:
+    """银行口径结论：按档案 key／主体类型／息差类指标探测，不绑死 skill_id。"""
+    if profile_key_for_plan(plan) == BANK:
         return True
-    if plan.skill_id == "bank_financial_report":
+    if getattr(plan, "company_type", "") == BANK:
         return True
     if industry_of(plan.subjects) == BANK:
         return True
     return any(
-        name in by_name
-        for name in registry.names_with("bank_lead_hint")
+        name in by_name for name in registry.names_with("bank_lead_hint")
     )
 
 
@@ -779,19 +781,12 @@ def _observation_lines(
             f"{'、'.join(stocks)}为期末时点余额（较上年末变动为季报原文披露值），"
             "不是累计发生额，不与前三季度累计值相减。"
         )
-    # 银行专属口径注记只挂银行报告；其它类型模板严禁写净息差／PPOP。
-    company_type = getattr(plan, "company_type", "") or industry_of(plan.subjects)
-    if (
-        company_type == BANK
-        or industry_of(plan.subjects) == BANK
-        or plan.skill_id == "bank_financial_report"
-    ):
-        lines.append(
-            "以上只并列原文披露的数字关系，不构成因果归因。季报未披露单季净息差拆分"
-            "所需的平均生息资产，也未披露拨备前利润（PPOP）的统一口径，两项均不推算。"
-        )
-    else:
-        lines.append("以上只并列原文披露的数字关系，不构成因果归因。")
+    # 观察收尾句按行业档案 notes.observation；银行等专属口径只写在 YAML。
+    observation = notes_for_plan(plan).observation.strip()
+    lines.append(
+        observation
+        or "以上只并列原文披露的数字关系，不构成因果归因。"
+    )
     return lines or ["没有可核对的数字关系，不写观察。"]
 
 
@@ -1168,7 +1163,9 @@ def _segment_peer_lines(
     if not groups:
         return _peer_lines(plan, current)
     # 组内对比按赛道类型路由指标；共享集作兜底，避免把 Fabless 指标硬套 Foundry。
+    # 赛道语义按当前行业档案解析：同名赛道在不同行业可以指向不同模板。
     shared = plan.indicators or default_indicators(INDUSTRY_SHARED)
+    segment_key = profile_key_for_plan(plan)
     lines: list[str] = []
     ladder = _margin_ladder_table(current)
     if ladder:
@@ -1181,7 +1178,7 @@ def _segment_peer_lines(
             lines.append("本期未抽到该赛道代表公司指标。")
             lines.append("")
             continue
-        typed = default_indicators(type_for_segment(segment))
+        typed = default_indicators(type_for_segment(segment, segment_key))
         # 赛道专属指标优先；抽不到的列在宽表里留空，缺口进「缺失」节。
         indicators = _segment_table_indicators(typed or list(shared))
         lines.extend(_wide_segment_table(segment, names, segment_facts, indicators))

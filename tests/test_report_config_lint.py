@@ -230,6 +230,26 @@ def test_industry_integrity_detects_unmapped_segment(monkeypatch):
     )
 
 
+def test_industry_integrity_rejects_missing_segments_declaration(monkeypatch):
+    """有赛道花名册却没声明自己的 segments：即使全局字典能命中也必须报错。
+
+    这是防「同名赛道串到别的行业模板」的关键门禁——光靠全局兜底不算声明。
+    """
+    fake = SimpleNamespace(
+        skill_id="fake_industry",
+        kind="industry",
+        indicator_set="generic",  # generic profile 没有 segments
+        companies=(("某公司", "000001", "设计", ""),),  # 但全局字典里有「设计」
+        section_ids=(),
+    )
+    monkeypatch.setattr(skills, "_load_skills", lambda: (fake,))
+    report = lint_report_config()
+    assert any(
+        issue.startswith("industry_integrity:") and "未声明 segments" in issue
+        for issue in report.issues
+    )
+
+
 def test_industry_integrity_detects_unknown_indicator_set(monkeypatch):
     fake = SimpleNamespace(
         skill_id="fake_industry",

@@ -15,13 +15,16 @@
 ``&bank_only`` 锚点与大量注释，dump 会把它们展开/丢掉。插入点用固定锚点，
 找不到就报错退出，绝不猜测位置。
 
-新增行业本身不需要改 .py：公司类型白名单、行业别名、指标集、定性文案都来自
-YAML，渲染层通过 industry.notes_for_plan() 按 indicator_set 取文案。
+新增行业本身不需要改 .py：公司类型白名单、行业别名、指标集、定性文案、
+赛道语义都来自 industries.yaml，渲染层通过 industry.profile_key_for_plan()
+按 indicator_set 取。赛道映射写进新 profile 自己的 segments，不追加到
+indicators.yaml 的全局 segment_to_type —— 那会污染其它行业的同名赛道。
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -97,7 +100,7 @@ section: next_period
 _PROFILE_BLOCK = """  {set_key}:
     include: *shared_include
     exclude: *bank_only
-
+{segments}
 """
 
 
@@ -141,6 +144,35 @@ def build_changes(args) -> dict[Path, str]:
         companies=args.companies,
     )
 
+    # 赛道语义属于这个行业自己：全部写进 profile.segments。
+    # 带赛道花名册却漏配映射，会让渲染层回退 generic 或串到别的行业模板，
+    # 所以这里直接拒绝生成，而不是等 lint 事后报错。
+    segment_pairs = _parse_pairs(args.segment_types, "=")
+    for segment, company_type in segment_pairs:
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", company_type):
+            raise ValueError(f"赛道 {segment!r} 的公司类型 {company_type!r} 非法")
+    roster_segments = {
+        row.split("|")[2].strip()
+        for row in (args.companies or "").split(",")
+        if row.strip() and len(row.split("|")) >= 3 and row.split("|")[2].strip()
+    }
+    mapped = {segment for segment, _ in segment_pairs}
+    missing = sorted(roster_segments - mapped)
+    if missing:
+        raise ValueError(
+            f"花名册赛道 {missing} 没有 --segment-types 映射；"
+            "新增行业必须声明自己的赛道语义"
+        )
+    unknown = sorted(mapped - roster_segments)
+    if unknown:
+        raise ValueError(f"--segment-types 含花名册里不存在的赛道 {unknown}")
+    segments_block = ""
+    if segment_pairs:
+        segments_block = "    segments:\n" + "".join(
+            f"      {segment}: {company_type}\n"
+            for segment, company_type in segment_pairs
+        )
+
     industries = config / "industries.yaml"
     text = industries.read_text(encoding="utf-8")
     text = _insert_before(
@@ -149,16 +181,12 @@ def build_changes(args) -> dict[Path, str]:
         f"\n  {args.name}: {args.set_key}\n  {args.set_key}: {args.set_key}\n",
     )
     text = _insert_before(
-        text, "\n  generic:\n", _PROFILE_BLOCK.format(set_key=args.set_key)
+        text,
+        "\n  generic:\n",
+        _PROFILE_BLOCK.format(set_key=args.set_key, segments=segments_block),
     )
     changes[industries] = text
-
-    segment_pairs = _parse_pairs(args.segment_types, "=")
-    if segment_pairs:
-        indicators = config / "indicators.yaml"
-        raw = indicators.read_text(encoding="utf-8")
-        block = "".join(f"    {seg}: {ctype}\n" for seg, ctype in segment_pairs)
-        changes[indicators] = _insert_before(raw, "\naliases:\n", "\n" + block)
+    # 不再改 indicators.yaml：全局 segment_to_type 只作无行业上下文时的兜底。
     return changes
 
 
@@ -170,7 +198,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--set", dest="set_key", required=True, help="profile key，如 photovoltaics")
     parser.add_argument("--title", default="", help="报告标题，默认按行业名生成")
     parser.add_argument("--companies", required=True, help="名|代码|赛道[, 名|代码|赛道…]")
-    parser.add_argument("--segment-types", default="", help="赛道=细类型[, …]，追加到 classification")
+    parser.add_argument(
+        "--segment-types",
+        default="",
+        help="赛道=细类型[, …]，写入新 profile 的 segments（需覆盖 companies 里全部赛道）",
+    )
     parser.add_argument("--apply", action="store_true", help="真正写文件（默认只打印）")
     parser.add_argument("--root", type=Path, default=_PROJECT_ROOT, help="仅供测试：替换项目根")
     args = parser.parse_args(argv)

@@ -43,13 +43,16 @@ SOFTWARE = "software"
 REAL_ESTATE = "real_estate"
 CYCLICAL = "cyclical"
 
-# 赛道名 → 细类型、公司名关键字 → 细类型，已迁到 config/indicators.yaml 的
-# classification 段（registry.segment_map() / registry.name_hints()）；配置不可用时
-# 由 registry 的内置兜底保持原有行为，这里不再重复维护一份。
+# 行业级「赛道名 → 细类型」在 config/industries.yaml 的 profile.segments；
+# 公司名关键字 → 细类型仍在 config/indicators.yaml 的 classification.name_hints。
+# 全局 classification.segment_to_type 只作「没有行业上下文时」的兜底，声明了
+# segments 的行业不会读它；配置不可用时由只读降级快照保持分类能力。
 
 _INDUSTRIES_YAML = Path(__file__).resolve().parent / "config" / "industries.yaml"
 
-_ALLOWED_NOTE_FIELDS = frozenset({"next_period", "margin_gloss", "rnd_gloss"})
+_ALLOWED_NOTE_FIELDS = frozenset(
+    {"next_period", "margin_gloss", "rnd_gloss", "observation"}
+)
 # 行业文案只能写定性句，不能借配置往正文塞未经 facts 校验的数字。
 _NUMBER_RE = re.compile(r"[0-9０-９]|%|％")
 _PROFILE_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -62,6 +65,7 @@ class IndustryNotes:
     next_period: tuple[str, ...] = ()
     margin_gloss: str = ""
     rnd_gloss: str = ""
+    observation: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,9 @@ class IndicatorProfile:
     indicators: tuple[str, ...]
     exclude: tuple[str, ...] = ()
     notes: IndustryNotes = IndustryNotes()
+    # 该行业的赛道名 → 公司类型；声明后即为权威，不再回退全局 segment_to_type。
+    # 用 tuple 保序且可哈希，避免 frozen dataclass 里塞可变 dict。
+    segments: tuple[tuple[str, str], ...] = ()
 
 
 def _as_str_tuple(raw: Any) -> tuple[str, ...]:
@@ -107,20 +114,44 @@ def _parse_notes(entry: dict[str, Any], where: str) -> IndustryNotes:
         raise ValueError(f"{where}.notes 含未声明字段 {sorted(unknown)}")
     next_period = _as_str_tuple(raw.get("next_period"))
     glosses: dict[str, str] = {}
-    for key in ("margin_gloss", "rnd_gloss"):
+    for key in ("margin_gloss", "rnd_gloss", "observation"):
         value = raw.get(key) or ""
         if not isinstance(value, str):
             raise ValueError(f"{where}.notes.{key} 必须是字符串")
         glosses[key] = value.strip()
     for text in (*next_period, *glosses.values()):
         if not text.strip():
-            continue  # 三个字段都是可选；留空表示用渲染层的通用兜底句
+            continue  # 字段都是可选；留空表示用渲染层的通用兜底句
         if _NUMBER_RE.search(text):
             raise ValueError(f"{where}.notes 不得含数字或百分比：{text!r}")
     clean_next_period = tuple(item.strip() for item in next_period if item.strip())
     return IndustryNotes(
-        clean_next_period, glosses["margin_gloss"], glosses["rnd_gloss"]
+        clean_next_period,
+        glosses["margin_gloss"],
+        glosses["rnd_gloss"],
+        glosses["observation"],
     )
+
+
+def _parse_segments(entry: dict[str, Any], where: str) -> tuple[tuple[str, str], ...]:
+    """行业级赛道语义：赛道名 → 公司类型（profile key）。
+
+    严格 schema：值必须是合法的 profile key 形态；「值确实存在」由
+    _load_profiles 在全部 profile 构建完后统一校验，避免解析顺序造成误判。
+    """
+    raw = entry.get("segments") or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where}.segments 必须是映射")
+    pairs: list[tuple[str, str]] = []
+    for key, value in raw.items():
+        segment = str(key).strip()
+        company_type = str(value).strip()
+        if not segment or not _PROFILE_KEY_RE.fullmatch(company_type):
+            raise ValueError(
+                f"{where}.segments 非法：{key!r} → {value!r}（值须为 profile key）"
+            )
+        pairs.append((segment, company_type))
+    return tuple(pairs)
 
 
 _ALLOWED_TOP_LEVEL = frozenset({"aliases", "sets", "profiles"})
@@ -151,10 +182,20 @@ def _load_profiles(path: Path) -> dict[str, IndicatorProfile]:
             indicators=include,
             exclude=_resolve_exclude(entry, sets if isinstance(sets, dict) else {}),
             notes=_parse_notes(entry, f"industries.yaml profile {profile_key}"),
+            segments=_parse_segments(entry, f"industries.yaml profile {profile_key}"),
         )
     for required in (GENERIC, INDUSTRY_SHARED):
         if required not in profiles:
             raise ValueError(f"industries.yaml 必须包含 {required} 兜底 profile")
+    # 赛道类型必须指向本文件里真实存在的 profile：新增行业写错类型名时
+    # fail-fast，而不是在渲染期静默落到 generic 指标集。
+    for key, profile in profiles.items():
+        for segment, company_type in profile.segments:
+            if company_type not in profiles:
+                raise ValueError(
+                    f"industries.yaml profile {key} 的赛道 {segment!r} "
+                    f"指向未知公司类型 {company_type!r}"
+                )
     return profiles
 
 
@@ -251,13 +292,45 @@ def classify_subject(subject: str) -> str:
     return GENERIC
 
 
-def type_for_segment(segment: str) -> str:
+def _fallback_industry_segments(key: str) -> tuple[tuple[str, str], ...] | None:
+    """industries.yaml 读不到时，从只读降级快照取该行业的赛道语义。"""
+    try:
+        from ai_agent.report.classification_defaults import INDUSTRY_SEGMENTS
+
+        return tuple(INDUSTRY_SEGMENTS.get(key, {}).items())
+    except ImportError:  # pragma: no cover - 仅打包缺生成物时触发
+        return None
+
+
+def segment_map_for(industry_key: str | None = None) -> dict[str, str]:
+    """取某行业的赛道 → 公司类型映射。
+
+    声明了 ``segments`` 的行业是**权威源，不合并全局字典**：不同行业的同名赛道
+    （例如都叫「设备」）可以指向不同指标模板，且漏配赛道时会拿到 generic，
+    绝不会静默套上别的行业模板。未声明 segments 的行业才回退全局兜底。
+    """
+    key = _normalize_key(industry_key or "")
+    profile: IndicatorProfile | None = None
+    try:
+        profile = _profiles().get(key)
+    except Exception:
+        logger.exception("industries.yaml 读取失败，赛道语义回退内置快照")
+        pairs = _fallback_industry_segments(key)
+        if pairs is not None:
+            return dict(pairs)
+    if profile is not None and profile.segments:
+        return dict(profile.segments)
+    return dict(registry.segment_map())
+
+
+def type_for_segment(segment: str, industry_key: str | None = None) -> str:
     """赛道名 → 细类型；未登记赛道回退 generic。
 
-    刻意不回退 semiconductor：那会让漏配 segment_to_type 的新行业静默套上
-    半导体指标模板，产出跨行业污染且零报错。漏配由 lint 显式拦截。
+    ``industry_key`` 传入时按该行业自己的 segments 解析（渲染层应始终传）。
+    刻意不回退 semiconductor：那会让漏配赛道的新行业静默套上半导体模板，
+    产出跨行业污染且零报错。漏配由 lint 显式拦截。
     """
-    return registry.segment_map().get((segment or "").strip(), GENERIC)
+    return segment_map_for(industry_key).get((segment or "").strip(), GENERIC)
 
 
 def default_indicators(industry_or_type: str) -> list[str]:
@@ -294,19 +367,27 @@ def profile_of(industry_or_type: str) -> IndicatorProfile:
     return profiles.get(key) or profiles[GENERIC]
 
 
-def notes_for_plan(plan: Any) -> IndustryNotes:
-    """从 skill 的 indicator_set（或报告行业名）取行业定性文案。
+def profile_key_for_plan(plan: Any) -> str:
+    """报告 → 行业档案 key：skill.indicator_set → industry → company_type。
 
-    取不到时返回空 notes，由渲染层使用通用兜底句；这里不出现任何 skill_id 分支。
+    所有需要「按行业取配置」的调用都走这里，避免各处重复拼 skill_id 判断。
+    返回值已经过别名归一（如「银行」→ bank）。
     """
     from ai_agent.report.skills import get_skill
 
     skill_id = (getattr(plan, "skill_id", "") or "").strip()
     skill = get_skill(skill_id) if skill_id else None
-    key = (getattr(skill, "indicator_set", "") or "").strip() or (
-        getattr(plan, "industry", "") or ""
-    ).strip()
-    return profile_of(key).notes
+    raw = (
+        (getattr(skill, "indicator_set", "") or "").strip()
+        or (getattr(plan, "industry", "") or "").strip()
+        or (getattr(plan, "company_type", "") or "").strip()
+    )
+    return _normalize_key(raw) if raw else ""
+
+
+def notes_for_plan(plan: Any) -> IndustryNotes:
+    """从行业档案取定性文案；取不到时返回空 notes，由渲染层用通用兜底句。"""
+    return profile_of(profile_key_for_plan(plan)).notes
 
 
 def normalize_indicator(text: str) -> str:
@@ -330,15 +411,23 @@ def _normalize_key(raw: str) -> str:
     text = (raw or "").strip().lower()
     stripped = (raw or "").strip()
     aliases = _aliases()
-    return (
-        aliases.get(text)
-        or aliases.get(stripped)
-        or (stripped if stripped in _profiles() else GENERIC)
-    )
+    found = aliases.get(text) or aliases.get(stripped)
+    if found:
+        return found
+    try:
+        return stripped if stripped in _profiles() else GENERIC
+    except Exception:
+        # 配置文件损坏时保留原 key，让降级快照仍有机会命中；不让分类链路整体抛错。
+        logger.exception("industries.yaml 读取失败，行业名归一保留原值")
+        return stripped or GENERIC
 
 
 def _skill_company_roster() -> dict[str, str]:
-    """合并各行业 skill 的 companies 花名册 → 公司／又名 → 细类型；失败则空。"""
+    """合并各行业 skill 的 companies 花名册 → 公司／又名 → 细类型；失败则空。
+
+    每个 skill 用自己 indicator_set 的赛道映射：两个行业可以都有「设备」赛道，
+    各自指向不同的指标模板，不会被合并成一份全局字典互相覆盖。
+    """
     try:
         from ai_agent.report.skills import SKILLS
     except Exception:
@@ -347,8 +436,9 @@ def _skill_company_roster() -> dict[str, str]:
     for skill in SKILLS:
         if skill.kind != "industry" or not skill.companies:
             continue
+        segments = segment_map_for(skill.indicator_set)
         for name, _code, segment, aka in skill.companies:
-            company_type = registry.segment_map().get((segment or "").strip())
+            company_type = segments.get((segment or "").strip())
             if not company_type:
                 continue
             out[name] = company_type

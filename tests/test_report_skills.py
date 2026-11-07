@@ -55,6 +55,7 @@ def test_resolve_skill_prefers_industry_template_then_generic():
         == "semiconductor_industry_report"
     )
     assert resolve_skill("industry", "机器人").skill_id == "robotics_industry_report"
+    assert resolve_skill("industry", "银行").skill_id == "bank_industry_report"
     # kind 不认识时按通用公司模板兜底，不抛错
     assert resolve_skill("unknown", "").kind == "company"
 
@@ -166,6 +167,39 @@ def test_robotics_skill_has_universe_and_routes(monkeypatch):
     assert "汇川技术" in plan.subjects
     assert "绿的谐波" in plan.subjects
     assert any(item.title == "组内对比" for item in plan.outline)
+    assert any(item.section_id == "segment_peer" for item in plan.outline)
+
+
+def test_bank_industry_skill_groups_and_routes(monkeypatch):
+    """银行行业：机构类型分组横比，指标仍用 bank 集；与单家 bank_financial 分流。"""
+    from ai_agent.report.industry import profile_of
+    from ai_agent.report.skills import is_segment_skill, reload_skills
+
+    reload_skills()
+    skill = get_skill("bank_industry_report")
+    assert skill is not None
+    assert skill.kind == "industry"
+    assert "银行" in skill.industries
+    assert is_segment_skill(skill.skill_id)
+    assert skill.segment_of("工商银行") == "国有大行"
+    assert skill.segment_of("招商银行") == "股份制"
+    assert skill.segment_of("宁波银行") == "城商行"
+    assert "净息差" in skill.indicators
+    assert "不良贷款率" in skill.indicators
+    segments = dict(profile_of("bank").segments)
+    assert segments == {"国有大行": "bank", "股份制": "bank", "城商行": "bank"}
+    monkeypatch.setattr(
+        "ai_agent.report.parse.store.list_kb_files",
+        lambda **k: [],
+    )
+    plan = parse_request("生成银行行业2025Q3财报对比分析")
+    assert plan.kind == "industry"
+    assert plan.industry == "银行"
+    assert plan.skill_id == "bank_industry_report"
+    assert "赛道分组版" in plan.title
+    assert "工商银行" in plan.subjects
+    assert "招商银行" in plan.subjects
+    assert "宁波银行" in plan.subjects
     assert any(item.section_id == "segment_peer" for item in plan.outline)
 
 
@@ -427,9 +461,11 @@ def test_skills_endpoint_lists_registry():
     ids = {item["skill_id"] for item in data["skills"]}
     assert {
         "bank_financial_report",
+        "bank_industry_report",
         "company_financial_report",
         "industry_report",
         "semiconductor_industry_report",
+        "robotics_industry_report",
     } <= ids
     bank = next(item for item in data["skills"] if item["skill_id"] == "bank_financial_report")
     assert "净息差" in bank["default_indicators"]
