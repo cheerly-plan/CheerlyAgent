@@ -151,6 +151,8 @@ class Settings(BaseSettings):
     kb_ingest_inline: bool = False
     # ingest-worker 空闲轮询间隔（秒）
     kb_ingest_poll_seconds: float = 1.0
+    # 单份文件解析子进程硬超时（秒）；超时杀进程并标 failed，释放 worker 槽
+    kb_ingest_job_timeout_seconds: float = 900.0
     # 表格：单个工作表最多取多少行，防止超大表撑爆切片与向量库
     kb_sheet_max_rows: int = 2000
 

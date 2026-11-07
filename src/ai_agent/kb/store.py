@@ -529,6 +529,18 @@ class KbStore:
                 """
             ).fetchall()
 
+    def list_false_missing_source_kb_files(self) -> list[dict]:
+        """误标「源文件已不在」但磁盘目录仍在的失败档（供启动自愈）。"""
+        with self._get_pool().connection() as conn:
+            return conn.execute(
+                """
+                SELECT id AS file_id, user_id, filename, status, error
+                FROM agent_kb_file
+                WHERE status = 'failed'
+                  AND error LIKE '服务重启导致处理中断，源文件已不在%'
+                """
+            ).fetchall()
+
     def claim_next_uploaded_kb_file(self) -> dict | None:
         """原子领取一份 uploaded 文件并标为 parsing。
 

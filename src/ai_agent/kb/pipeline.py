@@ -98,15 +98,21 @@ class KbPipeline:
         又打回队列，造成「改了 uploaded 却像没解析」或重复抢单。
         """
         do_requeue = settings.kb_ingest_inline if requeue is None else requeue
-        requeued: list[str] = []
-        if do_requeue:
-            # 解析／向量化中断且磁盘 PDF 还在：清半成品切片后重投，免删了重传。
-            requeued = self._requeue_interrupted_from_disk()
-            if requeued:
-                logger.warning(
-                    "kb 启动恢复：重投 %d 个中断文件（磁盘仍在，免重传）",
-                    len(requeued),
-                )
+        # 图谱卡住与解析无关，API／worker 都可清。
+        graphs = store.reset_stuck_graphs()
+        if graphs:
+            logger.warning("kb 启动恢复：%d 个文件图谱构建中断，标记 failed", graphs)
+        if not do_requeue:
+            # API 热重载：绝不能动 parsing／embedding——ingest-worker 可能正在跑，
+            # 误标「源文件已不在」会导致研报把 failed 当结束、不等解析就出稿。
+            return
+        # 解析／向量化中断且磁盘 PDF 还在：清半成品切片后重投，免删了重传。
+        requeued = self._requeue_interrupted_from_disk()
+        if requeued:
+            logger.warning(
+                "kb 启动恢复：重投 %d 个中断文件（磁盘仍在，免重传）",
+                len(requeued),
+            )
         stuck = store.recover_stuck_kb_files(
             exclude_ids=[uuid.UUID(item) for item in requeued]
         )
@@ -114,12 +120,6 @@ class KbPipeline:
             logger.warning(
                 "kb 启动恢复：%d 个中断文件无源文件，已标 failed（需重新上传）", stuck
             )
-        # 图谱构建是切片 ready 之后的增强步骤，卡住只标记图谱失败，文件仍可用
-        graphs = store.reset_stuck_graphs()
-        if graphs:
-            logger.warning("kb 启动恢复：%d 个文件图谱构建中断，标记 failed", graphs)
-        if not do_requeue:
-            return
         # uploaded + 磁盘已有 PDF：热重载丢掉了 ThreadPool 任务，主动重投
         try:
             from ai_agent.kb.fetch_reports import requeue_uploaded_files
@@ -133,14 +133,19 @@ class KbPipeline:
             logger.exception("kb 启动恢复：重投 uploaded 失败")
 
     def _requeue_interrupted_from_disk(self) -> list[str]:
-        """parsing／embedding／「重启中断」failed → 磁盘源文件还在则重投。"""
+        """parsing／embedding／可重试 failed → 磁盘源文件还在则重投。"""
         from ai_agent.kb.ingest.parsing import supported
 
+        rows = list(store.list_interrupted_kb_files())
+        # 自愈：曾被 API 热重载误标「源文件已不在」、但 PDF 其实还在
+        rows.extend(store.list_false_missing_source_kb_files())
+        seen: set[str] = set()
         restarted: list[str] = []
-        for row in store.list_interrupted_kb_files():
+        for row in rows:
             file_id = str(row.get("file_id") or "")
-            if not file_id:
+            if not file_id or file_id in seen:
                 continue
+            seen.add(file_id)
             try:
                 uid = uuid.UUID(file_id)
             except ValueError:
@@ -251,16 +256,37 @@ class KbPipeline:
         file_id: uuid.UUID,
         label: str,
     ) -> None:
-        """spawn 子进程跑重活；异常退出只标该文件 failed，不拖死 API。"""
+        """spawn 子进程跑重活；异常／超时只标该文件 failed，不拖死监督线程。"""
+        # OCR／pymupdf 偶发挂死：无超时 join 会占满 worker 槽，后面 uploaded 永远不跑。
+        timeout = max(float(getattr(settings, "kb_ingest_job_timeout_seconds", 900)), 60.0)
         proc = self._mp_ctx.Process(
             target=target,
             args=args,
             name=f"kb-{label}-{file_id}",
             daemon=True,
         )
-        logger.info("kb 子进程启动 label=%s file_id=%s", label, file_id)
+        logger.info("kb 子进程启动 label=%s file_id=%s timeout=%.0fs", label, file_id, timeout)
         proc.start()
-        proc.join()
+        proc.join(timeout=timeout)
+        if proc.is_alive():
+            logger.error(
+                "kb 子进程超时 label=%s file_id=%s timeout=%.0fs，强制终止",
+                label,
+                file_id,
+                timeout,
+            )
+            proc.terminate()
+            proc.join(timeout=15)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
+            if label == "parse":
+                store.update_kb_status(
+                    file_id,
+                    "failed",
+                    error=f"解析子进程超时（>{int(timeout)}s），可手动重试",
+                )
+            return
         if proc.exitcode == 0:
             return
         logger.error(

@@ -362,7 +362,28 @@ def wait_until_ready(
             if status == "ready":
                 progressed = True
                 continue
-            if status in {"failed", "empty"}:
+            if status == "empty":
+                unfinished.append(raw)
+                progressed = True
+                continue
+            if status == "failed":
+                # 误标「源文件已不在」但 PDF 还在：退回队列继续等，避免研报直接跳过
+                err = str((row or {}).get("error") or "")
+                folder = Path(settings.kb_upload_dir) / str(file_id)
+                has_pdf = folder.is_dir() and any(folder.glob("*.pdf"))
+                if has_pdf and (
+                    "源文件已不在" in err or "解析子进程异常退出" in err
+                ):
+                    store.update_kb_status(
+                        file_id, "uploaded", error="", chunk_count=0, text_count=0, table_count=0
+                    )
+                    requeue_uploaded_files([str(file_id)])
+                    waiting_labels.append(
+                        f"{_display_filing_name(name)}（已重新入队）"
+                    )
+                    next_parsing.append(raw)
+                    progressed = True
+                    continue
                 unfinished.append(raw)
                 progressed = True
                 continue
