@@ -175,7 +175,15 @@ def fetch_missing_reports(
         if fetched.duplicate_of:
             result.skipped.append(
                 f"《{fetched.filename}》与已有《{fetched.duplicate_of}》内容相同"
+                + (
+                    f"（当前 status={fetched.status}，需等入库）"
+                    if fetched.status and fetched.status != "ready"
+                    else ""
+                )
             )
+            # 重复档若尚未 ready，仍放入 files 以便上层等待，避免「未解析完就出稿」。
+            if fetched.status != "ready":
+                result.files.append(fetched)
         else:
             result.files.append(fetched)
     return result
@@ -260,10 +268,12 @@ def _ingest_bytes(
     digest = hashlib.sha256(content).hexdigest()
     duplicate = store.find_kb_file_by_hash(digest)
     if duplicate is not None:
+        # 如实带回库内状态：若仍在 parsing，调用方必须纳入 wait_until_ready，
+        # 不能假装已 ready 而跳过等待。
         return FetchedFile(
             file_id=str(duplicate["file_id"]),
             filename=str(duplicate["filename"]),
-            status="ready",
+            status=str(duplicate.get("status") or ""),
             announcement_id="",
             title="",
             duplicate_of=str(duplicate["filename"]),

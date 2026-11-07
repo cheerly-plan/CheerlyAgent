@@ -36,46 +36,65 @@ def ensure_filings_for_report(
     plan: ReportPlan,
     request_text: str = "",
 ) -> EnsureFilingsResult:
-    """按计划缺的报告期拉巨潮 PDF，等到 ready（或超时）后返回说明。"""
+    """按计划缺的报告期拉巨潮 PDF，等到 ready（或超时）后返回说明。
+
+    也会等待「库里已有、但仍在 parsing／embedding」的本期／基期文件，
+    避免未解析完就抽数出稿。
+    """
     result = EnsureFilingsResult()
-    if not settings.enable_cninfo_fetch:
-        return result
     if not plan.period:
         return result
 
-    result.attempted = True
-    targets = _missing_targets(plan, request_text)
-    if not targets:
-        return result
+    # 不依赖巨潮开关：只要库里已有未就绪文件，就必须等。
+    wait_ids = list(_pending_file_ids(plan))
 
-    # 行业报告一次可能很多家，限制补齐规模，避免打爆巨潮
-    limit = max(int(settings.cninfo_auto_fetch_max), 1)
-    targets = targets[:limit]
+    if settings.enable_cninfo_fetch:
+        result.attempted = True
+        targets = _missing_targets(plan, request_text)
+        # 行业报告一次可能很多家，限制补齐规模，避免打爆巨潮
+        limit = max(int(settings.cninfo_auto_fetch_max), 1)
+        targets = targets[:limit]
 
-    for subject, code, period in targets:
-        try:
-            fetched = fetch_missing_reports(code, period, max_files=1)
-        except Exception as exc:
-            logger.exception("自动补齐失败 subject=%s period=%s", subject, period)
-            result.notes.append(f"自动补齐 {subject} {period} 失败：{exc}")
+        for subject, code, period in targets:
+            try:
+                fetched = fetch_missing_reports(code, period, max_files=1)
+            except Exception as exc:
+                logger.exception("自动补齐失败 subject=%s period=%s", subject, period)
+                result.notes.append(f"自动补齐 {subject} {period} 失败：{exc}")
+                continue
+            if fetched.errors:
+                result.notes.extend(
+                    f"自动补齐 {subject} {period}：{item}" for item in fetched.errors
+                )
+            if fetched.skipped and not fetched.files:
+                result.notes.extend(
+                    f"自动补齐 {subject} {period}：{item}" for item in fetched.skipped
+                )
+            for item in fetched.files:
+                result.fetched_file_ids.append(item.file_id)
+                wait_ids.append(item.file_id)
+                if item.duplicate_of:
+                    result.notes.append(
+                        f"沿用已有 {subject} {period}《{item.filename}》"
+                        f"（status={item.status or '?'}）"
+                    )
+                else:
+                    result.notes.append(
+                        f"已从巨潮补齐 {subject} {period}《{item.filename}》"
+                        f"（file_id={item.file_id}）"
+                    )
+
+    # 去重保序
+    seen: set[str] = set()
+    ordered_wait: list[str] = []
+    for file_id in wait_ids:
+        if not file_id or file_id in seen:
             continue
-        if fetched.errors:
-            result.notes.extend(
-                f"自动补齐 {subject} {period}：{item}" for item in fetched.errors
-            )
-        if fetched.skipped and not fetched.files:
-            result.notes.extend(
-                f"自动补齐 {subject} {period}：{item}" for item in fetched.skipped
-            )
-        for item in fetched.files:
-            result.fetched_file_ids.append(item.file_id)
-            result.notes.append(
-                f"已从巨潮补齐 {subject} {period}《{item.filename}》"
-                f"（file_id={item.file_id}）"
-            )
+        seen.add(file_id)
+        ordered_wait.append(file_id)
 
-    if result.fetched_file_ids:
-        not_ready = wait_until_ready(result.fetched_file_ids)
+    if ordered_wait:
+        not_ready = wait_until_ready(ordered_wait)
         if not_ready:
             # 用文件名+状态写进缺口，比裸 UUID 更好转述给用户
             labels: list[str] = []
@@ -93,6 +112,56 @@ def ensure_filings_for_report(
                 + (f" 等共 {len(labels)} 份" if len(labels) > 8 else "")
             )
     return result
+
+
+def _pending_file_ids(plan: ReportPlan) -> list[str]:
+    """计划需要的报告期里，库中已有但尚未 ready 的文件。"""
+    periods = set(_needed_periods(plan))
+    if not periods:
+        return []
+    names = _plan_name_keys(plan)
+    if not names:
+        return []
+    pending: list[str] = []
+    for row in store.list_kb_files():
+        status = str(row.get("status") or "")
+        if status not in {"uploaded", "parsing", "embedding"}:
+            continue
+        if str(row.get("period") or "") not in periods:
+            continue
+        blob = " ".join(
+            [
+                str(row.get("subject") or ""),
+                " ".join(str(item) for item in (row.get("subject_aliases") or [])),
+                str(row.get("filename") or ""),
+            ]
+        )
+        from ai_agent.kb.ingest.meta import name_in_text
+
+        if any(name_in_text(blob, name) for name in names):
+            file_id = str(row.get("file_id") or "")
+            if file_id:
+                pending.append(file_id)
+    return pending
+
+
+def _plan_name_keys(plan: ReportPlan) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in plan.subjects:
+        key = (item or "").strip()
+        if key and key not in seen:
+            seen.add(key)
+            names.append(key)
+    skill = get_skill(plan.skill_id) if plan.skill_id else None
+    if skill and skill.companies:
+        for name, code, _segment in skill.companies:
+            for key in (name, code):
+                text = (key or "").strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    names.append(text)
+    return names
 
 
 def _missing_targets(

@@ -260,12 +260,42 @@ def test_duplicate_content_skipped(monkeypatch, tmp_path):
         lambda *a, **k: {
             "file_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "filename": "已有文件",
+            "status": "ready",
         },
     )
 
     result = fr.fetch_missing_reports("601988", "2025Q3")
     assert result.files == []
     assert any("内容相同" in item for item in result.skipped)
+
+
+def test_duplicate_still_parsing_is_waited(monkeypatch, tmp_path):
+    """内容重复但库内仍在 parsing 时，必须进入 files 以便上层等待。"""
+    monkeypatch.setattr(settings, "kb_upload_dir", tmp_path)
+    monkeypatch.setattr(cninfo.http, "request_json", lambda *a, **k: _stock_payload())
+    monkeypatch.setattr(
+        cninfo.http, "request_form", lambda *a, **k: _announcements_payload()
+    )
+    monkeypatch.setattr(
+        cninfo.http,
+        "request_bytes",
+        lambda *a, **k: (b"%PDF-1.4 same", "application/pdf"),
+    )
+    monkeypatch.setattr(
+        fr.store,
+        "find_kb_file_by_hash",
+        lambda *a, **k: {
+            "file_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "filename": "解析中的文件",
+            "status": "parsing",
+        },
+    )
+
+    result = fr.fetch_missing_reports("601988", "2025Q3")
+    assert len(result.files) == 1
+    assert result.files[0].status == "parsing"
+    assert result.files[0].file_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert any("需等入库" in item for item in result.skipped)
 
 
 def test_ensure_filings_fetches_missing_period(monkeypatch, tmp_path):

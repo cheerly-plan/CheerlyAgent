@@ -115,8 +115,12 @@ def run_report(
     deliverable 显式传 "pdf" / "markdown" 时覆盖需求文本的推断；
     write_pdf=False 用于只要 Markdown 的场景（省掉渲染开销）。
     """
+    from ai_agent.tools.progress import emit_progress
+
     # skill_id 为空时保持旧调用形态（只传 request）：外部对 parse_request
     # 的替身多为单参数 lambda，统一带 kwarg 会让它们全部 TypeError。
+    # 用「理解需求」避免和 PDF 入库「解析中」混淆。
+    emit_progress("正在理解研报需求…")
     plan = parse_request(request, skill_id=skill_id) if skill_id else parse_request(request)
     if deliverable in {"pdf", "markdown"}:
         plan.deliverable = deliverable
@@ -125,6 +129,12 @@ def run_report(
     # 缺本期/基期原文时先巨潮补齐，再重新绑定 plan.files，避免空库硬抽。
     ensure_notes: list[str] = []
     try:
+        subject_n = len(plan.subjects) or 1
+        emit_progress(
+            f"正在核对／补齐财报原文（{subject_n} 家公司）…"
+            if subject_n > 1
+            else "正在核对／补齐财报原文…"
+        )
         ensured = ensure_filings_for_report(plan, request_text=request)
         ensure_notes = list(ensured.notes)
         if ensured.fetched_any:
@@ -140,6 +150,7 @@ def run_report(
         logger.exception("研报自动补齐原文失败，继续用现有知识库抽数")
         ensure_notes.append("自动补齐原文失败，已跳过")
 
+    emit_progress("正在抽取财务指标…")
     facts, missing, views = _extract_all(plan)
     if ensure_notes:
         missing = [*ensure_notes, *missing]
@@ -159,6 +170,7 @@ def run_report(
         )
         for f in facts
     ]
+    emit_progress("正在计算同比／环比与撰写正文…")
     series = compare_measures(measures)
     analysis = analyze_operations(plan, facts, series=series, views=views)
     if analysis.derived_facts:
@@ -172,6 +184,7 @@ def run_report(
     # series 显式传进去：和撰写用的是同一批 Measure，校验允许的数字集合
     # 才和正文一致，不会出现「正文写了、校验说没算过」的假错。
     # views 也要传：单季列与较上年末变动的数字必须过原文核对。
+    emit_progress("正在校验数字与出处…")
     validation = validate_report(
         document, facts, plan=plan, series=series, views=views
     )
@@ -198,6 +211,7 @@ def run_report(
         result.pdf_error = "校验未通过：禁止渲染 PDF，请在审核队列处置错误后重新生成"
         document.deliverable = "markdown"
     elif want_pdf:
+        emit_progress("正在渲染 PDF…")
         try:
             result.pdf = render_report_pdf(
                 document, charts=charts_for_report(plan, facts, series)
@@ -210,6 +224,7 @@ def run_report(
             document.deliverable = "markdown"
             logger.warning("研报 PDF 渲染失败，降级为 Markdown：%s", result.pdf_error)
 
+    emit_progress("正在落盘产物…")
     _write_artifacts(result)
     # 产物全部落盘后再登记审核：指纹才覆盖最终字节。登记失败宁可整体抛错，
     # 也不能出现「有 PDF、没有审核记录」的漏网之鱼。
