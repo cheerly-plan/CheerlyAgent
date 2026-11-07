@@ -79,9 +79,25 @@ def main() -> None:
     dev_parser.add_argument("--host", default=settings.host)
     dev_parser.add_argument("--port", type=int, default=settings.port)
 
+    worker_parser = sub.add_parser(
+        "ingest-worker",
+        help="知识库入库常驻进程：抢 uploaded 任务并解析（与 API 隔离）",
+    )
+    worker_parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=None,
+        help="空闲轮询间隔，默认读 KB_INGEST_POLL_SECONDS",
+    )
+
     args = parser.parse_args()
     if args.command == "chat":
         _chat(" ".join(args.message).strip() or None)
+        return
+    if args.command == "ingest-worker":
+        from ai_agent.kb.ingest_worker import run_ingest_worker
+
+        run_ingest_worker(poll_seconds=args.poll_seconds)
         return
     if args.command == "dev":
         _serve(args.host, args.port, reload=True)

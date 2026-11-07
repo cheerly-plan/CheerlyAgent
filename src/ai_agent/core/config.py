@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     # 是 40 分钟级的长任务，跟解析/向量化挤同一个池子时，后上传的文件只能
     # 排队等它跑完——表现为「切片生成也变慢了」
     kb_graph_workers: int = 1
+    # False（默认）：API 只把文件标成 uploaded，由 `almost-agent ingest-worker`
+    # 抢任务解析，HTTP 与 OCR/嵌入进程隔离。True：兼容单进程，API 内 spawn
+    # 子进程解析（测试或未起 worker 时用）。
+    kb_ingest_inline: bool = False
+    # ingest-worker 空闲轮询间隔（秒）
+    kb_ingest_poll_seconds: float = 1.0
     # 表格：单个工作表最多取多少行，防止超大表撑爆切片与向量库
     kb_sheet_max_rows: int = 2000
 

@@ -507,9 +507,11 @@ class KbStore:
         return row is not None
 
     def list_interrupted_kb_files(self) -> list[dict]:
-        """上次进程退出时卡在解析／向量化，或已标「重启中断」失败的文件。
+        """上次进程退出时卡在解析／向量化，或可自动重试的失败文件。
 
-        供启动恢复：磁盘上还有 PDF 的可以重投，不必删了重传。
+        供启动恢复：磁盘上还有 PDF 的退回 uploaded 队列，不必删了重传。
+        含「服务重启中断」与「解析子进程异常退出」（SIGSEGV 等），重启 worker
+        应再试；真正业务失败（空文档等）不匹配这些前缀，不会死循环重投。
         """
         with self._get_pool().connection() as conn:
             return conn.execute(
@@ -519,10 +521,42 @@ class KbStore:
                 WHERE status IN ('parsing', 'embedding')
                    OR (
                         status = 'failed'
-                        AND error LIKE '服务重启导致处理中断%'
+                        AND (
+                            error LIKE '服务重启导致处理中断%'
+                            OR error LIKE '解析子进程异常退出%'
+                        )
                    )
                 """
             ).fetchall()
+
+    def claim_next_uploaded_kb_file(self) -> dict | None:
+        """原子领取一份 uploaded 文件并标为 parsing。
+
+        ``FOR UPDATE SKIP LOCKED``：多 ingest-worker 并发时不会抢同一行。
+        """
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                WITH next AS (
+                    SELECT id
+                    FROM agent_kb_file
+                    -- 兼容误写成 upload（少 ed）的脏数据
+                    WHERE status IN ('uploaded', 'upload')
+                    ORDER BY updated_at ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE agent_kb_file AS f
+                SET status = 'parsing',
+                    error = '',
+                    updated_at = now()
+                FROM next
+                WHERE f.id = next.id
+                RETURNING f.id AS file_id, f.user_id, f.filename
+                """
+            ).fetchone()
+            conn.commit()
+        return dict(row) if row else None
 
     def recover_stuck_kb_files(self, *, exclude_ids: list[uuid.UUID] | None = None) -> int:
         """把仍卡在中间态、且未能重投的文件标 failed。

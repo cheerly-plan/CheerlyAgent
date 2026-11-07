@@ -43,14 +43,15 @@ async def lifespan(app: FastAPI):
     from ai_agent.kb.retrieval.rerank import probe_reranker
 
     probe_reranker()
-    # 先让 HTTP 对外就绪，再恢复中断的 KB 任务——避免解析/OCR 原生崩溃
-    # 把 worker 打死在 "Waiting for application startup"，表现为登录一直转圈。
+    # 先让 HTTP 对外就绪，再把中断文件退回 uploaded 队列；真正的解析由
+    # ingest-worker 抢任务执行，避免 OCR 崩在 API 进程里。
     short_term_memory.start_cleanup()
     maintenance_cleaner.start()
 
     def _recover_kb() -> None:
         try:
-            kb_pipeline.recover_stuck()
+            # 有独立 ingest-worker 时不要把 parsing 打回 uploaded，避免抢跑中的任务被打断
+            kb_pipeline.recover_stuck(requeue=settings.kb_ingest_inline)
         except Exception:
             logging.getLogger(__name__).exception("kb 启动恢复失败")
 

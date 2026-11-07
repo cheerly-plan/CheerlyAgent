@@ -296,7 +296,7 @@ def _ingest_bytes(
     return FetchedFile(
         file_id=str(file_id),
         filename=stem,
-        status="parsing",
+        status="uploaded",
         announcement_id="",
         title="",
     )

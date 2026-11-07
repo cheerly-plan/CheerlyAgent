@@ -233,7 +233,8 @@ def complete_upload(
     store.update_kb_file_hash(record["id"], digest)
 
     kb_pipeline.submit(_parse_file_id(file_id), user.user_id, final_path)
-    return {"status": "parsing"}
+    # 默认只入队 uploaded，由 ingest-worker 领取后才变 parsing
+    return {"status": "uploaded"}
 
 
 @router.post("/files/fetch-cninfo")

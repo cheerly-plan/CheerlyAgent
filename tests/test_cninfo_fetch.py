@@ -234,7 +234,7 @@ def test_fetch_ingests_and_submits(monkeypatch, tmp_path):
     assert not result.errors
     assert len(result.files) == 1
     item = result.files[0]
-    assert item.status == "parsing"
+    assert item.status == "uploaded"
     # 默认 mock 全文约 2MB < 8MB 阈值，仍取全文
     assert item.filename == "中国银行股份有限公司2025年第三季度报告"
     assert created["filename"] == item.filename

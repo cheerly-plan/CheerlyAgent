@@ -1,11 +1,19 @@
 """知识库后台处理管道：解析 → 切片 → 批量嵌入 → 灌库。
 
-单进程部署，沿用 turn-finalizer 的线程池模式：lifespan 启动时
-recover_stuck()，关停时 shutdown() 等待在途任务完成。进度即
-agent_kb_file.status（parsing → embedding → ready / failed），
-前端轮询文件列表即可看到，不单独建 job 表。
+默认（``kb_ingest_inline=false``）：API 的 ``submit`` 只把文件留在 ``uploaded``，
+由独立进程 ``almost-agent ingest-worker`` 用 ``FOR UPDATE SKIP LOCKED`` 抢任务。
+Worker 内再 spawn 子进程跑解析／向量化——OCR SIGSEGV 只死子进程，HTTP 与
+常驻 worker 都还在。
+
+``kb_ingest_inline=true``：兼容单进程，API 内直接 spawn（测试或不想起 worker）。
+
+图谱抽取仍是 LLM IO，留在本进程线程池。进度即 agent_kb_file.status，
+前端轮询即可，不单独建 job 表。
 """
 
+from __future__ import annotations
+
+import multiprocessing as mp
 import threading
 import time
 import uuid
@@ -31,8 +39,37 @@ from ai_agent.storage.store import store
 logger = get_logger(__name__)
 
 
+def _kb_parse_job(file_id: str, user_id: str, path: str) -> None:
+    """子进程入口：解析 + 向量化。必须是顶层函数，供 spawn 序列化。"""
+    from ai_agent.core.logging import setup_logging
+
+    setup_logging()
+    kb_pipeline._process(uuid.UUID(file_id), user_id, Path(path))
+
+
+def _kb_reembed_job(file_id: str) -> None:
+    """子进程入口：改名重嵌。"""
+    from ai_agent.core.logging import setup_logging
+
+    setup_logging()
+    kb_pipeline._reembed(uuid.UUID(file_id))
+
+
+def _mark_subprocess_crash(file_id: uuid.UUID, exitcode: int | None) -> None:
+    """子进程非 0 退出时，若文件仍停在中间态，标 failed 供前端展示。"""
+    row = store.get_kb_file(file_id) or {}
+    if str(row.get("status") or "") not in {"uploaded", "parsing", "embedding"}:
+        return
+    code = "?" if exitcode is None else str(exitcode)
+    store.update_kb_status(
+        file_id,
+        "failed",
+        error=f"解析子进程异常退出 (exit={code})，可手动重试",
+    )
+
+
 class KbPipeline:
-    """两条独立线程池：解析/向量化（短任务）与图谱抽取（长任务）。
+    """解析/向量化走子进程；图谱抽取走本进程线程池。
 
     分池是必要的：一次图谱抽取是几十分钟的活，跟解析/向量化挤同一个池子时，
     管理员点了「建图」之后上传的新文件只能排队等它跑完——用户看到的现象是
@@ -40,21 +77,36 @@ class KbPipeline:
     """
 
     def __init__(self, workers: int = 2, graph_workers: int = 1) -> None:
-        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kb-pipeline")
+        # 监督线程：每个 worker 同时只盯一个 spawn 子进程，上限即并发解析数
+        self._pool = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="kb-pipeline"
+        )
         self._graph_pool = ThreadPoolExecutor(
             max_workers=max(1, graph_workers), thread_name_prefix="kb-graph"
         )
+        self._mp_ctx = mp.get_context("spawn")
         # 同一 file_id 只允许一条解析在途，避免重投把 (file_id, seq) 插重
         self._inflight: set[str] = set()
         self._inflight_lock = threading.Lock()
 
-    def recover_stuck(self) -> None:
-        # 解析／向量化中断且磁盘 PDF 还在：清半成品切片后重投，免删了重传。
-        requeued = self._requeue_interrupted_from_disk()
-        if requeued:
-            logger.warning(
-                "kb 启动恢复：重投 %d 个中断文件（磁盘仍在，免重传）", len(requeued)
-            )
+    def recover_stuck(self, *, requeue: bool | None = None) -> None:
+        """恢复中断的入库任务。
+
+        ``requeue=True``（ingest-worker / inline）：把磁盘还在的中断文件退回
+        ``uploaded`` 队列。``requeue=False``（API 热重载）：只处理无源文件与
+        图谱卡住，**不要**动正在 parsing 的行——否则会把 worker 已领取的任务
+        又打回队列，造成「改了 uploaded 却像没解析」或重复抢单。
+        """
+        do_requeue = settings.kb_ingest_inline if requeue is None else requeue
+        requeued: list[str] = []
+        if do_requeue:
+            # 解析／向量化中断且磁盘 PDF 还在：清半成品切片后重投，免删了重传。
+            requeued = self._requeue_interrupted_from_disk()
+            if requeued:
+                logger.warning(
+                    "kb 启动恢复：重投 %d 个中断文件（磁盘仍在，免重传）",
+                    len(requeued),
+                )
         stuck = store.recover_stuck_kb_files(
             exclude_ids=[uuid.UUID(item) for item in requeued]
         )
@@ -66,6 +118,8 @@ class KbPipeline:
         graphs = store.reset_stuck_graphs()
         if graphs:
             logger.warning("kb 启动恢复：%d 个文件图谱构建中断，标记 failed", graphs)
+        if not do_requeue:
+            return
         # uploaded + 磁盘已有 PDF：热重载丢掉了 ThreadPool 任务，主动重投
         try:
             from ai_agent.kb.fetch_reports import requeue_uploaded_files
@@ -118,6 +172,24 @@ class KbPipeline:
         return restarted
 
     def submit(self, file_id: uuid.UUID, user_id: str, path: Path) -> None:
+        """投递解析任务。
+
+        默认只保证状态为 ``uploaded``（队列），由 ingest-worker 领取；
+        ``kb_ingest_inline`` 时在本进程 spawn 子进程执行（旧行为）。
+        """
+        # path 留给调用方落盘校验；worker 按 upload_dir/file_id 再找源文件
+        _ = path
+        if not settings.kb_ingest_inline:
+            store.update_kb_status(
+                file_id, "uploaded", error="", chunk_count=0, text_count=0, table_count=0
+            )
+            logger.info(
+                "kb 入队 uploaded file_id=%s user=%s（等待 ingest-worker）",
+                file_id,
+                user_id,
+            )
+            return
+
         key = str(file_id)
         with self._inflight_lock:
             if key in self._inflight:
@@ -127,12 +199,28 @@ class KbPipeline:
 
         def _run() -> None:
             try:
-                self._process(file_id, user_id, path)
+                self._run_in_subprocess(
+                    _kb_parse_job,
+                    (str(file_id), user_id, str(path)),
+                    file_id=file_id,
+                    label="parse",
+                )
             finally:
                 with self._inflight_lock:
                     self._inflight.discard(key)
 
         self._pool.submit(_run)
+
+    def process_claimed(
+        self, file_id: uuid.UUID, user_id: str, path: Path
+    ) -> None:
+        """ingest-worker 已抢到任务后调用：子进程内跑解析，崩了只标该文件。"""
+        self._run_in_subprocess(
+            _kb_parse_job,
+            (str(file_id), user_id, str(path)),
+            file_id=file_id,
+            label="parse",
+        )
 
     def submit_graph(self, file_id: uuid.UUID) -> None:
         """只重建图谱（切片已在库里，不重复解析源文件）。"""
@@ -147,8 +235,42 @@ class KbPipeline:
         self._graph_pool.submit(self._align, file_id)
 
     def submit_reembed(self, file_id: uuid.UUID) -> None:
-        """改名后按新文件名重嵌全部切片（后台）。"""
-        self._pool.submit(self._reembed, file_id)
+        """改名后按新文件名重嵌全部切片（后台，子进程）。"""
+        self._pool.submit(
+            self._run_in_subprocess,
+            _kb_reembed_job,
+            (str(file_id),),
+            file_id,
+            "reembed",
+        )
+
+    def _run_in_subprocess(
+        self,
+        target,
+        args: tuple,
+        file_id: uuid.UUID,
+        label: str,
+    ) -> None:
+        """spawn 子进程跑重活；异常退出只标该文件 failed，不拖死 API。"""
+        proc = self._mp_ctx.Process(
+            target=target,
+            args=args,
+            name=f"kb-{label}-{file_id}",
+            daemon=True,
+        )
+        logger.info("kb 子进程启动 label=%s file_id=%s", label, file_id)
+        proc.start()
+        proc.join()
+        if proc.exitcode == 0:
+            return
+        logger.error(
+            "kb 子进程异常退出 label=%s file_id=%s exit=%s",
+            label,
+            file_id,
+            proc.exitcode,
+        )
+        if label == "parse":
+            _mark_subprocess_crash(file_id, proc.exitcode)
 
     def shutdown(self, wait: bool = True) -> None:
         self._pool.shutdown(wait=wait, cancel_futures=False)
