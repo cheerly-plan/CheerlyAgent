@@ -107,12 +107,10 @@ def _profitable(current: list[IndicatorFact]) -> bool:
 def _equity_growth(
     views: SupplementalResult,
 ) -> tuple[bool, str, str, str]:
+    from ai_agent.report.rules import is_equity_row
+
     equity = next(
-        (
-            item
-            for item in views.year_ends
-            if "所有者权益" in item.name or "净资产" in item.name
-        ),
+        (item for item in views.year_ends if is_equity_row(item.name)),
         None,
     )
     if equity is None or not equity.prior_value:

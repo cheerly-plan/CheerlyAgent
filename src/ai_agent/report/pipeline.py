@@ -30,7 +30,7 @@ from pathlib import Path
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.report.analyze import analyze_operations
-from ai_agent.report.compare import Measure, SeriesCompare, compare_measures
+from ai_agent.report.compare import SeriesCompare, compare_measures
 from ai_agent.report.compose import ReportDocument, compose_report
 from ai_agent.report.ensure_filings import ensure_filings_for_report
 from ai_agent.report.extract import IndicatorFact, ensure_amount_units, extract_indicators
@@ -155,22 +155,7 @@ def run_report(
     if ensure_notes:
         missing = [*ensure_notes, *missing]
     facts = ensure_amount_units(facts)
-    measures = [
-        Measure(
-            subject=f.subject,
-            name=f.name,
-            period=f.period,
-            value=f.value,
-            unit=f.unit,
-            scope=f.scope,
-            reported_yoy=f.reported_yoy,
-            cumulative=f.cumulative,
-            basis=f.basis,
-            coverage_months=f.coverage_months,
-            source_key=(f.evidence.file_id or f.evidence.filename or "").strip(),
-        )
-        for f in facts
-    ]
+    measures = [f.to_measure() for f in facts]
     emit_progress("正在计算同比／环比与撰写正文…")
     series = compare_measures(measures)
     analysis = analyze_operations(plan, facts, series=series, views=views)

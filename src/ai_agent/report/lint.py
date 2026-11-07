@@ -9,13 +9,14 @@
 1. ``indicators.yaml`` 严格 schema；
 2. ``indicators_defaults.yaml`` 自身合法；
 3. 降级镜像与主配置等价（改了主配置忘了跑同步脚本）；
-4. ``sections.yaml`` 严格 schema；
-5. sections.yaml 里的 id 都有 renderer（拼错 id 不该降级成占位句）；
-6. 章节降级快照 ``sections_defaults.py`` 与 sections.yaml 语义一致；
-7. 该快照是脚本的最新生成物（手工改过 / 忘了跑同步脚本）；
-8. registry 内置分类兜底与 indicators.yaml 的 classification 一致；
-9. SKILL.md 全量可解析、frontmatter 与指标集有效；
-10. SKILL.md 里 ``section:`` 声明的 id 都已注册（原先只会运行时 warning）。
+4. ``industries.yaml`` schema + profile key ⊆ 已知公司类型；
+5. ``sections.yaml`` 严格 schema；
+6. sections.yaml 里的 id 都有 renderer（拼错 id 不该降级成占位句）；
+7. 章节降级快照 ``sections_defaults.py`` 与 sections.yaml 语义一致；
+8. 该快照是脚本的最新生成物（手工改过 / 忘了跑同步脚本）；
+9. registry 内置分类兜底与 indicators.yaml 的 classification 一致；
+10. SKILL.md 全量可解析、frontmatter 与指标集有效；
+11. SKILL.md 里 ``section:`` 声明的 id 都已注册（原先只会运行时 warning）。
 
 行为取舍：默认 **只记 ERROR 日志，不阻断启动**。运行时本来就有降级路径，
 多租户服务端不该因为一份 YAML 拼错整体不可用；但错误必须显眼、可查。
@@ -89,6 +90,19 @@ def lint_report_config(
             )
 
     run("snapshot_sync", check_snapshot_sync)
+
+    def check_industries() -> None:
+        from ai_agent.report import industry
+
+        path = root / "industries.yaml"
+        if not path.exists():
+            raise ValueError(f"缺少 industries.yaml：{path}")
+        industry.validate_industries(path)
+
+    # 临时 config_dir 单测通常只拷贝 indicators／sections 三件套；有文件才查。
+    if (root / "industries.yaml").exists() or config_dir is None:
+        run("industries.yaml", check_industries)
+
     run("sections.yaml", lambda: sections.validate_sections(sections_yaml))
     run("renderer_bindings", lambda: sections.validate_bindings(sections_yaml))
 

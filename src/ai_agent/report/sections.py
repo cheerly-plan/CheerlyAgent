@@ -211,10 +211,33 @@ def validate_bindings(path: Path | None = None) -> None:
         raise ValueError(f"sections.yaml 引用了未注册的 renderer: {missing}")
 
 
+def section_id_of(title: str, section_id: str = "") -> str:
+    """SKILL 声明的 id 优先，否则按标题别名；都没有则空串。"""
+    key = (section_id or "").strip()
+    if key:
+        return key
+    return _config().by_title.get((title or "").strip(), "")
+
+
+def outline_has(outline, *section_ids: str) -> bool:
+    """大纲是否含任一目标章节（按 section_id 或标题别名）。"""
+    wanted = {item for item in section_ids if item}
+    if not wanted or not outline:
+        return False
+    for item in outline:
+        sid = section_id_of(
+            getattr(item, "title", "") or "",
+            getattr(item, "section_id", "") or "",
+        )
+        if sid in wanted:
+            return True
+    return False
+
+
 def resolve(title: str, section_id: str = "") -> tuple[str, SectionRenderer] | None:
     """按 SKILL.md 声明的 id 优先，其次按标题别名查；未绑定返回 None。"""
     _ensure_renderers()
-    key = (section_id or "").strip() or _config().by_title.get((title or "").strip(), "")
+    key = section_id_of(title, section_id)
     if not key:
         return None
     renderer = _RENDERERS.get(key)

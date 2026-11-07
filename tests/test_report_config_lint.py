@@ -30,6 +30,7 @@ _CHECK_NAMES = {
     "indicators.yaml",
     "indicators_defaults.yaml",
     "snapshot_sync",
+    "industries.yaml",
     "sections.yaml",
     "renderer_bindings",
     "builtin_aliases_sync",
@@ -49,7 +50,12 @@ def config_dir():
     """
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        for name in ("indicators.yaml", "indicators_defaults.yaml", "sections.yaml"):
+        for name in (
+            "indicators.yaml",
+            "indicators_defaults.yaml",
+            "sections.yaml",
+            "industries.yaml",
+        ):
             shutil.copy(_CONFIG_DIR / name, root / name)
         yield root
 

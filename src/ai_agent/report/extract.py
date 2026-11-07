@@ -35,6 +35,9 @@ from ai_agent.storage.store import store
 
 logger = get_logger(__name__)
 
+# 导入时拍一份注册表快照：查询键 → (正式名, 别名)；降级／契约测试依赖它。
+_INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = registry.table_specs()
+
 # 证据引文噪音：PDF 断字、勾选框、误入的 Markdown 章节符。
 _QUOTE_COMMA_BREAK = re.compile(r"(\d),(\s+)(\d)")
 _QUOTE_PCT_BREAK = re.compile(r"(\d)\.\s*%")
@@ -44,8 +47,6 @@ _QUOTE_MD_HEADING = re.compile(
 )
 
 # 大纲里的简称落到报表行项目。检索用更长的子串，避免「扣非」对不上正式科目。
-_INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = registry.table_specs()
-
 # 银行季报的资产质量、息差、资本充足率写在「经营情况简要分析」正文里，
 # 不是表格行。这里用**逐指标的显式短语**抽取，要求数字紧跟指标名、单位明确，
 # 并保留原文句子作为证据；匹配不上就写缺口，不用通用正则去猜。
@@ -130,6 +131,24 @@ class IndicatorFact:
     # 金额折算前的原单位；空串表示未折算或非金额。
     raw_unit: str = ""
     unit_converted: bool = False
+
+    def to_measure(self):
+        """转成 compare.Measure；pipeline／compose／validate 共用，避免字段漂移。"""
+        from ai_agent.report.compare import Measure
+
+        return Measure(
+            subject=self.subject,
+            name=self.name,
+            period=self.period,
+            value=self.value,
+            unit=self.unit,
+            scope=self.scope,
+            reported_yoy=self.reported_yoy,
+            cumulative=self.cumulative,
+            basis=self.basis,
+            coverage_months=self.coverage_months,
+            source_key=(self.evidence.file_id or self.evidence.filename or "").strip(),
+        )
 
 
 @dataclass
@@ -288,10 +307,11 @@ def read_indicator(
 
 def _indicator_spec(name: str) -> tuple[str, tuple[str, ...]]:
     key = _label(name)
-    # 已登记指标以 config/indicators.yaml 为准；未登记的仍走内置常量。
-    registered = registry.table_entry(key)
-    if registered is not None:
-        return registered
+    # 走 table_specs（含 table_keys 别名），不要用 spec_of 正式名查找。
+    # 运行时读注册表；主配置损坏时空表再回退导入快照。
+    live = registry.table_specs()
+    if key in live:
+        return live[key]
     if key in _INDICATORS:
         return _INDICATORS[key]
     return key, (key,)

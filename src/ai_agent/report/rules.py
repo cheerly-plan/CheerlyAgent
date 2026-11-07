@@ -102,6 +102,12 @@ def _default_yoy(
     )
 
 
+def is_equity_row(name: str) -> bool:
+    """归母／合并权益类科目名判定；compose／features／validate 共用。"""
+    text = name or ""
+    return "所有者权益" in text or "净资产" in text
+
+
 def equity_share_applicable(features: Features) -> bool:
     return features.equity_growth_large
 

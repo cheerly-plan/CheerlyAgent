@@ -139,17 +139,7 @@ def format_validation(result: ValidationResult) -> str:
 
 
 def _measure(fact: IndicatorFact) -> Measure:
-    return Measure(
-        subject=fact.subject,
-        name=fact.name,
-        period=fact.period,
-        value=fact.value,
-        unit=fact.unit,
-        scope=fact.scope,
-        reported_yoy=fact.reported_yoy,
-        cumulative=fact.cumulative,
-        source_key=(fact.evidence.file_id or fact.evidence.filename or "").strip(),
-    )
+    return fact.to_measure()
 
 
 def _plain(text: str) -> str:
@@ -217,8 +207,10 @@ def _allowed(
             key = _number_key(format_money_delta(delta))
             if key:
                 allowed.add(key)
+            from ai_agent.report.rules import is_equity_row
+
             for other in views.year_ends:
-                if "所有者权益" not in other.name and "净资产" not in other.name:
+                if not is_equity_row(other.name):
                     continue
                 whole = signed_delta(other.value, other.prior_value)
                 if whole is None or whole == 0:

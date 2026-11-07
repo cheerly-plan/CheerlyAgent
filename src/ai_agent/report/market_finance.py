@@ -26,9 +26,8 @@ logger = get_logger(__name__)
 _SOURCE = "akshare.stock_financial_abstract"
 _SOURCE_RD = "akshare.stock_profit_sheet_by_report_em"
 
-# 抽象表指标名 → 研报指标名
+# 导入时拍一份 abstract 映射快照，供降级／契约测试与 entry 查找兜底。
 _ABSTRACT_MAP: tuple[tuple[str, str, str], ...] = registry.abstract_map()
-
 _AMOUNT_INDICATORS = registry.names_with("amount_abstract")
 # 半导体行业横比时，毛利率一律用财务摘要累计列，覆盖季报正文「本季」叙述。
 _SEMICONDUCTOR_PREFER_MARKET = registry.names_with("prefer_market")
@@ -235,7 +234,7 @@ def _abstract_fact(
     col: str,
     indicator: str,
 ) -> IndicatorFact | None:
-    # 已登记指标以注册表为准；未登记的回退内置映射。
+    # 运行时优先读注册表；找不到再回退导入时快照（主配置降级场景）。
     entry = registry.abstract_entry(indicator) or next(
         (item for item in _ABSTRACT_MAP if item[1] == indicator), None
     )

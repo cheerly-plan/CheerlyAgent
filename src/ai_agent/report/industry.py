@@ -102,8 +102,14 @@ def _profiles() -> dict[str, IndicatorProfile]:
     return _load_profiles(_INDUSTRIES_YAML)
 
 
-def _profile_map() -> dict[str, IndicatorProfile]:
-    return _profiles()
+def validate_industries(path: Path | None = None) -> dict[str, IndicatorProfile]:
+    """显式校验 industries.yaml：schema + profile key ⊆ 已知公司类型。"""
+    profiles = _load_profiles(path or _INDUSTRIES_YAML)
+    unknown = sorted(set(profiles) - registry._KNOWN_COMPANY_TYPES)
+    if unknown:
+        raise ValueError(f"industries.yaml 含未知 profile: {unknown}")
+    return profiles
+
 
 # 需求文本里可能出现的简称 → 报表正式指标名。长词放前面避免被短词吃掉。
 _ALIASES: tuple[tuple[str, str], ...] = registry.aliases_map()
@@ -154,7 +160,7 @@ def type_for_segment(segment: str) -> str:
 def default_indicators(industry_or_type: str) -> list[str]:
     """indicator_set / 公司类型 → 默认指标列表。"""
     key = _normalize_key(industry_or_type)
-    profiles = _profile_map()
+    profiles = _profiles()
     profile = profiles.get(key) or profiles[GENERIC]
     return list(profile.indicators)
 
@@ -162,7 +168,7 @@ def default_indicators(industry_or_type: str) -> list[str]:
 def excluded_indicators(industry_or_type: str) -> frozenset[str]:
     """该类公司不该出现的指标（抽数／缺口／观察句一律跳过）。"""
     key = _normalize_key(industry_or_type)
-    profiles = _profile_map()
+    profiles = _profiles()
     profile = profiles.get(key) or profiles[GENERIC]
     return frozenset(profile.exclude)
 
@@ -181,7 +187,7 @@ def is_excluded(industry_or_type: str, indicator: str) -> bool:
 
 def profile_of(industry_or_type: str) -> IndicatorProfile:
     key = _normalize_key(industry_or_type)
-    profiles = _profile_map()
+    profiles = _profiles()
     return profiles.get(key) or profiles[GENERIC]
 
 
@@ -225,7 +231,7 @@ def _normalize_key(raw: str) -> str:
         "周期": CYCLICAL,
     }
     return aliases.get(text) or aliases.get(raw.strip()) or (
-        raw.strip() if raw.strip() in _profile_map() else GENERIC
+        raw.strip() if raw.strip() in _profiles() else GENERIC
     )
 
 
@@ -239,8 +245,11 @@ def _semiconductor_roster() -> dict[str, str]:
     if skill is None or not skill.companies:
         return {}
     out: dict[str, str] = {}
-    for name, _code, segment, _aka in skill.companies:
+    for name, _code, segment, aka in skill.companies:
         company_type = registry.segment_map().get((segment or "").strip())
-        if company_type:
-            out[name] = company_type
+        if not company_type:
+            continue
+        out[name] = company_type
+        if aka and aka != name:
+            out[aka] = company_type
     return out

@@ -30,7 +30,9 @@ from ai_agent.storage.store import store
 
 logger = get_logger(__name__)
 
-_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
+# compose._ANALYSIS_FALLBACK 须与此同文（compose 不反向 import 本模块）。
+ANALYSIS_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
+_FALLBACK = ANALYSIS_FALLBACK
 _TOPICS = frozenset({"nim", "profit", "asset_quality", "other"})
 _CLAIM_KINDS = frozenset({"restatement", "comparison", "gap"})
 _NUMBER = re.compile(r"-?\d[\d,，]*(?:[ \t\u00a0]\d{3})*(?:\.\d+)?%?")
@@ -85,7 +87,9 @@ def analyze_operations(
     evidence: list[EvidenceItem] | None = None,
 ) -> AnalysisSection:
     """生成经营解读段落。enabled 默认读配置；complete / evidence 可注入以便单测。"""
-    if not any(item.title == "经营解读" for item in plan.outline):
+    from ai_agent.report import sections as report_sections
+
+    if not report_sections.outline_has(plan.outline, "analysis"):
         return AnalysisSection()
 
     current = [fact for fact in facts if fact.period == plan.period]

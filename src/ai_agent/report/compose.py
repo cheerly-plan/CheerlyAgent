@@ -10,7 +10,8 @@ import re
 from dataclasses import dataclass, field
 
 from ai_agent.kb.ingest.meta import name_in_text
-from ai_agent.report import registry, sections
+from ai_agent.report import registry
+from ai_agent.report import sections as report_sections
 from ai_agent.report.basis import POINT, STOCK, disclosure_note, label as basis_label
 from ai_agent.report.compare import (
     NOT_COMPARABLE_NOTE,
@@ -36,6 +37,7 @@ from ai_agent.report.meta import infer_scope, scope_label
 from ai_agent.report.rules import (
     equity_share_applicable,
     equity_share_exemption_line,
+    is_equity_row,
     render_yoy_rate_bit,
     render_yoy_sentence,
 )
@@ -110,16 +112,18 @@ def compose_report(
     # 结论句已不再自带出处，出处全靠主要指标表承载。大纲若缺这一节（外部
     # 构造的 ReportPlan 可能没有），补上，避免产出一份全文无出处的报告。
     outline = list(plan.outline)
-    # 赛道分组版已用「组内对比」承载指标表，不再追加「主要指标与出处」以免重复。
-    if (
-        outline
-        and not any(item.title == "主要指标与出处" for item in outline)
-        and not any(item.title == "组内对比" for item in outline)
+    # 赛道分组版已用 segment_peer 承载指标表，不再追加 indicator_table 以免重复。
+    if outline and not report_sections.outline_has(
+        outline, "indicator_table", "segment_peer"
     ):
-        outline.append(OutlineItem("主要指标与出处", ""))
+        outline.append(OutlineItem("主要指标与出处", "", "indicator_table"))
     note = _READING_NOTE_SEGMENT if _is_segment_report(plan) else _READING_NOTE
     # 大纲自带「阅读说明」时不再额外 prepend 通用阅读注，避免双份。
-    prepend_note = note if outline and not any(item.title == "阅读说明" for item in outline) else ()
+    prepend_note = (
+        note
+        if outline and not report_sections.outline_has(outline, "reading_note")
+        else ()
+    )
     sections = [
         (
             item.title,
@@ -153,21 +157,10 @@ def compose_report(
 
 
 def _measure(fact: IndicatorFact) -> Measure:
-    return Measure(
-        subject=fact.subject,
-        name=fact.name,
-        period=fact.period,
-        value=fact.value,
-        unit=fact.unit,
-        scope=fact.scope,
-        reported_yoy=fact.reported_yoy,
-        cumulative=fact.cumulative,
-        basis=fact.basis,
-        coverage_months=fact.coverage_months,
-        source_key=(fact.evidence.file_id or fact.evidence.filename or "").strip(),
-    )
+    return fact.to_measure()
 
 
+# 与 analyze.ANALYSIS_FALLBACK 同文；compose 不反向 import analyze（避免环依赖）。
 _ANALYSIS_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
 
 _NEXT_PERIOD_NOTE = (
@@ -178,8 +171,8 @@ _NEXT_PERIOD_NOTE = (
 
 
 def _is_segment_report(plan: ReportPlan) -> bool:
-    return plan.skill_id == "semiconductor_industry_report" or any(
-        item.title in {"赛道分组", "组内对比"} for item in plan.outline
+    return plan.skill_id == "semiconductor_industry_report" or report_sections.outline_has(
+        plan.outline, "segment_roster", "segment_peer"
     )
 
 
@@ -187,8 +180,8 @@ def _is_segment_report(plan: ReportPlan) -> bool:
 # 每节只负责「把已有数据摆成文字」。数字仍全部来自 facts / series / features，
 # sections.yaml 与 SKILL.md 只能选 renderer，不能注入正文或改计算。
 # 新增章节：写一个 renderer + 注册一次；或直接在 SKILL.md 里复用已有 id。
-@sections.register("reading_note")
-def _render_reading_note(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("reading_note")
+def _render_reading_note(ctx: report_sections.SectionContext) -> list[str]:
     lines = list(_READING_NOTE_SEGMENT if _is_segment_report(ctx.plan) else _READING_NOTE)
     # 改名备注唯一来源：skill.companies 第 4 段「披露又名」，只在阅读说明写一次。
     rename = _roster_rename_note_lines(ctx.plan)
@@ -200,65 +193,65 @@ def _render_reading_note(ctx: sections.SectionContext) -> list[str]:
     return lines
 
 
-@sections.register("lead")
-def _render_lead(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("lead")
+def _render_lead(ctx: report_sections.SectionContext) -> list[str]:
     return _lead(ctx.plan, ctx.current, ctx.series, ctx.views, ctx.state)
 
 
-@sections.register("indicator_table")
-def _render_indicator_table(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("indicator_table")
+def _render_indicator_table(ctx: report_sections.SectionContext) -> list[str]:
     return _indicator_lines(ctx.plan, ctx.current)
 
 
-@sections.register("change")
-def _render_change(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("change")
+def _render_change(ctx: report_sections.SectionContext) -> list[str]:
     return _change_lines(ctx.plan, ctx.series, ctx.state)
 
 
-@sections.register("quarter")
-def _render_quarter(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("quarter")
+def _render_quarter(ctx: report_sections.SectionContext) -> list[str]:
     return _quarter_lines(ctx.plan, ctx.views)
 
 
-@sections.register("year_end")
-def _render_year_end(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("year_end")
+def _render_year_end(ctx: report_sections.SectionContext) -> list[str]:
     return _year_end_lines(ctx.views, ctx.state)
 
 
-@sections.register("observation")
-def _render_observation(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("observation")
+def _render_observation(ctx: report_sections.SectionContext) -> list[str]:
     return _observation_lines(ctx.plan, ctx.current, ctx.views)
 
 
-@sections.register("analysis")
-def _render_analysis(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("analysis")
+def _render_analysis(ctx: report_sections.SectionContext) -> list[str]:
     lines = [line.strip() for line in (ctx.analysis or []) if line and line.strip()]
     return lines or [_ANALYSIS_FALLBACK]
 
 
-@sections.register("segment_roster")
-def _render_segment_roster(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("segment_roster")
+def _render_segment_roster(ctx: report_sections.SectionContext) -> list[str]:
     return _segment_roster_lines(ctx.plan, ctx.current)
 
 
-@sections.register("segment_peer")
-def _render_segment_peer(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("segment_peer")
+def _render_segment_peer(ctx: report_sections.SectionContext) -> list[str]:
     return _segment_peer_lines(ctx.plan, ctx.current)
 
 
-@sections.register("chart_guide")
-def _render_chart_guide(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("chart_guide")
+def _render_chart_guide(ctx: report_sections.SectionContext) -> list[str]:
     return _chart_guide_lines(ctx.series, ctx.plan, ctx.current)
 
 
-@sections.register("next_period")
-def _render_next_period(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("next_period")
+def _render_next_period(ctx: report_sections.SectionContext) -> list[str]:
     # 「景气周期」「细分赛道」等旧大纲标题也映射到这里：宏观从略，指向下期预告。
     return list(_NEXT_PERIOD_NOTE)
 
 
-@sections.register("key_companies")
-def _render_key_companies(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("key_companies")
+def _render_key_companies(ctx: report_sections.SectionContext) -> list[str]:
     peers = _peer_lines(ctx.plan, ctx.current)
     table = _indicator_lines(ctx.plan, ctx.current)
     no_peers = "同一指标没有两家以上的公司，不做公司间对比。"
@@ -275,18 +268,18 @@ def _render_key_companies(ctx: sections.SectionContext) -> list[str]:
     return lines or ["重点公司本期没有抽到可核对指标。"]
 
 
-@sections.register("trend")
-def _render_trend(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("trend")
+def _render_trend(ctx: report_sections.SectionContext) -> list[str]:
     return _trend_lines(ctx.series, ctx.plan)
 
 
-@sections.register("peer")
-def _render_peer(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("peer")
+def _render_peer(ctx: report_sections.SectionContext) -> list[str]:
     return _peer_lines(ctx.plan, ctx.current)
 
 
-@sections.register("gaps")
-def _render_gaps(ctx: sections.SectionContext) -> list[str]:
+@report_sections.register("gaps")
+def _render_gaps(ctx: report_sections.SectionContext) -> list[str]:
     return _gap_lines(ctx.plan, ctx.current, ctx.gaps)
 
 
@@ -308,7 +301,7 @@ def _section(
     """
     current = [fact for fact in facts if fact.period == plan.period]
     state = features or compute_features(plan, facts, views, series)
-    ctx = sections.SectionContext(
+    ctx = report_sections.SectionContext(
         title=title,
         plan=plan,
         facts=facts,
@@ -319,8 +312,8 @@ def _section(
         state=state,
         analysis=analysis,
     )
-    resolved = sections.resolve(title, section_id)
-    return resolved[1](ctx) if resolved is not None else sections.fallback_lines()
+    resolved = report_sections.resolve(title, section_id)
+    return resolved[1](ctx) if resolved is not None else report_sections.fallback_lines()
 
 
 def _sole_subject(plan: ReportPlan, subjects: set[str]) -> bool:
@@ -492,14 +485,7 @@ def _equity_revaluation_lead(
         return ""
     if views is None or not views.year_ends or not views.balance_moves:
         return ""
-    equity = next(
-        (
-            item
-            for item in views.year_ends
-            if "所有者权益" in item.name or "净资产" in item.name
-        ),
-        None,
-    )
+    equity = next((item for item in views.year_ends if is_equity_row(item.name)), None)
     oci = next((item for item in views.balance_moves if item.name == "其他综合收益"), None)
     retained = next((item for item in views.balance_moves if item.name == "未分配利润"), None)
     if equity is None or oci is None or not equity.prior_value or not equity.change:
@@ -658,14 +644,7 @@ def _equity_composition_lines(
     权益增量相对构成科目变动过小（Features.equity_growth_large=False）时不写占比。
     """
     moves = {item.name: item for item in views.balance_moves}
-    equity = next(
-        (
-            item
-            for item in views.year_ends
-            if "所有者权益" in item.name or "净资产" in item.name
-        ),
-        None,
-    )
+    equity = next((item for item in views.year_ends if is_equity_row(item.name)), None)
     if equity is None or not equity.prior_value:
         return []
     equity_delta = signed_delta(equity.value, equity.prior_value)

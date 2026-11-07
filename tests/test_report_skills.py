@@ -81,6 +81,15 @@ def test_semiconductor_skill_has_universe_and_outline():
     assert "景气周期" not in titles
     assert "估值" not in "".join(titles)
     assert "研发费用率" in skill.indicators
+    assert skill.section_ids == (
+        "reading_note",
+        "segment_roster",
+        "segment_peer",
+        "analysis",
+        "chart_guide",
+        "gaps",
+        "next_period",
+    )
 
 
 def test_semiconductor_roster_renders_from_frontmatter():
