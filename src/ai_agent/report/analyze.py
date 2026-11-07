@@ -301,11 +301,20 @@ def _deterministic_lines(
     # 变动原因表常把「量价齐升」写在「主要原因」单元格——先抽叙述再判噪音，
     # 禁止因表头词整段丢弃有效原文。
     keys = ("量价", "存储", "出货", "毛利润增加", "经营业绩", "产能", "研发")
-    ban = ("被合并方", "合并日", "指引", "预期", "前瞻", "净利润为0", "净利润为 0", "是否经审计")
+    ban = (
+        "被合并方",
+        "合并日",
+        "指引",
+        "预期",
+        "前瞻",
+        "净利润为0",
+        "净利润为 0",
+        "是否经审计",
+    )
     used = 0
     seen_snippets: set[str] = set()
     for item in pack:
-        raw = _plain_evidence_quote(item.quote or "")
+        raw = _extract_operating_narrative(_plain_evidence_quote(item.quote or ""))
         if len(raw) < 20 or not any(token in raw for token in keys):
             continue
         if any(token in raw for token in ban):
@@ -316,9 +325,12 @@ def _deterministic_lines(
         ):
             continue
         for snippet in _iter_reason_snippets(raw):
+            snippet = _extract_operating_narrative(snippet) or snippet
             if len(snippet) < 20:
                 continue
             if _is_form_chrome(snippet):
+                continue
+            if any(token in snippet for token in _SHAREHOLDER_NOISE):
                 continue
             key = snippet[:40]
             if key in seen_snippets:
@@ -465,12 +477,96 @@ def _iter_reason_snippets(quote: str) -> list[str]:
     return [fallback] if fallback else []
 
 
+_TIP_PREFIX = re.compile(
+    r"需提醒投资者关注的关于公司报告期经营情况的其他重要信息[、,，]?"
+)
+_SHAREHOLDER_NOISE = (
+    "转融通",
+    "出借股份",
+    "无限售流通股",
+    "前十名股东",
+    "前 名股东",
+    "前名股东",
+)
+_OPERATING_MARKERS = (
+    "报告期内",
+    "公司前三季度",
+    "前三季度",
+    "本报告期",
+    "本期公司",
+    "围绕重点",
+    "持续优化",
+    "经营业绩",
+    "量价",
+    "毛利润增加",
+    "主要是",
+    "主要系",
+)
+_OPERATING_CONTENT = (
+    "产能",
+    "客户",
+    "技术",
+    "经营",
+    "毛利",
+    "量价",
+    "研发",
+    "应用板块",
+    "出货",
+    "存储",
+)
+
+
 def _plain_evidence_quote(raw: str) -> str:
     """去掉 HTML 标签，压成单行，并清洗 PDF 断字／勾选框噪音。"""
     from ai_agent.report.extract import sanitize_evidence_quote
 
     text = re.sub(r"<[^>]+>", " ", raw or "")
     return sanitize_evidence_quote(text)
+
+
+def _extract_operating_narrative(text: str) -> str:
+    """从股东／提示语／经营段拼接块里只留经营成句；切不干净则整条不用。
+
+    长电类原文常把「前十名股东转融通」与「需提醒投资者…」粘在经营段前面，
+    数字清洗后还会变成「前 名股东」——必须裁掉非经营前缀。
+    """
+    cleaned = _TIP_PREFIX.sub("", text or "")
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return ""
+    start = -1
+    for marker in _OPERATING_MARKERS:
+        idx = cleaned.find(marker)
+        if idx < 0:
+            continue
+        if start < 0 or idx < start:
+            start = idx
+    if start >= 0:
+        cleaned = cleaned[start:]
+    elif any(token in cleaned for token in _SHAREHOLDER_NOISE):
+        return ""
+    if any(token in cleaned for token in _SHAREHOLDER_NOISE):
+        # 经营段后仍夹股东噪音：截到噪音前；若截完无经营内容则弃用。
+        cut = min(
+            (cleaned.find(token) for token in _SHAREHOLDER_NOISE if token in cleaned),
+            default=-1,
+        )
+        if 0 <= cut < 40:
+            return ""
+        if cut >= 40:
+            cleaned = cleaned[:cut].rstrip(" ，,、；;")
+    if not any(token in cleaned for token in _OPERATING_CONTENT):
+        if any(token in cleaned for token in _SHAREHOLDER_NOISE):
+            return ""
+    stop = cleaned.find("。")
+    if stop >= 0:
+        cleaned = cleaned[: stop + 1]
+    cleaned = cleaned.strip(" ；;|、，,")
+    if len(cleaned) < 20:
+        return ""
+    if cleaned.startswith("前") and "股东" in cleaned[:24]:
+        return ""
+    return cleaned
 
 
 def _reason_only(quote: str) -> str:
@@ -533,7 +629,9 @@ def collect_evidence_pack(
         filename = fact.evidence.filename or ""
         if filename.startswith(("akshare.", "derived.")):
             continue
-        quote = _plain_evidence_quote(fact.evidence.quote or "")
+        quote = _extract_operating_narrative(
+            _plain_evidence_quote(fact.evidence.quote or "")
+        )
         if len(quote) < 8:
             continue
         key = (fact.evidence.file_id, fact.evidence.page, quote[:60])
@@ -659,7 +757,9 @@ def _load_kb_evidence(plan: ReportPlan) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     seen: set[str] = set()
     for index, row in enumerate(rows):
-        text = _plain_evidence_quote(str(row.get("text") or ""))
+        text = _extract_operating_narrative(
+            _plain_evidence_quote(str(row.get("text") or ""))
+        )
         if len(text) < 20 or any(token in text for token in ban):
             continue
         file_id = str(row.get("file_id") or "")

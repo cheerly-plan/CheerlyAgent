@@ -14,8 +14,12 @@ from ai_agent.report.extract import IndicatorFact
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.supplemental import SupplementalResult, signed_delta
 
-# 归母权益增量 / 上年末绝对值 ≥ 此阈值 → 允许写「占权益增量 X%」。
+# 归母权益增量 / 构成科目变动量级（|Δ| 之和）≥ 此阈值 → 允许写「占权益增量 X%」。
+# 基准必须是科目变动，不能用上年末权益总额：否则大盘公司小幅增厚会被误判不适用。
 EQUITY_GROWTH_RATIO = Decimal("0.10")
+
+# 与 compose._EQUITY_COMPOSITION 对齐：占比拆解用的科目。
+_EQUITY_COMPOSITION = ("其他综合收益", "未分配利润", "资本公积")
 
 _PROFIT_NAMES = (
     "扣非净利润",
@@ -118,12 +122,23 @@ def _equity_growth(
     if equity is None or not equity.prior_value:
         return False, "", "", ""
     delta = signed_delta(equity.value, equity.prior_value)
-    prior = parse_number(equity.prior_value)
-    if delta is None or prior is None or prior[0] == 0:
+    if delta is None:
         return False, "", equity.prior_value, equity.value
     from ai_agent.report.supplemental import format_money_delta
 
-    ratio = abs(delta) / abs(prior[0])
+    move_abs = Decimal(0)
+    for name in _EQUITY_COMPOSITION:
+        move = next((item for item in views.balance_moves if item.name == name), None)
+        if move is None:
+            continue
+        part = signed_delta(move.end_value, move.prior_value)
+        if part is None:
+            continue
+        move_abs += abs(part)
+    # 无科目变动可读时不算「可解释占比」——避免退回权益总额基准再误判。
+    if move_abs == 0:
+        return False, format_money_delta(delta), equity.prior_value, equity.value
+    ratio = abs(delta) / move_abs
     return (
         ratio >= EQUITY_GROWTH_RATIO,
         format_money_delta(delta),

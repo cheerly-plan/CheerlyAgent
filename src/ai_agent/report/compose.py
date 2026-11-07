@@ -594,7 +594,7 @@ def _equity_composition_lines(
 ) -> list[str]:
     """用合并资产负债表科目增减拆归母权益——只并列①级数字关系 + ②级原文原因。
 
-    权益增量过小（Features.equity_growth_large=False）时不写占比，避免硬套兆易模板。
+    权益增量相对构成科目变动过小（Features.equity_growth_large=False）时不写占比。
     """
     moves = {item.name: item for item in views.balance_moves}
     equity = next(

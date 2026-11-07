@@ -80,9 +80,83 @@ def test_profitable_feature_from_koufei():
     assert features2.profitable is True
 
 
-def test_equity_growth_large_threshold():
-    # 上年末 100，期末 120 → +20% ≥ 10%
-    views = SupplementalResult(
+def _equity_move(name: str, end: str, prior: str) -> BalanceMoveView:
+    return BalanceMoveView(
+        name=name,
+        end_value=end,
+        prior_value=prior,
+        unit="元",
+        evidence=Evidence(
+            file_id="a",
+            filename="t.pdf",
+            page=1,
+            page_end=1,
+            section="资产负债表",
+            quote=f"{name} {end} {prior}",
+        ),
+    )
+
+
+def test_equity_growth_uses_subject_move_magnitude():
+    """阈值基准=科目变动|Δ|之和，不是上年末权益总额。"""
+    # 长电型：增量 864 / 科目变动 1886 ≈ 45.8% ≥ 10% → 适用
+    large = SupplementalResult(
+        year_ends=[
+            YearEndView(
+                name="归属于上市公司股东的所有者权益",
+                value="21764",
+                prior_value="20900",
+                change="",
+                unit="元",
+            )
+        ],
+        balance_moves=[
+            _equity_move("其他综合收益", "0", "512"),
+            _equity_move("未分配利润", "1349", "0"),
+            _equity_move("资本公积", "25", "0"),
+        ],
+    )
+    assert compute_features(_plan(), [], large).equity_growth_large is True
+
+    # 飞测型：增量 6 / 科目变动 100 = 6% < 10% → 不适用
+    small = SupplementalResult(
+        year_ends=[
+            YearEndView(
+                name="归属于上市公司股东的所有者权益",
+                value="106",
+                prior_value="100",
+                change="",
+                unit="元",
+            )
+        ],
+        balance_moves=[
+            _equity_move("其他综合收益", "50", "0"),
+            _equity_move("未分配利润", "40", "0"),
+            _equity_move("资本公积", "10", "0"),
+        ],
+    )
+    assert compute_features(_plan(), [], small).equity_growth_large is False
+
+    # 相对上年末已达 15%，但相对科目变动仅 9.375% → 仍不适用（证明不再用总额基准）
+    fool_old = SupplementalResult(
+        year_ends=[
+            YearEndView(
+                name="归属于上市公司股东的所有者权益",
+                value="115",
+                prior_value="100",
+                change="",
+                unit="元",
+            )
+        ],
+        balance_moves=[
+            _equity_move("其他综合收益", "80", "0"),
+            _equity_move("未分配利润", "60", "0"),
+            _equity_move("资本公积", "20", "0"),
+        ],
+    )
+    assert compute_features(_plan(), [], fool_old).equity_growth_large is False
+    # 无科目变动时不写占比
+    bare = SupplementalResult(
         year_ends=[
             YearEndView(
                 name="归属于上市公司股东的所有者权益",
@@ -93,22 +167,7 @@ def test_equity_growth_large_threshold():
             )
         ]
     )
-    features = compute_features(_plan(), [], views)
-    assert features.equity_growth_large is True
-    # +5% < 10%
-    views2 = SupplementalResult(
-        year_ends=[
-            YearEndView(
-                name="归属于上市公司股东的所有者权益",
-                value="105",
-                prior_value="100",
-                change="+5%",
-                unit="元",
-            )
-        ]
-    )
-    features2 = compute_features(_plan(), [], views2)
-    assert features2.equity_growth_large is False
+    assert compute_features(_plan(), [], bare).equity_growth_large is False
     assert EQUITY_GROWTH_RATIO > 0
 
 
@@ -164,55 +223,16 @@ def test_equity_composition_skips_share_when_growth_small():
         year_ends=[
             YearEndView(
                 name="归属于上市公司股东的所有者权益",
-                value="105",
+                value="115",
                 prior_value="100",
-                change="+5%",
+                change="",
                 unit="元",
             )
         ],
         balance_moves=[
-            BalanceMoveView(
-                name="其他综合收益",
-                end_value="10",
-                prior_value="8",
-                unit="元",
-                evidence=Evidence(
-                    file_id="a",
-                    filename="t.pdf",
-                    page=1,
-                    page_end=1,
-                    section="资产负债表",
-                    quote="其他综合收益 10 8",
-                ),
-            ),
-            BalanceMoveView(
-                name="未分配利润",
-                end_value="50",
-                prior_value="48",
-                unit="元",
-                evidence=Evidence(
-                    file_id="a",
-                    filename="t.pdf",
-                    page=1,
-                    page_end=1,
-                    section="资产负债表",
-                    quote="未分配利润 50 48",
-                ),
-            ),
-            BalanceMoveView(
-                name="资本公积",
-                end_value="40",
-                prior_value="39",
-                unit="元",
-                evidence=Evidence(
-                    file_id="a",
-                    filename="t.pdf",
-                    page=1,
-                    page_end=1,
-                    section="资产负债表",
-                    quote="资本公积 40 39",
-                ),
-            ),
+            _equity_move("其他综合收益", "80", "0"),
+            _equity_move("未分配利润", "60", "0"),
+            _equity_move("资本公积", "20", "0"),
         ],
     )
     features = compute_features(_plan(), [], views)
@@ -221,7 +241,32 @@ def test_equity_composition_skips_share_when_growth_small():
     text = "\n".join(lines)
     assert "不适用" in text
     assert "占比不适用" in text
-    assert "约 74%" not in text
+    assert "科目变动量级" in text
+
+
+def test_equity_composition_shows_share_when_move_scale_ok():
+    views = SupplementalResult(
+        year_ends=[
+            YearEndView(
+                name="归属于上市公司股东的所有者权益",
+                value="21764",
+                prior_value="20900",
+                change="",
+                unit="元",
+            )
+        ],
+        balance_moves=[
+            _equity_move("其他综合收益", "0", "512"),
+            _equity_move("未分配利润", "1349", "0"),
+            _equity_move("资本公积", "25", "0"),
+        ],
+    )
+    features = compute_features(_plan(), [], views)
+    assert equity_share_applicable(features) is True
+    text = "\n".join(_equity_composition_lines(views, features))
+    assert "不适用" not in text
+    assert "占归母权益增量" in text
+    assert "未分配利润约" in text
 
 
 def test_change_lines_wires_loss_framing():

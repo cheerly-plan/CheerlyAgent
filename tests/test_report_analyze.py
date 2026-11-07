@@ -216,6 +216,51 @@ def test_analysis_disabled_writes_deterministic_facts():
     assert _FALLBACK not in section.lines
 
 
+def test_operating_quote_strips_shareholder_splice():
+    """长电类：股东转融通 + 提示语 + 经营段粘连时，只留经营成句。"""
+    from ai_agent.report.analyze import _extract_operating_narrative
+
+    raw = (
+        "前 名股东及前 名无限售流通股股东因转融通出借/归还原因导致较上期发生变化 "
+        "需提醒投资者关注的关于公司报告期经营情况的其他重要信息、"
+        "公司前三季度围绕重点应用板块，持续优化技术、产能与客户布局，"
+        "先进封装产能利用率保持高位。"
+    )
+    cleaned = _extract_operating_narrative(raw)
+    assert "转融通" not in cleaned
+    assert "需提醒投资者" not in cleaned
+    assert "前 名股东" not in cleaned
+    assert "围绕重点应用板块" in cleaned
+    assert "产能" in cleaned
+
+    pack = [
+        EvidenceItem(
+            evidence_id="e0",
+            file_id=_FILE_ID,
+            filename="长电科技2025Q3.pdf",
+            page=3,
+            section="经营情况讨论与分析",
+            quote=raw,
+        )
+    ]
+    plan = ReportPlan(
+        title="长电 2025Q3",
+        kind="company",
+        deliverable="markdown",
+        subjects=["江苏长电科技股份有限公司"],
+        period="2025Q3",
+        dimensions=["同比"],
+        indicators=["营业收入"],
+        outline=[OutlineItem("经营解读", "")],
+        gaps=[],
+        skill_id="company_financial_report",
+    )
+    body = "\n".join(_deterministic_lines(plan, [], pack))
+    assert "转融通" not in body
+    assert "前 名股东" not in body
+    assert "围绕重点应用板块" in body
+
+
 def test_volume_price_quote_not_dropped_by_change_table_headers():
     """变动原因表头不能误伤「量价齐升」单元格原文；两条关键原文都要保留。"""
     pack = [

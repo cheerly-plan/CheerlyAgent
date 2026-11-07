@@ -109,6 +109,6 @@ def equity_share_applicable(features: Features) -> bool:
 def equity_share_exemption_line(features: Features) -> str:
     delta = features.equity_delta_text or "过小"
     return (
-        f"归母权益增量 {delta} 相对上年末过小（未达可解释占比阈值），"
+        f"归母权益增量 {delta} 相对构成科目变动量级过小（未达可解释占比阈值），"
         "占比不适用；下表仅列科目期末／上年末增减，不写占权益增量比重。"
     )
