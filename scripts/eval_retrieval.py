@@ -242,7 +242,10 @@ def evaluate(
     metrics, detail = run_evaluation(
         cases, top_k, rerank, filters_on=filters_on
     )
-    n1 = metrics["n1"]; n3 = metrics["n3"]; nk = metrics["nk"]; n10 = metrics["n10"]
+    n1 = metrics["n1"]
+    n3 = metrics["n3"]
+    nk = metrics["nk"]
+    n10 = metrics["n10"]
     total = metrics["total"]
     failures: list[str] = []
     print(f"{'query':<30} hit@  命中位置")
