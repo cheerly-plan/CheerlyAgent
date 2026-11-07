@@ -11,9 +11,9 @@
   怎么验」。这些积木不接受 skill 改写，防幻觉门禁不因报告类型放宽。
 * 路由本身是规则匹配（kind + 主体行业），不调用 LLM，可回归测试。
 
-大纲条目是 (标题, 要点) 二元组，要点里可写 ``{indicators}`` 占位，
-由 parse 按实际选中的指标集填充——skill 保持纯数据，不引用 ReportPlan，
-避免和 parse 模块互相 import。
+大纲条目是 (标题, 要点) 二元组，要点里可写 ``{indicators}`` / ``{companies}``
+占位，由 build_outline 按实际指标集与 frontmatter 的 companies 花名册填充——
+skill 保持纯数据，不引用 ReportPlan，避免和 parse 模块互相 import。
 
 每个 ### 小节可在正文首行写 ``section: <renderer_id>`` 声明用哪个
 章节渲染器；不写则由 compose 按标题别名回退。这样新增报告类型不用往
@@ -60,12 +60,13 @@ class ReportSkill:
     section_ids: tuple[str, ...] = ()
 
     def build_outline(self, indicators: list[str]) -> list[tuple[str, str, str]]:
-        """把 {indicators} 占位填成实际选中的指标名列表，并带上 renderer id。"""
+        """把 {indicators} / {companies} 占位填成实际数据，并带上 renderer id。"""
         joined = "、".join(indicators) if indicators else "已点名的指标"
+        roster = self.roster_text()
         return [
             (
                 title,
-                brief.replace("{indicators}", joined),
+                brief.replace("{indicators}", joined).replace("{companies}", roster),
                 self.section_ids[i] if i < len(self.section_ids) else "",
             )
             for i, (title, brief) in enumerate(self.sections)
@@ -92,6 +93,20 @@ class ReportSkill:
                 buckets[key] = []
             buckets[key].append(name)
         return [(key, buckets[key]) for key in order]
+
+    def roster_text(self) -> str:
+        """把 frontmatter 的 companies 花名册按赛道渲染成一句话。
+
+        名单的唯一来源是 ``companies`` 字段；SKILL.md 正文用 ``{companies}``
+        占位，避免同一份花名册在文件里维护两遍。
+        """
+        groups = self.companies_by_segment()
+        if not groups:
+            return "本期未预设代表公司名单"
+        parts: list[str] = []
+        for segment, names in groups:
+            parts.append(segment + "、".join(names))
+        return "；".join(parts)
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:

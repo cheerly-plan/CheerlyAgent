@@ -8,7 +8,9 @@ tools 管「数字怎么来、怎么验」（抽数/计算/校验，无路径参
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
+from ai_agent.report import skills as skills_module
 from ai_agent.report.industry import BANK
 from ai_agent.report.parse import parse_request
 from ai_agent.report.skills import (
@@ -75,6 +77,34 @@ def test_semiconductor_skill_has_universe_and_outline():
     assert "景气周期" not in titles
     assert "估值" not in "".join(titles)
     assert "研发费用率" in skill.indicators
+
+
+def test_semiconductor_roster_renders_from_frontmatter():
+    """花名册单一数据源：{companies} 由 frontmatter 展开，不能漏花括号。"""
+    skill = get_skill("semiconductor_industry_report")
+    assert skill is not None
+    outline = skill.build_outline(list(skill.indicators[:3]))
+    briefs = " ".join(brief for _title, brief, _sid in outline)
+    assert "{companies}" not in briefs
+    assert "中芯国际" in briefs
+    assert "寒武纪" in briefs
+    assert skill.roster_text() in briefs
+    assert "制造中芯国际" in skill.roster_text()
+    assert "设备北方华创" in skill.roster_text()
+
+
+def test_semiconductor_skill_md_has_no_duplicate_roster():
+    """源文件里每个公司名只出现一次（只在 frontmatter companies 字段）。"""
+    skill = get_skill("semiconductor_industry_report")
+    assert skill is not None
+    path = (
+        Path(skills_module.__file__).resolve().parent
+        / "semiconductor_industry_report"
+        / "SKILL.md"
+    )
+    text = path.read_text(encoding="utf-8")
+    for name, _code, _segment in skill.companies:
+        assert text.count(name) == 1, f"{name} 在 SKILL.md 出现 {text.count(name)} 次"
 
 
 def test_semiconductor_empty_kb_uses_skill_companies(monkeypatch):
