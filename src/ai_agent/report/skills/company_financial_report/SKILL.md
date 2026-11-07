@@ -10,7 +10,7 @@ description: 非银行公司财报：指标集按公司类型（Fabless／Foundr
 # 公司财报深度分析
 
 管「写什么」：大纲。默认指标集由 `industry.company_type_of` 按主体细类型路由
-（Fabless 看毛利率／研发／存货周转；Foundry 看稼动率／CAPEX…），本 skill 的
+（Fabless 看毛利率／研发／存货周转；设备看合同负债／存货／在手订单；Foundry 看稼动率／CAPEX…），本 skill 的
 `indicator_set: generic` 仅作兜底。抽数、同比环比、数字校验、PDF 落盘仍走确定性
 工具，不改写防幻觉门禁。
 

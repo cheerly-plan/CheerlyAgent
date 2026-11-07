@@ -223,14 +223,18 @@ def test_narrative_strips_glued_footnote_digits(monkeypatch):
 
     impairment = _narrative_facts("资产减值损失", "2026Q3", [], by_id)
     assert len(impairment) == 1
-    assert impairment[0].value == "958.40"
-    assert impairment[0].unit == "亿元"
+    # 先剥脚注 2958.40→958.40，再按亿元归一为元
+    assert impairment[0].value == "95,840,000,000"
+    assert impairment[0].unit == "元"
+    assert impairment[0].raw_unit == "亿元"
+    assert "958.40" in impairment[0].evidence.quote
 
     loans = _narrative_facts("发放贷款和垫款总额", "2026Q3", [], by_id)
     assert len(loans) == 1
-    assert loans[0].value == "250,202.22"
+    assert loans[0].value == "25,020,222,000,000"
+    assert loans[0].unit == "元"
 
-    # 没有粘连脚注时不能误剥：958.40 应保持原样
+    # 没有粘连脚注时不能误剥：958.40 亿元 → 归一后同值
     clean_rows = [
         {
             **rows[0],
@@ -241,5 +245,8 @@ def test_narrative_strips_glued_footnote_digits(monkeypatch):
         "ai_agent.report.extract.store.search_kb_chunks_keyword",
         lambda *a, **k: clean_rows,
     )
-    assert _narrative_facts("资产减值损失", "2026Q3", [], by_id)[0].value == "958.40"
-    assert _narrative_facts("发放贷款和垫款总额", "2026Q3", [], by_id)[0].value == "250,202.22"
+    assert _narrative_facts("资产减值损失", "2026Q3", [], by_id)[0].value == "95,840,000,000"
+    assert (
+        _narrative_facts("发放贷款和垫款总额", "2026Q3", [], by_id)[0].value
+        == "25,020,222,000,000"
+    )

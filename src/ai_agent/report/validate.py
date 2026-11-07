@@ -114,6 +114,7 @@ def validate_report(
         _check_body_numbers(result, _body_for_numbers(body, facts, supplemental), allowed)
         _check_citations_in_body(result, facts, plan, body)
         _check_attribution_anchors(result, body)
+        _check_lead_yoy_consistency(result, document.markdown or body, facts, computed, plan)
 
     result.passed = not any(item.severity == "error" for item in result.findings)
     return result
@@ -197,8 +198,46 @@ def _allowed(
             if key:
                 allowed.add(key)
     for view in views.year_ends:
-        for raw in (view.value, view.change):
+        for raw in (view.value, view.change, view.prior_value):
             key = _number_key(raw)
+            if key:
+                allowed.add(key)
+    from ai_agent.report.supplemental import format_money_delta, signed_delta
+
+    for view in views.balance_moves:
+        for raw in (view.end_value, view.prior_value):
+            key = _number_key(raw)
+            if key:
+                allowed.add(key)
+        # 增减额由两列相减，必须进白名单，否则构成表被校验拦下。
+        delta = signed_delta(view.end_value, view.prior_value)
+        if delta is not None:
+            key = _number_key(format_money_delta(delta))
+            if key:
+                allowed.add(key)
+            for other in views.year_ends:
+                if "所有者权益" not in other.name and "净资产" not in other.name:
+                    continue
+                whole = signed_delta(other.value, other.prior_value)
+                if whole is None or whole == 0:
+                    continue
+                # 正文用 f"{share:.0f}%"，与 round 对齐进白名单
+                allowed.add(str(int(round(float(delta / whole * 100)))))
+    for view in views.year_end_reasons:
+        quote = view.reason or ""
+        for match in _NUMBER.finditer(quote):
+            key = _number_key(match.group(0))
+            if key:
+                allowed.add(key)
+        if view.evidence and view.evidence.page is not None:
+            allowed.add(str(view.evidence.page))
+    # 归母权益增量（主表两列相减）也要进白名单
+    for other in views.year_ends:
+        if not other.prior_value:
+            continue
+        whole = signed_delta(other.value, other.prior_value)
+        if whole is not None:
+            key = _number_key(format_money_delta(whole))
             if key:
                 allowed.add(key)
     for fact in facts:
@@ -288,6 +327,25 @@ def _check_views(result: ValidationResult, views: SupplementalResult) -> None:
                 f"{view.name} 的变动方向 {change} 与原文片段不符",
                 value=change,
             )
+    for view in views.balance_moves:
+        _check_view_evidence(
+            result, view.name, view.evidence, (view.end_value, view.prior_value)
+        )
+    for view in views.year_end_reasons:
+        if not view.evidence or not (view.reason or "").strip():
+            _error(result, "citation", f"{view.name} 变动原因缺少原文片段", value="")
+            continue
+        if view.reason not in (view.evidence.quote or ""):
+            # quote 形如「名称：原因」，允许包含关系
+            if view.reason not in (view.evidence.quote or "") and not (
+                view.evidence.quote or ""
+            ).endswith(view.reason):
+                _error(
+                    result,
+                    "citation",
+                    f"{view.name} 变动原因未出现在原文片段里",
+                    value=view.reason[:80],
+                )
 
 
 def _check_view_evidence(result, name: str, evidence, values: tuple[str, ...]) -> None:
@@ -351,7 +409,7 @@ def _check_facts(
                 f"{fact.subject}{fact.period}{fact.name} 没有文档出处",
                 fact=fact,
             )
-        if evidence.page is None:
+        if evidence.page is None and not _structured_source(evidence.filename):
             _review(
                 result,
                 f"{fact.subject}{fact.period}{fact.name} 没有页码，需人工核对出处",
@@ -362,6 +420,80 @@ def _check_facts(
                 result,
                 f"本期指标 {fact.name}={fact.value} 未写入正文",
                 fact=fact,
+            )
+
+
+def _structured_source(filename: str) -> bool:
+    """akshare / derived 等结构化源无原文页码，不进人工页码队列。"""
+    name = (filename or "").strip().lower()
+    return name.startswith(("akshare.", "derived."))
+
+
+_SECTION = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_YOY_FRAME = ("亏损扩大", "亏损收窄", "亏损持平", "扭亏为盈", "由盈转亏")
+
+
+def _section_text(markdown: str, title: str) -> str:
+    if not markdown:
+        return ""
+    matches = list(_SECTION.finditer(markdown))
+    for index, match in enumerate(matches):
+        if match.group(1).strip() != title:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
+        return markdown[start:end]
+    return ""
+
+
+def _check_lead_yoy_consistency(
+    result: ValidationResult,
+    markdown: str,
+    facts: list[IndicatorFact],
+    series: list[SeriesCompare],
+    plan: ReportPlan | None,
+) -> None:
+    """同一指标在「本期结论」与「同比与环比」的方向表述必须一致。"""
+    from ai_agent.report.rules import render_yoy_rate_bit
+
+    lead = _section_text(markdown, "本期结论")
+    yoy_sec = _section_text(markdown, "同比与环比")
+    if not lead or not yoy_sec:
+        return
+    period = plan.period if plan is not None else ""
+    by_key = {(fact.subject, fact.name, fact.period): fact for fact in facts}
+    for item in series:
+        change = item.yoy.get(period) if period else None
+        if change is None or not change.rate:
+            continue
+        fact = by_key.get((item.subject, item.name, period))
+        current = fact.value if fact is not None else change.delta
+        expected = render_yoy_rate_bit(current or "", change)
+        if not expected:
+            continue
+        # 结论未点名该指标则不查；点名了就必须与正文同一套方向标签。
+        if item.name not in lead:
+            continue
+        if expected in lead:
+            continue
+        framing = next((token for token in _YOY_FRAME if token in expected), "")
+        if framing and framing in yoy_sec and f"同比 {change.rate}" in lead:
+            _error(
+                result,
+                "consistency",
+                f"本期结论与同比节表述不一致：{item.name} 正文为「{framing}」，"
+                f"结论仍写「同比 {change.rate}」",
+                fact=fact,
+                value=change.rate,
+            )
+            continue
+        if framing and framing in yoy_sec and framing not in lead:
+            _error(
+                result,
+                "consistency",
+                f"本期结论缺少与同比节一致的方向词：{item.name} 应为「{expected}」",
+                fact=fact,
+                value=change.rate,
             )
 
 

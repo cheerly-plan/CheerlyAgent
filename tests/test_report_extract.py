@@ -266,6 +266,13 @@ def test_extract_indicators_carries_column_and_reported_yoy(monkeypatch):
     result = extract_indicators(["中国银行"], "2026Q3", ["营业收入"])
     assert len(result.facts) == 1
     fact = result.facts[0]
-    assert fact.value == "526,365"
+    # 百万元归一为元；原值留在 quote / raw_unit
+    assert fact.value == "526,365,000,000"
+    assert fact.unit == "元"
+    assert fact.unit_converted is True
+    assert fact.raw_unit == "百万元"
+    assert fact.scope == "consolidated"
+    assert fact.scope_inferred is True
     assert fact.column == "年初至报告期末"
     assert fact.reported_yoy == "7.16%"
+    assert "526,365" in fact.evidence.quote

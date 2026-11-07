@@ -1,8 +1,8 @@
 """按公司类型路由研报指标集。
 
 铁律：先分类，再取模板；模板外的指标不抽、也不写「没抽到」。
-银行看息差／资产质量；Fabless 看毛利率／研发／存货；Foundry 看稼动率／CAPEX——
-一套制造业模板通吃，必然出跨行业污染与假缺失。
+银行看息差／资产质量；Fabless 看毛利率／研发／存货；设备看合同负债／存货／在手订单；
+Foundry 看稼动率／CAPEX——一套制造业模板通吃，必然出跨行业污染与假缺失。
 
 粗粒度 ``industry_of`` 仍只服务 skill 路由（bank vs generic）；
 细粒度 ``company_type_of`` 决定抽哪些指标、排除哪些污染项。
@@ -57,7 +57,8 @@ _BANK_ONLY = (
 _BANK_EXCLUDE = ("毛利率", "存货周转率", "研发费用率", "产能利用率", "合同负债")
 _FABLESS_EXCLUDE = (*_BANK_ONLY, "产能利用率")
 _FOUNDRY_EXCLUDE = (*_BANK_ONLY, "大客户集中度")
-_EQUIPMENT_EXCLUDE = (*_BANK_ONLY, "产能利用率")
+# 设备类订单先行：不看稼动率；存货周转／资产负债率让位于合同负债／存货／在手订单。
+_EQUIPMENT_EXCLUDE = (*_BANK_ONLY, "产能利用率", "存货周转率", "资产负债率")
 _PACKAGING_EXCLUDE = (*_BANK_ONLY, "大客户集中度")
 _GENERIC_EXCLUDE = _BANK_ONLY
 
@@ -124,13 +125,15 @@ _PROFILES: dict[str, IndicatorProfile] = {
         exclude=_FOUNDRY_EXCLUDE,
     ),
     EQUIPMENT: IndicatorProfile(
+        # 订单先行：合同负债／存货／在手订单优先于研发费用率进组内横比前六列。
         indicators=(
             "营业收入",
             "扣非净利润",
             "毛利率",
-            "研发费用率",
             "合同负债",
             "存货",
+            "在手订单",
+            "研发费用率",
             "经营活动产生的现金流量净额",
         ),
         exclude=_EQUIPMENT_EXCLUDE,
@@ -246,7 +249,9 @@ _ALIASES: tuple[tuple[str, str], ...] = (
     ("产能利用率", "产能利用率"),
     ("稼动率", "产能利用率"),
     ("合同负债", "合同负债"),
-    ("在手订单", "合同负债"),
+    ("在手订单", "在手订单"),
+    ("新签订单", "在手订单"),
+    ("存货", "存货"),
     ("资产负债率", "资产负债率"),
     ("资本开支", "资本开支"),
     ("CAPEX", "资本开支"),

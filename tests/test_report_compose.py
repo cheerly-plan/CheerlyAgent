@@ -133,12 +133,16 @@ def test_segment_peer_tables_group_by_skill_segment():
     assert "### 全行业毛利率梯队" in text
     assert "| 名次 | 公司 | 毛利率 | 出处 |" in text
     assert "### 设备" in text
-    # 设备赛道按 equipment 模板路由，含合同负债／存货等，不再写死旧四列。
-    assert "| 公司 | 营业收入 | 扣非净利润 | 毛利率 | 研发费用率 | 合同负债 | 存货 |" in text
+    # 设备赛道按 equipment 模板路由；组内横比前六列含合同负债／存货／在手订单。
+    assert (
+        "| 公司 | 营业收入 | 扣非净利润 | 毛利率 | 合同负债 | 存货 | 在手订单 |"
+        in text
+    )
     assert "北方华创" in text and "中微公司" in text
-    assert "千元" in text and "不折算" in text
+    # 手工构造的 fact 未经抽取归一，仍可能带千元；阅读说明声明默认元。
+    assert "千元" in text
+    assert "金额默认统一为元" in text
     assert "WSTS" in text
     assert "深度分析" not in plan.title
-    assert "49,510,416,000" not in text
     # 不再按指标拆成多张三列表标题
     assert "营业收入（合并）" not in text

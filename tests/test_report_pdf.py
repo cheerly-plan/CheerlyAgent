@@ -10,6 +10,9 @@ from ai_agent.report.extract import Evidence, IndicatorFact
 from ai_agent.report.parse import OutlineItem, ReportPlan
 from ai_agent.report.pdf import (
     ChartSpec,
+    _chart_title,
+    _chart_title_lines,
+    _format_axis_tick,
     apply_print_template,
     chart_svg,
     charts_from_series,
@@ -123,6 +126,64 @@ def test_chart_uses_the_given_numbers():
     assert "12.5%" in bar
     assert "<rect" in bar
     assert chart_svg(ChartSpec(title="空", kind="bar", labels=["2025Q3"], values=["不适用"])) == ""
+
+
+def test_chart_title_keeps_two_point_suffix():
+    title = (
+        "兆易创新科技集团股份有限公司 经营活动产生的现金流量净额"
+        "（累计口径，非单季）（两点对比）"
+    )
+    shown = _chart_title(title)
+    assert "两点对比" in shown
+    assert "（两" not in shown.replace("（两点对比）", "")
+    lines = _chart_title_lines(title, width_chars=34)
+    assert any("两点对比" in line for line in lines)
+    assert all("（两" != line[-2:] for line in lines)
+    assert all(not line.endswith("（两") for line in lines)
+    svg = chart_svg(
+        ChartSpec(
+            title=title,
+            kind="bar",
+            labels=["2025Q3", "2026Q3"],
+            values=["1000000000", "2000000000"],
+            unit="元",
+        )
+    )
+    assert "两点对比" in svg
+    assert "（两<" not in svg
+    assert svg.count("<text") >= 2  # 至少标题多行或标题+刻度
+
+
+def test_axis_ticks_use_yi_consistently_for_loss_chart():
+    """扣非亏损图：峰值过亿时正负刻度一律「亿」，禁止 36,946,835 裸数字。"""
+    import re
+    from decimal import Decimal
+
+    high = Decimal("36946835")
+    assert _format_axis_tick(
+        high, "元", span=Decimal("250000000"), use_yi=True
+    ) == "0.37亿"
+    svg = chart_svg(
+        ChartSpec(
+            title="深圳中科飞测 扣非净利润（累计口径，非单季）（两点对比）",
+            kind="bar",
+            labels=["2025Q3", "2026Q3"],
+            values=["-139958727.02", "-205260194.78"],
+            unit="元",
+        )
+    )
+    assert "两点对比" in svg
+    assert "36,946,835" not in svg
+    ticks = re.findall(r">([^<]+)<", svg)
+    money_ticks = [t for t in ticks if "亿" in t or re.fullmatch(r"-?[\d,]+", t)]
+    # 金额刻度必须带「亿」，不能混入千分位裸整数。
+    bare = [
+        t
+        for t in money_ticks
+        if "亿" not in t and re.search(r"\d{5,}", t.replace(",", ""))
+    ]
+    assert not bare, bare
+    assert any("亿" in t for t in ticks)
 
 
 def test_bar_chart_y_axis_does_not_go_negative_for_positive_values():

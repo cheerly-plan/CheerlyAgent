@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ai_agent.report.industry import (
     BANK,
+    EQUIPMENT,
     FABLESS,
     FOUNDRY,
     classify_subject,
@@ -18,7 +19,21 @@ from ai_agent.report.parse import parse_request
 def test_classify_semiconductor_roster():
     assert classify_subject("兆易创新科技集团股份有限公司") == FABLESS
     assert classify_subject("中芯国际") == FOUNDRY
+    assert classify_subject("深圳中科飞测科技股份有限公司") == EQUIPMENT
     assert classify_subject("中国银行股份有限公司") == BANK
+
+
+def test_equipment_indicators_prefer_order_side():
+    indicators = default_indicators(EQUIPMENT)
+    banned = excluded_indicators(EQUIPMENT)
+    assert "合同负债" in indicators
+    assert "存货" in indicators
+    assert "在手订单" in indicators
+    assert "存货周转率" not in indicators
+    assert "资产负债率" not in indicators
+    assert "存货周转率" in banned
+    assert "资产负债率" in banned
+    assert is_excluded(EQUIPMENT, "产能利用率")
 
 
 def test_fabless_indicators_exclude_bank_metrics():
@@ -71,3 +86,28 @@ def test_parse_gye_routes_to_fabless(monkeypatch):
 
 def test_multi_type_subjects_fall_back_to_generic():
     assert company_type_of(["兆易创新", "中国银行"]) == "generic"
+
+
+def test_parse_feitce_routes_to_equipment(monkeypatch):
+    monkeypatch.setattr(
+        "ai_agent.report.parse.store.list_kb_files",
+        lambda **k: [
+            {
+                "file_id": "f-ft",
+                "filename": "深圳中科飞测科技股份有限公司2026年第三季度报告",
+                "subject": "深圳中科飞测科技股份有限公司",
+                "subject_aliases": ["中科飞测"],
+                "period": "2026Q3",
+                "status": "ready",
+                "tags": [],
+                "description": "",
+            }
+        ],
+    )
+    plan = parse_request("生成中科飞测2026Q3财报深度分析PDF研报")
+    assert plan.company_type == EQUIPMENT
+    assert "合同负债" in plan.indicators
+    assert "存货" in plan.indicators
+    assert "在手订单" in plan.indicators
+    assert "存货周转率" not in plan.indicators
+    assert "资产负债率" not in plan.indicators

@@ -69,13 +69,14 @@ def _section(markdown: str, heading: str) -> str:
     return rest.split("\n## ", 1)[0]
 
 
-def test_reading_note_is_stated_once_without_inventing_scope():
+def test_reading_note_is_stated_once_with_template_defaults():
     document = compose_report(_plan("本期结论", "主要指标与出处"), [_fact()])
     for text in (document.markdown, document.html):
         assert text.count("阅读说明") == 1
-        assert "不代为推断" in text
-    # 这两句是事实错误：scope 多为空，且期末余额/时点比率不是累计值
-    assert "均为合并报表口径" not in document.markdown
+        assert "按季报模板推定为合并" in text
+        assert "金额默认统一为元" in text
+    # 不再满篇「不代为推断」；也不谎称全部都是累计
+    assert "不代为推断" not in document.markdown
     assert "均为年初至报告期末累计值" not in document.markdown
     # 声明里不能出现阿拉伯数字，否则会被校验器当成未核对数值
     note = "\n".join(
@@ -112,7 +113,9 @@ def test_no_repeated_unknown_scope_anywhere_in_document():
     document = compose_report(_plan("本期结论", "主要指标与出处"), [_fact()])
     assert document.markdown.count("范围未标明") == 0
     assert document.html.count("范围未标明") == 0
-    assert "／—／" in document.markdown  # 表格里用破折号，含义在声明里
+    # 主表按模板推定合并，不再用破折号冒充「找不到」
+    assert "合并（按季报模板推定）" in document.markdown
+    assert "／—／" not in document.markdown
 
 
 def test_traceability_lives_in_the_indicator_table():

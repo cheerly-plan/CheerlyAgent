@@ -1,7 +1,8 @@
 """研报校验只对照抽取值和计算结果，不调用模型。"""
 
-from ai_agent.report.compose import compose_report
-from ai_agent.report.extract import Evidence, IndicatorFact
+from ai_agent.report.compare import Change, SeriesCompare
+from ai_agent.report.compose import ReportDocument, compose_report
+from ai_agent.report.extract import Evidence, IndicatorFact, sanitize_evidence_quote
 from ai_agent.report.parse import OutlineItem, ReportPlan
 from ai_agent.report.validate import format_validation, validate_report
 from ai_agent.tools.registry import TOOLS
@@ -96,6 +97,100 @@ def test_missing_citation_marker_fails():
     result = validate_report(document, facts, plan=_plan())
     assert not result.passed
     assert any("看不到出处标记" in item.message for item in result.findings)
+
+
+def test_akshare_missing_page_skips_review_queue():
+    fact = IndicatorFact(
+        subject="中国能源建设股份有限公司",
+        period="2025Q3",
+        name="毛利率",
+        value="48.35",
+        unit="%",
+        column="年初至报告期末",
+        scope="consolidated",
+        evidence=Evidence(
+            file_id="ak-1",
+            filename="akshare.stock_financial_abstract",
+            page=None,
+            page_end=None,
+            section="财务摘要",
+            quote="毛利率 采用=48.35%（akshare.stock_financial_abstract）",
+        ),
+    )
+    plan = ReportPlan(
+        title="t",
+        kind="company",
+        deliverable="markdown",
+        subjects=["中国能源建设股份有限公司"],
+        period="2025Q3",
+        dimensions=[],
+        indicators=["毛利率"],
+        outline=[OutlineItem("本期结论", ""), OutlineItem("主要指标与出处", "")],
+        gaps=[],
+    )
+    document = compose_report(plan, [fact])
+    result = validate_report(document, [fact], plan=plan)
+    assert not any("没有页码" in item.reason for item in result.review_queue)
+
+
+def test_lead_yoy_inconsistency_is_error():
+    facts = [
+        _fact("2025Q3", "-100", name="扣非净利润", quote="扣非净利润 | -100"),
+        _fact("2024Q3", "-50", name="扣非净利润", quote="扣非净利润 | -50"),
+    ]
+    # 手工造「结论裸同比、正文有方向词」的不一致正文。
+    markdown = (
+        "# t\n\n"
+        "## 本期结论\n\n"
+        "扣非净利润为 -100元（同比 100%）。\n\n"
+        "## 同比与环比\n\n"
+        "扣非净利润本期为 -100元，较 2024Q3（-50元）亏损扩大，幅度 100%。\n"
+    )
+    document = ReportDocument(title="t", markdown=markdown, html="", deliverable="markdown")
+    series = [
+        SeriesCompare(
+            subject="中国能源建设股份有限公司",
+            name="扣非净利润",
+            scope="consolidated",
+            unit="元",
+            points=[("2024Q3", "-50"), ("2025Q3", "-100")],
+            yoy={
+                "2025Q3": Change(
+                    base_period="2024Q3",
+                    base_value="-50",
+                    delta="-50",
+                    rate="100%",
+                )
+            },
+        )
+    ]
+    plan = ReportPlan(
+        title="t",
+        kind="company",
+        deliverable="markdown",
+        subjects=["中国能源建设股份有限公司"],
+        period="2025Q3",
+        dimensions=["同比"],
+        indicators=["扣非净利润"],
+        outline=[OutlineItem("本期结论", ""), OutlineItem("同比与环比", "")],
+        gaps=[],
+    )
+    result = validate_report(document, facts, plan=plan, series=series)
+    assert not result.passed
+    assert any("表述不一致" in item.message for item in result.findings)
+
+
+def test_sanitize_evidence_quote_fixes_breaks_and_noise():
+    raw = (
+        "净利润3, 70万元，同比增长783. %。"
+        "□适用 √不适用 ## （三）主要会计数据"
+    )
+    cleaned = sanitize_evidence_quote(raw)
+    assert "3, 70" not in cleaned
+    assert "370" in cleaned
+    assert "783%" in cleaned
+    assert "□" not in cleaned
+    assert "##" not in cleaned
 
 
 def test_tool_returns_summary_and_stays_off_chat_loop():

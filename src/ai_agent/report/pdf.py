@@ -224,11 +224,62 @@ def _chart_display_value(raw: str, unit: str) -> str:
     return text
 
 
-def _chart_title(title: str, max_chars: int = 42) -> str:
+def _chart_title_suffix(title: str) -> tuple[str, str]:
+    """拆出末尾连续全角括号（口径／图型），换行时整块下移，禁止出现「（两」。"""
+    text = (title or "").strip()
+    suffix = ""
+    rest = text
+    while True:
+        match = re.search(r"（[^）]*）\s*$", rest)
+        if not match:
+            break
+        suffix = match.group(0) + suffix
+        rest = rest[: match.start()]
+    return rest.rstrip(), suffix
+
+
+def _chart_title(title: str, max_chars: int = 56) -> str:
+    """单行兜底：过长时省略中间，末尾括号必须完整。"""
     text = (title or "").strip()
     if len(text) <= max_chars:
         return text
+    rest, suffix = _chart_title_suffix(text)
+    if suffix:
+        budget = max_chars - len(suffix) - 1
+        if budget >= 8:
+            return rest[:budget].rstrip() + "…" + suffix
     return text[: max_chars - 1] + "…"
+
+
+def _chart_title_lines(title: str, *, width_chars: int = 34) -> list[str]:
+    """按图宽折成多行；后缀括号独占末行尾，绝不半截。"""
+    text = (title or "").strip()
+    if not text:
+        return [""]
+    rest, suffix = _chart_title_suffix(text)
+    if len(text) <= width_chars:
+        return [text]
+    lines: list[str] = []
+    cursor = rest
+    # 前几行只排主体；最后一行留给「主体尾 + 后缀」。
+    while len(cursor) + len(suffix) > width_chars and len(cursor) > 8:
+        # 尽量在空格／顿号处断，找不到再硬切。
+        window = cursor[:width_chars]
+        break_at = max(window.rfind(" "), window.rfind("·"), window.rfind("，"))
+        if break_at < width_chars // 3:
+            break_at = width_chars
+        lines.append(cursor[:break_at].rstrip())
+        cursor = cursor[break_at:].lstrip()
+        if len(lines) >= 2:
+            break
+    tail = (cursor + suffix).strip()
+    if len(tail) <= width_chars:
+        lines.append(tail)
+    else:
+        # 主体仍过长：主体省略，后缀完整跟在同一行。
+        budget = max(width_chars - len(suffix) - 1, 8)
+        lines.append(cursor[:budget].rstrip() + "…" + suffix)
+    return [line for line in lines if line]
 
 
 def chart_svg(spec: ChartSpec) -> str:
@@ -245,10 +296,19 @@ def chart_svg(spec: ChartSpec) -> str:
     width, height = 520, 268
     amounts = [amount for _label, amount, _raw in rows]
     low, high = _chart_y_domain(amounts, include_zero=(kind == "bar"))
+    use_yi = _axis_use_yi(spec.unit, low=low, high=high)
     # 金额轴用紧凑刻度时左边距可小一些；超大整数刻度需加宽以免裁字。
-    sample_tick = _format_axis_tick(high, spec.unit, span=high - low)
+    sample_tick = _format_axis_tick(
+        high, spec.unit, span=high - low, use_yi=use_yi
+    )
     left = 72 if len(sample_tick) > 8 else 52
-    right, top, bottom = 24, 40, 44
+    right, bottom = 24, 44
+    title_lines = _chart_title_lines(spec.title, width_chars=max(28, (width - left - right) // 12))
+    title_block = 4 + 14 * len(title_lines)
+    top = max(40, title_block + 10)
+    # 多行标题时加高画布，避免挤占绘图区。
+    if len(title_lines) > 1:
+        height = 268 + 14 * (len(title_lines) - 1)
     plot_w = width - left - right
     plot_h = height - top - bottom
 
@@ -259,14 +319,22 @@ def chart_svg(spec: ChartSpec) -> str:
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}">',
-        f'<text x="{left}" y="22" font-family="{_FONT_FAMILY},sans-serif" font-size="12">'
-        f"{html.escape(_chart_title(spec.title))}</text>",
+    ]
+    for index, line in enumerate(title_lines):
+        y = 14 + index * 14
+        parts.append(
+            f'<text x="{left}" y="{y}" font-family="{_FONT_FAMILY},sans-serif" font-size="11">'
+            f"{html.escape(line)}</text>"
+        )
+    parts.extend(
+        [
         # 坐标轴
         f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#98a2b3" '
         'stroke-width="1"/>',
         f'<line x1="{left}" y1="{top + plot_h}" x2="{width - right}" y2="{top + plot_h}" '
         'stroke="#98a2b3" stroke-width="1"/>',
-    ]
+        ]
+    )
     # 三条浅网格，标出高/中/低，避免「只有一根线、看不出量级」
     for fraction in (Decimal(0), Decimal("0.5"), Decimal(1)):
         amount = high - (high - low) * fraction
@@ -276,7 +344,9 @@ def chart_svg(spec: ChartSpec) -> str:
                 f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}" '
                 'stroke="#eaecf0" stroke-width="1"/>'
             )
-        tick = _format_axis_tick(amount, spec.unit, span=high - low)
+        tick = _format_axis_tick(
+            amount, spec.unit, span=high - low, use_yi=use_yi
+        )
         parts.append(
             f'<text x="{left - 6}" y="{y + 3:.1f}" text-anchor="end" font-size="9" '
             f'fill="#667085" font-family="{_FONT_FAMILY},sans-serif">'
@@ -351,17 +421,36 @@ def chart_svg(spec: ChartSpec) -> str:
     return "".join(parts)
 
 
-def _format_axis_tick(amount: Decimal, unit: str, *, span: Decimal | None = None) -> str:
+def _axis_use_yi(unit: str, *, low: Decimal, high: Decimal) -> bool:
+    """整图峰值达亿元量级时，正负刻度一律用「亿」，禁止与裸数字混排。"""
+    if unit not in {"", "元", "人民币元"}:
+        return False
+    peak = max(abs(low), abs(high))
+    return peak >= Decimal("100000000")
+
+
+def _format_axis_tick(
+    amount: Decimal,
+    unit: str,
+    *,
+    span: Decimal | None = None,
+    use_yi: bool | None = None,
+) -> str:
     """Y 轴刻度：区间很窄时多留小数，避免高/中/低三格显示成同一个数。"""
     narrow = span is not None and span > 0 and span < Decimal("1")
     if unit == "%":
         places = Decimal("0.001") if narrow else Decimal("0.01")
         text = f"{amount.quantize(places):f}".rstrip("0").rstrip(".")
         return f"{text}%"
-    # 亿元级金额用紧凑刻度，避免「27,301,379,657」挤爆左边距。
-    if unit in {"", "元", "人民币元"} and abs(amount) >= Decimal("100000000"):
+    # 亿元量级图：0.37亿／-2.05亿 等同单位，不再出现 36,946,835 裸数字。
+    yi_mode = use_yi if use_yi is not None else (
+        unit in {"", "元", "人民币元"} and abs(amount) >= Decimal("100000000")
+    )
+    if yi_mode:
         yi = amount / Decimal("100000000")
         text = f"{yi.quantize(Decimal('0.01')):f}".rstrip("0").rstrip(".")
+        if text in {"", "-"}:
+            text = "0"
         return f"{text}亿"
     if abs(amount) < 1000 or (span is not None and span < 1000):
         places = Decimal("0.01") if not narrow else Decimal("0.001")
@@ -466,10 +555,11 @@ p, li {{ orphans: 2; widows: 2; }}
 table {{ width: 100%; border-collapse: collapse; page-break-inside: auto; }}
 thead {{ display: table-header-group; }}
 tr, th, td {{ break-inside: avoid; page-break-inside: avoid; }}
-th, td {{ border: 0.3pt solid #d0d5dd; padding: 1.4mm 2mm; font-size: 9pt; vertical-align: top; }}
+th, td {{ border: 0.3pt solid #d0d5dd; padding: 1.0mm 1.2mm; font-size: 8pt; vertical-align: top; }}
 th {{ background: #f2f4f7; }}
-/* 千分位长数字禁止中途断行，避免被读成逗号错位 */
-td, p, li {{ word-break: keep-all; overflow-wrap: anywhere; }}
+/* 禁止千分位数字中途断行（overflow-wrap:anywhere 会把 87,654,926,728.13 拆成两截） */
+td, p, li {{ word-break: keep-all; overflow-wrap: break-word; }}
+.num {{ white-space: nowrap; }}
 .page-logo {{ position: running(page-logo); height: 8mm; }}
 figure {{ break-inside: avoid; page-break-inside: avoid; margin: 4mm 0; }}
 </style>

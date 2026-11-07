@@ -7,6 +7,7 @@ import json
 from ai_agent.report.analyze import (
     EvidenceItem,
     _FALLBACK,
+    _deterministic_lines,
     analyze_operations,
 )
 from ai_agent.report.compose import compose_report
@@ -213,6 +214,116 @@ def test_analysis_disabled_writes_deterministic_facts():
     )
     assert any("1.27%" in line for line in section.lines)
     assert _FALLBACK not in section.lines
+
+
+def test_volume_price_quote_not_dropped_by_change_table_headers():
+    """变动原因表头不能误伤「量价齐升」单元格原文；两条关键原文都要保留。"""
+    pack = [
+        EvidenceItem(
+            evidence_id="e0",
+            file_id=_FILE_ID,
+            filename="兆易创新2026年第三季度报告.pdf",
+            page=2,
+            section="主要会计数据、财务指标发生变动的情况、原因",
+            quote=(
+                "主要会计数据、财务指标发生变动的情况、原因 项目名称 变动比例(%) 主要原因 "
+                "营业收入_本报告期 225.65 报告期内，存储芯片行业供给紧张，公司存储芯片产品"
+                "量价齐升，存储业务持续向好；MCU等多个业务产品线持续发力，产品出货规模亦"
+                "实现较好增长，整体经营业绩实现大幅增长 营业收入_年初至报告期末 197.11"
+            ),
+        ),
+        EvidenceItem(
+            evidence_id="e1",
+            file_id=_FILE_ID,
+            filename="兆易创新2026年第三季度报告.pdf",
+            page=3,
+            section="主要会计数据、财务指标发生变动的情况、原因",
+            quote="利润总额_本报告期 798.62 主要是本报告期营业收入增长,毛利润增加所致",
+        ),
+    ]
+    facts = [
+        IndicatorFact(
+            subject="兆易创新科技集团股份有限公司",
+            period="2026Q3",
+            name="毛利率",
+            value="66.22",
+            unit="%",
+            column="年初至报告期末",
+            scope="consolidated",
+            evidence=Evidence(
+                file_id="188a6f60-0000-0000-0000-000000000001",
+                filename="akshare.stock_financial_abstract",
+                page=None,
+                page_end=None,
+                section="财务摘要",
+                quote="毛利率 采用=66.22%",
+            ),
+        )
+    ]
+    plan = ReportPlan(
+        title="兆易创新 2026Q3",
+        kind="company",
+        deliverable="markdown",
+        subjects=["兆易创新科技集团股份有限公司"],
+        period="2026Q3",
+        dimensions=["同比"],
+        indicators=["营业收入", "毛利率"],
+        outline=[OutlineItem("经营解读", "")],
+        gaps=[],
+        skill_id="company_financial_report",
+    )
+    lines = _deterministic_lines(plan, facts, pack)
+    body = "\n".join(lines)
+    assert body.count("原文披露：") == 2
+    assert "量价齐升" in body
+    assert "毛利润增加" in body
+    assert "与原文「量价齐升／毛利润增加」并列" in body
+
+
+def test_structure_line_omits_volume_price_if_not_cited():
+    pack = [
+        EvidenceItem(
+            evidence_id="e1",
+            file_id=_FILE_ID,
+            filename="t.pdf",
+            page=3,
+            section="变动原因",
+            quote="主要是本报告期营业收入增长,毛利润增加所致",
+        )
+    ]
+    facts = [
+        IndicatorFact(
+            subject="测试公司",
+            period="2026Q3",
+            name="毛利率",
+            value="40",
+            unit="%",
+            column="年初至报告期末",
+            scope="consolidated",
+            evidence=Evidence(
+                file_id="a" * 36,
+                filename="akshare.stock_financial_abstract",
+                page=None,
+                page_end=None,
+                section="",
+                quote="毛利率 40%",
+            ),
+        )
+    ]
+    plan = ReportPlan(
+        title="t",
+        kind="company",
+        deliverable="markdown",
+        subjects=["测试公司"],
+        period="2026Q3",
+        dimensions=[],
+        indicators=["毛利率"],
+        outline=[OutlineItem("经营解读", "")],
+        gaps=[],
+    )
+    body = "\n".join(_deterministic_lines(plan, facts, pack))
+    assert "毛利润增加" in body
+    assert "量价齐升" not in body
 
 
 def test_attribution_without_anchor_goes_to_review_queue():

@@ -25,9 +25,22 @@ from ai_agent.kb.ingest.meta import (
 )
 from ai_agent.kb.ingest.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
 from ai_agent.report.basis import basis_of, ratio_unit
+from ai_agent.report.meta import (
+    enrich_quote_for_conversion,
+    infer_scope,
+    normalize_amount,
+)
 from ai_agent.storage.store import store
 
 logger = get_logger(__name__)
+
+# 证据引文噪音：PDF 断字、勾选框、误入的 Markdown 章节符。
+_QUOTE_COMMA_BREAK = re.compile(r"(\d),(\s+)(\d)")
+_QUOTE_PCT_BREAK = re.compile(r"(\d)\.\s*%")
+_QUOTE_CHECKBOX = re.compile(r"[□√☑☒]\s*(?:适用|不适用)")
+_QUOTE_MD_HEADING = re.compile(
+    r"#{1,6}\s*(?:（[一二三四五六七八九十]+）|[^\n#]{1,40})"
+)
 
 # 大纲里的简称落到报表行项目。检索用更长的子串，避免「扣非」对不上正式科目。
 _INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -48,6 +61,7 @@ _INDICATORS: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     "合同负债": ("合同负债", ("合同负债",)),
     "存货": ("存货", ("存货",)),
+    "在手订单": ("在手订单", ("在手订单", "新签订单", "订单金额")),
 }
 
 # 银行季报的资产质量、息差、资本充足率写在「经营情况简要分析」正文里，
@@ -81,6 +95,12 @@ _NARRATIVE_PATTERNS: dict[str, tuple[str, str, str]] = {
         "%",
     ),
     "合同负债": ("合同负债", r"合同负债\s*([\d,]+(?:\.\d+)?)\s*亿元", "亿元"),
+    "在手订单": (
+        "在手订单",
+        r"(?:在手订单|新签订单)(?:金额|总额|合计)?(?:约为|为|达)?\s*"
+        r"([\d,]+(?:\.\d+)?)\s*亿元",
+        "亿元",
+    ),
     "净息差": ("净息差", r"净息差\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
     "不良贷款率": ("不良贷款率", r"不良贷款率\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
     "不良贷款拨备覆盖率": (
@@ -234,6 +254,11 @@ class IndicatorFact:
     # compare 会回退到 cumulative 布尔值，保持旧调用兼容。
     basis: str = ""
     coverage_months: int = 0
+    # 范围是否按季报模板推定（主表默认合并）；True 时正文写「按季报模板推定」。
+    scope_inferred: bool = False
+    # 金额折算前的原单位；空串表示未折算或非金额。
+    raw_unit: str = ""
+    unit_converted: bool = False
 
 
 @dataclass
@@ -438,6 +463,13 @@ def _pick_facts(
         file_id = str(row.get("file_id") or "")
         meta = files.get(file_id, {})
         scope = str(row.get("scope") or "")
+        section = str(row.get("section") or "")
+        scope, scope_inferred = infer_scope(
+            scope=scope,
+            section=section,
+            column=str(parsed.get("column") or ""),
+            quote=str(parsed.get("quote") or ""),
+        )
         scope_rank = 2 if scope == SCOPE_CONSOLIDATED else 1 if scope != SCOPE_PARENT else 0
         # 科目本行优先于「其中」明细，合并口径优先于母公司口径
         rank = (parsed["rank"], scope_rank)
@@ -453,10 +485,24 @@ def _pick_facts(
             "经营活动产生的现金流量净额",
             "合同负债",
             "存货",
+            "在手订单",
             "资本开支",
             "折旧",
         }:
             unit = "元"
+        raw_value, raw_unit = value, unit
+        value, unit, raw_unit, unit_converted = normalize_amount(value, unit)
+        quote = sanitize_evidence_quote(parsed["quote"])
+        if unit_converted:
+            quote = sanitize_evidence_quote(
+                enrich_quote_for_conversion(
+                    quote,
+                    raw_value=raw_value,
+                    raw_unit=raw_unit,
+                    value=value,
+                    unit=unit,
+                )
+            )
         basis, months = basis_of(
             period,
             cumulative=bool(parsed.get("cumulative", False)),
@@ -476,13 +522,16 @@ def _pick_facts(
             cumulative=bool(parsed.get("cumulative", False)),
             basis=basis,
             coverage_months=months,
+            scope_inferred=scope_inferred,
+            raw_unit=raw_unit if unit_converted else "",
+            unit_converted=unit_converted,
             evidence=Evidence(
                 file_id=file_id,
                 filename=str(row.get("filename") or meta.get("filename") or ""),
                 page=row.get("page"),
                 page_end=row.get("page_end"),
-                section=str(row.get("section") or ""),
-                quote=parsed["quote"],
+                section=section,
+                quote=quote,
             ),
         )
         previous = found.get(file_id)
@@ -525,15 +574,38 @@ def _narrative_facts(
         value = match.group(1).strip()
         if not _value_in_source(value, text):
             continue
-        quote = _sentence_around(text, match.start(), match.end())
+        quote = sanitize_evidence_quote(
+            _sentence_around(text, match.start(), match.end())
+        )
         if not _value_in_source(value, quote):
-            quote = text[max(0, match.start() - 40) : min(len(text), match.end() + 40)].strip()
+            quote = sanitize_evidence_quote(
+                text[max(0, match.start() - 40) : min(len(text), match.end() + 40)].strip()
+            )
         file_id = str(row.get("file_id") or "")
         if file_id in seen_files:
             continue
         seen_files.add(file_id)
         meta = by_id.get(file_id, {})
         is_amount = unit != "%"
+        section = str(row.get("section") or "")
+        scope, scope_inferred = infer_scope(
+            scope=str(row.get("scope") or ""),
+            section=section,
+            column="经营情况简要分析（正文叙述）",
+            quote=quote,
+        )
+        raw_value, raw_unit = value, unit
+        value, unit, raw_unit, unit_converted = normalize_amount(value, unit)
+        if unit_converted:
+            quote = sanitize_evidence_quote(
+                enrich_quote_for_conversion(
+                    quote,
+                    raw_value=raw_value,
+                    raw_unit=raw_unit,
+                    value=value,
+                    unit=unit,
+                )
+            )
         basis, months = basis_of(
             period,
             cumulative=is_amount,
@@ -549,10 +621,13 @@ def _narrative_facts(
                 value=value,
                 unit=unit,
                 column="经营情况简要分析（正文叙述）",
-                scope="",
+                scope=scope,
                 cumulative=is_amount,
                 basis=basis,
                 coverage_months=months,
+                scope_inferred=scope_inferred,
+                raw_unit=raw_unit if unit_converted else "",
+                unit_converted=unit_converted,
                 evidence=Evidence(
                     file_id=file_id,
                     filename=str(row.get("filename") or meta.get("filename") or ""),
@@ -762,6 +837,27 @@ def _unit_of(text: str) -> str:
     return ""
 
 
+def sanitize_evidence_quote(text: str) -> str:
+    """清洗证据引文里的 PDF／OCR 噪音，避免断字数字进正文与校验。
+
+    - 千分位断字：``3, 70`` → ``370``；``1, 614, 059`` → ``1614059``
+    - 百分号断字：``783. %`` → ``783%``
+    - 勾选框：``□适用 √不适用`` 等删掉
+    - 误入正文的章节标记：``## （三）`` 删掉
+    """
+    if not text:
+        return ""
+    cleaned = text
+    cleaned = _QUOTE_CHECKBOX.sub(" ", cleaned)
+    cleaned = _QUOTE_MD_HEADING.sub(" ", cleaned)
+    cleaned = _QUOTE_PCT_BREAK.sub(r"\1%", cleaned)
+    prev = None
+    while prev != cleaned:
+        prev = cleaned
+        cleaned = _QUOTE_COMMA_BREAK.sub(r"\1\3", cleaned)
+    return " ".join(cleaned.split())
+
+
 def _quote(headers: list[str], cells: list[str], text: str) -> str:
     lines: list[str] = []
     unit = _unit_of(text)
@@ -770,7 +866,7 @@ def _quote(headers: list[str], cells: list[str], text: str) -> str:
     if any(headers):
         lines.append(" | ".join(headers))
     lines.append(" | ".join(cells))
-    quote = "\n".join(lines).strip()
+    quote = sanitize_evidence_quote("\n".join(lines).strip())
     return quote if len(quote) <= 500 else quote[:500]
 
 

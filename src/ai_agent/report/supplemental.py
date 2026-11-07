@@ -87,6 +87,28 @@ class YearEndView:
     value: str = ""
     unit: str = ""
     change: str = ""
+    # 上年度末原值（构成拆解用）；主表有「上年度末」列时填入。
+    prior_value: str = ""
+    evidence: Evidence | None = None
+
+
+@dataclass
+class BalanceMoveView:
+    """合并资产负债表科目：本期末 vs 上年末（均为原文列）。"""
+
+    name: str
+    end_value: str = ""
+    prior_value: str = ""
+    unit: str = "元"
+    evidence: Evidence | None = None
+
+
+@dataclass
+class YearEndReasonView:
+    """「主要会计数据、财务指标发生变动的情况、原因」表里的原文原因。"""
+
+    name: str
+    reason: str = ""
     evidence: Evidence | None = None
 
 
@@ -94,6 +116,10 @@ class YearEndView:
 class SupplementalResult:
     quarters: list[QuarterView] = field(default_factory=list)
     year_ends: list[YearEndView] = field(default_factory=list)
+    # 权益/资产暴涨时的科目拆解（其他综合收益、资本公积…），来自合并资产负债表。
+    balance_moves: list[BalanceMoveView] = field(default_factory=list)
+    # 总资产／归母权益变动原因原文（②级引述）。
+    year_end_reasons: list[YearEndReasonView] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
 
 
@@ -122,6 +148,8 @@ def extract_supplemental(
     wanted = {item.strip() for item in indicators if item and item.strip()}
     result.quarters = _quarter_views(file_ids, files, wanted)
     result.year_ends = _year_end_views(file_ids, files)
+    result.balance_moves = _balance_move_views(file_ids, files)
+    result.year_end_reasons = _year_end_reason_views(file_ids, files)
     if not result.quarters:
         result.gaps.append("单季视图：本期季报没有同时披露单季列与累计列")
     if not result.year_ends:
@@ -233,6 +261,7 @@ def _year_end_views(file_ids: list, files: list[dict]) -> list[YearEndView]:
                     value=item.value,
                     unit=item.unit or _unit_of(text) or "元",
                     change=item.change,
+                    prior_value=item.prior_value,
                     evidence=Evidence(
                         file_id=file_id,
                         filename=str(chunk.get("filename") or meta.get("filename") or ""),
@@ -292,7 +321,23 @@ class _BalanceYearEnd:
     value: str
     change: str
     unit: str = ""
+    prior_value: str = ""
     quote: str = ""
+
+
+# 权益暴涨时优先拆的资产负债表科目（合并报表「本期末｜上年末」两列）。
+_BALANCE_MOVE_NAMES = (
+    "其他权益工具投资",
+    "其他非流动金融资产",
+    "货币资金",
+    "其他综合收益",
+    "未分配利润",
+    "资本公积",
+    "实收资本（或股本）",
+    "实收资本(或股本)",
+)
+
+_DATE_HEADER = re.compile(r"20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 
 
 def _balance_year_end_rows(text: str) -> list[_BalanceYearEnd]:
@@ -312,6 +357,7 @@ def _balance_year_end_rows(text: str) -> list[_BalanceYearEnd]:
         if "上年度末" not in flat or "本报告期末" not in flat:
             continue
         end_i = _column(headers, lambda h: h == "本报告期末" or h.endswith("本报告期末"))
+        prior_i = _column(headers, lambda h: "上年度末" in h and "比" not in h and "较" not in h)
         # 表头第一列常为空，用「上年度末」定位后一列增减
         change_i = _column(
             headers,
@@ -339,8 +385,10 @@ def _balance_year_end_rows(text: str) -> list[_BalanceYearEnd]:
             # 按数值符号写成方向词，并保留原百分比数字。
             direction = "减少" if change.startswith("-") else "增加"
             pct = change.lstrip("+-")
+            prior = _cell(cells, prior_i) if prior_i is not None else ""
+            prior_bit = f"上年度末 {prior}，" if prior else ""
             quote = (
-                f"{name} 本报告期末 {value}，"
+                f"{name} 本报告期末 {value}，{prior_bit}"
                 f"本报告期末比上年度末增减变动幅度(%) {change_raw}，"
                 f"比上年度末{direction}{pct}"
             )
@@ -350,10 +398,205 @@ def _balance_year_end_rows(text: str) -> list[_BalanceYearEnd]:
                     value=value,
                     change=change,
                     unit=_unit_of(text) or "元",
+                    prior_value=prior,
                     quote=quote,
                 )
             )
     return found
+
+
+def _balance_move_views(file_ids: list, files: list[dict]) -> list[BalanceMoveView]:
+    """从合并资产负债表抽关键科目期末／上年末原值，供权益构成拆解。"""
+    by_id = {str(row.get("file_id")): row for row in files}
+    try:
+        chunks = store.search_kb_chunks_keyword(
+            [
+                "其他权益工具投资",
+                "其他综合收益",
+                "未分配利润",
+                "资本公积",
+                "货币资金",
+                "合并资产负债表",
+            ],
+            file_ids=file_ids,
+            top_k=16,
+            kinds=["table"],
+        )
+    except Exception:
+        logger.exception("检索资产负债表科目变动失败")
+        return []
+    found: dict[str, BalanceMoveView] = {}
+    for chunk in chunks:
+        text = str(chunk.get("text") or "")
+        file_id = str(chunk.get("file_id") or "")
+        meta = by_id.get(file_id, {})
+        for item in _balance_statement_rows(text):
+            if item.name in found:
+                continue
+            delta = _format_delta(item.end_value, item.prior_value)
+            quote = (
+                f"{item.name} 本期末 {item.end_value}，上年末 {item.prior_value}"
+                + (f"，增减 {delta}" if delta else "")
+            )
+            found[item.name] = BalanceMoveView(
+                name=item.name,
+                end_value=item.end_value,
+                prior_value=item.prior_value,
+                unit=item.unit or _unit_of(text) or "元",
+                evidence=Evidence(
+                    file_id=file_id,
+                    filename=str(chunk.get("filename") or meta.get("filename") or ""),
+                    page=chunk.get("page"),
+                    page_end=chunk.get("page_end"),
+                    section=str(chunk.get("section") or ""),
+                    quote=quote,
+                ),
+            )
+    # 稳定顺序：按预设名单
+    order = {name: index for index, name in enumerate(_BALANCE_MOVE_NAMES)}
+    return sorted(found.values(), key=lambda row: order.get(row.name, 99))
+
+
+def _year_end_reason_views(file_ids: list, files: list[dict]) -> list[YearEndReasonView]:
+    """读变动原因表：总资产／归母权益旁的「主要是…」原文。"""
+    by_id = {str(row.get("file_id")): row for row in files}
+    wanted = ("总资产", "归属于上市公司股东的所有者权益")
+    try:
+        chunks = store.search_kb_chunks_keyword(
+            ["其他权益工具投资", "公允价值", "比上年度末"],
+            file_ids=file_ids,
+            top_k=8,
+            kinds=["table", "text"],
+        )
+    except Exception:
+        logger.exception("检索较上年末变动原因失败")
+        return []
+    found: dict[str, YearEndReasonView] = {}
+    for chunk in chunks:
+        text = str(chunk.get("text") or "")
+        file_id = str(chunk.get("file_id") or "")
+        meta = by_id.get(file_id, {})
+        for name, reason in _change_reason_rows(text, wanted):
+            if name in found or len(reason) < 12:
+                continue
+            found[name] = YearEndReasonView(
+                name=name,
+                reason=reason,
+                evidence=Evidence(
+                    file_id=file_id,
+                    filename=str(chunk.get("filename") or meta.get("filename") or ""),
+                    page=chunk.get("page"),
+                    page_end=chunk.get("page_end"),
+                    section=str(chunk.get("section") or ""),
+                    quote=f"{name}：{reason}",
+                ),
+            )
+    return [found[name] for name in wanted if name in found]
+
+
+@dataclass
+class _BalanceStatementRow:
+    name: str
+    end_value: str
+    prior_value: str
+    unit: str = ""
+
+
+def _balance_statement_rows(text: str) -> list[_BalanceStatementRow]:
+    """合并资产负债表：表头两列日期（本期末／上年末）。"""
+    found: list[_BalanceStatementRow] = []
+    unit = _unit_of(text) or "元"
+    for table in _TABLE.finditer(text):
+        block = table.group(0)
+        rows = [
+            [_clean(cell.group(1)) for cell in _CELL.finditer(row.group(1))]
+            for row in _ROW.finditer(block)
+        ]
+        if len(rows) < 2:
+            continue
+        headers = rows[0]
+        date_cols = [i for i, h in enumerate(headers) if _DATE_HEADER.search(h or "")]
+        if len(date_cols) < 2:
+            continue
+        end_i, prior_i = date_cols[0], date_cols[1]
+        for cells in rows[1:]:
+            if not cells:
+                continue
+            name = cells[0].strip()
+            if name not in _BALANCE_MOVE_NAMES:
+                continue
+            # 统一「实收资本」显示名
+            display = "实收资本（或股本）" if "实收资本" in name else name
+            end_v = _cell(cells, end_i)
+            prior_v = _cell(cells, prior_i)
+            if not end_v or not prior_v:
+                continue
+            found.append(
+                _BalanceStatementRow(
+                    name=display, end_value=end_v, prior_value=prior_v, unit=unit
+                )
+            )
+    return found
+
+
+def _change_reason_rows(
+    text: str, wanted: tuple[str, ...]
+) -> list[tuple[str, str]]:
+    """从变动原因 HTML 表抽出 (指标名, 原因句)。"""
+    out: list[tuple[str, str]] = []
+    for table in _TABLE.finditer(text):
+        block = table.group(0)
+        for row in _ROW.finditer(block):
+            cells = [_clean(cell.group(1)) for cell in _CELL.finditer(row.group(1))]
+            if len(cells) < 2:
+                continue
+            name = cells[0].strip()
+            if name not in wanted:
+                continue
+            # 常见列：指标｜变动比例｜主要原因；原因在最后一列最长文本。
+            reason = max(cells[1:], key=len).strip()
+            if name in reason and len(cells) >= 3:
+                reason = cells[-1].strip()
+            if "主要是" in reason or "公允价值" in reason or "资本公积" in reason:
+                out.append((name, reason))
+    # 正文兜底：总资产 309.67 主要是…
+    if not out:
+        for name in wanted:
+            pattern = re.compile(
+                rf"{re.escape(name)}[^。]{{0,40}}?(主要是[^。]{{10,220}})"
+            )
+            match = pattern.search(text.replace("\n", ""))
+            if match:
+                out.append((name, match.group(1).strip()))
+    return out
+
+
+def signed_delta(end_value: str, prior_value: str):
+    """期末减上年末；解析失败返回 None。"""
+    from ai_agent.report.compare import parse_number
+
+    left = parse_number(end_value)
+    right = parse_number(prior_value)
+    if not left or not right:
+        return None
+    return left[0] - right[0]
+
+
+def format_money_delta(delta) -> str:
+    """带正负号与千分位的增减额文案。"""
+    sign = "+" if delta >= 0 else "-"
+    amount = abs(delta)
+    if amount == amount.to_integral_value():
+        return f"{sign}{int(amount):,}"
+    return f"{sign}{amount:,.2f}"
+
+
+def _format_delta(end_value: str, prior_value: str) -> str:
+    """期末减上年末，带千分位与正负号；解析失败返回空。"""
+    delta = signed_delta(end_value, prior_value)
+    if delta is None:
+        return ""
+    return format_money_delta(delta)
 
 
 def _change_after(text: str, start: int) -> str:

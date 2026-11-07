@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass, field
 
 from ai_agent.kb.ingest.meta import name_in_text
@@ -29,33 +30,39 @@ from ai_agent.report.industry import (
 )
 from ai_agent.report.parse import OutlineItem, ReportPlan
 from ai_agent.report.skills import get_skill
-from ai_agent.report.supplemental import SupplementalResult
+from ai_agent.report.features import Features, compute_features
+from ai_agent.report.meta import infer_scope, scope_label
+from ai_agent.report.rules import (
+    equity_share_applicable,
+    equity_share_exemption_line,
+    render_yoy_rate_bit,
+    render_yoy_sentence,
+)
+from ai_agent.report.supplemental import (
+    SupplementalResult,
+    format_money_delta,
+    signed_delta,
+)
 
 _SCOPE = {"consolidated": "合并", "parent": "母公司"}
-_UNKNOWN_SCOPE = "范围未标明"
-# 表格里未标明的范围用破折号，不逐行重复「范围未标明」；含义在阅读说明里一次讲清。
-_UNKNOWN_SCOPE_CELL = "—"
+_UNKNOWN_SCOPE = "—"
 
-# 开头统一声明。刻意不写「均为合并报表口径／年初至报告期末累计值」：
-# 库里 scope 多为空，且期末余额、时点比率也不是累计值，那样写等于编造口径。
-# 文案里不出现阿拉伯数字，避免被 validate 的数字扫描当成未核对数值。
+# 开头统一声明一次：能按模板推定的不写「找不到」；文案避免阿拉伯数字（校验器）。
 _READING_NOTE = (
-    "阅读说明：本文数值均按财报原文披露值引用，不自行折算单位、不由累计值倒推单季；"
-    "期间口径、合并／母公司范围与取数列逐项列在指标表，不以统一口径概括。",
-    "表中「范围」记为「—」表示原文未注明合并或母公司范围，不代为推断；"
-    "期末时点余额与期间比率不按累计值理解。",
-    "每项数值的页码、章节与文件出处集中在表格「出处」列；方括号内的短标识为"
-    "知识库文件标识前缀，完整标识与原文片段见溯源附件。",
+    "阅读说明：金额默认统一为元；若由千元／万元／百万元折算，指标表会注明原单位。",
+    "范围：主要财务数据等主表按季报模板推定为合并，母公司口径单独标注；"
+    "期间按列名区分——本报告期为单季、年初至报告期末为累计、期末为时点余额。",
+    "基期文件未入库属于数据缺口，与口径推定无关，见「缺失与口径」。"
+    "方括号短标识为知识库文件前缀，完整出处见溯源附件。",
 )
 
 _READING_NOTE_SEGMENT = (
-    "阅读说明：本文为半导体代表公司财报对比分析（赛道分组版），数值按财报原文披露值引用；"
-    "同表若原披露单位不同（如元与千元），不折算混比，并在表下注明单位不齐。",
-    "名单备注：韦尔股份现名豪威集团（股票代码 603501）；表头沿用技能名单「韦尔股份」，"
+    "阅读说明：本文为半导体代表公司财报对比分析（赛道分组版）；"
+    "金额默认统一为元，主表范围按季报模板推定为合并，期间按列名区分单季／累计／时点。",
+    "名单备注：韦尔股份现名豪威集团（股票代码暂略）；表头沿用技能名单「韦尔股份」，"
     "出处文件名以披露主体「豪威集团」为准。",
-    "三级归因边界：①已抽取的数据事实可写；②原文经营说明须标出处后方可引用；"
-    "③无出处的第三方推断（如未披露的「AI 订单驱动」）一律不写。",
-    "表中「范围」记为「—」表示原文未注明合并或母公司范围；完整标识与原文片段见溯源附件。",
+    "三级归因边界：已抽取的数据事实可写；原文经营说明须标出处后方可引用；"
+    "无出处的第三方推断一律不写。完整标识与原文片段见溯源附件。",
 )
 
 # 「本期结论」只提炼几条主线，完整指标集留给「主要指标与出处」表。
@@ -72,10 +79,17 @@ _LEAD_GENERIC = (
     "营业收入",
     "扣非净利润",
     "净利润",
+    "经营活动产生的现金流量净额",
     "毛利率",
 )
-_LEAD_MAX = 5
-_LEAD_NET_PROFIT = frozenset({"归属于母公司所有者的净利润", "净利润"})
+_LEAD_MAX = 3
+_LEAD_NET_PROFIT = frozenset({"归属于母公司所有者的净利润", "净利润", "扣非净利润"})
+# 结论首句优先并列的经营主线（有则写入同一句，不再拆成多句平铺）。
+_LEAD_OPERATING = (
+    "营业收入",
+    "扣非净利润",
+    "经营活动产生的现金流量净额",
+)
 
 
 @dataclass
@@ -107,6 +121,7 @@ def compose_report(
     """
     supplemental = views or SupplementalResult()
     series = compare_measures([_measure(fact) for fact in facts])
+    features = compute_features(plan, facts, supplemental, series)
     gaps = _gaps(plan, facts, series)
     # 结论句已不再自带出处，出处全靠主要指标表承载。大纲若缺这一节（外部
     # 构造的 ReportPlan 可能没有），补上，避免产出一份全文无出处的报告。
@@ -132,6 +147,7 @@ def compose_report(
                 gaps,
                 supplemental,
                 analysis=analysis,
+                features=features,
             ),
         )
         for item in outline
@@ -190,22 +206,24 @@ def _section(
     gaps: list[str],
     views: SupplementalResult,
     analysis: list[str] | None = None,
+    features: Features | None = None,
 ) -> list[str]:
     current = [fact for fact in facts if fact.period == plan.period]
+    state = features or compute_features(plan, facts, views, series)
     if title == "阅读说明":
         return list(
             _READING_NOTE_SEGMENT if _is_segment_report(plan) else _READING_NOTE
         )
     if title in {"本期结论", "覆盖范围", "行业概览"}:
-        return _lead(plan, current, series, views)
+        return _lead(plan, current, series, views, state)
     if title == "主要指标与出处":
         return _indicator_lines(plan, current)
     if title == "同比与环比":
-        return _change_lines(plan, series)
+        return _change_lines(plan, series, state)
     if title == "单季节奏":
         return _quarter_lines(plan, views)
     if title == "较上年末变动":
-        return _year_end_lines(views)
+        return _year_end_lines(views, state)
     if title == "数据观察":
         return _observation_lines(plan, current, views)
     if title == "经营解读":
@@ -268,14 +286,15 @@ def _lead(
     current: list[IndicatorFact],
     series: list[SeriesCompare],
     views: SupplementalResult | None = None,
+    features: Features | None = None,
 ) -> list[str]:
     if plan.kind == "industry":
         names = "、".join(plan.subjects) if plan.subjects else "没有公司"
         line = f"{plan.industry}行业 {plan.period} 覆盖：{names}。"
-        return [line, *_conclusion_sentences(plan, current, series, views)]
+        return [line, *_conclusion_sentences(plan, current, series, views, features)]
     if not current:
         return [f"{plan.period} 没有抽到指标。"]
-    return _conclusion_sentences(plan, current, series, views)
+    return _conclusion_sentences(plan, current, series, views, features)
 
 
 def _conclusion_sentences(
@@ -283,18 +302,14 @@ def _conclusion_sentences(
     facts: list[IndicatorFact],
     series: list[SeriesCompare],
     views: SupplementalResult | None = None,
+    features: Features | None = None,
 ) -> list[str]:
-    """本期结论：3–5 句主线提炼，不是指标平铺。
+    """本期结论：2–3 句主线提炼，不是指标平铺。
 
-    只写已抽取的数 + 同比／较上年末变动；不写因果、不写「低位／稳健」等主观词。
+    只写已抽取的数 + 同比／较上年末构成关系；不写因果、不写「低位／稳健」等主观词。
     完整清单仍在「主要指标与出处」。
     """
-    rates: dict[tuple[str, str, str], str] = {}
-    for item in series:
-        for period, change in item.yoy.items():
-            if change.source == "derived" or not change.rate:
-                continue
-            rates[(item.subject, item.name, period)] = change.rate
+    yoy_changes = _lead_yoy_changes(series)
     year_end = {
         item.name: item
         for item in (views.year_ends if views else [])
@@ -302,9 +317,22 @@ def _conclusion_sentences(
     by_name: dict[str, IndicatorFact] = {}
     for fact in facts:
         by_name.setdefault(fact.name, fact)
-    priority = _LEAD_BANK if any(name in by_name for name in _LEAD_BANK) else _LEAD_GENERIC
+    is_bank = _is_bank_lead(plan, by_name)
     subjects = {fact.subject for fact in facts}
     lines: list[str] = []
+
+    if not is_bank:
+        # 经营主线压成一句：营收／扣非／经营现金流并列，避免结论只剩一句营收。
+        operating = _operating_lead_clause(plan, by_name, yoy_changes, subjects)
+        if operating:
+            lines.append(operating)
+        equity = _equity_revaluation_lead(views, features)
+        if equity:
+            lines.append(equity)
+        if lines:
+            return lines[:_LEAD_MAX]
+
+    priority = _LEAD_BANK if is_bank else _LEAD_GENERIC
     used_profit = False
     for name in priority:
         if len(lines) >= _LEAD_MAX:
@@ -321,29 +349,127 @@ def _conclusion_sentences(
             f"{_prefix(plan, fact.subject, subjects)}{period_text}{fact.name}为 "
             f"{fact.value}{fact.unit}"
         ]
-        rate = rates.get((fact.subject, fact.name, fact.period), "")
-        if rate:
-            bits.append(f"同比 {rate}")
+        rate_bit = _lead_rate_bit(fact, yoy_changes)
+        if rate_bit:
+            bits.append(rate_bit)
         ye = year_end.get(name)
         if ye and ye.change:
             bits.append(f"较上年末 {ye.change}")
         lines.append("，".join(bits) + "。")
     if lines:
         return lines
-    # 优先级名单都没命中时，退回前几条，仍限制条数，避免再铺成清单
     return _indicator_sentences(plan, facts[:_LEAD_MAX], series)
+
+
+def _is_bank_lead(plan: ReportPlan, by_name: dict[str, IndicatorFact]) -> bool:
+    """银行结论走息差／资产质量优先级；不能仅凭「有营业收入」就判成银行。"""
+    if getattr(plan, "company_type", "") == BANK:
+        return True
+    if plan.skill_id == "bank_financial_report":
+        return True
+    if industry_of(plan.subjects) == BANK:
+        return True
+    return any(
+        name in by_name
+        for name in ("净息差", "不良贷款率", "不良贷款拨备覆盖率", "资本充足率")
+    )
+
+
+def _lead_yoy_changes(series: list[SeriesCompare]) -> dict[tuple[str, str, str], Change]:
+    """结论与正文共用的同比 Change；跳过环比推导值。"""
+    changes: dict[tuple[str, str, str], Change] = {}
+    for item in series:
+        for period, change in item.yoy.items():
+            if change.source == "derived" or not change.rate:
+                continue
+            changes[(item.subject, item.name, period)] = change
+    return changes
+
+
+def _lead_rate_bit(
+    fact: IndicatorFact, yoy_changes: dict[tuple[str, str, str], Change]
+) -> str:
+    change = yoy_changes.get((fact.subject, fact.name, fact.period))
+    if change is None:
+        return ""
+    return render_yoy_rate_bit(fact.value, change)
+
+
+def _operating_lead_clause(
+    plan: ReportPlan,
+    by_name: dict[str, IndicatorFact],
+    yoy_changes: dict[tuple[str, str, str], Change],
+    subjects: set[str],
+) -> str:
+    """营收／扣非／经营现金流压成一句；缺项就跳过，不硬凑。"""
+    bits: list[str] = []
+    period_text = ""
+    for name in _LEAD_OPERATING:
+        fact = by_name.get(name)
+        if fact is None:
+            continue
+        if not period_text and fact.basis not in (POINT, STOCK):
+            period_text = _period_label(fact)
+        piece = f"{fact.name}为 {fact.value}{fact.unit}"
+        rate_bit = _lead_rate_bit(fact, yoy_changes)
+        if rate_bit:
+            piece += f"（{rate_bit}）"
+        bits.append(piece)
+    if not bits:
+        return ""
+    head = _prefix(plan, next(iter(subjects), ""), subjects) + (period_text or "")
+    return f"{head}{'、'.join(bits)}。"
+
+
+def _equity_revaluation_lead(
+    views: SupplementalResult | None, features: Features | None = None
+) -> str:
+    """把「权益大增但主因是 OCI 重估」提进结论；增量过小或缺拆解则不写。"""
+    if features is not None and not features.equity_growth_large:
+        return ""
+    if views is None or not views.year_ends or not views.balance_moves:
+        return ""
+    equity = next(
+        (
+            item
+            for item in views.year_ends
+            if "所有者权益" in item.name or "净资产" in item.name
+        ),
+        None,
+    )
+    oci = next((item for item in views.balance_moves if item.name == "其他综合收益"), None)
+    retained = next((item for item in views.balance_moves if item.name == "未分配利润"), None)
+    if equity is None or oci is None or not equity.prior_value or not equity.change:
+        return ""
+    equity_delta = signed_delta(equity.value, equity.prior_value)
+    oci_delta = signed_delta(oci.end_value, oci.prior_value)
+    if equity_delta is None or oci_delta is None or equity_delta == 0:
+        return ""
+    oci_share = _share_of(oci_delta, equity_delta)
+    if oci_share is None or oci_share < 40:
+        # 重估不是主导时不占用结论篇幅，细节仍在「较上年末」节。
+        return ""
+    retained_bit = ""
+    if retained is not None:
+        retained_delta = signed_delta(retained.end_value, retained.prior_value)
+        if retained_delta is not None:
+            retained_share = _share_of(retained_delta, equity_delta)
+            if retained_share is not None:
+                retained_bit = f"，经营留存（未分配利润增减）约 {retained_share:.0f}%"
+    return (
+        f"需注意：{equity.name}为 {equity.value}{equity.unit}"
+        f"（较上年末 {equity.change}），其中其他综合收益增减约 {oci_share:.0f}%"
+        f"{retained_bit}"
+        "——账面权益扩张主要来自其他权益工具投资公允价值重估（计入 OCI），"
+        "不把公允价值变动等同于经营利润。"
+    )
 
 
 def _indicator_sentences(
     plan: ReportPlan, facts: list[IndicatorFact], series: list[SeriesCompare]
 ) -> list[str]:
     """兜底：按事实顺序写「是什么 + 变化多少」，条数由调用方截断。"""
-    rates: dict[tuple[str, str, str], str] = {}
-    for item in series:
-        for period, change in item.yoy.items():
-            if change.source == "derived" or not change.rate:
-                continue
-            rates[(item.subject, item.name, period)] = change.rate
+    yoy_changes = _lead_yoy_changes(series)
     subjects = {fact.subject for fact in facts}
     lines: list[str] = []
     seen: set[tuple[str, str, str]] = set()
@@ -353,8 +479,8 @@ def _indicator_sentences(
             continue
         seen.add(key)
         period_text = "" if fact.basis in (POINT, STOCK) else _period_label(fact)
-        rate = rates.get((fact.subject, fact.name, fact.period), "")
-        change_text = f"，同比 {rate}" if rate else ""
+        rate_bit = _lead_rate_bit(fact, yoy_changes)
+        change_text = f"，{rate_bit}" if rate_bit else ""
         lines.append(
             f"{_prefix(plan, fact.subject, subjects)}{period_text}{fact.name}为 {fact.value}{fact.unit}"
             f"{change_text}。"
@@ -380,18 +506,24 @@ def _indicator_lines(plan: ReportPlan, current: list[IndicatorFact]) -> list[str
         ]
     with_subject = "| 公司 |" in lines[0]
     for fact in rows:
-        # 范围未知时只留破折号，含义已在开头阅读说明里统一声明。
-        scope = _SCOPE.get(fact.scope, _UNKNOWN_SCOPE_CELL)
+        scope = _fact_scope_label(fact)
         subject_cell = f"{fact.subject} | " if with_subject else ""
         display = _cell_with_unit(fact, indicator=fact.name)
         lines.append(
             f"| {subject_cell}{fact.name} | {display} | "
             f"{_period_label(fact)}／{scope}／{_column(fact)} | {_cite(fact)} |"
         )
-    # 个别指标的特别注记（如净息差未注明年化）跟在表格下面当脚注，
-    # 不再重复写进每条结论句。
+    # 个别指标的特别注记（如净息差未注明年化、单位折算）跟在表格下面当脚注。
     notes = sorted({note for fact in rows if (note := disclosure_note(fact.name))})
     lines.extend(f"注：{note}。" for note in notes)
+    converted = [
+        fact
+        for fact in rows
+        if getattr(fact, "unit_converted", False) and getattr(fact, "raw_unit", "")
+    ]
+    if converted:
+        units = "、".join(sorted({fact.raw_unit for fact in converted}))
+        lines.append(f"注：上表部分金额由{units}折算为元，原值见溯源附件。")
     return lines
 
 
@@ -423,7 +555,9 @@ def _quarter_lines(plan: ReportPlan, views: SupplementalResult) -> list[str]:
     return lines
 
 
-def _year_end_lines(views: SupplementalResult) -> list[str]:
+def _year_end_lines(
+    views: SupplementalResult, features: Features | None = None
+) -> list[str]:
     if not views.year_ends:
         return ["本期季报没有披露较上年末变动，不写这一节。"]
     lines = [
@@ -441,7 +575,116 @@ def _year_end_lines(views: SupplementalResult) -> list[str]:
         "同一指标在主要财务数据表可能换用另一种单位（如资产总计正文用亿元、"
         "表格用百万元），数值等价、不重复计入。"
     )
+    composition = _equity_composition_lines(views, features)
+    if composition:
+        lines.append("")
+        lines.extend(composition)
     return lines
+
+
+# 归母权益构成拆解优先科目（顺序即叙述优先级）。
+_EQUITY_COMPOSITION = ("其他综合收益", "未分配利润", "资本公积")
+_ASSET_DRIVERS = ("其他权益工具投资", "其他非流动金融资产", "货币资金")
+
+
+def _equity_composition_lines(
+    views: SupplementalResult, features: Features | None = None
+) -> list[str]:
+    """用合并资产负债表科目增减拆归母权益——只并列①级数字关系 + ②级原文原因。
+
+    权益增量过小（Features.equity_growth_large=False）时不写占比，避免硬套兆易模板。
+    """
+    moves = {item.name: item for item in views.balance_moves}
+    equity = next(
+        (
+            item
+            for item in views.year_ends
+            if "所有者权益" in item.name or "净资产" in item.name
+        ),
+        None,
+    )
+    if equity is None or not equity.prior_value:
+        return []
+    equity_delta = signed_delta(equity.value, equity.prior_value)
+    if equity_delta is None:
+        return []
+    parts: list[tuple[str, object, str, object]] = []
+    for name in _EQUITY_COMPOSITION:
+        move = moves.get(name)
+        if move is None:
+            continue
+        delta = signed_delta(move.end_value, move.prior_value)
+        if delta is None:
+            continue
+        parts.append((name, delta, format_money_delta(delta), move.evidence))
+    if not parts:
+        return []
+
+    show_share = equity_share_applicable(features) if features else True
+    share_header = "占归母权益增量" if show_share else "占权益增量"
+    lines = [
+        "### 归母权益较上年末构成（合并资产负债表科目增减）",
+        f"| 科目 | 本期末 | 上年末 | 增减 | {share_header} | 出处 |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    share_bits: list[str] = []
+    for name, delta, delta_text, evidence in parts:
+        move = moves[name]
+        if show_share:
+            share = _share_of(delta, equity_delta)
+            share_text = f"{share:.0f}%" if share is not None else "—"
+            if share is not None:
+                share_bits.append(f"{name}约 {share_text}")
+        else:
+            share_text = "不适用"
+        lines.append(
+            f"| {name} | {move.end_value}{move.unit} | {move.prior_value}{move.unit} | "
+            f"{delta_text} | {share_text} | {_cite_evidence(evidence)} |"
+        )
+    equity_delta_text = format_money_delta(equity_delta)
+    lines.append(
+        f"归属于上市公司股东的所有者权益本期末 {equity.value}{equity.unit}、"
+        f"上年度末 {equity.prior_value}{equity.unit}，增量 {equity_delta_text}"
+        f"（由主表两列相减，非原文单独披露的增减额）。"
+    )
+    if not show_share and features is not None:
+        lines.append(equity_share_exemption_line(features))
+    elif share_bits:
+        lines.append(
+            "上述三项增减占归母权益增量的比重为 "
+            + "、".join(share_bits)
+            + "——只陈述资产负债表已披露科目的数量关系，"
+            "不把公允价值变动等同于经营利润。"
+        )
+    asset_bits: list[str] = []
+    for name in _ASSET_DRIVERS:
+        move = moves.get(name)
+        if move is None:
+            continue
+        delta = signed_delta(move.end_value, move.prior_value)
+        if delta is None:
+            continue
+        asset_bits.append(
+            f"{name} 本期末 {move.end_value}{move.unit}、上年末 {move.prior_value}{move.unit}，"
+            f"增减 {format_money_delta(delta)}（{_cite_evidence(move.evidence)}）"
+        )
+    if asset_bits:
+        lines.append("资产端对照：" + "；".join(asset_bits) + "。")
+    for reason in views.year_end_reasons:
+        cite = _cite_evidence(reason.evidence)
+        text = reason.reason.strip().rstrip("。")
+        lines.append(f"原文披露（{reason.name}）：{text}（{cite}）。")
+    if any("其他权益工具投资" in (item.reason or "") for item in views.year_end_reasons):
+        lines.append(
+            "季报变动原因未点名「其他权益工具投资」的具体标的名称；本期不推断投资对象。"
+        )
+    return lines
+
+
+def _share_of(part, whole) -> float | None:
+    if whole is None or whole == 0:
+        return None
+    return float(part / whole * 100)
 
 
 def _observation_lines(
@@ -509,9 +752,21 @@ def _rate_relation(single: str, cumulative: str) -> str:
     return "持平于"
 
 
-def _change_lines(plan: ReportPlan, series: list[SeriesCompare]) -> list[str]:
+def _change_lines(
+    plan: ReportPlan,
+    series: list[SeriesCompare],
+    features: Features | None = None,
+) -> list[str]:
+    state = features or Features()
     lines: list[str] = []
     subjects = {item.subject for item in series}
+    current_values = {
+        (item.subject, item.name): next(
+            (value for period, value in item.points if period == plan.period),
+            "",
+        )
+        for item in series
+    }
     for item in series:
         if plan.indicators and item.name not in plan.indicators:
             continue
@@ -528,7 +783,19 @@ def _change_lines(plan: ReportPlan, series: list[SeriesCompare]) -> list[str]:
             )
         elif yoy:
             note = _join_notes(_basis_note(item, plan.period, "同比", yoy), yoy.note)
-            lines.append(_change_sentence(prefix, item.name, "同比", yoy.base_period, yoy.delta, yoy.rate, note))
+            current = current_values.get((item.subject, item.name), "")
+            lines.append(
+                render_yoy_sentence(
+                    prefix=prefix,
+                    name=item.name,
+                    period=plan.period,
+                    current_value=current or yoy.delta,
+                    unit=item.unit,
+                    change=yoy,
+                    note=note,
+                    features=state,
+                )
+            )
         if qoq:
             base = (
                 f"{qoq.base_period}（由累计值推导）"
@@ -656,6 +923,8 @@ def _normalize_unit_label(unit: str) -> str:
         return "千元"
     if text in {"万元", "人民币万元"}:
         return "万元"
+    if text in {"百万元", "人民币百万元"}:
+        return "百万元"
     if text in {"亿元", "人民币亿元"}:
         return "亿元"
     return text
@@ -664,7 +933,7 @@ def _normalize_unit_label(unit: str) -> str:
 def _peer_table_block(
     title: str, rows: list[IndicatorFact], *, min_subjects: int = 1
 ) -> list[str]:
-    """组内对比表：数值保持原披露，不做千元→元换算（换算值校验不过）。"""
+    """组内对比表：金额已在抽取层尽量归一为元；仍有单位例外时脚注说明。"""
     subjects = {row.subject for row in rows}
     if len(subjects) < min_subjects:
         return []
@@ -672,11 +941,11 @@ def _peer_table_block(
     lines = [title, "| 公司 | 数值 | 出处 |", "| --- | --- | --- |"]
     for row in rows:
         lines.append(f"| {row.subject} | {row.value}{row.unit} | {_cite(row)} |")
-    money = units & {"元", "千元", "万元", "亿元"}
+    money = units & {"元", "千元", "万元", "亿元", "百万元"}
     if len(money) > 1:
         lines.append(
             f"注：本表金额单位未统一（{'／'.join(sorted(money))}），"
-            "按各行原披露单位阅读，不折算后对比。"
+            "暂不混比；抽取层未能归一的项保留原单位。"
         )
     return lines
 
@@ -897,20 +1166,43 @@ def _peer_lines(plan: ReportPlan, current: list[IndicatorFact]) -> list[str]:
 
 
 def _gap_lines(plan: ReportPlan, current: list[IndicatorFact], gaps: list[str]) -> list[str]:
-    known = sorted({_SCOPE[scope] for scope in (f.scope for f in current) if scope in _SCOPE})
-    lines = [
-        f"合并／母公司范围：{'、'.join(known) if known else '原文均未注明'}"
-        "（逐项见主要指标表「范围」列，未注明的不代为推断）。"
-    ]
+    # 范围／期间能推定的在阅读说明与指标表已交代；这里只列例外与真缺口。
+    lines: list[str] = []
+    parents = [fact.name for fact in current if fact.scope == "parent"]
+    if parents:
+        lines.append(f"母公司口径（例外）：{'、'.join(sorted(set(parents)))}。")
+    inferred = [fact for fact in current if getattr(fact, "scope_inferred", False)]
+    if inferred and not parents:
+        lines.append("范围：本期主表指标按季报模板推定为合并（详见阅读说明）。")
     bases = sorted({_period_label(fact) for fact in current if fact.basis})
     if bases:
-        lines.append(f"期间口径：{'、'.join(bases)}（同比只用同口径同期，跨期数不同不相减）。")
-    columns = sorted({_column(fact) for fact in current})
-    if columns:
-        lines.append(f"取数列：{'、'.join(columns)}（单季与累计数不可混用）。")
-    # 个别指标的特别注记已作为脚注挂在主要指标表下方，这里不再重复。
-    lines.extend(gaps)
+        lines.append(f"期间口径：{'、'.join(bases)}（同比只用同口径同期）。")
+    # 真缺口：缺指标／缺基期文件。把「口径不齐」类与「待入库」分开列。
+    data_gaps = [gap for gap in gaps if _is_data_gap(gap)]
+    other_gaps = [gap for gap in gaps if not _is_data_gap(gap)]
+    if data_gaps:
+        lines.append("数据缺口（待入库或未抽到）：")
+        lines.extend(data_gaps)
+    if other_gaps:
+        lines.append("其他说明：")
+        lines.extend(other_gaps)
     return lines or ["没有缺失项。"]
+
+
+def _is_data_gap(gap: str) -> bool:
+    text = gap or ""
+    return any(
+        token in text
+        for token in (
+            "没有抽到",
+            "没有找到",
+            "未入库",
+            "待",
+            "A 股无独立",
+            "累计报告不齐",
+            "知识库",
+        )
+    )
 
 
 def _has_indicator(
@@ -982,10 +1274,26 @@ def _cite_evidence(evidence) -> str:
     return where
 
 
-def _scope(scope: str) -> str:
-    # 这里说的是「合并／母公司」范围，不是期间口径，别再用「口径」两个字
-    # 和「前三季度累计」混在一起。
-    return _SCOPE.get(scope, _UNKNOWN_SCOPE)
+def _scope(scope: str, *, inferred: bool = False) -> str:
+    # 「合并／母公司」范围；能推定的写「按季报模板推定」，不写「未标明」。
+    if scope in _SCOPE:
+        return scope_label(scope, inferred=inferred)
+    return _UNKNOWN_SCOPE
+
+
+def _fact_scope_label(fact: IndicatorFact) -> str:
+    """展示用范围：抽取已推定则沿用；空 scope 时按章节／列名再推定一次。"""
+    scope = fact.scope or ""
+    inferred = bool(getattr(fact, "scope_inferred", False))
+    if not scope:
+        evidence = fact.evidence
+        scope, inferred = infer_scope(
+            scope="",
+            section=getattr(evidence, "section", "") or "",
+            column=fact.column or "",
+            quote=getattr(evidence, "quote", "") or "",
+        )
+    return scope_label(scope, inferred=inferred)
 
 
 def _column(fact: IndicatorFact) -> str:
@@ -1040,6 +1348,11 @@ def _html(
     )
 
 
+# 千分位长数字：包进 .num 禁止 PDF 中途断行。
+_LONG_NUMBER = re.compile(r"[+\-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?")
+_NUMERIC_CELL = re.compile(r"^[+\-]?[\d,]+(?:\.\d+)?(?:%|元|次|亿元|万元|百万元)?$")
+
+
 def _html_block(lines: list[str]) -> str:
     chunks: list[str] = []
     buffer: list[str] = []
@@ -1063,7 +1376,7 @@ def _html_block(lines: list[str]) -> str:
             buffer.append(line)
             continue
         flush_table()
-        chunks.append(f"<p>{html.escape(line)}</p>")
+        chunks.append(f"<p>{_wrap_long_numbers(html.escape(line))}</p>")
     flush_table()
     return "\n".join(chunks)
 
@@ -1081,4 +1394,16 @@ def _th(cells: list[str]) -> list[str]:
 
 
 def _td(cells: list[str]) -> list[str]:
-    return [f"<td>{html.escape(cell)}</td>" for cell in cells]
+    out: list[str] = []
+    for cell in cells:
+        escaped = html.escape(cell)
+        if _NUMERIC_CELL.match(cell.replace(" ", "")):
+            out.append(f'<td><span class="num">{escaped}</span></td>')
+        else:
+            out.append(f"<td>{_wrap_long_numbers(escaped)}</td>")
+    return out
+
+
+def _wrap_long_numbers(escaped: str) -> str:
+    """已 HTML escape 的文本里，给千分位数字加 nowrap 包裹。"""
+    return _LONG_NUMBER.sub(lambda match: f'<span class="num">{match.group(0)}</span>', escaped)

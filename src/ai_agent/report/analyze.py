@@ -298,25 +298,44 @@ def _deterministic_lines(
     lines: list[str] = []
     # ① 有经营原文明文时，不再用「长主语 + 已出现数字」复述；先写原文，再补一句
     # 可指回原文的结构关系（比率须已在 facts 中）。
+    # 变动原因表常把「量价齐升」写在「主要原因」单元格——先抽叙述再判噪音，
+    # 禁止因表头词整段丢弃有效原文。
     keys = ("量价", "存储", "出货", "毛利润增加", "经营业绩", "产能", "研发")
     ban = ("被合并方", "合并日", "指引", "预期", "前瞻", "净利润为0", "净利润为 0", "是否经审计")
     used = 0
+    seen_snippets: set[str] = set()
     for item in pack:
-        quote = _plain_evidence_quote(item.quote or "")
-        if len(quote) < 20 or not any(token in quote for token in keys):
+        raw = _plain_evidence_quote(item.quote or "")
+        if len(raw) < 20 or not any(token in raw for token in keys):
             continue
-        if any(token in quote for token in ban):
+        if any(token in raw for token in ban):
             continue
-        quote = _reason_only(quote)
-        if len(quote) < 20:
+        # 纯报表模板残片（无经营叙述词）跳过；含「量价／存储」的变动原因表保留。
+        if _is_statement_template(raw) and not any(
+            token in raw for token in ("量价", "存储", "出货", "毛利润增加", "经营业绩")
+        ):
             continue
-        quote = _safe_truncate(quote, 120)
-        cite = _format_citation([item])
-        lines.append(f"原文披露：{quote}{cite}。")
-        used += 1
+        for snippet in _iter_reason_snippets(raw):
+            if len(snippet) < 20:
+                continue
+            if _is_form_chrome(snippet):
+                continue
+            key = snippet[:40]
+            if key in seen_snippets:
+                continue
+            seen_snippets.add(key)
+            quote = _safe_truncate(snippet, 120)
+            cite = _format_citation([item])
+            lines.append(f"原文披露：{quote}{cite}。")
+            used += 1
+            if used >= 2:
+                break
         if used >= 2:
             break
-    structure = _company_structure_line(plan, facts, has_narrative=bool(lines))
+    cited = "\n".join(lines)
+    structure = _company_structure_line(
+        plan, facts, has_narrative=bool(lines), cited_text=cited
+    )
     if structure:
         lines.append(structure)
     if not lines:
@@ -345,7 +364,11 @@ def _deterministic_lines(
 
 
 def _company_structure_line(
-    plan: ReportPlan, facts: list[IndicatorFact], *, has_narrative: bool
+    plan: ReportPlan,
+    facts: list[IndicatorFact],
+    *,
+    has_narrative: bool,
+    cited_text: str = "",
 ) -> str:
     """有「量价齐升／毛利润增加」类原文时，用已授权毛利率做一句结构并列（非外部归因）。"""
     if not has_narrative:
@@ -353,6 +376,18 @@ def _company_structure_line(
     margin = next((f for f in facts if f.name == "毛利率" and f.period == plan.period), None)
     if margin is None:
         return ""
+    # 结构句只点名正文里真实出现过的原文用语，避免「引用了量价齐升但原文没了」。
+    labels = [
+        label
+        for label, token in (
+            ("量价齐升", "量价"),
+            ("毛利润增加", "毛利润增加"),
+        )
+        if token in (cited_text or "")
+    ]
+    if not labels:
+        return ""
+    label_text = "／".join(labels)
     anchor = citation_anchor(margin.evidence.file_id)
     source = margin.evidence.filename or ""
     # akshare 财务摘要列是报告期末累计口径，须写明，避免与单季营收混读。
@@ -363,20 +398,88 @@ def _company_structure_line(
         page = f"第{margin.evidence.page}页" if margin.evidence.page is not None else ""
         cite = f"（{page} {anchor}）" if page or anchor else ""
     return (
-        f"与原文「量价齐升／毛利润增加」并列：本期毛利率为 {margin.value}%"
+        f"与原文「{label_text}」并列：本期毛利率为 {margin.value}%"
         f"{cite}——只陈述已授权比率与原文用语的共现，不构成外部归因。"
     )
 
 
+def _is_statement_template(text: str) -> bool:
+    return any(
+        token in text
+        for token in ("合并利润表", "合并资产负债表", "编制单位", "审计类型")
+    )
+
+
+def _is_form_chrome(text: str) -> bool:
+    """抽后的短句若仍是表头／勾选框，才丢弃。"""
+    if "适用" in text and "不适用" in text:
+        return True
+    if "变动比例" in text and "主要原因" in text:
+        return True
+    return _is_statement_template(text)
+
+
+def _iter_reason_snippets(quote: str) -> list[str]:
+    """同一证据块可拆出多条叙述：量价齐升与毛利润增加不要互相抢占。"""
+    # 主题分组：每组至多取一条；组内取文中最早命中，避免「量价」截掉「报告期内」开头。
+    theme_groups = (
+        ("报告期内", "量价", "存储", "出货", "经营业绩"),
+        ("毛利润增加", "主要是", "主要系"),
+    )
+    snippets: list[str] = []
+    occupied: list[tuple[int, int]] = []
+    for group in theme_groups:
+        hits = sorted(
+            ((quote.find(marker), marker) for marker in group if marker in quote),
+            key=lambda item: item[0],
+        )
+        for idx, _marker in hits:
+            if idx < 0:
+                continue
+            if any(start <= idx < end for start, end in occupied):
+                continue
+            tail = quote[idx:]
+            caused = tail.find("所致")
+            if caused >= 0 and caused < 80:
+                piece = tail[: caused + 2]
+            else:
+                cut = re.search(
+                    r"\s+(?:营业收入|利润总额|归属于上市公司|基本每股|稀释每股|加权平均)",
+                    tail,
+                )
+                piece = tail[: cut.start()] if cut else tail
+                stop = piece.find("。")
+                if stop >= 0:
+                    piece = piece[: stop + 1]
+            cleaned = _strip_quote_numbers(piece.strip(" ；;|"))
+            if len(cleaned) < 20:
+                continue
+            snippets.append(cleaned)
+            occupied.append((idx, idx + max(len(piece), 1)))
+            break
+        if len(snippets) >= 2:
+            break
+    if snippets:
+        return snippets
+    fallback = _reason_only(quote)
+    return [fallback] if fallback else []
+
+
 def _plain_evidence_quote(raw: str) -> str:
-    """去掉 HTML 标签，压成单行。"""
+    """去掉 HTML 标签，压成单行，并清洗 PDF 断字／勾选框噪音。"""
+    from ai_agent.report.extract import sanitize_evidence_quote
+
     text = re.sub(r"<[^>]+>", " ", raw or "")
-    return " ".join(text.split())
+    return sanitize_evidence_quote(text)
 
 
 def _reason_only(quote: str) -> str:
-    """变动原因表常带比例数字与其它科目行；只保留原因叙述句。"""
-    markers = ("报告期内", "主要是", "量价", "存储", "出货")
+    """变动原因表常带比例数字与其它科目行；只保留原因叙述句。
+
+    定量数字必须来自已校验 facts；原文引述只留定性原因，避免断字残片进正文。
+    内容词（量价／存储）优先于「主要是」，防止长原文被短原因句抢占。
+    """
+    markers = ("量价", "存储", "出货", "报告期内", "主要是", "主要系")
     for marker in markers:
         idx = quote.find(marker)
         if idx < 0:
@@ -384,20 +487,25 @@ def _reason_only(quote: str) -> str:
         tail = quote[idx:]
         # 「…所致」后常接其它科目变动行，先截到所致。
         caused = tail.find("所致")
-        if caused >= 0:
+        if caused >= 0 and caused < 80:
             tail = tail[: caused + 2]
-        # 切断后续科目行（营业收入_本报告期 197.11 …）
-        cut = re.search(
-            r"\s+(?:营业收入|利润总额|归属于上市公司|基本每股|稀释每股|加权平均)",
-            tail,
-        )
-        if cut:
-            tail = tail[: cut.start()]
-        stop = tail.find("。")
-        if stop >= 0:
-            tail = tail[: stop + 1]
-        return tail.strip(" ；;|")
-    cleaned = re.sub(r"\b\d[\d,]*\.?\d*\b", " ", quote)
+        else:
+            # 切断后续科目行（营业收入_本报告期 197.11 …）
+            cut = re.search(
+                r"\s+(?:营业收入|利润总额|归属于上市公司|基本每股|稀释每股|加权平均)",
+                tail,
+            )
+            if cut:
+                tail = tail[: cut.start()]
+            stop = tail.find("。")
+            if stop >= 0:
+                tail = tail[: stop + 1]
+        return _strip_quote_numbers(tail.strip(" ；;|"))
+    return _strip_quote_numbers(quote)
+
+
+def _strip_quote_numbers(text: str) -> str:
+    cleaned = re.sub(r"-?\d[\d,，]*(?:\.\d+)?%?", " ", text or "")
     return " ".join(cleaned.split())
 
 
@@ -425,7 +533,7 @@ def collect_evidence_pack(
         filename = fact.evidence.filename or ""
         if filename.startswith(("akshare.", "derived.")):
             continue
-        quote = " ".join((fact.evidence.quote or "").split())
+        quote = _plain_evidence_quote(fact.evidence.quote or "")
         if len(quote) < 8:
             continue
         key = (fact.evidence.file_id, fact.evidence.page, quote[:60])
@@ -551,7 +659,7 @@ def _load_kb_evidence(plan: ReportPlan) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     seen: set[str] = set()
     for index, row in enumerate(rows):
-        text = " ".join(str(row.get("text") or "").split())
+        text = _plain_evidence_quote(str(row.get("text") or ""))
         if len(text) < 20 or any(token in text for token in ban):
             continue
         file_id = str(row.get("file_id") or "")

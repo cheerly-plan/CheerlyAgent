@@ -231,6 +231,86 @@ def test_balance_sheet_year_end_table_is_read(monkeypatch):
     changes = {item.name: item.change for item in views.year_ends}
     assert changes["总资产"] == "+309.67%"
     assert changes["归属于上市公司股东的所有者权益"] == "+304.20%"
+    priors = {item.name: item.prior_value for item in views.year_ends}
+    assert priors["总资产"] == "21,396,579,783.85"
+
+
+_BS_MOVES = """单位：元
+<table>
+<tr><td>项目</td><td>2026年9月30日</td><td>2025年12月31日</td></tr>
+<tr><td>其他权益工具投资</td><td>51,764,683,980.73</td><td>3,594,205,489.31</td></tr>
+<tr><td>其他综合收益</td><td>43,674,535,575.97</td><td>777,709,963.95</td></tr>
+<tr><td>未分配利润</td><td>18,988,274,610.20</td><td>8,407,152,153.02</td></tr>
+<tr><td>资本公积</td><td>14,075,841,391.51</td><td>8,867,475,996.39</td></tr>
+</table>
+"""
+
+_REASON_TABLE = """
+<table>
+<tr><td>总资产</td><td>309.67</td><td>主要是1期末公司持有的其他权益工具投资、其他非流动金融资产等公允价值上升;2货币资金增长</td></tr>
+<tr><td>归属于上市公司股东的所有者权益</td><td>304.20</td><td>主要是1经营业绩增长;2其他权益工具投资公允价值上升其他综合收益增加;3H股上市发行新股资本公积增加</td></tr>
+</table>
+"""
+
+
+def test_equity_composition_moves_and_reasons(monkeypatch):
+    """权益暴涨时抽出 OCI／留存／资本公积科目增减 + 变动原因原文。"""
+    file_id = uuid.uuid4()
+    filename = "兆易创新2026年第三季度报告"
+    files = [
+        {
+            "file_id": file_id,
+            "filename": filename,
+            "status": "ready",
+            "subject": "兆易创新科技集团股份有限公司",
+            "subject_aliases": ["兆易创新"],
+            "period": "2026Q3",
+        }
+    ]
+    monkeypatch.setattr(
+        "ai_agent.report.supplemental.store.list_kb_files", lambda: files
+    )
+
+    def search(keywords, **kwargs):
+        kinds = kwargs.get("kinds") or ["text"]
+        joined = " ".join(keywords)
+        if "公允价值" in joined or "比上年度末" in joined:
+            text = _REASON_TABLE
+            page = 3
+        elif "table" in kinds and "上年度末" in joined:
+            text = _BALANCE_TABLE
+            page = 2
+        elif "table" in kinds and (
+            "其他权益工具投资" in joined
+            or "其他综合收益" in joined
+            or "未分配利润" in joined
+        ):
+            text = _BS_MOVES
+            page = 6
+        else:
+            return []
+        return [
+            {
+                "file_id": file_id,
+                "filename": filename,
+                "page": page,
+                "page_end": None,
+                "section": "财务报表",
+                "text": text,
+                "kind": "table",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "ai_agent.report.supplemental.store.search_kb_chunks_keyword", search
+    )
+    views = extract_supplemental(["兆易创新科技集团股份有限公司"], "2026Q3", [])
+    moves = {item.name: item for item in views.balance_moves}
+    assert moves["其他综合收益"].end_value == "43,674,535,575.97"
+    assert moves["未分配利润"].prior_value == "8,407,152,153.02"
+    reasons = {item.name: item.reason for item in views.year_end_reasons}
+    assert "其他综合收益" in reasons["归属于上市公司股东的所有者权益"]
+    assert "其他权益工具投资" in reasons["总资产"]
 
 
 def test_quarter_view_maps_koufei_alias(env, monkeypatch):
