@@ -18,6 +18,7 @@ from ai_agent.report.skills import skill_catalog
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
+from ai_agent.core.text import clip_text
 from ai_agent.kb.retrieval.citations import collect_citations, merge_sources
 from ai_agent.kb.ingest.doc_profiles import resolve_profile
 from ai_agent.kb.retrieval.scope import (
@@ -42,6 +43,10 @@ from ai_agent.tools.registry import execute_tool, tool_schemas
 
 # 会长时间阻塞（巨潮补齐 + OCR 入库）的工具：丢到工作线程，边跑边推 tool_progress。
 _PROGRESS_TOOLS = frozenset({"generate_report"})
+# 知识库能力清单按 doc_type 分组，库里类型多了会线性撑大 system；只列文档数
+# 最多的几类，其余让模型用 kb_list_files 现查。整体还有 system_dynamic_max_chars 兜底。
+_KB_CAP_MAX_DOC_TYPES = 8
+_DYNAMIC_CLIP_MARK = "\n[系统动态信息已省略 {n} 字符，完整清单请用 kb_list_files 查询]\n"
 _tool_progress_pool = ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="tool-progress"
 )
@@ -206,7 +211,14 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
         "【知识库能力】知识库图谱存的是实体之间的关系（「谁和谁有什么关系」）。"
         "各文档类型在图谱中覆盖的实体与关系如下，不在其中的关系请走 kb_search 读原文：",
     ]
-    for dt, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+    ranked = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    if len(ranked) > _KB_CAP_MAX_DOC_TYPES:
+        lines.append(
+            f"（文档类型共 {len(ranked)} 类，此处只列文档数最多的 "
+            f"{_KB_CAP_MAX_DOC_TYPES} 类；完整清单用 kb_list_files 查）"
+        )
+        ranked = ranked[:_KB_CAP_MAX_DOC_TYPES]
+    for dt, members in ranked:
         profile = resolve_profile(dt)
         scope = "、".join(profile.entity_scope) if profile.entity_scope else "（通用抽取，无限定范围）"
         preds = "、".join(profile.predicates) if profile.predicates else "（通用抽取，无限定谓词）"
@@ -259,6 +271,10 @@ def _system_prompt(
     tail = "\n\n".join(p for p in (_today_line(), block, cap_block) if p)
     if not tail:
         return core
+    # 动态块原先完全不受上下文预算约束：画像条数、库内文档类型数、报告类型
+    # 数都会让它线性增长。这里按行保头保尾裁到硬上限，并留一句显式提示，
+    # 让模型知道清单不完整、需要时自己查，而不是拿着半截清单硬答。
+    tail = clip_text(tail, settings.system_dynamic_max_chars, marker=_DYNAMIC_CLIP_MARK)
     return f"{core}\n\n{tail}"
 
 

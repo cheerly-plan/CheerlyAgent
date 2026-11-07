@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from ai_agent.llm.types import ChatMessage
+from ai_agent.memory.short_term import short_term_memory
 from ai_agent.storage.db import (
     DEFAULT_SESSION_TITLE,
     ChatHistoryPage,
@@ -401,6 +402,9 @@ class SessionStore(Database):
                     (user_id,),
                 )
             conn.commit()
+        # DB 已清空，进程内热缓存必须一起失效，否则 TTL 内 load 仍会命中旧窗口，
+        # 用户删掉的会话会「自己回来」。事务提交成功后再失效，避免清了缓存但库没清。
+        short_term_memory.invalidate(user_id, chat_session_id)
 
     def create_session(self, user_id: str, idempotency_key: str) -> SessionRecord:
         session_id = str(uuid.uuid4())
@@ -545,6 +549,7 @@ class SessionStore(Database):
                 (user_id, session_id),
             )
             conn.commit()
+        short_term_memory.invalidate(user_id, session_id)
         return True
 
     def cleanup_empty_unnamed_sessions(self, max_age_seconds: int = 3600) -> int:

@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # 模型上下文窗口导致整轮报错。中文 1 字符 ≈ 0.6~1 token，40000 字符
     # 对 32k 窗口的模型是安全值；部署更大窗口的模型可调高。
     llm_context_char_budget: int = 40000
+    # system 提示词里动态拼接部分（画像 / 知识库能力清单 / 日期 / 报告类型）
+    # 的硬上限。这些块原先完全不受上下文预算约束，随画像条数与库内文件数
+    # 线性增长，极端情况下 system 自身就能把请求撑超限。超限时按行保头保尾
+    # 裁剪并留显式省略提示，模型改用 kb_list_files 现查。
+    system_dynamic_max_chars: int = 4000
     host: str = "127.0.0.1"
     port: int = 8000
     # 服务端访问令牌：非空时 /v1/** 要求携带 X-API-Key 或 Bearer Token
