@@ -506,19 +506,54 @@ class KbStore:
             conn.commit()
         return row is not None
 
-    def recover_stuck_kb_files(self) -> int:
-        """启动时不存在本进程的在途任务：卡在中间态的都是上次异常
-        退出留下的，直接标 failed（与 checkpoint 僵尸 run 同套路）。"""
+    def list_interrupted_kb_files(self) -> list[dict]:
+        """上次进程退出时卡在解析／向量化，或已标「重启中断」失败的文件。
+
+        供启动恢复：磁盘上还有 PDF 的可以重投，不必删了重传。
+        """
         with self._get_pool().connection() as conn:
-            cur = conn.execute(
+            return conn.execute(
                 """
-                UPDATE agent_kb_file
-                SET status = 'failed',
-                    error = '服务重启导致处理中断，请删除后重新上传',
-                    updated_at = now()
+                SELECT id AS file_id, user_id, filename, status, error
+                FROM agent_kb_file
                 WHERE status IN ('parsing', 'embedding')
+                   OR (
+                        status = 'failed'
+                        AND error LIKE '服务重启导致处理中断%'
+                   )
                 """
-            )
+            ).fetchall()
+
+    def recover_stuck_kb_files(self, *, exclude_ids: list[uuid.UUID] | None = None) -> int:
+        """把仍卡在中间态、且未能重投的文件标 failed。
+
+        能重投的（磁盘 PDF 还在）由 pipeline 先拿走；这里只处理
+        无源文件可恢复的残留，避免永远停在 parsing／embedding。
+        """
+        excluded = list(exclude_ids or [])
+        with self._get_pool().connection() as conn:
+            if excluded:
+                cur = conn.execute(
+                    """
+                    UPDATE agent_kb_file
+                    SET status = 'failed',
+                        error = '服务重启导致处理中断，源文件已不在，请重新上传',
+                        updated_at = now()
+                    WHERE status IN ('parsing', 'embedding')
+                      AND NOT (id = ANY(%s))
+                    """,
+                    (excluded,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE agent_kb_file
+                    SET status = 'failed',
+                        error = '服务重启导致处理中断，源文件已不在，请重新上传',
+                        updated_at = now()
+                    WHERE status IN ('parsing', 'embedding')
+                    """
+                )
             conn.commit()
         return cur.rowcount
 

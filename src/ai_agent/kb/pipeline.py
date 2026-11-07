@@ -49,9 +49,19 @@ class KbPipeline:
         self._inflight_lock = threading.Lock()
 
     def recover_stuck(self) -> None:
-        stuck = store.recover_stuck_kb_files()
+        # 解析／向量化中断且磁盘 PDF 还在：清半成品切片后重投，免删了重传。
+        requeued = self._requeue_interrupted_from_disk()
+        if requeued:
+            logger.warning(
+                "kb 启动恢复：重投 %d 个中断文件（磁盘仍在，免重传）", len(requeued)
+            )
+        stuck = store.recover_stuck_kb_files(
+            exclude_ids=[uuid.UUID(item) for item in requeued]
+        )
         if stuck:
-            logger.warning("kb 启动恢复：重置 %d 个中断文件为 failed", stuck)
+            logger.warning(
+                "kb 启动恢复：%d 个中断文件无源文件，已标 failed（需重新上传）", stuck
+            )
         # 图谱构建是切片 ready 之后的增强步骤，卡住只标记图谱失败，文件仍可用
         graphs = store.reset_stuck_graphs()
         if graphs:
@@ -67,6 +77,45 @@ class KbPipeline:
                 )
         except Exception:
             logger.exception("kb 启动恢复：重投 uploaded 失败")
+
+    def _requeue_interrupted_from_disk(self) -> list[str]:
+        """parsing／embedding／「重启中断」failed → 磁盘源文件还在则重投。"""
+        from ai_agent.kb.ingest.parsing import supported
+
+        restarted: list[str] = []
+        for row in store.list_interrupted_kb_files():
+            file_id = str(row.get("file_id") or "")
+            if not file_id:
+                continue
+            try:
+                uid = uuid.UUID(file_id)
+            except ValueError:
+                continue
+            folder = Path(settings.kb_upload_dir) / file_id
+            if not folder.is_dir():
+                continue
+            sources = sorted(
+                p for p in folder.iterdir() if p.is_file() and supported(p.suffix)
+            )
+            if not sources:
+                continue
+            user_id = str(row.get("user_id") or "")
+            if not user_id:
+                continue
+            # 半成品切片清掉，避免 (file_id, seq) 冲突；状态先回 uploaded
+            store.clear_kb_chunks(uid)
+            store.update_kb_status(
+                uid, "uploaded", error="", chunk_count=0, text_count=0, table_count=0
+            )
+            self.submit(uid, user_id, sources[0])
+            restarted.append(file_id)
+            logger.info(
+                "kb 重投中断文件 file_id=%s name=%s prior=%s",
+                file_id,
+                row.get("filename"),
+                row.get("status"),
+            )
+        return restarted
 
     def submit(self, file_id: uuid.UUID, user_id: str, path: Path) -> None:
         key = str(file_id)
