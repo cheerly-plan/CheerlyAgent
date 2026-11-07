@@ -1,54 +1,654 @@
-# 研报指标注册表（配置化竖切阶段）。
+# 研报统一配置（P0 全量收敛）——指标元数据、成员资格、有序名单、分类规则。
 #
-# 边界：这里只描述「指标元数据」与「分类规则」，不承载计算逻辑、数字或校验替换；
-# 抽数 / 同比环比 / 数字校验 / PDF 渲染仍是确定性 Python，防幻觉门禁不被配置绕过。
+# 边界：这里只描述「有哪些指标、怎么认出它们、属于哪些语义组」，绝不承载
+# 计算逻辑、数字或校验替换；抽数 / 同比环比 / 数字校验 / PDF 渲染仍是
+# 确定性 Python，防幻觉门禁不被配置绕过。
 #
-# 竖切阶段只登记「毛利率」作为打通全链路的样板。未登记的指标继续走各模块内的
-# 既有常量，保证行为逐字不变。迁移一个新指标 = 在本文件加一段 + 从对应模块常量
-# 删掉那一项；registry.flag() / *_entry() 一律「已登记优先、未登记回退」。
+# 新增一个指标 = 在本文件加一段（或给已有段补 flag），不再去 8 个模块里
+# 补名单。flags 的 key 就是原先散落在各模块的具名名单：
+#   money_validation / money_pick_facts / money_wide_table / money_cell_unit /
+#   amount_abstract / narrative_first / chart_default / point_in_time /
+#   stock_name / unannotated_ratio / equity_composition / asset_driver /
+#   profit_name / balance_move_name / balance_* / year_end_* / bank_lead_hint 等
+# 每个语义组单独一个 key，是为了保持迁移前各组之间的成员差异（例如金额
+# 白名单 10 项 vs 宽表 8 项 vs 单元格 7 项）——统一口径会悄悄改掉正文。
 #
-# classification 暂置于此（与 industry.py 原有常量一一对应），P1 再拆到独立 specs/。
+# ordering 放顺序敏感 / 标量参数（结论优先级、默认指标集、截断条数等）。
+# classification 放公司名关键字与赛道映射。
+#
+# 维护方式：改完本文件后运行 `uv run python scripts/sync_indicators_snapshot.py`
+# 同步只读降级镜像（registry 在主配置损坏时会回退到镜像）。
+# tests/test_report_registry.py::test_snapshot_matches_shipped_config 会在 CI
+# 里拦截「改了主配置忘了同步」；同一文件里还有各语义组成员差异的回归用例，
+# 新增指标时请一并确认该指标是否需要加入对应的 flags 具名组。
 
 version: 1
-
 indicators:
+  营业收入:
+    table_keys:
+    - 营收
+    - 营业收入
+    table_canonical: 营业收入
+    table_labels:
+    - 营业收入
+    abstract_column: 营业总收入
+    abstract_unit: 元
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_cell_unit: true
+      money_wide_table: true
+      amount_abstract: true
+      chart_default: true
+      money: true
+  扣除非经常性损益:
+    table_keys:
+    - 扣非
+    - 扣非净利润
+    table_canonical: 扣除非经常性损益
+    table_labels:
+    - 扣除非经常性损益的净利润
+    - 扣除非经常性损益后的净利润
+  归属于上市公司股东的净利润:
+    table_keys:
+    - 归母净利润
+    table_canonical: 归属于上市公司股东的净利润
+    table_labels:
+    - 归属于上市公司股东的净利润
+  净利润:
+    table_keys:
+    - 净利润
+    table_canonical: 净利润
+    table_labels:
+    - 净利润
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      profit_name: true
+      money: true
   毛利率:
-    # extract._INDICATORS：需求简称 → (报表正式名, 表格行别名)
+    table_keys:
+    - 毛利率
     table_canonical: 毛利率
-    table_labels: [毛利率, 综合毛利率]
-    # extract._NARRATIVE_PATTERNS：(检索关键词, 正则, 单位)
+    table_labels:
+    - 毛利率
+    - 综合毛利率
     narrative:
       keyword: 毛利率
-      pattern: '毛利率为?\s*([\d,]+(?:\.\d+)?)\s*%'
-      unit: "%"
-    # market_finance._ABSTRACT_MAP：(财务摘要列名, 研报指标名, 单位)
+      pattern: 毛利率为?\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
     abstract_column: 毛利率
-    abstract_unit: "%"
+    abstract_unit: '%'
     flags:
-      money: false          # validate：不参与金额单位折算校验
-      chart: true           # pdf：允许出赛道横比图
-      lead: true            # compose：进入「本期结论」优先级
-      prefer_market: true   # market_finance：半导体横比用摘要累计口径覆盖正文
-      ytd_ratio: true       # market_finance：摘要列按累计比率处理
-    lead_order: 4           # 排在 _LEAD_GENERIC 前四项之后
-
+      chart_default: true
+      prefer_market: true
+      chart: true
+      lead: true
+      ytd_ratio: true
+      ladder: true
+      money: false
+    lead_order: 4
+  研发费用率:
+    table_keys:
+    - 研发费用率
+    table_canonical: 研发费用率
+    table_labels:
+    - 研发费用率
+    - 研发投入占比
+    narrative:
+      keyword: 研发
+      pattern: (?:研发费用率|研发投入占营业收入(?:的比例)?|研发费用占营业收入(?:的比例)?)为?\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+    flags:
+      chart_default: true
+  经营活动产生的现金流量净额:
+    table_keys:
+    - 经营活动产生的现金流量净额
+    table_canonical: 经营活动产生的现金流量净额
+    table_labels:
+    - 经营活动产生的现金流量净额
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_cell_unit: true
+      money_wide_table: true
+      money: true
+  合同负债:
+    table_keys:
+    - 合同负债
+    table_canonical: 合同负债
+    table_labels:
+    - 合同负债
+    narrative:
+      keyword: 合同负债
+      pattern: 合同负债\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_cell_unit: true
+      money_wide_table: true
+      stock_name: true
+      money: true
+  存货:
+    table_keys:
+    - 存货
+    table_canonical: 存货
+    table_labels:
+    - 存货
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_cell_unit: true
+      money_wide_table: true
+      stock_name: true
+      money: true
+  在手订单:
+    table_keys:
+    - 在手订单
+    table_canonical: 在手订单
+    table_labels:
+    - 在手订单
+    - 新签订单
+    - 订单金额
+    narrative:
+      keyword: 在手订单
+      pattern: (?:在手订单|新签订单)(?:金额|总额|合计)?(?:约为|为|达)?\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_wide_table: true
+      stock_name: true
+      money: true
+  存货周转率:
+    narrative:
+      keyword: 存货周转
+      pattern: 存货周转率(?:（次）)?为?\s*([\d,]+(?:\.\d+)?)
+      unit: 次
+  资产负债率:
+    narrative:
+      keyword: 资产负债率
+      pattern: 资产负债率为?\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  产能利用率:
+    narrative:
+      keyword: 产能利用
+      pattern: (?:产能利用率|稼动率)为?\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  大客户集中度:
+    narrative:
+      keyword: 客户
+      pattern: (?:前五名客户合计(?:销售)?占比|客户集中度|向前五名客户销售(?:额)?占(?:年度)?销售(?:总额)?的比例)为?\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  净息差:
+    narrative:
+      keyword: 净息差
+      pattern: 净息差\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+    flags:
+      unannotated_ratio: true
+      bank_lead_hint: true
+  不良贷款率:
+    narrative:
+      keyword: 不良贷款率
+      pattern: 不良贷款率\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+    year_end:
+      pattern: 不良贷款率\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+    flags:
+      point_in_time: true
+      bank_lead_hint: true
+  不良贷款拨备覆盖率:
+    narrative:
+      keyword: 拨备覆盖率
+      pattern: 不良贷款拨备覆盖率\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+    year_end:
+      pattern: 不良贷款拨备覆盖率\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+    flags:
+      bank_lead_hint: true
+  加权平均净资产收益率:
+    narrative:
+      keyword: 加权平均净资产收益率
+      pattern: 加权平均净资产收益率（ROE）\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  核心一级资本充足率:
+    narrative:
+      keyword: 核心一级资本充足率
+      pattern: 核心一级资本充足率为?\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  资本充足率:
+    narrative:
+      keyword: 资本充足率
+      pattern: (?<!一级)资本充足率为?\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+    flags:
+      point_in_time: true
+      bank_lead_hint: true
+  利息净收入:
+    narrative:
+      keyword: 利息净收入
+      pattern: 利息净收入\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      narrative_first: true
+  非利息收入:
+    narrative:
+      keyword: 非利息收入
+      pattern: 非利息收入\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      narrative_first: true
+  成本收入比:
+    narrative:
+      keyword: 成本收入比
+      pattern: 成本收入比\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  平均总资产回报率:
+    narrative:
+      keyword: 平均总资产回报率
+      pattern: 平均总资产回报率（ROA）\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  非利息收入占比:
+    narrative:
+      keyword: 在营业收入中占比
+      pattern: 非利息收入在营业收入中占比为\s*([\d,]+(?:\.\d+)?)\s*%
+      unit: '%'
+  手续费及佣金净收入:
+    narrative:
+      keyword: 手续费及佣金净收入
+      pattern: 手续费及佣金净收入\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      narrative_first: true
+  业务及管理费:
+    narrative:
+      keyword: 业务及管理费
+      pattern: 业务及管理费\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      narrative_first: true
+  资产减值损失:
+    narrative:
+      keyword: 资产减值损失
+      pattern: 资产减值损失\s*(?:\$\s*\^\{\d+\}\s*\$|(?:[2-9])(?=\d{3}(?:\.\d+)?\s*亿))?\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      narrative_first: true
+  发放贷款和垫款总额:
+    narrative:
+      keyword: 发放贷款和垫款总额
+      pattern: (?<!人民币)发放贷款和垫款总额(?:\s*\$\s*\^\{\d+\}\s*\$|(?:[2-9])(?=\d{3},\d{3}))?\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    year_end:
+      pattern: (?<!人民币)发放贷款和垫款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      narrative_first: true
+      stock_name: true
+  吸收存款总额:
+    narrative:
+      keyword: 吸收存款总额
+      pattern: (?<!人民币)吸收存款总额(?:\s*\$\s*\^\{\d+\}\s*\$|(?:[2-9])(?=\d{3},\d{3}))?\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    year_end:
+      pattern: (?<!人民币)吸收存款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      narrative_first: true
+      stock_name: true
+  资产总计:
+    year_end:
+      pattern: 资产总计\s*([\d,]+(?:\.\d+)?)\s*亿元
+      unit: 亿元
+    flags:
+      stock_name: true
+  扣非净利润:
+    abstract_column: 扣非净利润
+    abstract_unit: 元
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_cell_unit: true
+      money_wide_table: true
+      amount_abstract: true
+      profit_name: true
+      chart_default: true
+      money: true
+  营业收入同比:
+    abstract_column: 营业总收入增长率
+    abstract_unit: '%'
+  折旧:
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_cell_unit: true
+      money_wide_table: true
+      money: true
+  资本开支:
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money_cell_unit: true
+      money_wide_table: true
+      money: true
+  利润总额:
+    flags:
+      money_validation: true
+      money_pick_facts: true
+      money: true
+  拨备覆盖率:
+    flags:
+      point_in_time: true
+  总资产:
+    flags:
+      stock_name: true
+      balance_year_end_row: true
+      year_end_reason_row: true
+  所有者权益合计:
+    flags:
+      stock_name: true
+  归属于母公司所有者权益合计:
+    flags:
+      stock_name: true
+  归属于上市公司股东的净资产:
+    flags:
+      stock_name: true
+      balance_year_end_row: true
+  不良贷款总额:
+    flags:
+      stock_name: true
+  归属于上市公司股东的所有者权益:
+    flags:
+      stock_name: true
+      balance_year_end_row: true
+      year_end_reason_row: true
+  其他综合收益:
+    flags:
+      equity_composition: true
+      balance_move_name: true
+      balance_search_keyword: true
+  未分配利润:
+    flags:
+      equity_composition: true
+      balance_move_name: true
+      balance_search_keyword: true
+  资本公积:
+    flags:
+      equity_composition: true
+      balance_move_name: true
+      balance_search_keyword: true
+  其他权益工具投资:
+    flags:
+      asset_driver: true
+      balance_move_name: true
+      balance_search_keyword: true
+      year_end_reason_keyword: true
+  其他非流动金融资产:
+    flags:
+      asset_driver: true
+      balance_move_name: true
+  货币资金:
+    flags:
+      asset_driver: true
+      balance_move_name: true
+      balance_search_keyword: true
+  归属于母公司所有者的净利润:
+    flags:
+      profit_name: true
+  归属于上市公司股东的扣除非经常性损益的净利润:
+    flags:
+      profit_name: true
+  实收资本（或股本）:
+    flags:
+      balance_move_name: true
+  实收资本(或股本):
+    flags:
+      balance_move_name: true
+  合并资产负债表:
+    flags:
+      balance_search_keyword: true
+  公允价值:
+    flags:
+      year_end_reason_keyword: true
+  比上年度末:
+    flags:
+      year_end_reason_keyword: true
+ordering:
+  year_end_order:
+  - 不良贷款率
+  - 不良贷款拨备覆盖率
+  - 发放贷款和垫款总额
+  - 吸收存款总额
+  - 资产总计
+  abstract_order:
+  - 毛利率
+  - 营业收入
+  - 扣非净利润
+  - 营业收入同比
+  equity_composition_order:
+  - 其他综合收益
+  - 未分配利润
+  - 资本公积
+  asset_drivers_order:
+  - 其他权益工具投资
+  - 其他非流动金融资产
+  - 货币资金
+  balance_move_names_order:
+  - 其他权益工具投资
+  - 其他非流动金融资产
+  - 货币资金
+  - 其他综合收益
+  - 未分配利润
+  - 资本公积
+  - 实收资本（或股本）
+  - 实收资本(或股本)
+  balance_year_end_rows:
+  - 总资产
+  - 归属于上市公司股东的所有者权益
+  - 归属于上市公司股东的净资产
+  balance_search_keywords:
+  - 其他权益工具投资
+  - 其他综合收益
+  - 未分配利润
+  - 资本公积
+  - 货币资金
+  - 合并资产负债表
+  year_end_reason_rows:
+  - 总资产
+  - 归属于上市公司股东的所有者权益
+  year_end_reason_keywords:
+  - 其他权益工具投资
+  - 公允价值
+  - 比上年度末
+  lead_bank:
+  - 营业收入
+  - 归属于母公司所有者的净利润
+  - 净利润
+  - 净息差
+  - 不良贷款率
+  - 不良贷款拨备覆盖率
+  lead_generic:
+  - 营业收入
+  - 扣非净利润
+  - 净利润
+  - 经营活动产生的现金流量净额
+  - 毛利率
+  lead_operating:
+  - 营业收入
+  - 扣非净利润
+  - 经营活动产生的现金流量净额
+  lead_net_profit:
+  - 净利润
+  - 归属于母公司所有者的净利润
+  - 扣非净利润
+  lead_max: 3
+  pdf_default_indicators:
+  - 营业收入
+  - 毛利率
+  - 研发费用率
+  - 扣非净利润
+  market_default_indicators:
+  - 营业收入
+  - 扣非净利润
+  - 毛利率
+  - 研发费用率
+  chart_defaults:
+  - 营业收入
+  - 扣非净利润
+  - 毛利率
+  - 研发费用率
+  indicator_keys:
+  - name: 扣非净利润
+    aliases:
+    - 扣非净利润
+    - 扣非
+  - name: 归母净利润
+    aliases:
+    - 归母净利润
+    - 归母
+  - name: 毛利率
+    aliases:
+    - 毛利率
+  - name: 净利润
+    aliases:
+    - 净利润
+  - name: 营业收入
+    aliases:
+    - 营业收入
+    - 营收
+  segment_table_core: 6
+  ocf: 经营活动产生的现金流量净额
+  rnd_ratio_indicator: 研发费用率
+  money_scale_units:
+  - 万元
+  - 人民币万元
+  - 人民币亿元
+  - 人民币千元
+  - 人民币百万元
+  - 亿元
+  - 千元
+  - 百万元
+  yoy_frame:
+  - 亏损扩大
+  - 亏损收窄
+  - 亏损持平
+  - 扭亏为盈
+  - 由盈转亏
 classification:
-  # 公司名关键字 → 细类型；顺序敏感（长词靠前），与 industry.py 原 _NAME_HINTS 一致
   name_hints:
-    - [银行, bank]
-    - [置业, real_estate]
-    - [地产, real_estate]
-    - [房地产, real_estate]
-    - [软件, software]
-    - [互联, software]
-    - [云, software]
-    - [钢铁, cyclical]
-    - [化工, cyclical]
-    - [煤炭, cyclical]
-    - [有色, cyclical]
-  # 半导体赛道名 → 细类型；与 industry.py 原 _SEGMENT_TO_TYPE 一致
+  - - 银行
+    - bank
+  - - 置业
+    - real_estate
+  - - 地产
+    - real_estate
+  - - 房地产
+    - real_estate
+  - - 软件
+    - software
+  - - 互联
+    - software
+  - - 云
+    - software
+  - - 钢铁
+    - cyclical
+  - - 化工
+    - cyclical
+  - - 煤炭
+    - cyclical
+  - - 有色
+    - cyclical
   segment_to_type:
     设计: fabless
     制造: foundry
     设备: equipment
     封测: packaging
+aliases:
+- - 加权平均净资产收益率
+  - 加权平均净资产收益率
+- - 核心一级资本充足率
+  - 核心一级资本充足率
+- - 不良贷款拨备覆盖率
+  - 不良贷款拨备覆盖率
+- - 拨备覆盖率
+  - 不良贷款拨备覆盖率
+- - 不良贷款率
+  - 不良贷款率
+- - 不良率
+  - 不良贷款率
+- - 利息净收入
+  - 利息净收入
+- - 净利息收入
+  - 利息净收入
+- - 非利息收入占比
+  - 非利息收入占比
+- - 非利息收入
+  - 非利息收入
+- - 非息收入
+  - 非利息收入
+- - 非息占比
+  - 非利息收入占比
+- - 手续费及佣金净收入
+  - 手续费及佣金净收入
+- - 业务及管理费
+  - 业务及管理费
+- - 成本收入比
+  - 成本收入比
+- - 资产减值损失
+  - 资产减值损失
+- - 发放贷款和垫款总额
+  - 发放贷款和垫款总额
+- - 吸收存款总额
+  - 吸收存款总额
+- - 归属于母公司所有者的净利润
+  - 归属于母公司所有者的净利润
+- - 经营活动产生的现金流量净额
+  - 经营活动产生的现金流量净额
+- - 经营现金流
+  - 经营活动产生的现金流量净额
+- - 存货周转率
+  - 存货周转率
+- - 存货周转
+  - 存货周转率
+- - 大客户集中度
+  - 大客户集中度
+- - 客户集中度
+  - 大客户集中度
+- - 产能利用率
+  - 产能利用率
+- - 稼动率
+  - 产能利用率
+- - 合同负债
+  - 合同负债
+- - 在手订单
+  - 在手订单
+- - 新签订单
+  - 在手订单
+- - 存货
+  - 存货
+- - 资产负债率
+  - 资产负债率
+- - 资本开支
+  - 资本开支
+- - CAPEX
+  - 资本开支
+- - 利润总额
+  - 利润总额
+- - 净息差
+  - 净息差
+- - 资本充足率
+  - 资本充足率
+- - 净资产收益率
+  - 加权平均净资产收益率
+- - ROE
+  - 加权平均净资产收益率
+- - ROA
+  - 平均总资产回报率
+- - NIM
+  - 净息差
+- - PPOP
+  - 拨备前利润

@@ -261,6 +261,77 @@ def test_operating_quote_strips_shareholder_splice():
     assert "围绕重点应用板块" in body
 
 
+def test_operating_quote_excises_hollow_tail_keeps_narrative():
+    """空缺尾巴／科目罗列要切掉，但有效经营句必须留下（不能整段扔）。"""
+    from ai_agent.report.analyze import (
+        _extract_operating_narrative,
+        _is_usable_operating_quote,
+    )
+
+    catalog = (
+        "前三季度(月)年前三季度(月)其中:营业成本 利息支出 手续费及佣金支出 "
+        "退保金 赔付支出净额 提取保险责任准备金净额 保单红利支出 分保费用 "
+        "税金及附加 销售费用 管理费用 研发费用"
+    )
+    assert _extract_operating_narrative(catalog) == ""
+    assert not _is_usable_operating_quote(catalog)
+
+    hollow_only = "扣除非经常性损益后归属于上市公司股东的净利润为人民币 亿元，同比增长 。"
+    assert not _is_usable_operating_quote(hollow_only)
+    assert _extract_operating_narrative(hollow_only) == ""
+
+    # 经营句 + 空缺尾巴粘在同一段：切尾巴、留经营
+    glued = (
+        "公司前三季度围绕重点应用板块，持续优化技术、产能与客户布局，"
+        "加速推进先进封装产能落地与配套能力升级，"
+        "扣除非经常性损益后归属于上市公司股东的净利润为人民币 亿元，同比增长 。"
+    )
+    cleaned = _extract_operating_narrative(glued)
+    assert "围绕重点应用板块" in cleaned
+    assert "先进封装产能落地" in cleaned
+    assert "人民币 亿元" not in cleaned
+    assert "同比增长" not in cleaned
+
+    pack = [
+        EvidenceItem(
+            evidence_id="e0",
+            file_id=_FILE_ID,
+            filename="长电科技2025Q3.pdf",
+            page=3,
+            section="经营情况讨论与分析",
+            quote=glued,
+        ),
+        EvidenceItem(
+            evidence_id="e1",
+            file_id=_FILE_ID,
+            filename="长电科技2025Q3.pdf",
+            page=9,
+            section="合并利润表",
+            quote=catalog,
+        ),
+    ]
+    plan = ReportPlan(
+        title="长电 2025Q3",
+        kind="company",
+        deliverable="markdown",
+        subjects=["江苏长电科技股份有限公司"],
+        period="2025Q3",
+        dimensions=["同比"],
+        indicators=["营业收入"],
+        outline=[OutlineItem("经营解读", "")],
+        gaps=[],
+        skill_id="company_financial_report",
+    )
+    body = "\n".join(_deterministic_lines(plan, [], pack))
+    assert "围绕重点应用板块" in body
+    assert "先进封装" in body
+    assert "退保金" not in body
+    assert "营业成本 利息支出" not in body
+    assert "人民币 亿元" not in body
+    assert "毛利率" not in body or "原文披露" in body
+    assert body.count("原文披露：") >= 1
+
+
 def test_volume_price_quote_not_dropped_by_change_table_headers():
     """变动原因表头不能误伤「量价齐升」单元格原文；两条关键原文都要保留。"""
     pack = [

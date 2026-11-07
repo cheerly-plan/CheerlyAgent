@@ -13,20 +13,16 @@ from ai_agent.report.compare import SeriesCompare, parse_number
 from ai_agent.report.extract import IndicatorFact
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.supplemental import SupplementalResult, signed_delta
+from ai_agent.report import registry
 
 # 归母权益增量 / 构成科目变动量级（|Δ| 之和）≥ 此阈值 → 允许写「占权益增量 X%」。
 # 基准必须是科目变动，不能用上年末权益总额：否则大盘公司小幅增厚会被误判不适用。
 EQUITY_GROWTH_RATIO = Decimal("0.10")
 
 # 与 compose._EQUITY_COMPOSITION 对齐：占比拆解用的科目。
-_EQUITY_COMPOSITION = ("其他综合收益", "未分配利润", "资本公积")
+_EQUITY_COMPOSITION = registry.ordering_list("equity_composition_order")
 
-_PROFIT_NAMES = (
-    "扣非净利润",
-    "归属于母公司所有者的净利润",
-    "归属于上市公司股东的扣除非经常性损益的净利润",
-    "净利润",
-)
+_PROFIT_NAMES = tuple(registry.names_with("profit_name"))
 
 
 @dataclass(frozen=True)

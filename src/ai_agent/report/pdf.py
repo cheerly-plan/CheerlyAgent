@@ -141,11 +141,11 @@ def _segment_peer_charts(
     current = [fact for fact in facts if fact.period == plan.period]
     indicators = [
         name
-        for name in (plan.indicators or ["营业收入", "毛利率", "研发费用率", "扣非净利润"])
+        for name in (plan.indicators or list(registry.ordering_list("pdf_default_indicators")))
         if registry.flag(
             name,
             "chart",
-            default=name in {"营业收入", "扣非净利润", "毛利率", "研发费用率"},
+            default=name in registry.names_with("chart_default"),
         )
     ]
     charts: list[ChartSpec] = []

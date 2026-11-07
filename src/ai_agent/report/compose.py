@@ -68,29 +68,12 @@ _READING_NOTE_SEGMENT = (
 
 # 「本期结论」只提炼几条主线，完整指标集留给「主要指标与出处」表。
 # 顺序即优先级；同组里靠前的命中后，靠后的同组名不再重复（如已有归母则不再写净利润）。
-_LEAD_BANK = (
-    "营业收入",
-    "归属于母公司所有者的净利润",
-    "净利润",
-    "净息差",
-    "不良贷款率",
-    "不良贷款拨备覆盖率",
-)
-_LEAD_GENERIC = (
-    "营业收入",
-    "扣非净利润",
-    "净利润",
-    "经营活动产生的现金流量净额",
-    "毛利率",
-)
-_LEAD_MAX = 3
-_LEAD_NET_PROFIT = frozenset({"归属于母公司所有者的净利润", "净利润", "扣非净利润"})
+_LEAD_BANK = registry.ordering_list("lead_bank")
+_LEAD_GENERIC = registry.ordering_list("lead_generic")
+_LEAD_MAX = registry.ordering_int("lead_max")
+_LEAD_NET_PROFIT = frozenset(registry.ordering_list("lead_net_profit"))
 # 结论首句优先并列的经营主线（有则写入同一句，不再拆成多句平铺）。
-_LEAD_OPERATING = (
-    "营业收入",
-    "扣非净利润",
-    "经营活动产生的现金流量净额",
-)
+_LEAD_OPERATING = registry.ordering_list("lead_operating")
 
 
 @dataclass
@@ -445,7 +428,7 @@ def _is_bank_lead(plan: ReportPlan, by_name: dict[str, IndicatorFact]) -> bool:
         return True
     return any(
         name in by_name
-        for name in ("净息差", "不良贷款率", "不良贷款拨备覆盖率", "资本充足率")
+        for name in registry.names_with("bank_lead_hint")
     )
 
 
@@ -657,8 +640,8 @@ def _year_end_lines(
 
 
 # 归母权益构成拆解优先科目（顺序即叙述优先级）。
-_EQUITY_COMPOSITION = ("其他综合收益", "未分配利润", "资本公积")
-_ASSET_DRIVERS = ("其他权益工具投资", "其他非流动金融资产", "货币资金")
+_EQUITY_COMPOSITION = registry.ordering_list("equity_composition_order")
+_ASSET_DRIVERS = registry.ordering_list("asset_drivers_order")
 
 
 def _equity_composition_lines(
@@ -1054,15 +1037,7 @@ def _cell_with_unit(fact: IndicatorFact | None, *, indicator: str = "") -> str:
     if unit:
         return f"{fact.value}{unit}"
     # 金额类缺单位时默认补「元」，避免同行带单位、本格裸数字。
-    money = {
-        "营业收入",
-        "扣非净利润",
-        "经营活动产生的现金流量净额",
-        "合同负债",
-        "存货",
-        "资本开支",
-        "折旧",
-    }
+    money = registry.names_with("money_cell_unit")
     if indicator in money or (not unit and _looks_like_money(fact.value)):
         return f"{fact.value}元"
     return str(fact.value)
@@ -1100,16 +1075,7 @@ def _wide_segment_table(
     lines = [header, sep]
     money_units: set[str] = set()
     converted_raw: set[str] = set()
-    money_names = {
-        "营业收入",
-        "扣非净利润",
-        "经营活动产生的现金流量净额",
-        "合同负债",
-        "存货",
-        "在手订单",
-        "资本开支",
-        "折旧",
-    }
+    money_names = registry.names_with("money_wide_table")
     for company in names:
         cells = [company]
         for indicator in indicators:
@@ -1158,7 +1124,7 @@ def _margin_ladder_table(current: list[IndicatorFact]) -> list[str]:
 
     rows: list[tuple[object, str, IndicatorFact]] = []
     for fact in current:
-        if fact.name != "毛利率":
+        if not registry.flag(fact.name, "ladder"):
             continue
         parsed = parse_number(fact.value)
         if parsed is None:
@@ -1179,8 +1145,8 @@ def _margin_ladder_table(current: list[IndicatorFact]) -> list[str]:
     return lines
 
 
-_SEGMENT_TABLE_CORE = 6
-_OCF = "经营活动产生的现金流量净额"
+_SEGMENT_TABLE_CORE = registry.ordering_int("segment_table_core")
+_OCF = registry.ordering_str("ocf")
 
 
 def _segment_table_indicators(typed: list[str]) -> list[str]:

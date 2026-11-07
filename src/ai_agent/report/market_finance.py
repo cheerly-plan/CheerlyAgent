@@ -27,16 +27,13 @@ _SOURCE = "akshare.stock_financial_abstract"
 _SOURCE_RD = "akshare.stock_profit_sheet_by_report_em"
 
 # 抽象表指标名 → 研报指标名
-_ABSTRACT_MAP: tuple[tuple[str, str, str], ...] = (
-    ("毛利率", "毛利率", "%"),
-    ("营业总收入", "营业收入", "元"),
-    ("扣非净利润", "扣非净利润", "元"),
-    ("营业总收入增长率", "营业收入同比", "%"),
-)
+_ABSTRACT_MAP: tuple[tuple[str, str, str], ...] = registry.abstract_map()
 
-_AMOUNT_INDICATORS = frozenset({"营业收入", "扣非净利润"})
+_AMOUNT_INDICATORS = registry.names_with("amount_abstract")
 # 半导体行业横比时，毛利率一律用财务摘要累计列，覆盖季报正文「本季」叙述。
-_SEMICONDUCTOR_PREFER_MARKET = frozenset({"毛利率"})
+_SEMICONDUCTOR_PREFER_MARKET = registry.names_with("prefer_market")
+# 利润表推算的那个比率指标名由配置给定（新增同类指标不用改本模块）。
+_RND_RATIO_INDICATOR = registry.ordering_str("rnd_ratio_indicator")
 
 
 def period_column(period: str) -> str | None:
@@ -78,7 +75,9 @@ def supplement_facts_from_market(
     roster = _market_roster(plan, skill)
     if not roster:
         return facts, missing
-    wanted = list(plan.indicators) or ["营业收入", "扣非净利润", "毛利率", "研发费用率"]
+    wanted = list(plan.indicators) or list(
+        registry.ordering_list("market_default_indicators")
+    )
     col = period_column(plan.period)
     if not col:
         return facts, missing
@@ -207,7 +206,7 @@ def _fetch_one(
     indicator: str,
 ) -> IndicatorFact | None:
     try:
-        if indicator == "研发费用率":
+        if indicator == _RND_RATIO_INDICATOR:
             return _rd_rate_fact(subject, code, period, col)
         return _abstract_fact(subject, code, period, col, indicator)
     except Exception:
@@ -259,7 +258,7 @@ def _abstract_fact(
     # 财务摘要报告期列是期末累计口径（Q3=前三季度），毛利率等同列比率也是累计。
     is_amount = indicator in _AMOUNT_INDICATORS
     is_ytd_ratio = registry.flag(
-        indicator, "ytd_ratio", default=indicator == "毛利率"
+        indicator, "ytd_ratio", default=False
     )
     if is_ytd_ratio:
         basis, months = CUMULATIVE, cumulative_months(period)
@@ -340,7 +339,7 @@ def _rd_rate_fact(
     return IndicatorFact(
         subject=subject,
         period=period,
-        name="研发费用率",
+        name=_RND_RATIO_INDICATOR,
         value=value,
         unit="%",
         column="利润表推算研发费用率",
@@ -349,7 +348,7 @@ def _rd_rate_fact(
         basis=basis,
         coverage_months=months,
         evidence=Evidence(
-            file_id=_synthetic_id(code, period, "研发费用率"),
+            file_id=_synthetic_id(code, period, _RND_RATIO_INDICATOR),
             filename=_SOURCE_RD,
             page=None,
             page_end=None,

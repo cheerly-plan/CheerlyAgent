@@ -373,32 +373,8 @@ def _view_number(value: str) -> str:
     return _number_key(value).lstrip("+-").rstrip("%")
 
 
-_MONEY_SCALE_UNITS = frozenset(
-    {
-        "千元",
-        "人民币千元",
-        "万元",
-        "人民币万元",
-        "百万元",
-        "人民币百万元",
-        "亿元",
-        "人民币亿元",
-    }
-)
-_MONEY_INDICATORS = frozenset(
-    {
-        "营业收入",
-        "扣非净利润",
-        "净利润",
-        "利润总额",
-        "经营活动产生的现金流量净额",
-        "合同负债",
-        "存货",
-        "在手订单",
-        "资本开支",
-        "折旧",
-    }
-)
+_MONEY_SCALE_UNITS = frozenset(registry.ordering_list("money_scale_units"))
+_MONEY_INDICATORS = registry.names_with("money_validation")
 _QUOTE_SCALE_UNIT = re.compile(
     r"单位[:：]\s*(?:人民币)?(千元|万元|百万元|亿元)"
 )
@@ -504,7 +480,7 @@ def _structured_source(filename: str) -> bool:
 
 
 _SECTION = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
-_YOY_FRAME = ("亏损扩大", "亏损收窄", "亏损持平", "扭亏为盈", "由盈转亏")
+_YOY_FRAME = registry.ordering_list("yoy_frame")
 
 
 def _section_text(markdown: str, title: str) -> str:

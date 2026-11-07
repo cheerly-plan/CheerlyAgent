@@ -27,6 +27,7 @@ from ai_agent.report.extract import (
     _row_rank,
     _unit_of,
 )
+from ai_agent.report import registry
 
 logger = get_logger(__name__)
 
@@ -38,27 +39,7 @@ _NUMBER = re.compile(r"^[\s（(]*-?\d[\d,，]*(?:\.\d+)?%?[\s)）]*$")
 
 # 经营分析正文里带「较上年末」变动的指标。值正则用于定位，随后只在该值
 # 之后、句号之前的短窗口里找变动描述，避免跨句抓到别人的百分比。
-_YEAR_END_SPECS: tuple[tuple[str, str, str], ...] = (
-    ("不良贷款率", r"不良贷款率\s*([\d,]+(?:\.\d+)?)\s*%", "%"),
-    (
-        "不良贷款拨备覆盖率",
-        r"不良贷款拨备覆盖率\s*([\d,]+(?:\.\d+)?)\s*%",
-        "%",
-    ),
-    (
-        "发放贷款和垫款总额",
-        r"(?<!人民币)发放贷款和垫款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*"
-        r"([\d,]+(?:\.\d+)?)\s*亿元",
-        "亿元",
-    ),
-    (
-        "吸收存款总额",
-        r"(?<!人民币)吸收存款总额(?:\s*\$\s*\^\{\d+\}\s*\$)?\s*"
-        r"([\d,]+(?:\.\d+)?)\s*亿元",
-        "亿元",
-    ),
-    ("资产总计", r"资产总计\s*([\d,]+(?:\.\d+)?)\s*亿元", "亿元"),
-)
+_YEAR_END_SPECS: tuple[tuple[str, str, str], ...] = registry.year_end_specs()
 _YEAR_END_ANCHOR = re.compile(r"比上年末|较上年末|比上年度末")
 _CHANGE_TOKEN = re.compile(
     r"(下降|上升|增长|减少|增加)\s*([\d,]+(?:\.\d+)?)\s*(个百分点|%|亿元)"
@@ -326,23 +307,14 @@ class _BalanceYearEnd:
 
 
 # 权益暴涨时优先拆的资产负债表科目（合并报表「本期末｜上年末」两列）。
-_BALANCE_MOVE_NAMES = (
-    "其他权益工具投资",
-    "其他非流动金融资产",
-    "货币资金",
-    "其他综合收益",
-    "未分配利润",
-    "资本公积",
-    "实收资本（或股本）",
-    "实收资本(或股本)",
-)
+_BALANCE_MOVE_NAMES = registry.ordering_list("balance_move_names_order")
 
 _DATE_HEADER = re.compile(r"20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 
 
 def _balance_year_end_rows(text: str) -> list[_BalanceYearEnd]:
     """读「本报告期末｜上年度末｜比上年度末增减」表，常见于非金融公司季报第 1–2 页。"""
-    wanted = ("总资产", "归属于上市公司股东的所有者权益", "归属于上市公司股东的净资产")
+    wanted = registry.ordering_list("balance_year_end_rows")
     found: list[_BalanceYearEnd] = []
     for table in _TABLE.finditer(text):
         block = table.group(0)
@@ -410,14 +382,7 @@ def _balance_move_views(file_ids: list, files: list[dict]) -> list[BalanceMoveVi
     by_id = {str(row.get("file_id")): row for row in files}
     try:
         chunks = store.search_kb_chunks_keyword(
-            [
-                "其他权益工具投资",
-                "其他综合收益",
-                "未分配利润",
-                "资本公积",
-                "货币资金",
-                "合并资产负债表",
-            ],
+            list(registry.ordering_list("balance_search_keywords")),
             file_ids=file_ids,
             top_k=16,
             kinds=["table"],
@@ -460,10 +425,10 @@ def _balance_move_views(file_ids: list, files: list[dict]) -> list[BalanceMoveVi
 def _year_end_reason_views(file_ids: list, files: list[dict]) -> list[YearEndReasonView]:
     """读变动原因表：总资产／归母权益旁的「主要是…」原文。"""
     by_id = {str(row.get("file_id")): row for row in files}
-    wanted = ("总资产", "归属于上市公司股东的所有者权益")
+    wanted = registry.ordering_list("year_end_reason_rows")
     try:
         chunks = store.search_kb_chunks_keyword(
-            ["其他权益工具投资", "公允价值", "比上年度末"],
+            list(registry.ordering_list("year_end_reason_keywords")),
             file_ids=file_ids,
             top_k=8,
             kinds=["table", "text"],

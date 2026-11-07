@@ -20,6 +20,7 @@ from ai_agent.report.industry import (
     industry_of,
 )
 from ai_agent.report.skills import ReportSkill, get_skill, resolve_skill, skill_ids
+from ai_agent.report import registry
 
 logger = get_logger(__name__)
 
@@ -38,13 +39,7 @@ _MARKDOWN_ONLY = re.compile(
     re.I,
 )
 # 长名称放前面，避免「净利润」从「扣非净利润」里再认一次
-_INDICATOR_KEYS = (
-    ("扣非净利润", ("扣非净利润", "扣非")),
-    ("归母净利润", ("归母净利润", "归母")),
-    ("毛利率", ("毛利率",)),
-    ("净利润", ("净利润",)),
-    ("营业收入", ("营业收入", "营收")),
-)
+_INDICATOR_KEYS = registry.indicator_keys()
 # 默认指标集在 report/industry.py 按主体所属行业选择，这里只处理「需求点名」。
 _INDUSTRY_STOP = {"所属", "本公司", "该", "全", "本"}
 

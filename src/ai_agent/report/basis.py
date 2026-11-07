@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+from ai_agent.report import registry
 
 CUMULATIVE = "cumulative"
 SINGLE = "single"
@@ -21,26 +22,13 @@ _MONTHS = {"Q1": 3, "H1": 6, "Q3": 9, "Q4": 12}
 _RATIO_NAME = re.compile(r"(率|比率|息差|倍数|指数)$")
 _RATIO_UNIT = re.compile(r"(%|％|百分点)")
 # 期末快照类比率：跨期比百分点有意义，但不受累计期数影响
-_POINT_IN_TIME = ("不良贷款率", "拨备覆盖率", "资本充足率")
+_POINT_IN_TIME = tuple(registry.names_with("point_in_time"))
 # 用显式名单，不要用「总额$」这类宽泛正则：「利润总额」「负债总额」是期间
 # 发生额或科目合计，不是期末时点存量，套上 stock 口径等于造新错。
-_STOCK_NAMES = (
-    "发放贷款和垫款总额",
-    "吸收存款总额",
-    "不良贷款总额",
-    "资产总计",
-    "总资产",  # 制造业季报主要财务数据表常用名
-    "所有者权益合计",
-    "归属于母公司所有者权益合计",
-    "归属于上市公司股东的所有者权益",
-    "归属于上市公司股东的净资产",
-    "合同负债",
-    "存货",
-    "在手订单",
-)
+_STOCK_NAMES = tuple(registry.names_with("stock_name"))
 # 原文没写年化、我们也不替它推断的比率。同表 ROE 明确标了「(%,年化)」，
 # 净息差没有——这种差异必须写进正文，不能拿外部行业均值硬比。
-_UNANNOTATED_RATIO = ("净息差",)
+_UNANNOTATED_RATIO = tuple(registry.names_with("unannotated_ratio"))
 
 
 def period_token(period: str) -> str:

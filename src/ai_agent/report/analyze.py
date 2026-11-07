@@ -325,12 +325,10 @@ def _deterministic_lines(
         ):
             continue
         for snippet in _iter_reason_snippets(raw):
-            snippet = _extract_operating_narrative(snippet) or snippet
-            if len(snippet) < 20:
+            snippet = _extract_operating_narrative(snippet)
+            if not snippet or not _is_usable_operating_quote(snippet):
                 continue
             if _is_form_chrome(snippet):
-                continue
-            if any(token in snippet for token in _SHAREHOLDER_NOISE):
                 continue
             key = snippet[:40]
             if key in seen_snippets:
@@ -463,8 +461,10 @@ def _iter_reason_snippets(quote: str) -> list[str]:
                 stop = piece.find("。")
                 if stop >= 0:
                     piece = piece[: stop + 1]
-            cleaned = _strip_quote_numbers(piece.strip(" ；;|"))
-            if len(cleaned) < 20:
+            cleaned = _keep_operating_fragments(
+                _strip_quote_numbers(piece.strip(" ；;|"))
+            )
+            if not cleaned:
                 continue
             snippets.append(cleaned)
             occupied.append((idx, idx + max(len(piece), 1)))
@@ -473,7 +473,7 @@ def _iter_reason_snippets(quote: str) -> list[str]:
             break
     if snippets:
         return snippets
-    fallback = _reason_only(quote)
+    fallback = _keep_operating_fragments(_reason_only(quote))
     return [fallback] if fallback else []
 
 
@@ -514,6 +514,65 @@ _OPERATING_CONTENT = (
     "出货",
     "存储",
 )
+# 利润表模板科目；成串出现 = 科目清单，不是经营解读。
+_PL_ACCOUNT_NAMES = (
+    "营业成本",
+    "利息支出",
+    "手续费及佣金支出",
+    "退保金",
+    "赔付支出",
+    "提取保险责任准备金净额",
+    "提取保险责任准备金",
+    "保单红利支出",
+    "分保费用",
+    "税金及附加",
+    "销售费用",
+    "管理费用",
+    "研发费用",
+    "财务费用",
+    "资产减值损失",
+    "信用减值损失",
+    "其他收益",
+    "投资收益",
+    "公允价值变动收益",
+    "营业外收入",
+    "营业外支出",
+    "所得税费用",
+)
+# 封测／制造公司正文不该出现的跨行业科目（保险／银行模板残留）。
+_CROSS_INDUSTRY_ACCOUNTS = (
+    "退保金",
+    "赔付支出",
+    "保单红利",
+    "提取保险责任准备金",
+    "分保费用",
+    "净息差",
+    "不良贷款",
+    "拨备覆盖率",
+    "利息净收入",
+)
+_NARRATIVE_CUES = (
+    "优化",
+    "布局",
+    "增长",
+    "下降",
+    "提升",
+    "推进",
+    "持续",
+    "实现",
+    "所致",
+    "主要是",
+    "主要系",
+    "围绕",
+    "保持",
+    "量价",
+    "出货",
+    "发力",
+    "向好",
+)
+_HOLLOW_NUMBER_SLOT = re.compile(
+    r"(＿|_{2,}|人民币\s+亿?元|为\s+元|同比\s*(?:增长|下降|增减)?\s*[。.%％]?)"
+)
 
 
 def _plain_evidence_quote(raw: str) -> str:
@@ -524,11 +583,106 @@ def _plain_evidence_quote(raw: str) -> str:
     return sanitize_evidence_quote(text)
 
 
-def _extract_operating_narrative(text: str) -> str:
-    """从股东／提示语／经营段拼接块里只留经营成句；切不干净则整条不用。
+def _is_account_catalog(text: str) -> bool:
+    """整段基本是利润表科目名罗列（长电第 2 条引文这类）。"""
+    hits = sum(1 for name in _PL_ACCOUNT_NAMES if name in (text or ""))
+    if hits >= 4:
+        return True
+    return "其中" in (text or "") and hits >= 2
 
-    长电类原文常把「前十名股东转融通」与「需提醒投资者…」粘在经营段前面，
-    数字清洗后还会变成「前 名股东」——必须裁掉非经营前缀。
+
+def _has_hollow_number_slots(text: str) -> bool:
+    """数字被抽空后留下「人民币 亿元／同比 。」半截句。"""
+    return bool(_HOLLOW_NUMBER_SLOT.search(text or ""))
+
+
+def _looks_like_operating_sentence(text: str) -> bool:
+    if any(mark in text for mark in ("。", "；", "所致")):
+        return True
+    return any(cue in text for cue in _NARRATIVE_CUES)
+
+
+def _is_usable_operating_quote(text: str) -> bool:
+    """单片段是否可引用：成句、非科目清单、无跨行业残留、无数字空壳。"""
+    cleaned = (text or "").strip()
+    if len(cleaned) < 20:
+        return False
+    if any(token in cleaned for token in _CROSS_INDUSTRY_ACCOUNTS):
+        return False
+    if _is_account_catalog(cleaned):
+        return False
+    if _has_hollow_number_slots(cleaned):
+        return False
+    if not _looks_like_operating_sentence(cleaned):
+        return False
+    return True
+
+
+def _excise_bad_clauses(text: str) -> str:
+    """按逗号切开，丢掉空缺／科目罗列／跨行业子句，保留其余。"""
+    parts = re.split(r"([，,])", text or "")
+    kept: list[str] = []
+    idx = 0
+    while idx < len(parts):
+        chunk = parts[idx]
+        delim = ""
+        if idx + 1 < len(parts) and parts[idx + 1] in {"，", ","}:
+            delim = parts[idx + 1]
+            idx += 2
+        else:
+            idx += 1
+        piece = chunk.strip()
+        if not piece:
+            continue
+        if _has_hollow_number_slots(piece):
+            continue
+        if _is_account_catalog(piece):
+            continue
+        if any(token in piece for token in _CROSS_INDUSTRY_ACCOUNTS):
+            continue
+        kept.append(chunk + delim)
+    return "".join(kept).strip(" ，,、；;")
+
+
+def _keep_operating_fragments(text: str) -> str:
+    """片段级切除：空缺句／科目清单丢掉，经营成句保留（不因半段瑕疵整段扔）。"""
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[。；])\s*", text or ""):
+        piece = sentence.strip()
+        if not piece:
+            continue
+        if _is_account_catalog(piece) and not any(
+            cue in piece for cue in ("围绕", "优化", "布局", "量价", "产能落地")
+        ):
+            continue
+        if any(token in piece for token in _CROSS_INDUSTRY_ACCOUNTS):
+            # 整句都是保险／银行残留：丢；若只是尾巴污染，先切除再判。
+            if not any(cue in piece for cue in _NARRATIVE_CUES):
+                continue
+        if _has_hollow_number_slots(piece) or any(
+            token in piece for token in _CROSS_INDUSTRY_ACCOUNTS
+        ):
+            piece = _excise_bad_clauses(piece)
+        piece = piece.strip(" ，,、；;")
+        if not piece:
+            continue
+        if not _is_usable_operating_quote(piece):
+            # 切除后可能变短，但仍有明确经营线索则保留。
+            if len(piece) < 16 or not _looks_like_operating_sentence(piece):
+                continue
+            if _has_hollow_number_slots(piece) or _is_account_catalog(piece):
+                continue
+        if not piece.endswith(("。", "；", "！", "？")):
+            piece += "。"
+        kept.append(piece)
+    return "".join(kept)
+
+
+def _extract_operating_narrative(text: str) -> str:
+    """从拼接块里精准切出经营原文：垃圾片段丢、有效片段留。
+
+    长电常见形态：股东转融通前缀 + 经营句 + 「净利润为人民币 亿元」空缺尾巴。
+    不能因尾巴有空缺整段扔掉（否则经营解读退化成指标复读）。
     """
     cleaned = _TIP_PREFIX.sub("", text or "")
     cleaned = " ".join(cleaned.split())
@@ -546,7 +700,6 @@ def _extract_operating_narrative(text: str) -> str:
     elif any(token in cleaned for token in _SHAREHOLDER_NOISE):
         return ""
     if any(token in cleaned for token in _SHAREHOLDER_NOISE):
-        # 经营段后仍夹股东噪音：截到噪音前；若截完无经营内容则弃用。
         cut = min(
             (cleaned.find(token) for token in _SHAREHOLDER_NOISE if token in cleaned),
             default=-1,
@@ -555,18 +708,9 @@ def _extract_operating_narrative(text: str) -> str:
             return ""
         if cut >= 40:
             cleaned = cleaned[:cut].rstrip(" ，,、；;")
-    if not any(token in cleaned for token in _OPERATING_CONTENT):
-        if any(token in cleaned for token in _SHAREHOLDER_NOISE):
-            return ""
-    stop = cleaned.find("。")
-    if stop >= 0:
-        cleaned = cleaned[: stop + 1]
-    cleaned = cleaned.strip(" ；;|、，,")
-    if len(cleaned) < 20:
-        return ""
     if cleaned.startswith("前") and "股东" in cleaned[:24]:
         return ""
-    return cleaned
+    return _keep_operating_fragments(cleaned)
 
 
 def _reason_only(quote: str) -> str:
