@@ -53,6 +53,8 @@ _INDUSTRY_STOP = {"所属", "本公司", "该", "全", "本"}
 class OutlineItem:
     title: str
     brief: str
+    # SKILL.md 里可选的 `section: <id>`；为空时 compose 按标题别名回退。
+    section_id: str = ""
 
 
 @dataclass
@@ -386,7 +388,10 @@ def _files_for(subjects: list[str], period: str, rows: list[dict]) -> list[dict]
 
 def _outline(plan: ReportPlan, skill: ReportSkill) -> list[OutlineItem]:
     """大纲由 skill 注册表提供；parse 只负责把占位填成实际指标集。"""
-    return [OutlineItem(title, brief) for title, brief in skill.build_outline(plan.indicators)]
+    return [
+        OutlineItem(title, brief, section_id)
+        for title, brief, section_id in skill.build_outline(plan.indicators)
+    ]
 
 
 def _title(plan: ReportPlan) -> str:

@@ -14,6 +14,10 @@
 大纲条目是 (标题, 要点) 二元组，要点里可写 ``{indicators}`` 占位，
 由 parse 按实际选中的指标集填充——skill 保持纯数据，不引用 ReportPlan，
 避免和 parse 模块互相 import。
+
+每个 ### 小节可在正文首行写 ``section: <renderer_id>`` 声明用哪个
+章节渲染器；不写则由 compose 按标题别名回退。这样新增报告类型不用往
+compose.py 里补 if 或标题名单。
 """
 
 from __future__ import annotations
@@ -52,11 +56,20 @@ class ReportSkill:
     sections: tuple[tuple[str, str], ...]
     # 行业宇宙：((公司名, 股票代码, 赛道), ...)；赛道可空；空元组 = 仍只从知识库推断主体
     companies: tuple[tuple[str, str, str], ...] = ()
+    # 与 sections 平行的 renderer id；空串表示该节按标题别名回退。
+    section_ids: tuple[str, ...] = ()
 
-    def build_outline(self, indicators: list[str]) -> list[tuple[str, str]]:
-        """把 {indicators} 占位填成实际选中的指标名列表。"""
+    def build_outline(self, indicators: list[str]) -> list[tuple[str, str, str]]:
+        """把 {indicators} 占位填成实际选中的指标名列表，并带上 renderer id。"""
         joined = "、".join(indicators) if indicators else "已点名的指标"
-        return [(title, brief.replace("{indicators}", joined)) for title, brief in self.sections]
+        return [
+            (
+                title,
+                brief.replace("{indicators}", joined),
+                self.section_ids[i] if i < len(self.section_ids) else "",
+            )
+            for i, (title, brief) in enumerate(self.sections)
+        ]
 
     def segment_of(self, subject: str) -> str:
         """按公司名（或包含关系）查赛道；未标注返回空串。"""
@@ -129,19 +142,28 @@ def _parse_companies(raw: str) -> tuple[tuple[str, str, str], ...]:
     return tuple(out)
 
 
-def _parse_sections(body: str) -> tuple[tuple[str, str], ...]:
+def _parse_sections(body: str) -> tuple[tuple[str, str, str], ...]:
     marker = "## 大纲"
     start = body.find(marker)
     if start < 0:
         raise ValueError("SKILL.md 正文必须包含「## 大纲」章节")
     outline_block = body[start + len(marker) :]
-    sections: list[tuple[str, str]] = []
+    sections: list[tuple[str, str, str]] = []
     for match in _SECTION_RE.finditer(outline_block):
         title = match.group("title").strip()
-        brief = " ".join(match.group("body").strip().split())
+        lines = match.group("body").strip().splitlines()
+        section_id = ""
+        if lines and lines[0].strip().startswith("section:"):
+            declared = lines[0].strip()
+            matched = re.fullmatch(r"section:\s*([a-z][a-z0-9_]*)\s*", declared)
+            if matched is None:
+                raise ValueError(f"大纲小节 {title!r} 的 section 声明非法：{declared!r}")
+            section_id = matched.group(1)
+            lines = lines[1:]
+        brief = " ".join(" ".join(lines).split())
         if not title or not brief:
             raise ValueError(f"大纲小节不完整：title={title!r}")
-        sections.append((title, brief))
+        sections.append((title, brief, section_id))
     if not sections:
         raise ValueError("「## 大纲」下至少要有一个 ### 小节")
     return tuple(sections)
@@ -158,6 +180,7 @@ def _load_skill(path: Path) -> ReportSkill:
         raise ValueError(f"{path}: frontmatter 需要 name/kind/title/description")
     if path.parent.name != skill_id:
         raise ValueError(f"{path}: 目录名 {path.parent.name!r} 须与 name {skill_id!r} 一致")
+    parsed = _parse_sections(body)
     return ReportSkill(
         skill_id=skill_id,
         kind=kind,
@@ -165,8 +188,9 @@ def _load_skill(path: Path) -> ReportSkill:
         industries=_parse_industries(meta.get("industries", "")),
         description=description,
         indicators=tuple(default_indicators(indicator_set)),
-        sections=_parse_sections(body),
+        sections=tuple((section_title, brief) for section_title, brief, _ in parsed),
         companies=_parse_companies(meta.get("companies", "")),
+        section_ids=tuple(section_id for _, _, section_id in parsed),
     )
 
 

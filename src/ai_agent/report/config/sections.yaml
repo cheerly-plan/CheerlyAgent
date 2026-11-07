@@ -1,0 +1,53 @@
+version: 1
+
+# 章节标题 → renderer id。compose.py 里 17 路标题 if-else 收敛到这里。
+#
+# 边界：这里只做「选规则」，不写正文、不写数字、不写计算逻辑；
+# renderer 全部在 compose.py 用确定性 Python 声明并注册。
+# SKILL.md 的 ### 小节可在正文首行写 `section: <id>` 直接指定，
+# 优先级高于本表——新增行业/报告类型时不必再改这份配置。
+aliases:
+  reading_note:
+    - 阅读说明
+  lead:
+    - 本期结论
+    - 覆盖范围
+    - 行业概览
+  indicator_table:
+    - 主要指标与出处
+  change:
+    - 同比与环比
+  quarter:
+    - 单季节奏
+  year_end:
+    - 较上年末变动
+  observation:
+    - 数据观察
+    - 核心主线
+  analysis:
+    - 经营解读
+  segment_roster:
+    - 赛道分组
+  segment_peer:
+    - 组内对比
+  chart_guide:
+    - 趋势与对比图
+  next_period:
+    - 下期预告
+    - 景气周期
+    - 细分赛道
+  key_companies:
+    - 重点公司
+  trend:
+    - 趋势
+  peer:
+    - 公司间对比
+  gaps:
+    - 缺失说明
+    - 缺失与口径
+    - 风险与缺失
+
+# 未匹配到 renderer 时的占位句。保持既有文案，不静默留空。
+# 只允许一行纯文案；数字、模板占位、计算逻辑一律拒绝。
+fallback:
+  note: "这一节没有对应的数据，未写。"

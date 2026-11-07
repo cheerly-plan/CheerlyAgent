@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from ai_agent.report import registry
+
 # —— skill 路由用的粗行业（与 SKILL.md industries / indicator_set 对齐）——
 BANK = "bank"
 GENERIC = "generic"
@@ -33,13 +35,9 @@ SOFTWARE = "software"
 REAL_ESTATE = "real_estate"
 CYCLICAL = "cyclical"
 
-# 半导体赛道名 → 细类型（与 semiconductor_industry_report 的 companies 赛道一致）
-_SEGMENT_TO_TYPE = {
-    "设计": FABLESS,
-    "制造": FOUNDRY,
-    "设备": EQUIPMENT,
-    "封测": PACKAGING,
-}
+# 赛道名 → 细类型、公司名关键字 → 细类型，已迁到 config/indicators.yaml 的
+# classification 段（registry.segment_map() / registry.name_hints()）；配置不可用时
+# 由 registry 的内置兜底保持原有行为，这里不再重复维护一份。
 
 _INDUSTRIES_YAML = Path(__file__).resolve().parent / "config" / "industries.yaml"
 
@@ -153,21 +151,6 @@ _ALIASES: tuple[tuple[str, str], ...] = (
     ("PPOP", "拨备前利润"),
 )
 
-_NAME_HINTS: tuple[tuple[str, str], ...] = (
-    ("银行", BANK),
-    ("置业", REAL_ESTATE),
-    ("地产", REAL_ESTATE),
-    ("房地产", REAL_ESTATE),
-    ("软件", SOFTWARE),
-    ("互联", SOFTWARE),
-    ("云", SOFTWARE),
-    ("钢铁", CYCLICAL),
-    ("化工", CYCLICAL),
-    ("煤炭", CYCLICAL),
-    ("有色", CYCLICAL),
-)
-
-
 def industry_of(subjects: list[str]) -> str:
     """粗行业：主体名含「银行」→ bank；否则 generic（供 skill 路由）。"""
     if any("银行" in (name or "") for name in subjects):
@@ -200,7 +183,7 @@ def classify_subject(subject: str) -> str:
     for key, company_type in roster.items():
         if key == text or key in text or text in key:
             return company_type
-    for token, company_type in _NAME_HINTS:
+    for token, company_type in registry.name_hints():
         if token in text:
             return company_type
     return GENERIC
@@ -208,7 +191,7 @@ def classify_subject(subject: str) -> str:
 
 def type_for_segment(segment: str) -> str:
     """赛道名 → 细类型；未知赛道回退 semiconductor 共用集。"""
-    return _SEGMENT_TO_TYPE.get((segment or "").strip(), SEMICONDUCTOR)
+    return registry.segment_map().get((segment or "").strip(), SEMICONDUCTOR)
 
 
 def default_indicators(industry_or_type: str) -> list[str]:
@@ -300,7 +283,7 @@ def _semiconductor_roster() -> dict[str, str]:
         return {}
     out: dict[str, str] = {}
     for name, _code, segment in skill.companies:
-        company_type = _SEGMENT_TO_TYPE.get((segment or "").strip())
+        company_type = registry.segment_map().get((segment or "").strip())
         if company_type:
             out[name] = company_type
     return out

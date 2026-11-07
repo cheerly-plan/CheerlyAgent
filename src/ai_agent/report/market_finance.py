@@ -15,6 +15,7 @@ import re
 from functools import lru_cache
 
 from ai_agent.core.logging import get_logger
+from ai_agent.report import registry
 from ai_agent.report.basis import CUMULATIVE, basis_of, cumulative_months
 from ai_agent.report.extract import Evidence, IndicatorFact
 from ai_agent.report.parse import ReportPlan
@@ -82,7 +83,9 @@ def supplement_facts_from_market(
     if not col:
         return facts, missing
     prefer_market = (
-        _SEMICONDUCTOR_PREFER_MARKET
+        registry.names_with(
+            "prefer_market", fallback=_SEMICONDUCTOR_PREFER_MARKET
+        )
         if plan.skill_id == "semiconductor_industry_report"
         else frozenset()
     )
@@ -233,10 +236,13 @@ def _abstract_fact(
     col: str,
     indicator: str,
 ) -> IndicatorFact | None:
-    source_name = next((src for src, dst, _u in _ABSTRACT_MAP if dst == indicator), None)
-    unit = next((u for src, dst, u in _ABSTRACT_MAP if dst == indicator), "")
-    if not source_name:
+    # 已登记指标以注册表为准；未登记的回退内置映射。
+    entry = registry.abstract_entry(indicator) or next(
+        (item for item in _ABSTRACT_MAP if item[1] == indicator), None
+    )
+    if entry is None:
         return None
+    source_name, _dst, unit = entry
     df = _load_abstract(code)
     if col not in df.columns or "指标" not in df.columns:
         return None
@@ -252,7 +258,9 @@ def _abstract_fact(
     value, display_unit = formatted
     # 财务摘要报告期列是期末累计口径（Q3=前三季度），毛利率等同列比率也是累计。
     is_amount = indicator in _AMOUNT_INDICATORS
-    is_ytd_ratio = indicator == "毛利率"
+    is_ytd_ratio = registry.flag(
+        indicator, "ytd_ratio", default=indicator == "毛利率"
+    )
     if is_ytd_ratio:
         basis, months = CUMULATIVE, cumulative_months(period)
         cumulative = True

@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 
 from ai_agent.kb.ingest.meta import name_in_text
+from ai_agent.report import registry, sections
 from ai_agent.report.basis import POINT, STOCK, disclosure_note, label as basis_label
 from ai_agent.report.compare import (
     NOT_COMPARABLE_NOTE,
@@ -150,6 +151,7 @@ def compose_report(
                 supplemental,
                 analysis=analysis,
                 features=features,
+                section_id=getattr(item, "section_id", ""),
             ),
         )
         for item in outline
@@ -200,6 +202,105 @@ def _is_segment_report(plan: ReportPlan) -> bool:
     )
 
 
+# —— 章节 renderer 注册表 ——
+# 每节只负责「把已有数据摆成文字」。数字仍全部来自 facts / series / features，
+# sections.yaml 与 SKILL.md 只能选 renderer，不能注入正文或改计算。
+# 新增章节：写一个 renderer + 注册一次；或直接在 SKILL.md 里复用已有 id。
+@sections.register("reading_note")
+def _render_reading_note(ctx: sections.SectionContext) -> list[str]:
+    return list(_READING_NOTE_SEGMENT if _is_segment_report(ctx.plan) else _READING_NOTE)
+
+
+@sections.register("lead")
+def _render_lead(ctx: sections.SectionContext) -> list[str]:
+    return _lead(ctx.plan, ctx.current, ctx.series, ctx.views, ctx.state)
+
+
+@sections.register("indicator_table")
+def _render_indicator_table(ctx: sections.SectionContext) -> list[str]:
+    return _indicator_lines(ctx.plan, ctx.current)
+
+
+@sections.register("change")
+def _render_change(ctx: sections.SectionContext) -> list[str]:
+    return _change_lines(ctx.plan, ctx.series, ctx.state)
+
+
+@sections.register("quarter")
+def _render_quarter(ctx: sections.SectionContext) -> list[str]:
+    return _quarter_lines(ctx.plan, ctx.views)
+
+
+@sections.register("year_end")
+def _render_year_end(ctx: sections.SectionContext) -> list[str]:
+    return _year_end_lines(ctx.views, ctx.state)
+
+
+@sections.register("observation")
+def _render_observation(ctx: sections.SectionContext) -> list[str]:
+    return _observation_lines(ctx.plan, ctx.current, ctx.views)
+
+
+@sections.register("analysis")
+def _render_analysis(ctx: sections.SectionContext) -> list[str]:
+    lines = [line.strip() for line in (ctx.analysis or []) if line and line.strip()]
+    return lines or [_ANALYSIS_FALLBACK]
+
+
+@sections.register("segment_roster")
+def _render_segment_roster(ctx: sections.SectionContext) -> list[str]:
+    return _segment_roster_lines(ctx.plan, ctx.current)
+
+
+@sections.register("segment_peer")
+def _render_segment_peer(ctx: sections.SectionContext) -> list[str]:
+    return _segment_peer_lines(ctx.plan, ctx.current)
+
+
+@sections.register("chart_guide")
+def _render_chart_guide(ctx: sections.SectionContext) -> list[str]:
+    return _chart_guide_lines(ctx.series, ctx.plan, ctx.current)
+
+
+@sections.register("next_period")
+def _render_next_period(ctx: sections.SectionContext) -> list[str]:
+    # 「景气周期」「细分赛道」等旧大纲标题也映射到这里：宏观从略，指向下期预告。
+    return list(_NEXT_PERIOD_NOTE)
+
+
+@sections.register("key_companies")
+def _render_key_companies(ctx: sections.SectionContext) -> list[str]:
+    peers = _peer_lines(ctx.plan, ctx.current)
+    table = _indicator_lines(ctx.plan, ctx.current)
+    no_peers = "同一指标没有两家以上的公司，不做公司间对比。"
+    no_table = "没有抽到大纲里的指标。"
+    if peers == [no_peers] and table == [no_table]:
+        return ["重点公司本期没有抽到可核对指标。"]
+    lines: list[str] = []
+    if peers and peers[0] != no_peers:
+        lines.extend(peers)
+    if table and table[0] != no_table:
+        if lines:
+            lines.append("")
+        lines.extend(table)
+    return lines or ["重点公司本期没有抽到可核对指标。"]
+
+
+@sections.register("trend")
+def _render_trend(ctx: sections.SectionContext) -> list[str]:
+    return _trend_lines(ctx.series, ctx.plan)
+
+
+@sections.register("peer")
+def _render_peer(ctx: sections.SectionContext) -> list[str]:
+    return _peer_lines(ctx.plan, ctx.current)
+
+
+@sections.register("gaps")
+def _render_gaps(ctx: sections.SectionContext) -> list[str]:
+    return _gap_lines(ctx.plan, ctx.current, ctx.gaps)
+
+
 def _section(
     title: str,
     plan: ReportPlan,
@@ -209,63 +310,28 @@ def _section(
     views: SupplementalResult,
     analysis: list[str] | None = None,
     features: Features | None = None,
+    section_id: str = "",
 ) -> list[str]:
+    """按 section_id（SKILL.md 声明）或标题别名查注册表；未绑定写占位句。
+
+    这里不再有标题 if-else：新增报告类型/章节不用改本函数，只要章节能
+    绑定到一个已注册 renderer。查不到时保留原有占位文案，不静默留空。
+    """
     current = [fact for fact in facts if fact.period == plan.period]
     state = features or compute_features(plan, facts, views, series)
-    if title == "阅读说明":
-        return list(
-            _READING_NOTE_SEGMENT if _is_segment_report(plan) else _READING_NOTE
-        )
-    if title in {"本期结论", "覆盖范围", "行业概览"}:
-        return _lead(plan, current, series, views, state)
-    if title == "主要指标与出处":
-        return _indicator_lines(plan, current)
-    if title == "同比与环比":
-        return _change_lines(plan, series, state)
-    if title == "单季节奏":
-        return _quarter_lines(plan, views)
-    if title == "较上年末变动":
-        return _year_end_lines(views, state)
-    if title == "数据观察":
-        return _observation_lines(plan, current, views)
-    if title == "经营解读":
-        lines = [line.strip() for line in (analysis or []) if line and line.strip()]
-        return lines or [_ANALYSIS_FALLBACK]
-    if title == "赛道分组":
-        return _segment_roster_lines(plan, current)
-    if title == "组内对比":
-        return _segment_peer_lines(plan, current)
-    if title == "趋势与对比图":
-        return _chart_guide_lines(series, plan, current)
-    if title == "下期预告":
-        return list(_NEXT_PERIOD_NOTE)
-    if title in {"景气周期", "细分赛道"}:
-        # 旧大纲兜底：宏观从略，并指向下期预告语义
-        return list(_NEXT_PERIOD_NOTE)
-    if title == "核心主线":
-        return _observation_lines(plan, current, views)
-    if title == "重点公司":
-        peers = _peer_lines(plan, current)
-        table = _indicator_lines(plan, current)
-        if peers == ["同一指标没有两家以上的公司，不做公司间对比。"] and (
-            table == ["没有抽到大纲里的指标。"]
-        ):
-            return ["重点公司本期没有抽到可核对指标。"]
-        lines = []
-        if peers and peers[0] != "同一指标没有两家以上的公司，不做公司间对比。":
-            lines.extend(peers)
-        if table and table[0] != "没有抽到大纲里的指标。":
-            if lines:
-                lines.append("")
-            lines.extend(table)
-        return lines or ["重点公司本期没有抽到可核对指标。"]
-    if title == "趋势":
-        return _trend_lines(series, plan)
-    if title == "公司间对比":
-        return _peer_lines(plan, current)
-    if title in {"缺失说明", "缺失与口径", "风险与缺失"}:
-        return _gap_lines(plan, current, gaps)
-    return ["这一节没有对应的数据，未写。"]
+    ctx = sections.SectionContext(
+        title=title,
+        plan=plan,
+        facts=facts,
+        current=current,
+        series=series,
+        gaps=gaps,
+        views=views,
+        state=state,
+        analysis=analysis,
+    )
+    resolved = sections.resolve(title, section_id)
+    return resolved[1](ctx) if resolved is not None else sections.fallback_lines()
 
 
 def _sole_subject(plan: ReportPlan, subjects: set[str]) -> bool:
@@ -334,7 +400,13 @@ def _conclusion_sentences(
         if lines:
             return lines[:_LEAD_MAX]
 
-    priority = _LEAD_BANK if is_bank else _LEAD_GENERIC
+    # 前四项是固定的经营主线，其后的优先级由注册表按 lead_order 派生；
+    # 配置降级时回退 _LEAD_GENERIC 原有后缀，行为不变。
+    priority = (
+        _LEAD_BANK
+        if is_bank
+        else (*_LEAD_GENERIC[:4], *registry.lead_names(fallback=_LEAD_GENERIC[4:]))
+    )
     used_profit = False
     for name in priority:
         if len(lines) >= _LEAD_MAX:

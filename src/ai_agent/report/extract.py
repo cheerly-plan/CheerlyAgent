@@ -24,6 +24,7 @@ from ai_agent.kb.ingest.meta import (
     name_in_text,
 )
 from ai_agent.kb.ingest.tables import SCOPE_CONSOLIDATED, SCOPE_PARENT
+from ai_agent.report import registry
 from ai_agent.report.basis import basis_of, ratio_unit
 from ai_agent.report.meta import (
     enrich_quote_for_conversion,
@@ -355,7 +356,9 @@ def extract_indicators(
             picked = _pick_facts(
                 rows, by_id, aliases, indicator, period, requested=names
             )
-        if not picked and indicator in _NARRATIVE_PATTERNS:
+        if not picked and (
+            registry.narrative_entry(indicator) or _NARRATIVE_PATTERNS.get(indicator)
+        ):
             picked = _narrative_facts(
                 indicator, period, file_ids, by_id, requested=names
             )
@@ -416,6 +419,10 @@ def read_indicator(
 
 def _indicator_spec(name: str) -> tuple[str, tuple[str, ...]]:
     key = _label(name)
+    # 已登记指标以 config/indicators.yaml 为准；未登记的仍走内置常量。
+    registered = registry.table_entry(key)
+    if registered is not None:
+        return registered
     if key in _INDICATORS:
         return _INDICATORS[key]
     return key, (key,)
@@ -591,7 +598,9 @@ def _narrative_facts(
     每份文件至多一条，必须能回指到原文句子与页码；数字和单位写死在模式里，
     不允许「看起来像」就取。抽不到返回空列表，由调用方写缺口。
     """
-    keyword, pattern, unit = _NARRATIVE_PATTERNS[indicator]
+    keyword, pattern, unit = (
+        registry.narrative_entry(indicator) or _NARRATIVE_PATTERNS[indicator]
+    )
     try:
         rows = store.search_kb_chunks_keyword(
             [keyword], file_ids=file_ids, top_k=10, kinds=["text"]

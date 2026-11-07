@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ai_agent.report import registry
 from ai_agent.report.compare import Change, Measure, SeriesCompare, compare_measures
 from ai_agent.report.compose import ReportDocument
 from ai_agent.report.extract import IndicatorFact, citation_anchor
@@ -413,7 +414,10 @@ def _check_money_units(
     for fact in facts:
         if focus and fact.period != focus:
             continue
-        if fact.name not in _MONEY_INDICATORS:
+        # 已登记指标按 flags.money 判定；未登记的回退原有白名单。
+        if not registry.flag(
+            fact.name, "money", default=fact.name in _MONEY_INDICATORS
+        ):
             continue
         unit = (fact.unit or "").strip()
         if unit in _MONEY_SCALE_UNITS:

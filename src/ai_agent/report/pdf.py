@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
+from ai_agent.report import registry
 from ai_agent.report.compare import SeriesCompare, parse_number
 from ai_agent.report.compose import ReportDocument
 from ai_agent.report.extract import IndicatorFact
@@ -141,7 +142,11 @@ def _segment_peer_charts(
     indicators = [
         name
         for name in (plan.indicators or ["营业收入", "毛利率", "研发费用率", "扣非净利润"])
-        if name in {"营业收入", "扣非净利润", "毛利率", "研发费用率"}
+        if registry.flag(
+            name,
+            "chart",
+            default=name in {"营业收入", "扣非净利润", "毛利率", "研发费用率"},
+        )
     ]
     charts: list[ChartSpec] = []
     for segment, names in skill.companies_by_segment():

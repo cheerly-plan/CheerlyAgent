@@ -1,0 +1,54 @@
+# 研报指标注册表（配置化竖切阶段）。
+#
+# 边界：这里只描述「指标元数据」与「分类规则」，不承载计算逻辑、数字或校验替换；
+# 抽数 / 同比环比 / 数字校验 / PDF 渲染仍是确定性 Python，防幻觉门禁不被配置绕过。
+#
+# 竖切阶段只登记「毛利率」作为打通全链路的样板。未登记的指标继续走各模块内的
+# 既有常量，保证行为逐字不变。迁移一个新指标 = 在本文件加一段 + 从对应模块常量
+# 删掉那一项；registry.flag() / *_entry() 一律「已登记优先、未登记回退」。
+#
+# classification 暂置于此（与 industry.py 原有常量一一对应），P1 再拆到独立 specs/。
+
+version: 1
+
+indicators:
+  毛利率:
+    # extract._INDICATORS：需求简称 → (报表正式名, 表格行别名)
+    table_canonical: 毛利率
+    table_labels: [毛利率, 综合毛利率]
+    # extract._NARRATIVE_PATTERNS：(检索关键词, 正则, 单位)
+    narrative:
+      keyword: 毛利率
+      pattern: '毛利率为?\s*([\d,]+(?:\.\d+)?)\s*%'
+      unit: "%"
+    # market_finance._ABSTRACT_MAP：(财务摘要列名, 研报指标名, 单位)
+    abstract_column: 毛利率
+    abstract_unit: "%"
+    flags:
+      money: false          # validate：不参与金额单位折算校验
+      chart: true           # pdf：允许出赛道横比图
+      lead: true            # compose：进入「本期结论」优先级
+      prefer_market: true   # market_finance：半导体横比用摘要累计口径覆盖正文
+      ytd_ratio: true       # market_finance：摘要列按累计比率处理
+    lead_order: 4           # 排在 _LEAD_GENERIC 前四项之后
+
+classification:
+  # 公司名关键字 → 细类型；顺序敏感（长词靠前），与 industry.py 原 _NAME_HINTS 一致
+  name_hints:
+    - [银行, bank]
+    - [置业, real_estate]
+    - [地产, real_estate]
+    - [房地产, real_estate]
+    - [软件, software]
+    - [互联, software]
+    - [云, software]
+    - [钢铁, cyclical]
+    - [化工, cyclical]
+    - [煤炭, cyclical]
+    - [有色, cyclical]
+  # 半导体赛道名 → 细类型；与 industry.py 原 _SEGMENT_TO_TYPE 一致
+  segment_to_type:
+    设计: fabless
+    制造: foundry
+    设备: equipment
+    封测: packaging
