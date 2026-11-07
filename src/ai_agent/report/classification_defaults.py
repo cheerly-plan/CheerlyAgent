@@ -80,3 +80,7 @@ INDUSTRY_SEGMENTS = {
     'semiconductor': {'设计': 'fabless', '制造': 'foundry', '设备': 'equipment', '封测': 'packaging'},
     'robotics': {'本体': 'manufacturing', '减速器': 'manufacturing', '伺服控制': 'equipment', '系统集成': 'manufacturing'},
 }
+
+INDUSTRY_LEAD = {
+    'bank': {'lead': ['营业收入', '归属于母公司所有者的净利润', '净利润', '净息差', '不良贷款率', '不良贷款拨备覆盖率'], 'lead_hint': ['净息差', '不良贷款率', '不良贷款拨备覆盖率', '资本充足率']},
+}

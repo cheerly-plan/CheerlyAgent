@@ -219,6 +219,16 @@ def section_id_of(title: str, section_id: str = "") -> str:
     return _config().by_title.get((title or "").strip(), "")
 
 
+def titles_of(section_id: str) -> tuple[str, ...]:
+    """某 section_id 在 sections.yaml 里登记的全部标题别名（保序）。"""
+    key = (section_id or "").strip()
+    if not key:
+        return ()
+    return tuple(
+        title for title, sid in _config().by_title.items() if sid == key
+    )
+
+
 def outline_has(outline, *section_ids: str) -> bool:
     """大纲是否含任一目标章节（按 section_id 或标题别名）。"""
     wanted = {item for item in section_ids if item}

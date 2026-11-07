@@ -1,42 +1,33 @@
 """按大纲写成研报。正文里的数字只来自抽取结果和计算工具。
 
 不调用模型，因此不会补一个大纲里有、但表格里没抽到的数。
+
+章节渲染按职责拆到 compose_*.py；本模块负责编排、结论句与 renderer 注册。
 """
 
 from __future__ import annotations
 
-import html
-import re
 from dataclasses import dataclass, field
 
-from ai_agent.kb.ingest.meta import name_in_text
 from ai_agent.report import registry
 from ai_agent.report import sections as report_sections
-from ai_agent.report.basis import POINT, STOCK, disclosure_note, label as basis_label
+from ai_agent.report.basis import POINT, STOCK, disclosure_note
 from ai_agent.report.compare import (
-    NOT_COMPARABLE_NOTE,
-    STOCK_NOTE,
     Change,
-    Measure,
     SeriesCompare,
     compare_measures,
     parse_number,
 )
-from ai_agent.report.extract import IndicatorFact, citation_anchor, ensure_amount_units
+from ai_agent.report.extract import IndicatorFact, ensure_amount_units
 from ai_agent.report.industry import (
-    BANK,
-    INDUSTRY_SHARED,
-    default_indicators,
-    industry_of,
-    is_excluded,
+    lead_hint_profiles,
+    lead_priority,
     notes_for_plan,
     profile_key_for_plan,
-    type_for_segment,
 )
 from ai_agent.report.parse import OutlineItem, ReportPlan
-from ai_agent.report.skills import get_skill, is_segment_skill
+from ai_agent.report.phrases import ANALYSIS_FALLBACK
 from ai_agent.report.features import Features, compute_features
-from ai_agent.report.meta import infer_scope, scope_label
 from ai_agent.report.rules import (
     equity_share_applicable,
     equity_share_exemption_line,
@@ -49,33 +40,45 @@ from ai_agent.report.supplemental import (
     format_money_delta,
     signed_delta,
 )
+from ai_agent.report import compose_common as _common
+from ai_agent.report import compose_format as _format
+from ai_agent.report import compose_gaps as _gaps_mod
+from ai_agent.report import compose_segment as _segment
 
-_SCOPE = {"consolidated": "合并", "parent": "母公司"}
-_UNKNOWN_SCOPE = "—"
+# —— 兼容旧私有名（测试与本文件结论句仍用下划线风格）——
+_READING_NOTE = _common.READING_NOTE
+_NEXT_PERIOD_NOTE = _common.NEXT_PERIOD_NOTE
+_is_segment_report = _common.is_segment_report
+_segment_reading_note = _common.segment_reading_note
+_roster_rename_note_lines = _common.roster_rename_note_lines
+_cite = _common.cite
+_cite_evidence = _common.cite_evidence
+_scope = _common.scope_text
+_fact_scope_label = _common.fact_scope_label
+_column = _common.column_label
+_period_label = _common.period_label
+_cell_with_unit = _common.cell_with_unit
+_sole_subject = _common.sole_subject
+_prefix = _common.subject_prefix
 
-# 开头统一声明一次：能按模板推定的不写「找不到」；文案避免阿拉伯数字（校验器）。
-_READING_NOTE = (
-    "阅读说明：金额默认统一为元；若由千元／万元／百万元折算，指标表会注明原单位。",
-    "范围：主要财务数据等主表按季报模板推定为合并，母公司口径单独标注；"
-    "期间按列名区分——本报告期为单季、年初至报告期末为累计、期末为时点余额。",
-    "基期文件未入库属于数据缺口，与口径推定无关，见「缺失与口径」。"
-    "方括号短标识为知识库文件前缀，完整出处见溯源附件。",
-)
+_markdown = _format.markdown
+_html = _format.html_doc
 
-_READING_NOTE_SEGMENT_TAIL = (
-    "金额默认统一为元，主表范围按季报模板推定为合并，期间按列名区分单季／累计／时点。",
-    "三级归因边界：已抽取的数据事实可写；原文经营说明须标出处后方可引用；"
-    "无出处的第三方推断一律不写。完整标识与原文片段见溯源附件。",
-)
+_segment_roster_lines = _segment.segment_roster_lines
+_segment_peer_lines = _segment.segment_peer_lines
+_segment_table_indicators = _segment.segment_table_indicators
+_peer_lines = _segment.peer_lines
+_chart_guide_lines = _segment.chart_guide_lines
+_gap_lines = _gaps_mod.gap_lines
+_gaps = _gaps_mod.collect_gaps
 
 # 「本期结论」只提炼几条主线，完整指标集留给「主要指标与出处」表。
-# 顺序即优先级；同组里靠前的命中后，靠后的同组名不再重复（如已有归母则不再写净利润）。
-_LEAD_BANK = registry.ordering_list("lead_bank")
 _LEAD_GENERIC = registry.ordering_list("lead_generic")
 _LEAD_MAX = registry.ordering_int("lead_max")
 _LEAD_NET_PROFIT = frozenset(registry.ordering_list("lead_net_profit"))
-# 结论首句优先并列的经营主线（有则写入同一句，不再拆成多句平铺）。
 _LEAD_OPERATING = registry.ordering_list("lead_operating")
+_EQUITY_COMPOSITION = registry.ordering_list("equity_composition_order")
+_ASSET_DRIVERS = registry.ordering_list("asset_drivers_order")
 
 
 @dataclass
@@ -108,7 +111,7 @@ def compose_report(
     supplemental = views or SupplementalResult()
     # 千元／万元等入口再折一次，避免抽取漏识别时组内表混单位。
     facts = ensure_amount_units(facts)
-    series = compare_measures([_measure(fact) for fact in facts])
+    series = compare_measures([fact.to_measure() for fact in facts])
     features = compute_features(plan, facts, supplemental, series)
     gaps = _gaps(plan, facts, series)
     # 结论句已不再自带出处，出处全靠主要指标表承载。大纲若缺这一节（外部
@@ -156,33 +159,6 @@ def compose_report(
         deliverable=plan.deliverable,
         gaps=gaps,
     )
-
-
-def _measure(fact: IndicatorFact) -> Measure:
-    return fact.to_measure()
-
-
-# 与 analyze.ANALYSIS_FALLBACK 同文；compose 不反向 import analyze（避免环依赖）。
-_ANALYSIS_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
-
-# 行业专属的「下期预告」定性句来自 industries.yaml 的 profile.notes；
-# 没配 notes 的行业用这份通用兜底句，新增行业不必往这里加常量或 if 分支。
-_NEXT_PERIOD_NOTE = (
-    "景气周期依赖外部数据源，本期流水线未接入，不推断周期位置。",
-    "下一期预告需明确：数据源清单、入库表结构、更新频率；接入前本报告只做公司财报赛道分组对比。",
-)
-
-
-def _is_segment_report(plan: ReportPlan) -> bool:
-    return is_segment_skill(plan.skill_id) or report_sections.outline_has(
-        plan.outline, "segment_roster", "segment_peer"
-    )
-
-
-def _segment_reading_note(plan: ReportPlan) -> tuple[str, ...]:
-    industry = (plan.industry or "").strip() or "行业"
-    head = f"阅读说明：本文为{industry}代表公司财报对比分析（赛道分组版）；"
-    return (head + _READING_NOTE_SEGMENT_TAIL[0],) + _READING_NOTE_SEGMENT_TAIL[1:]
 
 
 # —— 章节 renderer 注册表 ——
@@ -237,7 +213,7 @@ def _render_observation(ctx: report_sections.SectionContext) -> list[str]:
 @report_sections.register("analysis")
 def _render_analysis(ctx: report_sections.SectionContext) -> list[str]:
     lines = [line.strip() for line in (ctx.analysis or []) if line and line.strip()]
-    return lines or [_ANALYSIS_FALLBACK]
+    return lines or [ANALYSIS_FALLBACK]
 
 
 @report_sections.register("segment_roster")
@@ -329,21 +305,6 @@ def _section(
     return resolved[1](ctx) if resolved is not None else report_sections.fallback_lines()
 
 
-def _sole_subject(plan: ReportPlan, subjects: set[str]) -> bool:
-    """单公司报告正文省略主语，全称由标题承担。
-
-    行业报告或多主体并列时必须保留全称——那时省略主语就分不清说的是哪家。
-    kind 不是 industry 且主体唯一即视为单公司报告；fact 的主体与计划主体
-    不一致（别名解析差异之类）时主体仍是唯一的，省略同样成立。
-    """
-    return plan.kind != "industry" and len(subjects) <= 1
-
-
-def _prefix(plan: ReportPlan, subject: str, subjects: set[str]) -> str:
-    """句首主语：单公司报告为空串，多主体报告用全称。"""
-    return "" if _sole_subject(plan, subjects) else subject
-
-
 def _lead(
     plan: ReportPlan,
     current: list[IndicatorFact],
@@ -380,11 +341,11 @@ def _conclusion_sentences(
     by_name: dict[str, IndicatorFact] = {}
     for fact in facts:
         by_name.setdefault(fact.name, fact)
-    uses_bank_lead = _uses_bank_metric_lead(plan, by_name)
+    custom_lead = _lead_priority(plan, by_name)
     subjects = {fact.subject for fact in facts}
     lines: list[str] = []
 
-    if not uses_bank_lead:
+    if not custom_lead:
         # 经营主线压成一句：营收／扣非／经营现金流并列，避免结论只剩一句营收。
         operating = _operating_lead_clause(plan, by_name, yoy_changes, subjects)
         if operating:
@@ -395,13 +356,8 @@ def _conclusion_sentences(
         if lines:
             return lines[:_LEAD_MAX]
 
-    # 前四项是固定的经营主线，其后的优先级由注册表按 lead_order 派生；
-    # 配置降级时回退 _LEAD_GENERIC 原有后缀，行为不变。
-    priority = (
-        _LEAD_BANK
-        if uses_bank_lead
-        else (*_LEAD_GENERIC[:4], *registry.lead_names(fallback=_LEAD_GENERIC[4:]))
-    )
+    # 有行业口径就按档案出句，否则用通用优先级：配置顺序在前，带 lead 标记的补在后面。
+    priority = custom_lead or _generic_lead_priority()
     used_profit = False
     for name in priority:
         if len(lines) >= _LEAD_MAX:
@@ -430,19 +386,31 @@ def _conclusion_sentences(
     return _indicator_sentences(plan, facts[:_LEAD_MAX], series)
 
 
-def _uses_bank_metric_lead(
+def _lead_priority(
     plan: ReportPlan, by_name: dict[str, IndicatorFact]
-) -> bool:
-    """银行口径结论：按档案 key／主体类型／息差类指标探测，不绑死 skill_id。"""
-    if profile_key_for_plan(plan) == BANK:
-        return True
-    if getattr(plan, "company_type", "") == BANK:
-        return True
-    if industry_of(plan.subjects) == BANK:
-        return True
-    return any(
-        name in by_name for name in registry.names_with("bank_lead_hint")
-    )
+) -> tuple[str, ...]:
+    """本期结论的行业口径；没有就用空元组表示「走通用口径」。
+
+    顺序：报告所属行业档案的 ``lead`` → 出现某品类专属指标（``lead_hint``）
+    就取该品类口径。两条依据都在 industries.yaml，本函数不出现任何行业名。
+    """
+    configured = lead_priority(profile_key_for_plan(plan))
+    if configured:
+        return configured
+    for hints, lead in lead_hint_profiles():
+        if any(name in by_name for name in hints):
+            return lead
+    return ()
+
+
+def _generic_lead_priority() -> tuple[str, ...]:
+    """通用结论优先级：lead_generic 的配置顺序在前，带 lead 标记的指标补在后面。
+
+    配置降级（indicators.yaml 读不到）时 lead_names 返回空，退化成纯配置顺序，
+    不会因为缺一份派生名单而漏写结论。
+    """
+    extra = tuple(name for name in registry.lead_names() if name not in _LEAD_GENERIC)
+    return (*_LEAD_GENERIC, *extra)
 
 
 def _lead_yoy_changes(series: list[SeriesCompare]) -> dict[tuple[str, str, str], Change]:
@@ -880,12 +848,6 @@ def _join_notes(*parts: str) -> str:
     return "；".join(part for part in parts if part)
 
 
-def _period_label(fact: IndicatorFact) -> str:
-    """手工构造、没标口径的 fact 沿用旧文案，避免破坏纯计算调用。"""
-    if not fact.basis:
-        return fact.period
-    return basis_label(fact.period, fact.basis, fact.coverage_months)
-
 
 def _change_sentence(
     subject: str, name: str, label: str, base: str, delta: str, rate: str, note: str
@@ -924,630 +886,3 @@ def _trend_lines(series: list[SeriesCompare], plan: ReportPlan | None = None) ->
     return ["没有多期数据，不写趋势。"]
 
 
-def _roster_rename_note_lines(plan: ReportPlan) -> list[str]:
-    """花名册「披露又名」→ 阅读说明改名备注；无又名则空。"""
-    skill = get_skill(plan.skill_id) if plan.skill_id else None
-    if skill is None:
-        return []
-    notes = skill.rename_notes()
-    if not notes:
-        return []
-    return [f"名单备注：{'；'.join(notes)}。"]
-
-
-def _skill_segments(plan: ReportPlan) -> list[tuple[str, list[str]]]:
-    skill = get_skill(plan.skill_id) if plan.skill_id else None
-    if skill and skill.companies:
-        groups = skill.companies_by_segment()
-        if plan.subjects:
-            wanted = plan.subjects
-            filtered: list[tuple[str, list[str]]] = []
-            for segment, names in groups:
-                keep = [
-                    name
-                    for name in names
-                    if any(
-                        name == subject or name in subject or subject in name
-                        for subject in wanted
-                    )
-                ]
-                if keep:
-                    filtered.append((segment, keep))
-            return filtered or groups
-        return groups
-    if plan.subjects:
-        return [("未分组", list(plan.subjects))]
-    return []
-
-
-def _facts_for_subjects(
-    current: list[IndicatorFact], subjects: list[str]
-) -> list[IndicatorFact]:
-    rows: list[IndicatorFact] = []
-    for fact in current:
-        if any(
-            name_in_text(fact.subject, name)
-            or name_in_text(name, fact.subject)
-            or fact.subject == name
-            for name in subjects
-        ):
-            rows.append(fact)
-    return rows
-
-
-def _normalize_unit_label(unit: str) -> str:
-    text = (unit or "").strip()
-    if text in {"", "元", "人民币元"}:
-        return "元"
-    if text in {"千元", "人民币千元"}:
-        return "千元"
-    if text in {"万元", "人民币万元"}:
-        return "万元"
-    if text in {"百万元", "人民币百万元"}:
-        return "百万元"
-    if text in {"亿元", "人民币亿元"}:
-        return "亿元"
-    return text
-
-
-def _peer_table_block(
-    title: str, rows: list[IndicatorFact], *, min_subjects: int = 1
-) -> list[str]:
-    """组内对比表：金额已在抽取层尽量归一为元；仍有单位例外时脚注说明。"""
-    subjects = {row.subject for row in rows}
-    if len(subjects) < min_subjects:
-        return []
-    units = {_normalize_unit_label(row.unit) for row in rows if row.unit}
-    lines = [title, "| 公司 | 数值 | 出处 |", "| --- | --- | --- |"]
-    for row in rows:
-        lines.append(f"| {row.subject} | {row.value}{row.unit} | {_cite(row)} |")
-    money = units & {"元", "千元", "万元", "亿元", "百万元"}
-    if len(money) > 1:
-        lines.append(
-            f"注：本表金额单位未统一（{'／'.join(sorted(money))}），"
-            "暂不混比；抽取层未能归一的项保留原单位。"
-        )
-    return lines
-
-
-def _segment_roster_lines(
-    plan: ReportPlan, current: list[IndicatorFact]
-) -> list[str]:
-    groups = _skill_segments(plan)
-    if not groups:
-        return ["没有可分组的代表公司。"]
-    lines = [
-        f"{plan.industry or ''}行业 {plan.period} 按赛道覆盖如下（只列名单与是否抽到本期财报，不写赛道景气度）。".strip()
-    ]
-    for segment, names in groups:
-        bits: list[str] = []
-        for name in names:
-            ready = any(
-                name_in_text(fact.subject, name) or name_in_text(name, fact.subject)
-                for fact in current
-            )
-            bits.append(f"{name}（{'已抽到本期' if ready else '本期未抽到'}）")
-        lines.append(f"**{segment}**：{'；'.join(bits)}。")
-    return lines
-
-
-def _cell_with_unit(fact: IndicatorFact | None, *, indicator: str = "") -> str:
-    if fact is None:
-        return "—"
-    unit = (fact.unit or "").strip()
-    if unit == "%":
-        return f"{fact.value}%"
-    if unit:
-        return f"{fact.value}{unit}"
-    # 金额类缺单位时默认补「元」，避免同行带单位、本格裸数字。
-    money = registry.names_with("money_cell_unit")
-    if indicator in money or (not unit and _looks_like_money(fact.value)):
-        return f"{fact.value}元"
-    return str(fact.value)
-
-
-def _looks_like_money(value: str) -> bool:
-    text = (value or "").replace(",", "")
-    return bool(text) and text.replace(".", "", 1).isdigit() and "," in (value or "")
-
-
-def _find_fact(
-    facts: list[IndicatorFact], subject: str, indicator: str
-) -> IndicatorFact | None:
-    for fact in facts:
-        if fact.name != indicator:
-            continue
-        if (
-            fact.subject == subject
-            or name_in_text(fact.subject, subject)
-            or name_in_text(subject, fact.subject)
-        ):
-            return fact
-    return None
-
-
-def _wide_segment_table(
-    segment: str,
-    names: list[str],
-    facts: list[IndicatorFact],
-    indicators: list[str],
-) -> list[str]:
-    """行=公司、列=指标的赛道宽表；金额格带原单位，缺数用 —。"""
-    header = "| 公司 | " + " | ".join(indicators) + " |"
-    sep = "| --- | " + " | ".join("---" for _ in indicators) + " |"
-    lines = [header, sep]
-    money_units: set[str] = set()
-    converted_raw: set[str] = set()
-    money_names = registry.names_with("money_wide_table")
-    for company in names:
-        cells = [company]
-        for indicator in indicators:
-            fact = _find_fact(facts, company, indicator)
-            cells.append(_cell_with_unit(fact, indicator=indicator))
-            if fact and indicator in money_names:
-                money_units.add(_normalize_unit_label(fact.unit or "元"))
-                if getattr(fact, "unit_converted", False) and getattr(fact, "raw_unit", ""):
-                    converted_raw.add(str(fact.raw_unit))
-        lines.append("| " + " | ".join(cells) + " |")
-    if len(names) < 2:
-        lines.append("注：本组仅 1 家代表公司，不做组内横比，仅列示本期已抽到指标。")
-    money = money_units & {"元", "千元", "万元", "亿元", "百万元"}
-    if len(money) > 1:
-        lines.append(
-            f"注：金额列单位未统一（{'／'.join(sorted(money))}），"
-            "抽取层未能归一；定稿前须折算为元后再比。"
-        )
-    elif converted_raw:
-        lines.append(
-            f"注：上表部分金额由{'、'.join(sorted(converted_raw))}折算为元，原值见溯源附件。"
-        )
-    # 出处脚注：每公司一行，避免宽表塞满出处列
-    cites: list[str] = []
-    for company in names:
-        bits: list[str] = []
-        for indicator in indicators:
-            fact = _find_fact(facts, company, indicator)
-            if fact is None:
-                continue
-            bits.append(f"{indicator}←{_cite(fact)}")
-        if bits:
-            cites.append(f"{company}：{'；'.join(bits)}")
-    for cite in cites:
-        lines.append(f"出处：{cite}。")
-    return lines
-
-
-def _margin_ladder_table(current: list[IndicatorFact]) -> list[str]:
-    """全行业毛利率梯队总表（一眼可比）。"""
-    from ai_agent.report.compare import parse_number
-
-    rows: list[tuple[object, str, IndicatorFact]] = []
-    for fact in current:
-        if not registry.flag(fact.name, "ladder"):
-            continue
-        parsed = parse_number(fact.value)
-        if parsed is None:
-            continue
-        rows.append((parsed[0], fact.subject, fact))
-    if len(rows) < 2:
-        return []
-    rows.sort(key=lambda item: item[0], reverse=True)
-    lines = [
-        "### 全行业毛利率梯队",
-        "| 名次 | 公司 | 毛利率 | 出处 |",
-        "| --- | --- | --- | --- |",
-    ]
-    for index, (_amount, subject, fact) in enumerate(rows, start=1):
-        lines.append(
-            f"| {index} | {subject} | {fact.value}% | {_cite(fact)} |"
-        )
-    return lines
-
-
-_SEGMENT_TABLE_CORE = registry.ordering_int("segment_table_core")
-_OCF = registry.ordering_str("ocf")
-
-
-def _segment_table_indicators(typed: list[str]) -> list[str]:
-    """组内宽表列：主看项最多六列；模板含经营现金流则必保留（与封测表对齐）。"""
-    core = list(typed[:_SEGMENT_TABLE_CORE])
-    if _OCF in typed and _OCF not in core:
-        core.append(_OCF)
-    return core
-
-
-def _segment_peer_lines(
-    plan: ReportPlan, current: list[IndicatorFact]
-) -> list[str]:
-    groups = _skill_segments(plan)
-    if not groups:
-        return _peer_lines(plan, current)
-    # 组内对比按赛道类型路由指标；共享集作兜底，避免把 Fabless 指标硬套 Foundry。
-    # 赛道语义按当前行业档案解析：同名赛道在不同行业可以指向不同模板。
-    shared = plan.indicators or default_indicators(INDUSTRY_SHARED)
-    segment_key = profile_key_for_plan(plan)
-    lines: list[str] = []
-    ladder = _margin_ladder_table(current)
-    if ladder:
-        lines.extend(ladder)
-        lines.append("")
-    for segment, names in groups:
-        segment_facts = _facts_for_subjects(current, names)
-        lines.append(f"### {segment}")
-        if not segment_facts:
-            lines.append("本期未抽到该赛道代表公司指标。")
-            lines.append("")
-            continue
-        typed = default_indicators(type_for_segment(segment, segment_key))
-        # 赛道专属指标优先；抽不到的列在宽表里留空，缺口进「缺失」节。
-        indicators = _segment_table_indicators(typed or list(shared))
-        lines.extend(_wide_segment_table(segment, names, segment_facts, indicators))
-        lines.append("")
-    while lines and lines[-1] == "":
-        lines.pop()
-    return lines or ["组内没有可对比的已抽取指标。"]
-
-
-def _chart_guide_lines(
-    series: list[SeriesCompare],
-    plan: ReportPlan | None = None,
-    facts: list[IndicatorFact] | None = None,
-) -> list[str]:
-    lines = [
-        "PDF 附图规则：赛道报告以「组内横比」柱状图为主（同赛道、同指标、公司并列）；"
-        "单公司多期仅两期用柱状两点对比，至少四期同口径才画折线，避免伪趋势。"
-        "柱状图仅出现在 PDF 交付件；本 Markdown 只列将生成的图题。",
-    ]
-    if plan is not None and _is_segment_report(plan):
-        from ai_agent.report.pdf import charts_for_report
-
-        charts = charts_for_report(plan, facts or [], series)
-        if charts:
-            lines.append("本期 PDF 将附以下组内横比柱状图：")
-            for index, chart in enumerate(charts, start=1):
-                lines.append(f"{index}. {chart.title}")
-        else:
-            lines.append("本期无足够的同赛道横比数据时，不附组内柱状图。")
-        return lines
-    comparable = sum(1 for item in series if len(item.points) >= 2)
-    if comparable:
-        lines.append(f"本期另有 {comparable} 组多期序列可作附录对照。")
-    else:
-        lines.append("本期无可用同口径多期序列时，不附伪趋势折线。")
-    return lines
-
-
-def _peer_lines(plan: ReportPlan, current: list[IndicatorFact]) -> list[str]:
-    grouped: dict[tuple[str, str], list[IndicatorFact]] = {}
-    for fact in current:
-        if plan.indicators and fact.name not in plan.indicators:
-            continue
-        grouped.setdefault((fact.name, fact.scope), []).append(fact)
-    lines: list[str] = []
-    for (name, scope), rows in grouped.items():
-        subjects = {row.subject for row in rows}
-        if len(subjects) < 2:
-            continue
-        block = _peer_table_block(f"{name}（{_scope(scope)}）", rows, min_subjects=2)
-        if lines and block:
-            lines.append("")
-        lines.extend(block)
-    return lines or ["同一指标没有两家以上的公司，不做公司间对比。"]
-
-
-def _gap_lines(plan: ReportPlan, current: list[IndicatorFact], gaps: list[str]) -> list[str]:
-    # 范围／期间能推定的在阅读说明与指标表已交代；这里只列例外与真缺口。
-    lines: list[str] = []
-    parents = [fact.name for fact in current if fact.scope == "parent"]
-    if parents:
-        lines.append(f"母公司口径（例外）：{'、'.join(sorted(set(parents)))}。")
-    inferred = [fact for fact in current if getattr(fact, "scope_inferred", False)]
-    if inferred and not parents:
-        lines.append("范围：本期主表指标按季报模板推定为合并（详见阅读说明）。")
-    bases = sorted({_period_label(fact) for fact in current if fact.basis})
-    if bases:
-        lines.append(f"期间口径：{'、'.join(bases)}（同比只用同口径同期）。")
-    # 真缺口：缺指标／缺基期文件。把「口径不齐」类与「待入库」分开列。
-    data_gaps = [gap for gap in gaps if _is_data_gap(gap)]
-    other_gaps = [gap for gap in gaps if not _is_data_gap(gap)]
-    if data_gaps:
-        lines.append("数据缺口（待入库或未抽到）：")
-        lines.extend(data_gaps)
-    if other_gaps:
-        lines.append("其他说明：")
-        lines.extend(other_gaps)
-    return lines or ["没有缺失项。"]
-
-
-def _is_data_gap(gap: str) -> bool:
-    text = gap or ""
-    return any(
-        token in text
-        for token in (
-            "没有抽到",
-            "没有找到",
-            "未入库",
-            "待",
-            "A 股无独立",
-            "累计报告不齐",
-            "知识库",
-        )
-    )
-
-
-def _has_indicator(
-    facts: list[IndicatorFact], subject: str, name: str
-) -> bool:
-    """需求简称与事实主体全称可互相包含即视为已抽到。"""
-    for fact in facts:
-        if fact.name != name:
-            continue
-        if fact.subject == subject:
-            return True
-        if name_in_text(fact.subject, subject) or name_in_text(subject, fact.subject):
-            return True
-    return False
-
-
-_CUMULATIVE_BASE_GAP_RE = re.compile(
-    r"^A 股无独立二季报；缺 (?P<base>.+) 的累计报告，(?P<focus>.+) 单季环比无法推导$"
-)
-
-
-def _gaps(
-    plan: ReportPlan, facts: list[IndicatorFact], series: list[SeriesCompare]
-) -> list[str]:
-    gaps = _coalesce_cumulative_base_gaps(list(plan.gaps))
-    period_facts = [fact for fact in facts if fact.period == plan.period]
-    # 单公司报告缺口句省略主语，全称由标题承担
-    subjects = {fact.subject for fact in facts} | {item.subject for item in series}
-    single = _sole_subject(plan, subjects)
-    company_type = getattr(plan, "company_type", "") or industry_of(plan.subjects)
-    # 同指标多公司都缺：概括一行，避免「没有抽到」刷屏。
-    missing_by_indicator: dict[str, list[str]] = {}
-    for subject in plan.subjects:
-        for name in plan.indicators:
-            # 类型排除项不报假缺失（银行毛利率、Fabless 净息差等）。
-            if is_excluded(company_type, name):
-                continue
-            if not _has_indicator(period_facts, subject, name):
-                missing_by_indicator.setdefault(name, []).append(subject)
-    for name, cos in missing_by_indicator.items():
-        gaps.append(_format_missing_indicator_gap(cos, plan.period, name, single=bool(single)))
-    # 「不可比」／「时点存量」：逐指标同一句 → 合并计数。
-    # 其它 series 缺口：同一原因跨公司／跨指标 → 概括一条 + 例外单列。
-    repeated: dict[str, int] = {}
-    by_reason: dict[str, list[tuple[str, str]]] = {}
-    for item in series:
-        for gap in item.gaps:
-            if gap in {NOT_COMPARABLE_NOTE, STOCK_NOTE}:
-                repeated[gap] = repeated.get(gap, 0) + 1
-                continue
-            by_reason.setdefault(gap, []).append((item.subject, item.name))
-    for note, count in repeated.items():
-        gaps.append(f"{count} 项指标：{note}")
-    for reason, hits in by_reason.items():
-        gaps.append(_format_series_gap_cluster(hits, reason, single=bool(single)))
-    return gaps
-
-
-def _coalesce_cumulative_base_gaps(gaps: list[str]) -> list[str]:
-    """缺 Q1／H1 两条「累计基期」合并成一句，避免同一规则写两遍。"""
-    bases: list[str] = []
-    focus = ""
-    out: list[str] = []
-    for gap in gaps:
-        matched = _CUMULATIVE_BASE_GAP_RE.match(gap or "")
-        if matched is None:
-            out.append(gap)
-            continue
-        base = matched.group("base")
-        if base not in bases:
-            bases.append(base)
-        focus = matched.group("focus")
-    if not bases:
-        return out
-    out.append(
-        f"A 股无独立二季报；缺 {'、'.join(bases)} 的累计报告，"
-        f"{focus} 单季环比无法推导"
-    )
-    return out
-
-
-def _unique_preserve(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        out.append(item)
-    return out
-
-
-def _format_missing_indicator_gap(
-    companies: list[str], period: str, name: str, *, single: bool
-) -> str:
-    cos = _unique_preserve(companies)
-    if single or len(cos) <= 1:
-        prefix = "" if single else f"{cos[0]} "
-        return f"{prefix}没有抽到 {period} {name}"
-    return f"{len(cos)} 家公司（{'、'.join(cos)}）没有抽到 {period} {name}"
-
-
-def _format_series_gap_cluster(
-    hits: list[tuple[str, str]], reason: str, *, single: bool
-) -> str:
-    """同一原因只写一次：多家／多指标概括；单条例外保持「公司+指标：原因」。"""
-    subjects = _unique_preserve([subject for subject, _ in hits])
-    names = _unique_preserve([name for _, name in hits])
-    if len(hits) == 1:
-        subject, name = hits[0]
-        prefix = "" if single else subject
-        return f"{prefix}{name}：{reason}"
-    name_part = "、".join(names)
-    if single or len(subjects) == 1:
-        prefix = "" if single else subjects[0]
-        if len(names) == 1:
-            return f"{prefix}{names[0]}：{reason}"
-        return f"{prefix}{len(names)} 项指标（{name_part}）：{reason}"
-    return (
-        f"{len(subjects)} 家公司（{'、'.join(subjects)}）"
-        f"{len(names)} 项指标（{name_part}）：{reason}"
-    )
-
-
-def _cite(fact: IndicatorFact) -> str:
-    return _cite_evidence(fact.evidence)
-
-
-def _cite_evidence(evidence) -> str:
-    if evidence is None:
-        return "出处不明"
-    if evidence.page is None:
-        where = evidence.filename or "出处不明"
-    elif evidence.page_end and evidence.page_end != evidence.page:
-        where = f"{evidence.filename} 第{evidence.page}–{evidence.page_end}页"
-    else:
-        where = f"{evidence.filename} 第{evidence.page}页"
-    if evidence.section:
-        where = f"{where} {evidence.section}"
-    anchor = citation_anchor(evidence.file_id)
-    if anchor:
-        where = f"{where} {anchor}"
-    return where
-
-
-def _scope(scope: str, *, inferred: bool = False) -> str:
-    # 「合并／母公司」范围；能推定的写「按季报模板推定」，不写「未标明」。
-    if scope in _SCOPE:
-        return scope_label(scope, inferred=inferred)
-    return _UNKNOWN_SCOPE
-
-
-def _fact_scope_label(fact: IndicatorFact) -> str:
-    """展示用范围：抽取已推定则沿用；空 scope 时按章节／列名再推定一次。"""
-    scope = fact.scope or ""
-    inferred = bool(getattr(fact, "scope_inferred", False))
-    if not scope:
-        evidence = fact.evidence
-        scope, inferred = infer_scope(
-            scope="",
-            section=getattr(evidence, "section", "") or "",
-            column=fact.column or "",
-            quote=getattr(evidence, "quote", "") or "",
-        )
-    return scope_label(scope, inferred=inferred)
-
-
-def _column(fact: IndicatorFact) -> str:
-    """数值取自哪一列（本报告期 / 年初至报告期末），写进正文防止口径误读。"""
-    return fact.column.strip() or "未标明取数列"
-
-
-def _markdown(
-    title: str, sections: list[tuple[str, list[str]]], note: tuple[str, ...] = ()
-) -> str:
-    """段落之间空一行，但表格的连续行必须挨着，否则 Markdown 表格会散架。
-
-    顶层 join 会把每个元素之间插入空行，所以表格行先合并成一块再交给它。
-    HTML 路径（`_html_block`）本来就是按连续 "|" 行拼 <table>，不受影响。
-    """
-    parts = [f"# {title}"]
-    if note:
-        parts.append("\n".join(f"> {line}" for line in note))
-    for heading, lines in sections:
-        parts.append(f"## {heading}")
-        table: list[str] = []
-        for line in lines:
-            if line.startswith("|"):
-                table.append(line)
-                continue
-            if table:
-                parts.append("\n".join(table))
-                table.clear()
-            parts.append(line)
-        if table:
-            parts.append("\n".join(table))
-    return "\n\n".join(parts).strip() + "\n"
-
-
-def _html(
-    title: str, sections: list[tuple[str, list[str]]], note: tuple[str, ...] = ()
-) -> str:
-    body = [f"<h1>{html.escape(title)}</h1>"]
-    if note:
-        inner = "".join(f"<p>{html.escape(line)}</p>" for line in note)
-        body.append(f"<blockquote>{inner}</blockquote>")
-    for heading, lines in sections:
-        body.append("<section>")
-        body.append(f"<h2>{html.escape(heading)}</h2>")
-        body.append(_html_block(lines))
-        body.append("</section>")
-    inner = "\n".join(body)
-    return (
-        "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n"
-        "<meta charset=\"utf-8\">\n"
-        f"<title>{html.escape(title)}</title>\n</head>\n<body>\n{inner}\n</body>\n</html>\n"
-    )
-
-
-# 千分位长数字：包进 .num 禁止 PDF 中途断行。
-_LONG_NUMBER = re.compile(r"[+\-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?")
-_NUMERIC_CELL = re.compile(r"^[+\-]?[\d,]+(?:\.\d+)?(?:%|元|次|亿元|万元|百万元)?$")
-
-
-def _html_block(lines: list[str]) -> str:
-    chunks: list[str] = []
-    buffer: list[str] = []
-
-    def flush_table() -> None:
-        if not buffer:
-            return
-        rows = [line for line in buffer if not _is_rule(line)]
-        head, *rest = rows
-        rendered = ["<table>", "<thead><tr>", *_th(_cells(head)), "</tr></thead>", "<tbody>"]
-        for row in rest:
-            rendered.append("<tr>")
-            rendered.extend(_td(_cells(row)))
-            rendered.append("</tr>")
-        rendered.append("</tbody></table>")
-        chunks.append("\n".join(rendered))
-        buffer.clear()
-
-    for line in lines:
-        if line.startswith("|"):
-            buffer.append(line)
-            continue
-        flush_table()
-        chunks.append(f"<p>{_wrap_long_numbers(html.escape(line))}</p>")
-    flush_table()
-    return "\n".join(chunks)
-
-
-def _is_rule(line: str) -> bool:
-    return set(line.replace("|", "").replace(" ", "")) <= {"-", ":"}
-
-
-def _cells(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
-
-
-def _th(cells: list[str]) -> list[str]:
-    return [f"<th>{html.escape(cell)}</th>" for cell in cells]
-
-
-def _td(cells: list[str]) -> list[str]:
-    out: list[str] = []
-    for cell in cells:
-        escaped = html.escape(cell)
-        if _NUMERIC_CELL.match(cell.replace(" ", "")):
-            out.append(f'<td><span class="num">{escaped}</span></td>')
-        else:
-            out.append(f"<td>{_wrap_long_numbers(escaped)}</td>")
-    return out
-
-
-def _wrap_long_numbers(escaped: str) -> str:
-    """已 HTML escape 的文本里，给千分位数字加 nowrap 包裹。"""
-    return _LONG_NUMBER.sub(lambda match: f'<span class="num">{match.group(0)}</span>', escaped)

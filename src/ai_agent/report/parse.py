@@ -14,6 +14,7 @@ from ai_agent.kb.ingest.meta import fragment_subjects, is_plausible_subject, nam
 from ai_agent.storage.store import store
 from ai_agent.report.compare import cumulative_base_periods, qoq_period, yoy_period
 from ai_agent.report.industry import (
+    GENERIC,
     company_type_of,
     default_indicators,
     indicator_aliases,
@@ -42,6 +43,60 @@ _MARKDOWN_ONLY = re.compile(
 _INDICATOR_KEYS = registry.indicator_keys()
 # 默认指标集在 report/industry.py 按主体所属行业选择，这里只处理「需求点名」。
 _INDUSTRY_STOP = {"所属", "本公司", "该", "全", "本"}
+# 需求里的动词前缀：「生成储能行业」会被 _INDUSTRY 贪婪匹配成「生成储能」，
+# 长词在前，逐个剥掉再判行业名。只处理动词，不猜行业。
+_INDUSTRY_VERB_PREFIXES = tuple(
+    sorted(
+        {
+            "帮我生成",
+            "帮我写",
+            "帮我做",
+            "帮我出",
+            "给我生成",
+            "给我出",
+            "给我写",
+            "给我做",
+            "给我来",
+            "请生成",
+            "麻烦生成",
+            "生成一份",
+            "生成一个",
+            "生成",
+            "写一份",
+            "写一个",
+            "写篇",
+            "写",
+            "做一份",
+            "做一个",
+            "做",
+            "出一份",
+            "出一个",
+            "出",
+            "来一份",
+            "来个",
+            # 量词前缀：「帮我写一份保险行业」会被捕获成「一份保险」
+            "一份",
+            "一个",
+            "一篇",
+            "一张",
+            "份",
+            "篇",
+            "分析一下",
+            "分析",
+            "研究一下",
+            "研究",
+            "看一下",
+            "看看",
+            "看下",
+            "我要",
+            "我想要",
+            "请",
+            "麻烦",
+        },
+        key=len,
+        reverse=True,
+    )
+)
 
 
 @dataclass
@@ -127,6 +182,17 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
     # skill 路由：显式指定优先；没指定就按 kind + 行业路由。
     skill = _resolve_plan_skill(plan, skill_id)
     plan.skill_id = skill.skill_id
+    # 未注册行业别静默走通用模板：写一条缺口，编辑能看懂该补什么。
+    if (
+        not skill_id
+        and plan.kind == "industry"
+        and plan.industry
+        and plan.industry not in skill.industries
+    ):
+        plan.gaps.append(
+            f"「{plan.industry}」没有专属报告模板，已按通用行业模板生成；"
+            "要定制大纲或指标集请新增 SKILL.md"
+        )
     # 行业 skill 自带宇宙名单：空库也能定标的，再靠巨潮补齐原文。
     if plan.kind == "industry" and not plan.subjects and skill.companies:
         plan.subjects = [name for name, _code, _segment, _aka in skill.companies]
@@ -137,6 +203,13 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
         ]
     if plan.kind == "company":
         plan.company_type = company_type_of(plan.subjects)
+        if plan.subjects and plan.company_type == GENERIC:
+            # 判不出品类时按通用集抽数，但要让读者知道这是通用口径，不是专属模板。
+            plan.gaps.append(
+                "未识别公司品类，已按通用指标集生成；"
+                "可在 indicators.yaml 的 classification.name_hints 补关键字，"
+                "或把公司写进行业花名册"
+            )
     elif skill.industries:
         plan.company_type = skill.industries[0]
     else:
@@ -221,6 +294,20 @@ def _mentioned_subjects(text: str, rows: list[dict]) -> list[str]:
     return found
 
 
+def _strip_request_verb(name: str) -> str:
+    """剥掉「生成／写一份／分析一下」这类需求动词，只留行业名本体。"""
+    text = name
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _INDUSTRY_VERB_PREFIXES:
+            if text.startswith(prefix) and len(text) > len(prefix):
+                text = text[len(prefix) :]
+                changed = True
+                break
+    return text
+
+
 def _industry_of(text: str) -> str:
     # 先命中 skill 登记过的行业名，避免「生成半导体行业」被正则吃成「生成半导体」。
     from ai_agent.report.skills import _load_skills
@@ -245,8 +332,8 @@ def _industry_of(text: str) -> str:
     match = _INDUSTRY.search(text)
     if not match:
         return ""
-    name = match.group(1)
-    if name in _INDUSTRY_STOP:
+    name = _strip_request_verb(match.group(1))
+    if len(name) < 2 or name in _INDUSTRY_STOP:
         return ""
     # 已知行业是捕获串后缀时收回（「生成半导体」→「半导体」）
     for item in known:

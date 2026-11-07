@@ -7,7 +7,7 @@ registry / industry**，避免「生成物要读被生成模块」的鸡生蛋�
 
 * ``config/indicators.yaml`` 的 ``classification``（name_hints / segment_to_type）；
 * ``config/industries.yaml`` 的 ``profiles``（公司类型白名单、行业级赛道语义
-  ``segments``）与 ``aliases``（行业名别名）。
+  ``segments``、结论口径 ``lead`` / ``lead_hint``）与 ``aliases``（行业名别名）。
 
 生成物是纯 Python 字面量，主配置与 YAML 镜像都读不到时仍能完成分类；
 由 ``scripts/sync_indicators_snapshot.py`` 导出，lint 校验它不是过期生成物。
@@ -77,6 +77,22 @@ def render_defaults(indicators: Path, industries: Path) -> str:
         + ["}"]
     )
 
+    # 结论口径也一样：主配置读不到时，银行等品类的结论不能退化成通用顺序。
+    industry_lead = {
+        str(key): {
+            field: [str(item) for item in (entry.get(field) or [])]
+            for field in ("lead", "lead_hint")
+            if entry.get(field)
+        }
+        for key, entry in profiles.items()
+        if isinstance(entry, dict) and (entry.get("lead") or entry.get("lead_hint"))
+    }
+    lead_literal = "\n".join(
+        ["INDUSTRY_LEAD = {"]
+        + [f"    {key!r}: {value!r}," for key, value in industry_lead.items()]
+        + ["}"]
+    )
+
     type_aliases = "\n".join(
         ["TYPE_ALIASES = {"]
         + [f"    {str(key)!r}: {str(value)!r}," for key, value in aliases.items()]
@@ -95,5 +111,6 @@ def render_defaults(indicators: Path, industries: Path) -> str:
             _render_pairs("NAME_HINTS", name_hints),
             _render_pairs("SEGMENT_TO_TYPE", segment_to_type),
             segments_literal,
+            lead_literal,
         ]
     ) + "\n"

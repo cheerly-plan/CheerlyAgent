@@ -65,6 +65,78 @@ def test_dry_run_writes_nothing():
         assert "photovoltaics" not in before
 
 
+def test_company_mode_scaffold_produces_routable_category(monkeypatch):
+    """新增公司品类：一条命令产出 SKILL.md + 别名 + profile，且能被别名路由到。"""
+    mod = _load_script()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = _temp_root(root)
+        argv = [
+            "--kind",
+            "company",
+            "--name",
+            "保险",
+            "--set",
+            "insurance",
+            "--root",
+            str(root),
+            "--apply",
+        ]
+        assert mod.main(argv) == 0
+
+        skill_md = (
+            root / "src/ai_agent/report/skills/insurance_financial_report/SKILL.md"
+        )
+        assert skill_md.exists()
+        skill = skills._load_skill(skill_md)
+        assert skill.kind == "company"
+        assert skill.indicator_set == "insurance"
+        assert skill.industries == ("insurance",)
+        assert not skill.companies  # 公司品类不带花名册
+
+        text = (config / "industries.yaml").read_text(encoding="utf-8")
+        assert "  保险: insurance" in text
+        assert "  insurance:" in text
+
+        with monkeypatch.context() as patch:
+            patch.setattr(industry, "_INDUSTRIES_YAML", config / "industries.yaml")
+            patch.setattr(registry, "_INDUSTRIES_YAML", config / "industries.yaml")
+            patch.setattr(registry, "_INDICATORS_YAML", config / "indicators.yaml")
+            industry._profiles.cache_clear()
+            industry._aliases.cache_clear()
+            registry.reload_registry()
+
+            # 中文别名 → profile key，公司路由（industry_of）就能命中
+            assert industry.canonical_industry("保险") == "insurance"
+            assert industry._normalize_key("保险") == "insurance"
+            assert "insurance" in industry.known_company_types()
+
+        industry._profiles.cache_clear()
+        industry._aliases.cache_clear()
+        registry.reload_registry()
+
+
+def test_company_mode_rejects_roster_flags():
+    """公司品类不该带花名册：混着传说明把两类搞混了，直接报错。"""
+    mod = _load_script()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _temp_root(root)
+        argv = [
+            "--kind",
+            "company",
+            "--name",
+            "保险",
+            "--set",
+            "insurance",
+            "--companies",
+            "中国平安|601318",
+            "--root",
+            str(root),
+        ]
+        assert mod.main(argv) == 1
+
+
 def test_apply_produces_config_that_existing_code_can_read(monkeypatch):
     mod = _load_script()
     with tempfile.TemporaryDirectory() as tmp:

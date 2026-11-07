@@ -166,7 +166,6 @@ indicators:
       unit: '%'
     flags:
       unannotated_ratio: true
-      bank_lead_hint: true
   不良贷款率:
     narrative:
       keyword: 不良贷款率
@@ -177,7 +176,6 @@ indicators:
       unit: '%'
     flags:
       point_in_time: true
-      bank_lead_hint: true
   不良贷款拨备覆盖率:
     narrative:
       keyword: 拨备覆盖率
@@ -186,8 +184,6 @@ indicators:
     year_end:
       pattern: 不良贷款拨备覆盖率\s*([\d,]+(?:\.\d+)?)\s*%
       unit: '%'
-    flags:
-      bank_lead_hint: true
   加权平均净资产收益率:
     narrative:
       keyword: 加权平均净资产收益率
@@ -205,7 +201,6 @@ indicators:
       unit: '%'
     flags:
       point_in_time: true
-      bank_lead_hint: true
   利息净收入:
     narrative:
       keyword: 利息净收入
@@ -442,13 +437,6 @@ ordering:
   - 其他权益工具投资
   - 公允价值
   - 比上年度末
-  lead_bank:
-  - 营业收入
-  - 归属于母公司所有者的净利润
-  - 净利润
-  - 净息差
-  - 不良贷款率
-  - 不良贷款拨备覆盖率
   lead_generic:
   - 营业收入
   - 扣非净利润

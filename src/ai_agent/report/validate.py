@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 
 from ai_agent.report import registry
-from ai_agent.report.compare import Change, Measure, SeriesCompare, compare_measures
+from ai_agent.report.compare import Change, SeriesCompare, compare_measures
 from ai_agent.report.compose import ReportDocument
 from ai_agent.report.extract import IndicatorFact, citation_anchor
 from ai_agent.report.parse import ReportPlan
@@ -90,7 +90,9 @@ def validate_report(
     """核对正文数字和引用。异常写入 review_queue，不改正文。"""
     supplemental = views or SupplementalResult()
     body = _plain(document.markdown) or _plain(document.html)
-    computed = series if series is not None else compare_measures([_measure(fact) for fact in facts])
+    computed = series if series is not None else compare_measures(
+        [fact.to_measure() for fact in facts]
+    )
     result = ValidationResult(passed=True, provenance=_provenance(facts))
     allowed = _allowed(facts, computed, plan, supplemental)
     _check_views(result, supplemental)
@@ -136,10 +138,6 @@ def format_validation(result: ValidationResult) -> str:
         lines.append("")
         lines.append(result.provenance.markdown.rstrip())
     return "\n".join(lines).strip() + "\n"
-
-
-def _measure(fact: IndicatorFact) -> Measure:
-    return fact.to_measure()
 
 
 def _plain(text: str) -> str:
@@ -488,6 +486,17 @@ def _section_text(markdown: str, title: str) -> str:
     return ""
 
 
+def _section_text_by_id(markdown: str, section_id: str) -> str:
+    """按 section_id 取正文：命中任一标题别名即可（不绑死中文「本期结论」）。"""
+    from ai_agent.report import sections as report_sections
+
+    for title in report_sections.titles_of(section_id):
+        text = _section_text(markdown, title)
+        if text:
+            return text
+    return ""
+
+
 def _check_lead_yoy_consistency(
     result: ValidationResult,
     markdown: str,
@@ -495,11 +504,11 @@ def _check_lead_yoy_consistency(
     series: list[SeriesCompare],
     plan: ReportPlan | None,
 ) -> None:
-    """同一指标在「本期结论」与「同比与环比」的方向表述必须一致。"""
+    """同一指标在结论节与同比节的方向表述必须一致。"""
     from ai_agent.report.rules import render_yoy_rate_bit
 
-    lead = _section_text(markdown, "本期结论")
-    yoy_sec = _section_text(markdown, "同比与环比")
+    lead = _section_text_by_id(markdown, "lead")
+    yoy_sec = _section_text_by_id(markdown, "change")
     if not lead or not yoy_sec:
         return
     period = plan.period if plan is not None else ""

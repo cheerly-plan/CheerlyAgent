@@ -127,7 +127,6 @@ def test_downstream_constants_are_registry_snapshots():
     assert extract._INDICATORS == registry.table_specs()
     assert extract._NARRATIVE_PATTERNS == registry.narrative_patterns()
     assert validate._MONEY_INDICATORS == registry.names_with("money_validation")
-    assert compose._LEAD_BANK == registry.ordering_list("lead_bank")
     assert compose._LEAD_GENERIC == registry.ordering_list("lead_generic")
     assert compose._LEAD_MAX == registry.ordering_int("lead_max")
     assert set(basis._POINT_IN_TIME) == set(registry.names_with("point_in_time"))

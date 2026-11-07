@@ -19,7 +19,14 @@
 11. SKILL.md 里 ``section:`` 声明的 id 都已注册（原先只会运行时 warning）；
 12. 行业档案完整性：indicator_set 指向已登记 profile、带赛道花名册的行业
     必须自己声明 segments 且覆盖全部赛道、定性文案不含数字
-    （**验收「新增一个行业」**，并拦住同名赛道跨行业串模板）。
+    （**验收「新增一个行业」**，并拦住同名赛道跨行业串模板）；
+13. 公司档案可路由：公司类 skill 的 ``industries`` 必须是已登记的非 generic
+    profile、必须有中文别名可被主体名命中、并且确实能被 ``resolve_skill``
+    反查回自己（**验收「新增一个公司品类」**）；
+14. 结论口径可落地：profile 的 ``lead`` / ``lead_hint`` 只能是已登记指标，
+    且 ``lead`` 必须落在该 profile 的 ``include`` 里（否则结论句永远出不来）；
+15. 赛道结构口径：带花名册的行业必须声明 ``structure``，且名单落在 include／
+    已登记指标内；``structure_gloss`` 的 key 必须是 structure 里的指标。
 
 行为取舍：默认 **只记 ERROR 日志，不阻断启动**。运行时本来就有降级路径，
 多租户服务端不该因为一份 YAML 拼错整体不可用；但错误必须显眼、可查。
@@ -195,11 +202,91 @@ def lint_report_config(
                 problems.append(
                     f"{skill.skill_id}: 赛道 {missing} 缺行业级 segments 映射"
                 )
+            if not industry.profile_of(key).structure:
+                problems.append(
+                    f"{skill.skill_id}: 花名册含赛道，但 profile {key!r} 未声明 "
+                    "structure（经营解读不会默认毛利率，必须显式配置）"
+                )
         if problems:
             raise ValueError("行业档案不完整：" + "；".join(sorted(set(problems))))
 
     if config_dir is None:
         run("industry_integrity", check_industry_integrity)
+
+    def check_company_skill_routing() -> None:
+        """新增一个公司品类的验收：声明了 industries 就必须真的能路由到。
+
+        原先公司侧只有「名字含银行→bank」一条写死规则，新写一个
+        ``industries: 保险`` 的公司 skill 永远不会被自动路由。现在路由靠
+        industries.yaml 的别名，这里把三个前提都变成显式 issue：
+        行业已登记（非 generic）、有中文别名可被主体名命中、反查命中自己。
+        """
+        from ai_agent.report import industry, skills
+
+        tokens = {key for _token, key in industry._industry_tokens()}
+        problems: list[str] = []
+        for skill in skills._load_skills():
+            if skill.kind != "company" or not skill.industries:
+                continue
+            for declared in skill.industries:
+                key = industry.canonical_industry(declared)
+                if not key:
+                    problems.append(
+                        f"{skill.skill_id}: industries {declared!r} 不是已登记的 profile"
+                    )
+                    continue
+                if key == industry.GENERIC:
+                    problems.append(
+                        f"{skill.skill_id}: industries 指向 generic（通用模板不该声明行业）"
+                    )
+                    continue
+                if key not in tokens:
+                    problems.append(
+                        f"{skill.skill_id}: profile {key!r} 缺中文别名，"
+                        "主体名永远命中不了它（在 industries.yaml 的 aliases 补一行）"
+                    )
+                chosen = skills.resolve_skill("company", key)
+                if chosen.skill_id != skill.skill_id:
+                    problems.append(
+                        f"{skill.skill_id}: 被 {chosen.skill_id} 抢先命中，"
+                        "公司口径不会生效"
+                    )
+        if problems:
+            raise ValueError("公司档案不可路由：" + "；".join(sorted(set(problems))))
+
+    if config_dir is None:
+        run("company_skill_routing", check_company_skill_routing)
+
+    def check_profile_lead_names() -> None:
+        """行业结论／结构口径必须能落到真实指标上，否则那句结论永远出不来。"""
+        from ai_agent.report import industry
+
+        problems: list[str] = []
+        for key, profile in industry._profiles().items():
+            for field in ("lead", "lead_hint", "structure"):
+                for name in getattr(profile, field):
+                    if registry.spec_of(name) is None:
+                        problems.append(f"{key}.{field} 的 {name!r} 不是已登记指标")
+            for field in ("lead", "structure"):
+                missing = [
+                    name
+                    for name in getattr(profile, field)
+                    if name not in profile.indicators
+                ]
+                if missing:
+                    problems.append(f"{key}.{field} 含不在 include 里的指标 {missing}")
+            gloss_keys = {name for name, _text in profile.notes.structure_gloss}
+            unknown_gloss = sorted(gloss_keys - set(profile.structure))
+            if unknown_gloss:
+                problems.append(
+                    f"{key}.notes.structure_gloss 含不在 structure 里的指标 "
+                    f"{unknown_gloss}"
+                )
+        if problems:
+            raise ValueError("结论口径不可落地：" + "；".join(sorted(set(problems))))
+
+    if config_dir is None:
+        run("profile_lead_names", check_profile_lead_names)
 
     def check_skill_frontmatter() -> None:
         # 延迟导入：skills 模块导入即扫描 SKILL.md，坏了也要变成一条 issue

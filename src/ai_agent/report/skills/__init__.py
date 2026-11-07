@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from ai_agent.report.industry import default_indicators
+from ai_agent.report.industry import canonical_industry, default_indicators
 
 _SKILLS_ROOT = Path(__file__).resolve().parent
 _FRONTMATTER_RE = re.compile(
@@ -260,13 +260,24 @@ SKILLS: tuple[ReportSkill, ...] = _load_skills()
 def resolve_skill(kind: str, industry: str = "") -> ReportSkill:
     """先找行业专属模板，找不到再退到该 kind 的通用模板。
 
+    行业名先按原样比，再按 industries.yaml 的别名归一后比：公司类 skill 可以写
+    ``industries: bank``，也可以写 ``industries: 银行``，两种都能被路由到——
+    这样新增公司品类只要补一行别名 + 一个 skill，不用改 Python。
+
     kind 不认识时按通用公司模板兜底：调用方（parse）对 no_request 场景
     提前返回，不会走到这里依赖兜底语义。
     """
     skills = _load_skills()
     if industry:
+        wanted = canonical_industry(industry)
         for skill in skills:
-            if skill.kind == kind and industry in skill.industries:
+            if skill.kind != kind or not skill.industries:
+                continue
+            if industry in skill.industries:
+                return skill
+            if wanted and any(
+                canonical_industry(item) == wanted for item in skill.industries
+            ):
                 return skill
     for skill in skills:
         if skill.kind == kind and not skill.industries:

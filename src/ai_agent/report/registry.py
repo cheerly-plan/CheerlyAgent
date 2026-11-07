@@ -72,7 +72,8 @@ _ORDERING_TYPES: dict[str, type | tuple[type, ...]] = {
     "balance_search_keywords": list,
     "year_end_reason_rows": list,
     "year_end_reason_keywords": list,
-    "lead_bank": list,
+    # 行业专属的结论口径（原 lead_bank）已迁到 industries.yaml 的 profile.lead；
+    # 这里只留通用优先级与参数。
     "lead_generic": list,
     "lead_operating": list,
     "lead_net_profit": list,

@@ -23,20 +23,35 @@ from ai_agent.report.extract import (
     _as_uuid,
     _files_for,
 )
-from ai_agent.report.industry import notes_for_plan
+from ai_agent.report import registry
+from ai_agent.report.industry import (
+    lead_priority,
+    notes_for_plan,
+    profile_key_for_plan,
+    structure_for_plan,
+)
 from ai_agent.report.parse import ReportPlan
+from ai_agent.report.phrases import ANALYSIS_FALLBACK
 from ai_agent.report.supplemental import SupplementalResult
-from ai_agent.report.validate import _allowed, _measure, _number_key
+from ai_agent.report.validate import _allowed, _number_key
 from ai_agent.storage.store import store
+
+# 兼容旧 import：from ai_agent.report.analyze import ANALYSIS_FALLBACK
+__all__ = ("ANALYSIS_FALLBACK", "AnalysisSection", "analyze_operations")
 
 logger = get_logger(__name__)
 
-# compose._ANALYSIS_FALLBACK 须与此同文（compose 不反向 import 本模块）。
-ANALYSIS_FALLBACK = "经营解读：本期季报未提供可核对的归因表述，本节从略。"
 _FALLBACK = ANALYSIS_FALLBACK
 _TOPICS = frozenset({"nim", "profit", "asset_quality", "other"})
 _CLAIM_KINDS = frozenset({"restatement", "comparison", "gap"})
 _NUMBER = re.compile(r"-?\d[\d,，]*(?:[ \t\u00a0]\d{3})*(?:\.\d+)?%?")
+_DEFAULT_STRUCTURE_GLOSS = "此为已抽取数字的横向关系，不构成外部归因。"
+_DEFAULT_STRUCTURE_GLOSS_MORE = "同样只陈述本期数字结构，不引入无出处因果。"
+# 原文共现线索：有这些用语才写「与原文并列」结构句（制造业常见；银行原文通常不会命中）。
+_STRUCTURE_NARRATIVE_CUES = (
+    ("量价齐升", "量价"),
+    ("毛利润增加", "毛利润增加"),
+)
 _EVIDENCE_KEYWORDS = (
     "经营情况简要分析",
     "经营情况讨论与分析",
@@ -104,11 +119,17 @@ def analyze_operations(
         lines, derived = _segment_structure_lines(plan, current)
         if lines:
             return AnalysisSection(lines=lines, used_llm=False, derived_facts=derived)
-        return AnalysisSection(lines=[_FALLBACK], gaps=["缺少可排序的毛利率或研发费用率"])
+        wanted = structure_for_plan(plan)
+        gap = (
+            f"缺少可排序的结构指标（{'、'.join(wanted)}）"
+            if wanted
+            else "行业档案未声明 structure，赛道解读从略"
+        )
+        return AnalysisSection(lines=[_FALLBACK], gaps=[gap])
 
     supplemental = views or SupplementalResult()
     computed = series if series is not None else compare_measures(
-        [_measure(fact) for fact in facts]
+        [fact.to_measure() for fact in facts]
     )
     pack = evidence if evidence is not None else collect_evidence_pack(plan, current)
     by_id = {item.evidence_id: item for item in pack}
@@ -174,9 +195,13 @@ def analyze_operations(
 def _segment_structure_lines(
     plan: ReportPlan, facts: list[IndicatorFact]
 ) -> tuple[list[str], list[IndicatorFact]]:
-    """用已授权毛利率/研发费用率写梯队与结构关系（①级数据关系，非第三方因果）。"""
+    """用行业档案 structure 清单写梯队与结构关系（①级数据关系，非第三方因果）。"""
     from ai_agent.report.compare import parse_number
     from ai_agent.report.skills import get_skill
+
+    indicators = structure_for_plan(plan)
+    if not indicators:
+        return [], []
 
     skill = get_skill(plan.skill_id) if plan.skill_id else None
     segment_of = skill.segment_of if skill else (lambda _name: "")
@@ -197,27 +222,23 @@ def _segment_structure_lines(
         rows.sort(key=lambda item: item[3], reverse=True)
         return rows
 
-    margins = _ranked("毛利率")
-    rd_rates = _ranked("研发费用率")
-    if len(margins) < 2 and len(rd_rates) < 2:
+    ranked = {name: _ranked(name) for name in indicators}
+    if all(len(rows) < 2 for rows in ranked.values()):
         return [], []
 
     lines: list[str] = []
     derived: list[IndicatorFact] = []
-    if margins:
+    for name in indicators:
+        rows = ranked[name]
+        if not rows:
+            continue
         ladder = " > ".join(
-            f"{name} {value}%{f' {cite}' if cite else ''}"
-            for name, value, cite, _ in margins
+            f"{subject} {value}%{f' {cite}' if cite else ''}"
+            for subject, value, cite, _ in rows
         )
-        lines.append(f"毛利率梯队（从高到低）：{ladder}。")
-    if rd_rates:
-        ladder = " > ".join(
-            f"{name} {value}%{f' {cite}' if cite else ''}"
-            for name, value, cite, _ in rd_rates
-        )
-        lines.append(f"研发费用率梯队（从高到低）：{ladder}。")
+        lines.append(f"{name}梯队（从高到低）：{ladder}。")
 
-    # 按赛道聚合格率均值，只陈述高低关系，不写外部因果
+    # 按赛道聚合比率均值，只陈述高低关系，不写外部因果
     def _segment_avg(rows: list[tuple[str, str, str, object]]) -> list[tuple[str, object]]:
         buckets: dict[str, list[object]] = {}
         for name, _value, _cite, amount in rows:
@@ -232,24 +253,21 @@ def _segment_structure_lines(
         out.sort(key=lambda item: item[1], reverse=True)
         return out
 
-    margin_seg = _segment_avg(margins)
-    rd_seg = _segment_avg(rd_rates)
-    if len(margin_seg) >= 2:
-        detail = " / ".join(f"{seg}≈{_fmt_avg(avg)}%" for seg, avg in margin_seg)
-        order = " > ".join(seg for seg, _ in margin_seg)
-        gloss = notes.margin_gloss or "此为已抽取数字的横向关系，不构成外部归因。"
-        lines.append(f"按赛道看毛利率均值排序为 {order}（{detail}）：{gloss}")
-        derived.extend(
-            _segment_avg_fact(plan.period, "毛利率", seg, avg) for seg, avg in margin_seg
+    for index, name in enumerate(indicators):
+        seg_rows = _segment_avg(ranked[name])
+        if len(seg_rows) < 2:
+            continue
+        detail = " / ".join(f"{seg}≈{_fmt_avg(avg)}%" for seg, avg in seg_rows)
+        order = " > ".join(seg for seg, _ in seg_rows)
+        gloss = notes.gloss_for(name) or (
+            _DEFAULT_STRUCTURE_GLOSS if index == 0 else _DEFAULT_STRUCTURE_GLOSS_MORE
         )
-    if len(rd_seg) >= 2:
-        detail = " / ".join(f"{seg}≈{_fmt_avg(avg)}%" for seg, avg in rd_seg)
-        order = " > ".join(seg for seg, _ in rd_seg)
-        gloss = notes.rnd_gloss or "同样只陈述本期数字结构，不引入无出处因果。"
-        lines.append(f"按赛道看研发费用率均值排序为 {order}（{detail}）：{gloss}")
+        lines.append(f"按赛道看{name}均值排序为 {order}（{detail}）：{gloss}")
         derived.extend(
-            _segment_avg_fact(plan.period, "研发费用率", seg, avg) for seg, avg in rd_seg
+            _segment_avg_fact(plan.period, name, seg, avg) for seg, avg in seg_rows
         )
+    if not lines:
+        return [], []
     lines.append("以上判断仅基于本期已抽取或结构化补齐的比率，不引入无出处的订单／景气推断。")
     return lines, derived
 
@@ -359,8 +377,8 @@ def _deterministic_lines(
     if structure:
         lines.append(structure)
     if not lines:
-        # 无原文可引时才退回数字并列，避免空节。
-        priority = ("毛利率", "营业收入", "扣非净利润", "研发费用率")
+        # 无原文可引时才退回数字并列，避免空节；顺序跟行业档案走。
+        priority = _company_fact_priority(plan)
         ordered = sorted(
             facts,
             key=lambda fact: (
@@ -383,6 +401,37 @@ def _deterministic_lines(
     return lines
 
 
+def _company_fact_priority(plan: ReportPlan) -> tuple[str, ...]:
+    """单家经营解读数字并列顺序：structure → lead → lead_generic（不写死毛利率）。"""
+    structured = structure_for_plan(plan)
+    if structured:
+        return structured
+    lead = lead_priority(profile_key_for_plan(plan))
+    if lead:
+        return lead
+    generic = list(registry.ordering_list("lead_generic"))
+    for name in sorted(registry.names_with("ladder")):
+        if name not in generic:
+            generic.append(name)
+    return tuple(generic)
+
+
+def _pick_structure_ratio(
+    plan: ReportPlan, facts: list[IndicatorFact]
+) -> IndicatorFact | None:
+    """结构并列句选用的比率：优先 structure／lead 里已有的本期事实。"""
+    priority = _company_fact_priority(plan)
+    current = [fact for fact in facts if fact.period == plan.period]
+    by_name = {fact.name: fact for fact in current}
+    for name in priority:
+        fact = by_name.get(name)
+        if fact is None:
+            continue
+        if fact.unit == "%" or registry.flag(fact.name, "ladder"):
+            return fact
+    return next((fact for fact in current if fact.unit == "%"), None)
+
+
 def _company_structure_line(
     plan: ReportPlan,
     facts: list[IndicatorFact],
@@ -390,35 +439,36 @@ def _company_structure_line(
     has_narrative: bool,
     cited_text: str = "",
 ) -> str:
-    """有「量价齐升／毛利润增加」类原文时，用已授权毛利率做一句结构并列（非外部归因）。"""
+    """有经营原文共现线索时，用已授权比率做一句结构并列（非外部归因）。
+
+    比率名来自行业档案 structure／lead，不再写死毛利率。
+    """
     if not has_narrative:
-        return ""
-    margin = next((f for f in facts if f.name == "毛利率" and f.period == plan.period), None)
-    if margin is None:
         return ""
     # 结构句只点名正文里真实出现过的原文用语，避免「引用了量价齐升但原文没了」。
     labels = [
         label
-        for label, token in (
-            ("量价齐升", "量价"),
-            ("毛利润增加", "毛利润增加"),
-        )
+        for label, token in _STRUCTURE_NARRATIVE_CUES
         if token in (cited_text or "")
     ]
     if not labels:
         return ""
+    ratio = _pick_structure_ratio(plan, facts)
+    if ratio is None:
+        return ""
     label_text = "／".join(labels)
-    anchor = citation_anchor(margin.evidence.file_id)
-    source = margin.evidence.filename or ""
+    anchor = citation_anchor(ratio.evidence.file_id)
+    source = ratio.evidence.filename or ""
+    unit = ratio.unit or "%"
     # akshare 财务摘要列是报告期末累计口径，须写明，避免与单季营收混读。
     if source.startswith("akshare."):
         scope = "前三季度累计口径" if plan.period.endswith("Q3") else "结构化摘要累计口径"
         cite = f"（{scope} {anchor}）" if anchor else f"（{scope}）"
     else:
-        page = f"第{margin.evidence.page}页" if margin.evidence.page is not None else ""
+        page = f"第{ratio.evidence.page}页" if ratio.evidence.page is not None else ""
         cite = f"（{page} {anchor}）" if page or anchor else ""
     return (
-        f"与原文「{label_text}」并列：本期毛利率为 {margin.value}%"
+        f"与原文「{label_text}」并列：本期{ratio.name}为 {ratio.value}{unit}"
         f"{cite}——只陈述已授权比率与原文用语的共现，不构成外部归因。"
     )
 

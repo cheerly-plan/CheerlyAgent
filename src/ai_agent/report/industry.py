@@ -4,7 +4,8 @@
 银行看息差／资产质量；Fabless 看毛利率／研发／存货；设备看合同负债／存货／在手订单；
 Foundry 看稼动率／CAPEX——一套制造业模板通吃，必然出跨行业污染与假缺失。
 
-粗粒度 ``industry_of`` 仍只服务 skill 路由（bank vs generic）；
+粗粒度 ``industry_of`` 只服务 skill 路由：按 industries.yaml 的行业别名匹配主体名，
+返回 profile key（bank / insurance / …），匹配不到才 generic。
 细粒度 ``company_type_of`` 决定抽哪些指标、排除哪些污染项。
 指标名一律用报表原文术语，才能和原文对得上。
 """
@@ -51,7 +52,7 @@ CYCLICAL = "cyclical"
 _INDUSTRIES_YAML = Path(__file__).resolve().parent / "config" / "industries.yaml"
 
 _ALLOWED_NOTE_FIELDS = frozenset(
-    {"next_period", "margin_gloss", "rnd_gloss", "observation"}
+    {"next_period", "structure_gloss", "observation"}
 )
 # 行业文案只能写定性句，不能借配置往正文塞未经 facts 校验的数字。
 _NUMBER_RE = re.compile(r"[0-9０-９]|%|％")
@@ -63,9 +64,16 @@ class IndustryNotes:
     """行业级定性文案；全部可选，缺省时由渲染层使用通用兜底句。"""
 
     next_period: tuple[str, ...] = ()
-    margin_gloss: str = ""
-    rnd_gloss: str = ""
+    # 赛道均值句的定性 gloss：按结构指标名索引（毛利率／净息差…）。
+    structure_gloss: tuple[tuple[str, str], ...] = ()
     observation: str = ""
+
+    def gloss_for(self, indicator: str) -> str:
+        key = (indicator or "").strip()
+        for name, text in self.structure_gloss:
+            if name == key:
+                return text
+        return ""
 
 
 @dataclass(frozen=True)
@@ -78,6 +86,14 @@ class IndicatorProfile:
     # 该行业的赛道名 → 公司类型；声明后即为权威，不再回退全局 segment_to_type。
     # 用 tuple 保序且可哈希，避免 frozen dataclass 里塞可变 dict。
     segments: tuple[tuple[str, str], ...] = ()
+    # 「本期结论」的指标出句顺序；声明后即接管该行业的结论口径，
+    # 渲染层不再按 skill_id 写分支（原来是 bank / generic 两套写死）。
+    lead: tuple[str, ...] = ()
+    # 出现这些指标就说明是本品类公司（如银行的净息差）：用于报告类型被误路由时的兜底。
+    lead_hint: tuple[str, ...] = ()
+    # 赛道经营解读／全行业梯队表用的比率清单；有赛道 ≠ 一律写毛利率。
+    # 声明后 analyze / compose 按名单写梯队，银行可配净息差／不良等。
+    structure: tuple[str, ...] = ()
 
 
 def _as_str_tuple(raw: Any) -> tuple[str, ...]:
@@ -104,6 +120,34 @@ def _resolve_exclude(entry: dict[str, Any], sets: dict[str, Any]) -> tuple[str, 
     return tuple(out)
 
 
+def _parse_structure_gloss(raw: Any, where: str) -> tuple[tuple[str, str], ...]:
+    """structure_gloss: {指标名: 定性句} → 保序 tuple；值不得含数字。"""
+    if raw is None or raw == "":
+        return ()
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where}.notes.structure_gloss 必须是映射")
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for key, value in raw.items():
+        name = str(key).strip() if key is not None else ""
+        if not name:
+            raise ValueError(f"{where}.notes.structure_gloss 不得含空指标名")
+        if not isinstance(value, str):
+            raise ValueError(f"{where}.notes.structure_gloss[{name!r}] 必须是字符串")
+        text = value.strip()
+        if not text:
+            continue
+        if _NUMBER_RE.search(text):
+            raise ValueError(
+                f"{where}.notes.structure_gloss 不得含数字或百分比：{text!r}"
+            )
+        if name in seen:
+            continue
+        seen.add(name)
+        pairs.append((name, text))
+    return tuple(pairs)
+
+
 def _parse_notes(entry: dict[str, Any], where: str) -> IndustryNotes:
     """行业定性文案：严格 schema + 数字护栏，配置不能注入未经核对的数值。"""
     raw = entry.get("notes") or {}
@@ -113,13 +157,12 @@ def _parse_notes(entry: dict[str, Any], where: str) -> IndustryNotes:
     if unknown:
         raise ValueError(f"{where}.notes 含未声明字段 {sorted(unknown)}")
     next_period = _as_str_tuple(raw.get("next_period"))
-    glosses: dict[str, str] = {}
-    for key in ("margin_gloss", "rnd_gloss", "observation"):
-        value = raw.get(key) or ""
-        if not isinstance(value, str):
-            raise ValueError(f"{where}.notes.{key} 必须是字符串")
-        glosses[key] = value.strip()
-    for text in (*next_period, *glosses.values()):
+    observation_raw = raw.get("observation") or ""
+    if not isinstance(observation_raw, str):
+        raise ValueError(f"{where}.notes.observation 必须是字符串")
+    observation = observation_raw.strip()
+    structure_gloss = _parse_structure_gloss(raw.get("structure_gloss"), where)
+    for text in (*next_period, observation):
         if not text.strip():
             continue  # 字段都是可选；留空表示用渲染层的通用兜底句
         if _NUMBER_RE.search(text):
@@ -127,10 +170,35 @@ def _parse_notes(entry: dict[str, Any], where: str) -> IndustryNotes:
     clean_next_period = tuple(item.strip() for item in next_period if item.strip())
     return IndustryNotes(
         clean_next_period,
-        glosses["margin_gloss"],
-        glosses["rnd_gloss"],
-        glosses["observation"],
+        structure_gloss,
+        observation,
     )
+
+
+def _parse_name_list(
+    entry: dict[str, Any], field: str, where: str
+) -> tuple[str, ...]:
+    """profile 里的指标名名单（lead / lead_hint）：保序去重，拒绝空串。
+
+    「名字是否真的登记过」属于跨文件校验，放在 lint 里做；这里只保证形状合法，
+    避免 industries.yaml 读不出来时把整条分类链路带崩。
+    """
+    raw = entry.get(field)
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}.{field} 必须是列表")
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        name = str(item).strip() if isinstance(item, str) else ""
+        if not name:
+            raise ValueError(f"{where}.{field} 不得含空指标名：{item!r}")
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return tuple(out)
 
 
 def _parse_segments(entry: dict[str, Any], where: str) -> tuple[tuple[str, str], ...]:
@@ -155,6 +223,19 @@ def _parse_segments(entry: dict[str, Any], where: str) -> tuple[tuple[str, str],
 
 
 _ALLOWED_TOP_LEVEL = frozenset({"aliases", "sets", "profiles"})
+# profile 里允许的字段；未声明的字段一律报错，避免「写了但没人读」的假配置。
+_ALLOWED_PROFILE_FIELDS = frozenset(
+    {
+        "include",
+        "exclude",
+        "exclude_refs",
+        "notes",
+        "segments",
+        "lead",
+        "lead_hint",
+        "structure",
+    }
+)
 
 
 def _load_profiles(path: Path) -> dict[str, IndicatorProfile]:
@@ -175,14 +256,23 @@ def _load_profiles(path: Path) -> dict[str, IndicatorProfile]:
             raise ValueError(f"industries.yaml profile key 非法：{profile_key!r}")
         if not isinstance(entry, dict):
             raise ValueError(f"industries.yaml profile 非法: {profile_key}")
+        unknown = set(entry) - _ALLOWED_PROFILE_FIELDS
+        if unknown:
+            raise ValueError(
+                f"industries.yaml profile {profile_key} 含未声明字段 {sorted(unknown)}"
+            )
         include = _as_str_tuple(entry.get("include"))
         if not include:
             raise ValueError(f"industries.yaml profile 缺少 include: {profile_key}")
+        where = f"industries.yaml profile {profile_key}"
         profiles[profile_key] = IndicatorProfile(
             indicators=include,
             exclude=_resolve_exclude(entry, sets if isinstance(sets, dict) else {}),
-            notes=_parse_notes(entry, f"industries.yaml profile {profile_key}"),
-            segments=_parse_segments(entry, f"industries.yaml profile {profile_key}"),
+            notes=_parse_notes(entry, where),
+            segments=_parse_segments(entry, where),
+            lead=_parse_name_list(entry, "lead", where),
+            lead_hint=_parse_name_list(entry, "lead_hint", where),
+            structure=_parse_name_list(entry, "structure", where),
         )
     for required in (GENERIC, INDUSTRY_SHARED):
         if required not in profiles:
@@ -254,10 +344,36 @@ def validate_industries(path: Path | None = None) -> dict[str, IndicatorProfile]
 # 需求文本里可能出现的简称 → 报表正式指标名。长词放前面避免被短词吃掉。
 _ALIASES: tuple[tuple[str, str], ...] = registry.aliases_map()
 
+def _industry_tokens() -> tuple[tuple[str, str], ...]:
+    """主体名里可能出现的行业词 → profile key，按长度降序（最长优先）。
+
+    只取中文别名（英文 profile key 不做子串匹配，避免在英文公司名里瞎猜）；
+    「制造业」这类长词排在「制造」前，避免短词先命中。名单来自
+    industries.yaml 的 aliases，不在 Python 里写死「银行」。
+    """
+    tokens = [
+        (token.strip(), key)
+        for token, key in _aliases().items()
+        if token.strip() and not token.strip().isascii()
+    ]
+    return tuple(sorted(tokens, key=lambda item: len(item[0]), reverse=True))
+
+
 def industry_of(subjects: list[str]) -> str:
-    """粗行业：主体名含「银行」→ bank；否则 generic（供 skill 路由）。"""
-    if any("银行" in (name or "") for name in subjects):
-        return BANK
+    """粗行业（供 skill 路由）：主体名命中哪个行业词，就返回它的 profile key。
+
+    例：「某某银行股份有限公司」→ bank；「某某保险」→ insurance（配置了
+    ``保险: insurance`` 别名后）。都没命中 → generic。
+    新增一个公司类行业只要在 industries.yaml 补一行中文别名，不用改这里。
+    """
+    tokens = _industry_tokens()
+    for name in subjects:
+        text = (name or "").strip()
+        if not text:
+            continue
+        for token, key in tokens:
+            if token in text:
+                return key
     return GENERIC
 
 
@@ -276,12 +392,16 @@ def company_type_of(subjects: list[str]) -> str:
 
 
 def classify_subject(subject: str) -> str:
-    """单家公司分类：行业 skill 花名册 → 名称关键字 → generic。不调用模型。"""
+    """单家公司分类：行业 skill 花名册 → 名称关键字 → 行业别名 → generic。
+
+    名称关键字来自 indicators.yaml 的 classification.name_hints，
+    行业别名来自 industries.yaml 的 aliases；两者都是配置，本函数没有
+    写死的行业名（原先「主体名含银行即判 bank」的分支已由 ``银行: bank``
+    别名接管）。
+    """
     text = (subject or "").strip()
     if not text:
         return GENERIC
-    if "银行" in text:
-        return BANK
     roster = _skill_company_roster()
     for key, company_type in roster.items():
         if key == text or key in text or text in key:
@@ -289,6 +409,11 @@ def classify_subject(subject: str) -> str:
     for token, company_type in registry.name_hints():
         if token in text:
             return company_type
+    # 只在配了专属指标档案（非 generic）时按行业别名兜底，避免「软件」这类
+    # 泛词把公司错判进某个细类型后套错模板。
+    for token, profile_key in _industry_tokens():
+        if token in text and profile_key != GENERIC:
+            return profile_key
     return GENERIC
 
 
@@ -390,6 +515,59 @@ def notes_for_plan(plan: Any) -> IndustryNotes:
     return profile_of(profile_key_for_plan(plan)).notes
 
 
+def structure_for_plan(plan: Any) -> tuple[str, ...]:
+    """赛道解读／梯队表用的比率清单；未声明则空（不默认毛利率）。"""
+    key = profile_key_for_plan(plan)
+    if not key:
+        return ()
+    return profile_of(key).structure
+
+
+def _fallback_industry_lead(key: str, field: str) -> tuple[str, ...] | None:
+    """industries.yaml 读不到时，从只读降级快照取该行业的结论口径。"""
+    try:
+        from ai_agent.report import classification_defaults
+
+        table = getattr(classification_defaults, "INDUSTRY_LEAD", {})
+        entry = (table or {}).get(key) or {}
+        return tuple(entry.get(field, ())) if isinstance(entry, dict) else ()
+    except ImportError:  # pragma: no cover - 仅打包缺生成物时触发
+        return None
+
+
+def lead_priority(profile_key: str) -> tuple[str, ...]:
+    """该行业的「本期结论」出句顺序；未声明时返回空元组（走通用口径）。
+
+    结论口径跟着行业档案走，而不是跟着 skill_id 或「是不是银行」走：
+    新增一个公司口径只要在 profile 里写 ``lead:``，渲染层不用改。
+    """
+    key = _normalize_key(profile_key or "")
+    try:
+        profile = _profiles().get(key)
+    except Exception:
+        logger.exception("industries.yaml 读取失败，结论口径回退内置快照")
+        return _fallback_industry_lead(key, "lead") or ()
+    return profile.lead if profile is not None else ()
+
+
+def lead_hint_profiles() -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    """[(hint 指标名, 对应结论顺序), …]：按档案声明顺序，用于报告类型被误路由时兜底。
+
+    例：银行档案声明 ``lead_hint: [净息差, …]``，即使请求被路由到通用公司模板，
+    只要正文里出现净息差，结论仍按银行口径出句。
+    """
+    try:
+        profiles = _profiles()
+    except Exception:
+        logger.exception("industries.yaml 读取失败，结论口径线索不可用")
+        return ()
+    return tuple(
+        (profile.lead_hint, profile.lead)
+        for profile in profiles.values()
+        if profile.lead_hint and profile.lead
+    )
+
+
 def normalize_indicator(text: str) -> str:
     """把需求里的简称归一到报表正式指标名；不认识就原样返回。"""
     cleaned = (text or "").strip()
@@ -403,10 +581,31 @@ def indicator_aliases() -> tuple[tuple[str, str], ...]:
     return _ALIASES
 
 
+def canonical_industry(raw: str) -> str:
+    """行业名 → profile key；不认识返回空串。
+
+    与 ``_normalize_key`` 的区别：不把未知行业悄悄当成 generic。路由层需要
+    「这个行业到底登记过没有」的判断，用这个函数，别用会兜底的那个。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    aliases = _aliases()
+    found = aliases.get(text.lower()) or aliases.get(text)
+    if found:
+        return found
+    try:
+        return text if text in _profiles() else ""
+    except Exception:
+        logger.exception("industries.yaml 读取失败，行业名按原值返回")
+        return text
+
+
 def _normalize_key(raw: str) -> str:
     """行业名／公司类型 → profile key；别名表来自 industries.yaml。
 
     新增行业只要在该文件补一行 alias，不必再往 Python 字典里加常量。
+    未知值落 generic——需要「到底登记过没有」的判断请用 canonical_industry。
     """
     text = (raw or "").strip().lower()
     stripped = (raw or "").strip()

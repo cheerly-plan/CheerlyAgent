@@ -9,7 +9,7 @@
 #   money_validation / money_pick_facts / money_wide_table / money_cell_unit /
 #   amount_abstract / narrative_first / chart_default / point_in_time /
 #   stock_name / unannotated_ratio / equity_composition / asset_driver /
-#   profit_name / balance_move_name / balance_* / year_end_* / bank_lead_hint 等
+#   profit_name / balance_move_name / balance_* / year_end_* 等
 # 每个语义组单独一个 key，是为了保持迁移前各组之间的成员差异（例如金额
 # 白名单 10 项 vs 宽表 8 项 vs 单元格 7 项）——统一口径会悄悄改掉正文。
 #
@@ -188,7 +188,6 @@ indicators:
       unit: '%'
     flags:
       unannotated_ratio: true
-      bank_lead_hint: true
   不良贷款率:
     narrative:
       keyword: 不良贷款率
@@ -199,7 +198,6 @@ indicators:
       unit: '%'
     flags:
       point_in_time: true
-      bank_lead_hint: true
   不良贷款拨备覆盖率:
     narrative:
       keyword: 拨备覆盖率
@@ -208,8 +206,6 @@ indicators:
     year_end:
       pattern: 不良贷款拨备覆盖率\s*([\d,]+(?:\.\d+)?)\s*%
       unit: '%'
-    flags:
-      bank_lead_hint: true
   加权平均净资产收益率:
     narrative:
       keyword: 加权平均净资产收益率
@@ -227,7 +223,6 @@ indicators:
       unit: '%'
     flags:
       point_in_time: true
-      bank_lead_hint: true
   利息净收入:
     narrative:
       keyword: 利息净收入
@@ -464,13 +459,6 @@ ordering:
   - 其他权益工具投资
   - 公允价值
   - 比上年度末
-  lead_bank:
-  - 营业收入
-  - 归属于母公司所有者的净利润
-  - 净利润
-  - 净息差
-  - 不良贷款率
-  - 不良贷款拨备覆盖率
   lead_generic:
   - 营业收入
   - 扣非净利润

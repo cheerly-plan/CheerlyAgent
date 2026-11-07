@@ -70,23 +70,39 @@ def test_unknown_segment_never_falls_back_to_another_industry():
 
 def test_render_layer_has_no_industry_specific_branches():
     """静态护栏：行业专属 if 不许在渲染/分析/路由层长回来。"""
-    for name in (
-        "compose.py",
-        "analyze.py",
-        "parse.py",
-        "pdf.py",
-        "market_finance.py",
-    ):
-        src = (_REPORT_ROOT / name).read_text(encoding="utf-8")
-        for banned in (
-            "semiconductor_industry_report",
-            "robotics_industry_report",
-            "bank_industry_report",
-            "bank_financial_report",
-            "_NEXT_PERIOD_NOTE_SEMICONDUCTOR",
-            "_NEXT_PERIOD_NOTE_ROBOTICS",
-        ):
-            assert banned not in src, f"{name} 又出现了行业专属分支 {banned}"
+    paths = [
+        _REPORT_ROOT / "compose.py",
+        _REPORT_ROOT / "compose_common.py",
+        _REPORT_ROOT / "compose_format.py",
+        _REPORT_ROOT / "compose_segment.py",
+        _REPORT_ROOT / "compose_gaps.py",
+        _REPORT_ROOT / "analyze.py",
+        _REPORT_ROOT / "parse.py",
+        _REPORT_ROOT / "pdf.py",
+        _REPORT_ROOT / "market_finance.py",
+    ]
+    banned = (
+        "semiconductor_industry_report",
+        "robotics_industry_report",
+        "bank_industry_report",
+        "bank_financial_report",
+        "_NEXT_PERIOD_NOTE_SEMICONDUCTOR",
+        "_NEXT_PERIOD_NOTE_ROBOTICS",
+        "_SEMICONDUCTOR_PREFER_MARKET",
+    )
+    for path in paths:
+        src = path.read_text(encoding="utf-8")
+        for token in banned:
+            assert token not in src, f"{path.name} 又出现了行业专属分支 {token}"
+
+
+@pytest.mark.parametrize("skill", _SEGMENT_SKILLS, ids=lambda s: s.skill_id)
+def test_segment_skills_declare_structure(skill):
+    """有赛道花名册就必须声明 structure，禁止默认走毛利率叙事。"""
+    profile = industry.profile_of(skill.indicator_set)
+    assert profile.structure, f"{skill.skill_id} 缺少 structure"
+    for name in profile.structure:
+        assert name in profile.indicators
 
 
 def test_classification_defaults_is_generated_not_handwritten():

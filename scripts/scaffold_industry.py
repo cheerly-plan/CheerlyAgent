@@ -1,12 +1,15 @@
-"""给研报新增一个行业：生成 SKILL.md + 追加配置片段，零 Python 改动。
+"""给研报新增一个行业或公司品类：生成 SKILL.md + 追加配置片段，零 Python 改动。
 
 用法（项目根目录）：
 
-    # 先看将要写什么（默认 dry-run，不改任何文件）
+    # 新增行业：先看将要写什么（默认 dry-run，不改任何文件）
     uv run python scripts/scaffold_industry.py \\
         --name 光伏 --set photovoltaics --title 光伏行业财报对比分析 \\
         --companies "隆基绿能|601012|组件, 通威股份|600438|硅料" \\
         --segment-types "组件=manufacturing,硅料=cyclical"
+
+    # 新增公司品类（保险／券商这类）：不需要花名册与赛道
+    uv run python scripts/scaffold_industry.py --kind company --name 保险 --set insurance
 
     # 确认后写入，并自动同步降级快照 + 跑配置 lint
     uv run python scripts/scaffold_industry.py ... --apply
@@ -19,6 +22,9 @@
 赛道语义都来自 industries.yaml，渲染层通过 industry.profile_key_for_plan()
 按 indicator_set 取。赛道映射写进新 profile 自己的 segments，不追加到
 indicators.yaml 的全局 segment_to_type —— 那会污染其它行业的同名赛道。
+
+新增公司品类同理：写一个 ``kind: company`` 的 SKILL.md + 一行中文别名，
+公司路由（industry.industry_of）就会把主体名命中到该 profile key。
 """
 
 from __future__ import annotations
@@ -103,6 +109,51 @@ _PROFILE_BLOCK = """  {set_key}:
 {segments}
 """
 
+_COMPANY_SKILL_TEMPLATE = """---
+name: {skill_id}
+kind: company
+title: {title}
+industries: {set_key}
+indicator_set: {set_key}
+description: {name}公司季报/半年报：按{name}口径取指标，不套用其它行业模板
+---
+
+# {title}
+
+管「写什么」：大纲与默认指标集。抽数、同比环比、数字校验、PDF 落盘仍走确定性工具，
+本 skill 不改写防幻觉门禁。
+
+## 大纲
+
+### 本期结论
+
+用 3–5 句提炼主线，数字必须来自本期已抽取的指标；完整清单放「主要指标与出处」，不在这里平铺。
+
+### 主要指标与出处
+
+只写{{indicators}}。每个数字都要能回到文件和页码，抽取没有的数不写。
+
+### 同比与环比
+
+增减额和幅度只用计算工具的结果，不在正文里重算。
+
+### 单季节奏
+
+只用季报「本报告期」列与它自带的单季同比，和累计同比并排看节奏，不由累计值倒推。
+
+### 数据观察
+
+只并列原文披露的数字关系，不写因果归因；口径交代不全的地方如实标明。
+
+### 经营解读
+
+只根据已抽取指标与季报原文解释经营现象；无原文支撑的因果不写；不写同业均值、估值与投资建议。
+
+### 缺失与口径
+
+写明合并还是母公司。缺失项直接列出。
+"""
+
 
 def _parse_pairs(raw: str, sep: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
@@ -128,7 +179,9 @@ def build_changes(args) -> dict[Path, str]:
     root: Path = args.root
     config = root / "src/ai_agent/report/config" if root != _PROJECT_ROOT else _CONFIG_DIR
     skills_root = root / "src/ai_agent/report/skills" if root != _PROJECT_ROOT else _SKILLS_ROOT
-    skill_id = f"{args.set_key}_industry_report"
+    company = getattr(args, "kind", "industry") == "company"
+    suffix = "_financial_report" if company else "_industry_report"
+    skill_id = f"{args.set_key}{suffix}"
 
     skill_path = skills_root / skill_id / "SKILL.md"
     if skill_path.exists():
@@ -136,18 +189,30 @@ def build_changes(args) -> dict[Path, str]:
 
     changes: dict[Path, str] = {}
     base = args.name if args.name.endswith("行业") else f"{args.name}行业"
-    changes[skill_path] = _SKILL_TEMPLATE.format(
-        skill_id=skill_id,
-        title=args.title or f"{base}财报对比分析",
-        name=args.name,
-        set_key=args.set_key,
-        companies=args.companies,
-    )
+    if company:
+        changes[skill_path] = _COMPANY_SKILL_TEMPLATE.format(
+            skill_id=skill_id,
+            title=args.title or f"{args.name}财报深度分析",
+            name=args.name,
+            set_key=args.set_key,
+        )
+    else:
+        changes[skill_path] = _SKILL_TEMPLATE.format(
+            skill_id=skill_id,
+            title=args.title or f"{base}财报对比分析",
+            name=args.name,
+            set_key=args.set_key,
+            companies=args.companies,
+        )
 
-    # 赛道语义属于这个行业自己：全部写进 profile.segments。
-    # 带赛道花名册却漏配映射，会让渲染层回退 generic 或串到别的行业模板，
-    # 所以这里直接拒绝生成，而不是等 lint 事后报错。
     segment_pairs = _parse_pairs(args.segment_types, "=")
+    if company:
+        # 公司品类没有花名册，也就没有赛道语义；混着传多半是把两类搞混了。
+        if segment_pairs or args.companies:
+            raise ValueError("公司品类不支持 --companies / --segment-types")
+    else:
+        if not args.companies:
+            raise ValueError("新增行业需要 --companies 花名册")
     for segment, company_type in segment_pairs:
         if not re.fullmatch(r"[a-z][a-z0-9_]*", company_type):
             raise ValueError(f"赛道 {segment!r} 的公司类型 {company_type!r} 非法")
@@ -191,17 +256,27 @@ def build_changes(args) -> dict[Path, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="新增研报行业（生成配置，零 Python 改动）")
+    parser = argparse.ArgumentParser(
+        description="新增研报行业或公司品类（生成配置，零 Python 改动）"
+    )
     parser.add_argument(
-        "--name", required=True, help="中文行业名，不要带「行业」后缀，如 光伏"
+        "--kind",
+        choices=("industry", "company"),
+        default="industry",
+        help="新增的是行业报告（industry）还是公司品类口径（company）",
+    )
+    parser.add_argument(
+        "--name", required=True, help="中文行业名，不要带「行业」后缀，如 光伏／保险"
     )
     parser.add_argument("--set", dest="set_key", required=True, help="profile key，如 photovoltaics")
     parser.add_argument("--title", default="", help="报告标题，默认按行业名生成")
-    parser.add_argument("--companies", required=True, help="名|代码|赛道[, 名|代码|赛道…]")
+    parser.add_argument(
+        "--companies", default="", help="名|代码|赛道[, 名|代码|赛道…]（仅行业报告）"
+    )
     parser.add_argument(
         "--segment-types",
         default="",
-        help="赛道=细类型[, …]，写入新 profile 的 segments（需覆盖 companies 里全部赛道）",
+        help="赛道=细类型[, …]，写入新 profile 的 segments（仅行业报告，需覆盖全部赛道）",
     )
     parser.add_argument("--apply", action="store_true", help="真正写文件（默认只打印）")
     parser.add_argument("--root", type=Path, default=_PROJECT_ROOT, help="仅供测试：替换项目根")

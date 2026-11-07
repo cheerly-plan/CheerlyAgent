@@ -2,22 +2,24 @@
 
 注册表层已测过 ``lead_names`` / ``lead_order``，但没有用例证明这些顺序
 真的落到正文里——P0 竖切期的 fallback 语义 bug 正是「名单没缩、正文悄悄缩」。
-这里从 registry 派生期望顺序，不写死指标名单，改配置会同步改变断言。
+这里从行业档案（industries.yaml 的 profile.lead）派生期望顺序，不写死指标名单，
+改配置会同步改变断言。
 """
 
 from __future__ import annotations
 
-from ai_agent.report import registry
 from ai_agent.report.compose import (
-    _LEAD_BANK,
     _LEAD_MAX,
     _LEAD_NET_PROFIT,
     compose_report,
 )
 from ai_agent.report.extract import Evidence, IndicatorFact
+from ai_agent.report.industry import lead_priority, profile_of
 from ai_agent.report.parse import OutlineItem, ReportPlan
 
 _SUBJECT = "某某银行股份有限公司"
+# 银行结论口径来自 industries.yaml 的 profile.lead，不再是 compose 里的常量。
+_LEAD_BANK = lead_priority("bank")
 
 
 def _fact(name: str, value: str) -> IndicatorFact:
@@ -81,7 +83,8 @@ def test_conclusion_sentences_follow_bank_priority_order():
     lines = [line for line in section.splitlines() if line.strip()]
     expected = _expected_names(set(names))
 
-    assert _LEAD_BANK == registry.ordering_list("lead_bank")
+    assert _LEAD_BANK == profile_of("bank").lead
+    assert _LEAD_BANK  # 档案里必须真的声明了银行口径
     assert len(lines) == len(expected) == min(_LEAD_MAX, len(names))
     for line, name in zip(lines, expected):
         assert f"{name}为 " in line, f"结论行 {line!r} 未按优先级输出 {name}"

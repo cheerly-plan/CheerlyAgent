@@ -2,7 +2,7 @@
 
 边界：
 * 默认只补「缺口」——知识库已抽到的同公司同指标不覆盖，保留 PDF 出处。
-* 半导体赛道报告的「毛利率」例外：统一用财务摘要累计口径覆盖正文单季叙述，
+* 赛道横比报告：``prefer_market`` 标记的指标统一用财务摘要累计口径覆盖正文单季叙述，
   避免与同表其它公司混口径排序。
 * 每条事实带可核对 quote（指标名、报告期列、原值）；数字路径仍走 validate。
 * 研发费用率由利润表 RESEARCH_EXPENSE / TOTAL_OPERATE_INCOME 计算，quote 写明两端。
@@ -29,8 +29,8 @@ _SOURCE_RD = "akshare.stock_profit_sheet_by_report_em"
 # 导入时拍一份 abstract 映射快照，供降级／契约测试与 entry 查找兜底。
 _ABSTRACT_MAP: tuple[tuple[str, str, str], ...] = registry.abstract_map()
 _AMOUNT_INDICATORS = registry.names_with("amount_abstract")
-# 半导体行业横比时，毛利率一律用财务摘要累计列，覆盖季报正文「本季」叙述。
-_SEMICONDUCTOR_PREFER_MARKET = registry.names_with("prefer_market")
+# prefer_market 导入快照：赛道横比覆盖用；配置热更新时 names_with 仍可读最新值。
+_PREFER_MARKET_FALLBACK = registry.names_with("prefer_market")
 # 利润表推算的那个比率指标名由配置给定（新增同类指标不用改本模块）。
 _RND_RATIO_INDICATOR = registry.ordering_str("rnd_ratio_indicator")
 
@@ -82,11 +82,9 @@ def supplement_facts_from_market(
         return facts, missing
     from ai_agent.report.skills import is_segment_skill
 
-    # 赛道横比报告统一用财务摘要累计口径覆盖正文单季叙述（毛利率等）。
+    # 赛道横比报告统一用财务摘要累计口径覆盖正文单季叙述（prefer_market 指标）。
     prefer_market = (
-        registry.names_with(
-            "prefer_market", fallback=_SEMICONDUCTOR_PREFER_MARKET
-        )
+        registry.names_with("prefer_market", fallback=_PREFER_MARKET_FALLBACK)
         if is_segment_skill(plan.skill_id)
         else frozenset()
     )

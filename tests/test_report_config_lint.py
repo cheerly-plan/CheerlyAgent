@@ -39,6 +39,8 @@ _CHECK_NAMES = {
     "skill_frontmatter",
     "skill_section_ids",
     "industry_integrity",
+    "company_skill_routing",
+    "profile_lead_names",
 }
 
 
@@ -296,7 +298,6 @@ def test_third_industry_is_config_only(monkeypatch):
             "exclude": list(raw["profiles"]["semiconductor"]["exclude"]),
             "notes": {
                 "next_period": ["景气周期待接入外部数据源，本期不推断。"],
-                "rnd_gloss": "只陈述本期数字结构。",
             },
         }
         target.write_text(
