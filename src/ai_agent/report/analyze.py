@@ -1,7 +1,8 @@
 """经营解读：受约束 LLM，只许用已抽取事实 + 季报原文。
 
-数字路径（抽数 / 计算 / 结论表）仍是确定性代码。本模块只生成「经营解读」
-一节；输出必须过数字白名单与证据 id 校验，失败则从略，不阻断整份报告。
+数字路径（抽数 / 计算 / 结论表）仍是确定性代码。本模块只编排「经营解读」
+一节；原文清洗见 analyze_evidence，结构梯队见 analyze_structure，
+启发式名单见 config/analysis.yaml。
 """
 
 from __future__ import annotations
@@ -16,28 +17,38 @@ from ai_agent.llm.client import complete_chat, lightweight_llm
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.prompts.report_analysis import ANALYSIS_SYSTEM, render_analysis_user
 from ai_agent.report.compare import SeriesCompare, compare_measures
-from ai_agent.report.extract import (
-    Evidence,
-    IndicatorFact,
-    citation_anchor,
-    _as_uuid,
-    _files_for,
-)
-from ai_agent.report import registry
-from ai_agent.report.industry import (
-    lead_priority,
-    notes_for_plan,
-    profile_key_for_plan,
-    structure_for_plan,
-)
+from ai_agent.report.extract import IndicatorFact, citation_anchor
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.phrases import ANALYSIS_FALLBACK
 from ai_agent.report.supplemental import SupplementalResult
 from ai_agent.report.validate import _allowed, _number_key
-from ai_agent.storage.store import store
+from ai_agent.report.analyze_evidence import (
+    EvidenceItem,
+    collect_evidence_pack,
+    extract_operating_narrative,
+    is_form_chrome,
+    is_statement_template,
+    is_usable_operating_quote,
+    iter_reason_snippets,
+    plain_evidence_quote,
+    safe_truncate,
+)
+from ai_agent.report.analyze_heuristics import operating_snippet_keys
+from ai_agent.report.analyze_structure import (
+    company_fact_priority,
+    company_structure_line,
+    segment_structure_lines,
+    semiconductor_structure_lines,
+)
 
-# 兼容旧 import：from ai_agent.report.analyze import ANALYSIS_FALLBACK
-__all__ = ("ANALYSIS_FALLBACK", "AnalysisSection", "analyze_operations")
+# 兼容旧 import / 测试私有名
+__all__ = (
+    "ANALYSIS_FALLBACK",
+    "AnalysisSection",
+    "EvidenceItem",
+    "analyze_operations",
+    "collect_evidence_pack",
+)
 
 logger = get_logger(__name__)
 
@@ -45,38 +56,13 @@ _FALLBACK = ANALYSIS_FALLBACK
 _TOPICS = frozenset({"nim", "profit", "asset_quality", "other"})
 _CLAIM_KINDS = frozenset({"restatement", "comparison", "gap"})
 _NUMBER = re.compile(r"-?\d[\d,，]*(?:[ \t\u00a0]\d{3})*(?:\.\d+)?%?")
-_DEFAULT_STRUCTURE_GLOSS = "此为已抽取数字的横向关系，不构成外部归因。"
-_DEFAULT_STRUCTURE_GLOSS_MORE = "同样只陈述本期数字结构，不引入无出处因果。"
-# 原文共现线索：有这些用语才写「与原文并列」结构句（制造业常见；银行原文通常不会命中）。
-_STRUCTURE_NARRATIVE_CUES = (
-    ("量价齐升", "量价"),
-    ("毛利润增加", "毛利润增加"),
-)
-_EVIDENCE_KEYWORDS = (
-    "经营情况简要分析",
-    "经营情况讨论与分析",
-    "主要会计数据、财务指标发生变动的情况、原因",
-    "净息差",
-    "不良贷款",
-    "拨备覆盖率",
-    "营业收入",
-    "净利润",
-    "毛利率",
-    "研发费用",
-    "研发投入",
-    "产能利用率",
-    "量价齐升",
-)
 
-
-@dataclass
-class EvidenceItem:
-    evidence_id: str
-    file_id: str
-    filename: str
-    page: int | None
-    section: str
-    quote: str
+# 测试兼容别名
+_company_fact_priority = company_fact_priority
+_segment_structure_lines = segment_structure_lines
+_semiconductor_structure_lines = semiconductor_structure_lines
+_extract_operating_narrative = extract_operating_narrative
+_is_usable_operating_quote = is_usable_operating_quote
 
 
 @dataclass
@@ -114,9 +100,10 @@ def analyze_operations(
 
     # 赛道分组报告：用已抽取数字写梯队与结构关系，不跑 LLM 复述/乱引模板条款。
     from ai_agent.report.skills import is_segment_skill
+    from ai_agent.report.industry import structure_for_plan
 
     if is_segment_skill(plan.skill_id):
-        lines, derived = _segment_structure_lines(plan, current)
+        lines, derived = segment_structure_lines(plan, current)
         if lines:
             return AnalysisSection(lines=lines, used_llm=False, derived_facts=derived)
         wanted = structure_for_plan(plan)
@@ -142,7 +129,7 @@ def analyze_operations(
 
     use_llm = settings.report_analysis_enabled if enabled is None else enabled
     if not use_llm:
-        lines = _deterministic_lines(plan, current, pack)
+        lines = deterministic_lines(plan, current, pack)
         if lines:
             return AnalysisSection(
                 lines=lines, gaps=["经营解读未启用模型，已用数字事实与原文引述"], used_llm=False
@@ -158,7 +145,7 @@ def analyze_operations(
         raw = (complete or _call_llm)(ANALYSIS_SYSTEM, user)
     except Exception:
         logger.exception("经营解读 LLM 调用失败，改用原文证据回退")
-        lines = _deterministic_lines(plan, current, pack)
+        lines = deterministic_lines(plan, current, pack)
         if lines:
             return AnalysisSection(
                 lines=lines, gaps=["经营解读模型调用失败，已改用原文引述"], used_llm=False
@@ -167,7 +154,7 @@ def analyze_operations(
 
     parsed = load_llm_json(raw, repair=True)
     if not isinstance(parsed, dict):
-        lines = _deterministic_lines(plan, current, pack)
+        lines = deterministic_lines(plan, current, pack)
         if lines:
             return AnalysisSection(
                 lines=lines, gaps=["经营解读输出无法解析，已改用原文引述"], used_llm=True
@@ -182,7 +169,7 @@ def analyze_operations(
         if isinstance(raw_paras, list) and raw_paras:
             gaps = list(gaps) or ["经营解读无合法段落"]
             return AnalysisSection(lines=[_FALLBACK], gaps=gaps, used_llm=True)
-        fallback_lines = _deterministic_lines(plan, current, pack)
+        fallback_lines = deterministic_lines(plan, current, pack)
         if fallback_lines:
             gaps = list(gaps) or ["经营解读无合法 LLM 段落"]
             gaps.append("已改用原文证据引述")
@@ -192,123 +179,7 @@ def analyze_operations(
     return AnalysisSection(lines=lines, gaps=gaps, used_llm=True)
 
 
-def _segment_structure_lines(
-    plan: ReportPlan, facts: list[IndicatorFact]
-) -> tuple[list[str], list[IndicatorFact]]:
-    """用行业档案 structure 清单写梯队与结构关系（①级数据关系，非第三方因果）。"""
-    from ai_agent.report.compare import parse_number
-    from ai_agent.report.skills import get_skill
-
-    indicators = structure_for_plan(plan)
-    if not indicators:
-        return [], []
-
-    skill = get_skill(plan.skill_id) if plan.skill_id else None
-    segment_of = skill.segment_of if skill else (lambda _name: "")
-    # 行业专属的定性 gloss 来自 industries.yaml；未配置则用通用句。
-    notes = notes_for_plan(plan)
-
-    def _ranked(indicator: str) -> list[tuple[str, str, str, object]]:
-        rows: list[tuple[str, str, str, object]] = []
-        for fact in facts:
-            if fact.name != indicator:
-                continue
-            parsed = parse_number(fact.value)
-            if parsed is None:
-                continue
-            amount, _ = parsed
-            cite = citation_anchor(fact.evidence.file_id)
-            rows.append((fact.subject, fact.value, cite, amount))
-        rows.sort(key=lambda item: item[3], reverse=True)
-        return rows
-
-    ranked = {name: _ranked(name) for name in indicators}
-    if all(len(rows) < 2 for rows in ranked.values()):
-        return [], []
-
-    lines: list[str] = []
-    derived: list[IndicatorFact] = []
-    for name in indicators:
-        rows = ranked[name]
-        if not rows:
-            continue
-        ladder = " > ".join(
-            f"{subject} {value}%{f' {cite}' if cite else ''}"
-            for subject, value, cite, _ in rows
-        )
-        lines.append(f"{name}梯队（从高到低）：{ladder}。")
-
-    # 按赛道聚合比率均值，只陈述高低关系，不写外部因果
-    def _segment_avg(rows: list[tuple[str, str, str, object]]) -> list[tuple[str, object]]:
-        buckets: dict[str, list[object]] = {}
-        for name, _value, _cite, amount in rows:
-            seg = segment_of(name) or "未分组"
-            buckets.setdefault(seg, []).append(amount)
-        out: list[tuple[str, object]] = []
-        for seg, amounts in buckets.items():
-            if not amounts:
-                continue
-            avg = sum(amounts) / len(amounts)  # type: ignore[arg-type]
-            out.append((seg, avg))
-        out.sort(key=lambda item: item[1], reverse=True)
-        return out
-
-    for index, name in enumerate(indicators):
-        seg_rows = _segment_avg(ranked[name])
-        if len(seg_rows) < 2:
-            continue
-        detail = " / ".join(f"{seg}≈{_fmt_avg(avg)}%" for seg, avg in seg_rows)
-        order = " > ".join(seg for seg, _ in seg_rows)
-        gloss = notes.gloss_for(name) or (
-            _DEFAULT_STRUCTURE_GLOSS if index == 0 else _DEFAULT_STRUCTURE_GLOSS_MORE
-        )
-        lines.append(f"按赛道看{name}均值排序为 {order}（{detail}）：{gloss}")
-        derived.extend(
-            _segment_avg_fact(plan.period, name, seg, avg) for seg, avg in seg_rows
-        )
-    if not lines:
-        return [], []
-    lines.append("以上判断仅基于本期已抽取或结构化补齐的比率，不引入无出处的订单／景气推断。")
-    return lines, derived
-
-
-# 兼容旧测试名。
-_semiconductor_structure_lines = _segment_structure_lines
-
-
-def _fmt_avg(amount: object) -> str:
-    """赛道均值展示到一位小数，便于正文横比阅读。"""
-    try:
-        return f"{float(amount):.1f}"
-    except (TypeError, ValueError):
-        return str(amount)
-
-
-def _segment_avg_fact(
-    period: str, indicator: str, segment: str, avg: object
-) -> IndicatorFact:
-    value = _fmt_avg(avg)
-    quote = f"{segment}赛道{indicator}均值≈{value}%（成员本期{indicator}算术平均）"
-    return IndicatorFact(
-        subject=f"{segment}赛道均值",
-        period=period,
-        name=f"{indicator}均值",
-        value=value,
-        unit="%",
-        column="赛道均值推算",
-        scope="derived",
-        evidence=Evidence(
-            file_id=f"segment-avg-{segment}-{indicator}",
-            filename="derived.segment_average",
-            page=None,
-            page_end=None,
-            section="经营解读",
-            quote=quote,
-        ),
-    )
-
-
-def _deterministic_lines(
+def deterministic_lines(
     plan: ReportPlan,
     facts: list[IndicatorFact],
     pack: list[EvidenceItem],
@@ -320,15 +191,11 @@ def _deterministic_lines(
     from ai_agent.report.skills import is_segment_skill
 
     if is_segment_skill(plan.skill_id):
-        lines, _derived = _segment_structure_lines(plan, facts)
+        lines, _derived = segment_structure_lines(plan, facts)
         return lines
 
     lines: list[str] = []
-    # ① 有经营原文明文时，不再用「长主语 + 已出现数字」复述；先写原文，再补一句
-    # 可指回原文的结构关系（比率须已在 facts 中）。
-    # 变动原因表常把「量价齐升」写在「主要原因」单元格——先抽叙述再判噪音，
-    # 禁止因表头词整段丢弃有效原文。
-    keys = ("量价", "存储", "出货", "毛利润增加", "经营业绩", "产能", "研发")
+    keys = operating_snippet_keys()
     ban = (
         "被合并方",
         "合并日",
@@ -339,30 +206,30 @@ def _deterministic_lines(
         "净利润为 0",
         "是否经审计",
     )
+    narrative_keep = ("量价", "存储", "出货", "毛利润增加", "经营业绩")
     used = 0
     seen_snippets: set[str] = set()
     for item in pack:
-        raw = _extract_operating_narrative(_plain_evidence_quote(item.quote or ""))
+        raw = extract_operating_narrative(plain_evidence_quote(item.quote or ""))
         if len(raw) < 20 or not any(token in raw for token in keys):
             continue
         if any(token in raw for token in ban):
             continue
-        # 纯报表模板残片（无经营叙述词）跳过；含「量价／存储」的变动原因表保留。
-        if _is_statement_template(raw) and not any(
-            token in raw for token in ("量价", "存储", "出货", "毛利润增加", "经营业绩")
+        if is_statement_template(raw) and not any(
+            token in raw for token in narrative_keep
         ):
             continue
-        for snippet in _iter_reason_snippets(raw):
-            snippet = _extract_operating_narrative(snippet)
-            if not snippet or not _is_usable_operating_quote(snippet):
+        for snippet in iter_reason_snippets(raw):
+            snippet = extract_operating_narrative(snippet)
+            if not snippet or not is_usable_operating_quote(snippet):
                 continue
-            if _is_form_chrome(snippet):
+            if is_form_chrome(snippet):
                 continue
             key = snippet[:40]
             if key in seen_snippets:
                 continue
             seen_snippets.add(key)
-            quote = _safe_truncate(snippet, 120)
+            quote = safe_truncate(snippet, 120)
             cite = _format_citation([item])
             lines.append(f"原文披露：{quote}{cite}。")
             used += 1
@@ -371,14 +238,13 @@ def _deterministic_lines(
         if used >= 2:
             break
     cited = "\n".join(lines)
-    structure = _company_structure_line(
+    structure = company_structure_line(
         plan, facts, has_narrative=bool(lines), cited_text=cited
     )
     if structure:
         lines.append(structure)
     if not lines:
-        # 无原文可引时才退回数字并列，避免空节；顺序跟行业档案走。
-        priority = _company_fact_priority(plan)
+        priority = company_fact_priority(plan)
         ordered = sorted(
             facts,
             key=lambda fact: (
@@ -401,461 +267,7 @@ def _deterministic_lines(
     return lines
 
 
-def _company_fact_priority(plan: ReportPlan) -> tuple[str, ...]:
-    """单家经营解读数字并列顺序：structure → lead → lead_generic（不写死毛利率）。"""
-    structured = structure_for_plan(plan)
-    if structured:
-        return structured
-    lead = lead_priority(profile_key_for_plan(plan))
-    if lead:
-        return lead
-    generic = list(registry.ordering_list("lead_generic"))
-    for name in sorted(registry.names_with("ladder")):
-        if name not in generic:
-            generic.append(name)
-    return tuple(generic)
-
-
-def _pick_structure_ratio(
-    plan: ReportPlan, facts: list[IndicatorFact]
-) -> IndicatorFact | None:
-    """结构并列句选用的比率：优先 structure／lead 里已有的本期事实。"""
-    priority = _company_fact_priority(plan)
-    current = [fact for fact in facts if fact.period == plan.period]
-    by_name = {fact.name: fact for fact in current}
-    for name in priority:
-        fact = by_name.get(name)
-        if fact is None:
-            continue
-        if fact.unit == "%" or registry.flag(fact.name, "ladder"):
-            return fact
-    return next((fact for fact in current if fact.unit == "%"), None)
-
-
-def _company_structure_line(
-    plan: ReportPlan,
-    facts: list[IndicatorFact],
-    *,
-    has_narrative: bool,
-    cited_text: str = "",
-) -> str:
-    """有经营原文共现线索时，用已授权比率做一句结构并列（非外部归因）。
-
-    比率名来自行业档案 structure／lead，不再写死毛利率。
-    """
-    if not has_narrative:
-        return ""
-    # 结构句只点名正文里真实出现过的原文用语，避免「引用了量价齐升但原文没了」。
-    labels = [
-        label
-        for label, token in _STRUCTURE_NARRATIVE_CUES
-        if token in (cited_text or "")
-    ]
-    if not labels:
-        return ""
-    ratio = _pick_structure_ratio(plan, facts)
-    if ratio is None:
-        return ""
-    label_text = "／".join(labels)
-    anchor = citation_anchor(ratio.evidence.file_id)
-    source = ratio.evidence.filename or ""
-    unit = ratio.unit or "%"
-    # akshare 财务摘要列是报告期末累计口径，须写明，避免与单季营收混读。
-    if source.startswith("akshare."):
-        scope = "前三季度累计口径" if plan.period.endswith("Q3") else "结构化摘要累计口径"
-        cite = f"（{scope} {anchor}）" if anchor else f"（{scope}）"
-    else:
-        page = f"第{ratio.evidence.page}页" if ratio.evidence.page is not None else ""
-        cite = f"（{page} {anchor}）" if page or anchor else ""
-    return (
-        f"与原文「{label_text}」并列：本期{ratio.name}为 {ratio.value}{unit}"
-        f"{cite}——只陈述已授权比率与原文用语的共现，不构成外部归因。"
-    )
-
-
-def _is_statement_template(text: str) -> bool:
-    return any(
-        token in text
-        for token in ("合并利润表", "合并资产负债表", "编制单位", "审计类型")
-    )
-
-
-def _is_form_chrome(text: str) -> bool:
-    """抽后的短句若仍是表头／勾选框，才丢弃。"""
-    if "适用" in text and "不适用" in text:
-        return True
-    if "变动比例" in text and "主要原因" in text:
-        return True
-    return _is_statement_template(text)
-
-
-def _iter_reason_snippets(quote: str) -> list[str]:
-    """同一证据块可拆出多条叙述：量价齐升与毛利润增加不要互相抢占。"""
-    # 主题分组：每组至多取一条；组内取文中最早命中，避免「量价」截掉「报告期内」开头。
-    theme_groups = (
-        ("报告期内", "量价", "存储", "出货", "经营业绩"),
-        ("毛利润增加", "主要是", "主要系"),
-    )
-    snippets: list[str] = []
-    occupied: list[tuple[int, int]] = []
-    for group in theme_groups:
-        hits = sorted(
-            ((quote.find(marker), marker) for marker in group if marker in quote),
-            key=lambda item: item[0],
-        )
-        for idx, _marker in hits:
-            if idx < 0:
-                continue
-            if any(start <= idx < end for start, end in occupied):
-                continue
-            tail = quote[idx:]
-            caused = tail.find("所致")
-            if caused >= 0 and caused < 80:
-                piece = tail[: caused + 2]
-            else:
-                cut = re.search(
-                    r"\s+(?:营业收入|利润总额|归属于上市公司|基本每股|稀释每股|加权平均)",
-                    tail,
-                )
-                piece = tail[: cut.start()] if cut else tail
-                stop = piece.find("。")
-                if stop >= 0:
-                    piece = piece[: stop + 1]
-            cleaned = _keep_operating_fragments(
-                _strip_quote_numbers(piece.strip(" ；;|"))
-            )
-            if not cleaned:
-                continue
-            snippets.append(cleaned)
-            occupied.append((idx, idx + max(len(piece), 1)))
-            break
-        if len(snippets) >= 2:
-            break
-    if snippets:
-        return snippets
-    fallback = _keep_operating_fragments(_reason_only(quote))
-    return [fallback] if fallback else []
-
-
-_TIP_PREFIX = re.compile(
-    r"需提醒投资者关注的关于公司报告期经营情况的其他重要信息[、,，]?"
-)
-_SHAREHOLDER_NOISE = (
-    "转融通",
-    "出借股份",
-    "无限售流通股",
-    "前十名股东",
-    "前 名股东",
-    "前名股东",
-)
-_OPERATING_MARKERS = (
-    "报告期内",
-    "公司前三季度",
-    "前三季度",
-    "本报告期",
-    "本期公司",
-    "围绕重点",
-    "持续优化",
-    "经营业绩",
-    "量价",
-    "毛利润增加",
-    "主要是",
-    "主要系",
-)
-_OPERATING_CONTENT = (
-    "产能",
-    "客户",
-    "技术",
-    "经营",
-    "毛利",
-    "量价",
-    "研发",
-    "应用板块",
-    "出货",
-    "存储",
-)
-# 利润表模板科目；成串出现 = 科目清单，不是经营解读。
-_PL_ACCOUNT_NAMES = (
-    "营业成本",
-    "利息支出",
-    "手续费及佣金支出",
-    "退保金",
-    "赔付支出",
-    "提取保险责任准备金净额",
-    "提取保险责任准备金",
-    "保单红利支出",
-    "分保费用",
-    "税金及附加",
-    "销售费用",
-    "管理费用",
-    "研发费用",
-    "财务费用",
-    "资产减值损失",
-    "信用减值损失",
-    "其他收益",
-    "投资收益",
-    "公允价值变动收益",
-    "营业外收入",
-    "营业外支出",
-    "所得税费用",
-)
-# 封测／制造公司正文不该出现的跨行业科目（保险／银行模板残留）。
-_CROSS_INDUSTRY_ACCOUNTS = (
-    "退保金",
-    "赔付支出",
-    "保单红利",
-    "提取保险责任准备金",
-    "分保费用",
-    "净息差",
-    "不良贷款",
-    "拨备覆盖率",
-    "利息净收入",
-)
-_NARRATIVE_CUES = (
-    "优化",
-    "布局",
-    "增长",
-    "下降",
-    "提升",
-    "推进",
-    "持续",
-    "实现",
-    "所致",
-    "主要是",
-    "主要系",
-    "围绕",
-    "保持",
-    "量价",
-    "出货",
-    "发力",
-    "向好",
-)
-_HOLLOW_NUMBER_SLOT = re.compile(
-    r"(＿|_{2,}|人民币\s+亿?元|为\s+元|同比\s*(?:增长|下降|增减)?\s*[。.%％]?)"
-)
-
-
-def _plain_evidence_quote(raw: str) -> str:
-    """去掉 HTML 标签，压成单行，并清洗 PDF 断字／勾选框噪音。"""
-    from ai_agent.report.extract import sanitize_evidence_quote
-
-    text = re.sub(r"<[^>]+>", " ", raw or "")
-    return sanitize_evidence_quote(text)
-
-
-def _is_account_catalog(text: str) -> bool:
-    """整段基本是利润表科目名罗列（长电第 2 条引文这类）。"""
-    hits = sum(1 for name in _PL_ACCOUNT_NAMES if name in (text or ""))
-    if hits >= 4:
-        return True
-    return "其中" in (text or "") and hits >= 2
-
-
-def _has_hollow_number_slots(text: str) -> bool:
-    """数字被抽空后留下「人民币 亿元／同比 。」半截句。"""
-    return bool(_HOLLOW_NUMBER_SLOT.search(text or ""))
-
-
-def _looks_like_operating_sentence(text: str) -> bool:
-    if any(mark in text for mark in ("。", "；", "所致")):
-        return True
-    return any(cue in text for cue in _NARRATIVE_CUES)
-
-
-def _is_usable_operating_quote(text: str) -> bool:
-    """单片段是否可引用：成句、非科目清单、无跨行业残留、无数字空壳。"""
-    cleaned = (text or "").strip()
-    if len(cleaned) < 20:
-        return False
-    if any(token in cleaned for token in _CROSS_INDUSTRY_ACCOUNTS):
-        return False
-    if _is_account_catalog(cleaned):
-        return False
-    if _has_hollow_number_slots(cleaned):
-        return False
-    if not _looks_like_operating_sentence(cleaned):
-        return False
-    return True
-
-
-def _excise_bad_clauses(text: str) -> str:
-    """按逗号切开，丢掉空缺／科目罗列／跨行业子句，保留其余。"""
-    parts = re.split(r"([，,])", text or "")
-    kept: list[str] = []
-    idx = 0
-    while idx < len(parts):
-        chunk = parts[idx]
-        delim = ""
-        if idx + 1 < len(parts) and parts[idx + 1] in {"，", ","}:
-            delim = parts[idx + 1]
-            idx += 2
-        else:
-            idx += 1
-        piece = chunk.strip()
-        if not piece:
-            continue
-        if _has_hollow_number_slots(piece):
-            continue
-        if _is_account_catalog(piece):
-            continue
-        if any(token in piece for token in _CROSS_INDUSTRY_ACCOUNTS):
-            continue
-        kept.append(chunk + delim)
-    return "".join(kept).strip(" ，,、；;")
-
-
-def _keep_operating_fragments(text: str) -> str:
-    """片段级切除：空缺句／科目清单丢掉，经营成句保留（不因半段瑕疵整段扔）。"""
-    kept: list[str] = []
-    for sentence in re.split(r"(?<=[。；])\s*", text or ""):
-        piece = sentence.strip()
-        if not piece:
-            continue
-        if _is_account_catalog(piece) and not any(
-            cue in piece for cue in ("围绕", "优化", "布局", "量价", "产能落地")
-        ):
-            continue
-        if any(token in piece for token in _CROSS_INDUSTRY_ACCOUNTS):
-            # 整句都是保险／银行残留：丢；若只是尾巴污染，先切除再判。
-            if not any(cue in piece for cue in _NARRATIVE_CUES):
-                continue
-        if _has_hollow_number_slots(piece) or any(
-            token in piece for token in _CROSS_INDUSTRY_ACCOUNTS
-        ):
-            piece = _excise_bad_clauses(piece)
-        piece = piece.strip(" ，,、；;")
-        if not piece:
-            continue
-        if not _is_usable_operating_quote(piece):
-            # 切除后可能变短，但仍有明确经营线索则保留。
-            if len(piece) < 16 or not _looks_like_operating_sentence(piece):
-                continue
-            if _has_hollow_number_slots(piece) or _is_account_catalog(piece):
-                continue
-        if not piece.endswith(("。", "；", "！", "？")):
-            piece += "。"
-        kept.append(piece)
-    return "".join(kept)
-
-
-def _extract_operating_narrative(text: str) -> str:
-    """从拼接块里精准切出经营原文：垃圾片段丢、有效片段留。
-
-    长电常见形态：股东转融通前缀 + 经营句 + 「净利润为人民币 亿元」空缺尾巴。
-    不能因尾巴有空缺整段扔掉（否则经营解读退化成指标复读）。
-    """
-    cleaned = _TIP_PREFIX.sub("", text or "")
-    cleaned = " ".join(cleaned.split())
-    if not cleaned:
-        return ""
-    start = -1
-    for marker in _OPERATING_MARKERS:
-        idx = cleaned.find(marker)
-        if idx < 0:
-            continue
-        if start < 0 or idx < start:
-            start = idx
-    if start >= 0:
-        cleaned = cleaned[start:]
-    elif any(token in cleaned for token in _SHAREHOLDER_NOISE):
-        return ""
-    if any(token in cleaned for token in _SHAREHOLDER_NOISE):
-        cut = min(
-            (cleaned.find(token) for token in _SHAREHOLDER_NOISE if token in cleaned),
-            default=-1,
-        )
-        if 0 <= cut < 40:
-            return ""
-        if cut >= 40:
-            cleaned = cleaned[:cut].rstrip(" ，,、；;")
-    if cleaned.startswith("前") and "股东" in cleaned[:24]:
-        return ""
-    return _keep_operating_fragments(cleaned)
-
-
-def _reason_only(quote: str) -> str:
-    """变动原因表常带比例数字与其它科目行；只保留原因叙述句。
-
-    定量数字必须来自已校验 facts；原文引述只留定性原因，避免断字残片进正文。
-    内容词（量价／存储）优先于「主要是」，防止长原文被短原因句抢占。
-    """
-    markers = ("量价", "存储", "出货", "报告期内", "主要是", "主要系")
-    for marker in markers:
-        idx = quote.find(marker)
-        if idx < 0:
-            continue
-        tail = quote[idx:]
-        # 「…所致」后常接其它科目变动行，先截到所致。
-        caused = tail.find("所致")
-        if caused >= 0 and caused < 80:
-            tail = tail[: caused + 2]
-        else:
-            # 切断后续科目行（营业收入_本报告期 197.11 …）
-            cut = re.search(
-                r"\s+(?:营业收入|利润总额|归属于上市公司|基本每股|稀释每股|加权平均)",
-                tail,
-            )
-            if cut:
-                tail = tail[: cut.start()]
-            stop = tail.find("。")
-            if stop >= 0:
-                tail = tail[: stop + 1]
-        return _strip_quote_numbers(tail.strip(" ；;|"))
-    return _strip_quote_numbers(quote)
-
-
-def _strip_quote_numbers(text: str) -> str:
-    cleaned = re.sub(r"-?\d[\d,，]*(?:\.\d+)?%?", " ", text or "")
-    return " ".join(cleaned.split())
-
-
-def _safe_truncate(text: str, limit: int) -> str:
-    """截断正文引述时不从数字中间切开，避免校验把半截数字当成未核对。"""
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    if cut and cut[-1].isdigit() and limit < len(text) and text[limit].isdigit():
-        cut = re.sub(r"[\d,，.]+$", "", cut).rstrip(" |,，、；;")
-    return cut.rstrip() + "…"
-
-
-def collect_evidence_pack(
-    plan: ReportPlan, facts: list[IndicatorFact]
-) -> list[EvidenceItem]:
-    """KB 召回 + 本期事实出处，供 analyze / 测试共用。"""
-    items = _load_kb_evidence(plan)
-    seen = {(item.file_id, item.page, item.quote[:60]) for item in items}
-    index = len(items)
-    for fact in facts:
-        if fact.period != plan.period:
-            continue
-        # akshare / 推算出处只作数值补齐，不当作「季报原文」引述进经营解读。
-        filename = fact.evidence.filename or ""
-        if filename.startswith(("akshare.", "derived.")):
-            continue
-        quote = _extract_operating_narrative(
-            _plain_evidence_quote(fact.evidence.quote or "")
-        )
-        if len(quote) < 8:
-            continue
-        key = (fact.evidence.file_id, fact.evidence.page, quote[:60])
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append(
-            EvidenceItem(
-                evidence_id=f"e{index}",
-                file_id=fact.evidence.file_id,
-                filename=fact.evidence.filename,
-                page=fact.evidence.page,
-                section=fact.evidence.section,
-                quote=quote[:500],
-            )
-        )
-        index += 1
-        if len(items) >= 12:
-            break
-    return items
+_deterministic_lines = deterministic_lines
 
 
 def _call_llm(system: str, user: str) -> str:
@@ -875,7 +287,6 @@ def _call_llm(system: str, user: str) -> str:
             response_format={"type": "json_object"},
         )
     except LLMError:
-        # 本地小模型常不支持 response_format，降级为纯 prompt 约束
         return complete_chat(
             messages,
             model=model,
@@ -934,66 +345,6 @@ def _render_evidence(items: list[EvidenceItem]) -> str:
     return "\n".join(lines)
 
 
-def _load_kb_evidence(plan: ReportPlan) -> list[EvidenceItem]:
-    try:
-        files = _files_for(plan.subjects, plan.period)
-    except Exception:
-        logger.exception("经营解读定位本期文件失败")
-        return []
-    file_ids = [_as_uuid(row.get("file_id")) for row in files]
-    file_ids = [item for item in file_ids if item is not None]
-    if not file_ids:
-        return []
-    rows: list[dict] = []
-    for kinds in (["text"], ["table"]):
-        try:
-            rows.extend(
-                store.search_kb_chunks_keyword(
-                    list(_EVIDENCE_KEYWORDS),
-                    file_ids=file_ids,
-                    top_k=8,
-                    kinds=kinds,
-                )
-            )
-        except Exception:
-            logger.exception("经营解读证据召回失败 kinds=%s", kinds)
-    ban = ("被合并方", "合并日", "净利润为：0", "净利润为0")
-    items: list[EvidenceItem] = []
-    seen: set[str] = set()
-    for index, row in enumerate(rows):
-        text = _extract_operating_narrative(
-            _plain_evidence_quote(str(row.get("text") or ""))
-        )
-        if len(text) < 20 or any(token in text for token in ban):
-            continue
-        file_id = str(row.get("file_id") or "")
-        page = row.get("page")
-        key = f"{file_id}:{page}:{text[:80]}"
-        if key in seen:
-            continue
-        seen.add(key)
-        page_int: int | None
-        if isinstance(page, int):
-            page_int = page
-        elif str(page).isdigit():
-            page_int = int(page)
-        else:
-            page_int = None
-        items.append(
-            EvidenceItem(
-                evidence_id=f"e{index}",
-                file_id=file_id,
-                filename=str(row.get("filename") or ""),
-                page=page_int,
-                section=str(row.get("section") or ""),
-                quote=text[:500],
-            )
-        )
-        if len(items) >= 8:
-            break
-    return items
-
-
 def _postprocess(
     payload: dict,
     *,
@@ -1036,7 +387,6 @@ def _postprocess(
             gaps.append(f"段落含未授权数字，已丢弃：{text[:40]}")
             continue
         cite = _format_citation([by_id[eid] for eid in evidence_ids if eid in by_id])
-        # 锚点必须落在句号前，否则按句扫描归因时会把出处拆到下一句。
         body = text.rstrip("。．.！？；;")
         lines.append(f"{body}{cite}。")
     return lines, gaps
@@ -1048,7 +398,6 @@ def _numbers_allowed(text: str, allowed: set[str]) -> bool:
         key = _number_key(raw)
         if not key:
             continue
-        # 章节号 / 短序号不拦
         if re.fullmatch(r"-?\d{1,2}", key.rstrip("%")):
             continue
         if key in allowed:
