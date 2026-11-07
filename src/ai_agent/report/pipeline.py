@@ -33,7 +33,7 @@ from ai_agent.report.analyze import analyze_operations
 from ai_agent.report.compare import Measure, SeriesCompare, compare_measures
 from ai_agent.report.compose import ReportDocument, compose_report
 from ai_agent.report.ensure_filings import ensure_filings_for_report
-from ai_agent.report.extract import IndicatorFact, extract_indicators
+from ai_agent.report.extract import IndicatorFact, ensure_amount_units, extract_indicators
 from ai_agent.report.parse import ReportPlan, parse_request
 from ai_agent.report.market_finance import supplement_facts_from_market
 from ai_agent.report.pdf import PdfFile, charts_for_report, render_report_pdf
@@ -154,6 +154,7 @@ def run_report(
     facts, missing, views = _extract_all(plan)
     if ensure_notes:
         missing = [*ensure_notes, *missing]
+    facts = ensure_amount_units(facts)
     measures = [
         Measure(
             subject=f.subject,

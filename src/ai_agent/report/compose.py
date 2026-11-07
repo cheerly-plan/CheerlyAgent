@@ -20,7 +20,7 @@ from ai_agent.report.compare import (
     compare_measures,
     parse_number,
 )
-from ai_agent.report.extract import IndicatorFact, citation_anchor
+from ai_agent.report.extract import IndicatorFact, citation_anchor, ensure_amount_units
 from ai_agent.report.industry import (
     BANK,
     default_indicators,
@@ -120,6 +120,8 @@ def compose_report(
     未传入或为空时写从略句，不阻断整份报告。
     """
     supplemental = views or SupplementalResult()
+    # 千元／万元等入口再折一次，避免抽取漏识别时组内表混单位。
+    facts = ensure_amount_units(facts)
     series = compare_measures([_measure(fact) for fact in facts])
     features = compute_features(plan, facts, supplemental, series)
     gaps = _gaps(plan, facts, series)
@@ -1025,21 +1027,38 @@ def _wide_segment_table(
     sep = "| --- | " + " | ".join("---" for _ in indicators) + " |"
     lines = [header, sep]
     money_units: set[str] = set()
+    converted_raw: set[str] = set()
+    money_names = {
+        "营业收入",
+        "扣非净利润",
+        "经营活动产生的现金流量净额",
+        "合同负债",
+        "存货",
+        "在手订单",
+        "资本开支",
+        "折旧",
+    }
     for company in names:
         cells = [company]
         for indicator in indicators:
             fact = _find_fact(facts, company, indicator)
             cells.append(_cell_with_unit(fact, indicator=indicator))
-            if fact and indicator in {"营业收入", "扣非净利润"}:
+            if fact and indicator in money_names:
                 money_units.add(_normalize_unit_label(fact.unit or "元"))
+                if getattr(fact, "unit_converted", False) and getattr(fact, "raw_unit", ""):
+                    converted_raw.add(str(fact.raw_unit))
         lines.append("| " + " | ".join(cells) + " |")
     if len(names) < 2:
         lines.append("注：本组仅 1 家代表公司，不做组内横比，仅列示本期已抽到指标。")
-    money = money_units & {"元", "千元", "万元", "亿元"}
+    money = money_units & {"元", "千元", "万元", "亿元", "百万元"}
     if len(money) > 1:
         lines.append(
             f"注：金额列单位未统一（{'／'.join(sorted(money))}），"
-            "各格已带原披露单位，不折算后直接比大小。"
+            "抽取层未能归一；定稿前须折算为元后再比。"
+        )
+    elif converted_raw:
+        lines.append(
+            f"注：上表部分金额由{'、'.join(sorted(converted_raw))}折算为元，原值见溯源附件。"
         )
     # 出处脚注：每公司一行，避免宽表塞满出处列
     cites: list[str] = []
@@ -1088,6 +1107,18 @@ def _margin_ladder_table(current: list[IndicatorFact]) -> list[str]:
     return lines
 
 
+_SEGMENT_TABLE_CORE = 6
+_OCF = "经营活动产生的现金流量净额"
+
+
+def _segment_table_indicators(typed: list[str]) -> list[str]:
+    """组内宽表列：主看项最多六列；模板含经营现金流则必保留（与封测表对齐）。"""
+    core = list(typed[:_SEGMENT_TABLE_CORE])
+    if _OCF in typed and _OCF not in core:
+        core.append(_OCF)
+    return core
+
+
 def _segment_peer_lines(
     plan: ReportPlan, current: list[IndicatorFact]
 ) -> list[str]:
@@ -1110,7 +1141,7 @@ def _segment_peer_lines(
             continue
         typed = default_indicators(type_for_segment(segment))
         # 赛道专属指标优先；抽不到的列在宽表里留空，缺口进「缺失」节。
-        indicators = (typed or list(shared))[:6]
+        indicators = _segment_table_indicators(typed or list(shared))
         lines.extend(_wide_segment_table(segment, names, segment_facts, indicators))
         lines.append("")
     while lines and lines[-1] == "":
@@ -1219,38 +1250,112 @@ def _has_indicator(
     return False
 
 
+_CUMULATIVE_BASE_GAP_RE = re.compile(
+    r"^A 股无独立二季报；缺 (?P<base>.+) 的累计报告，(?P<focus>.+) 单季环比无法推导$"
+)
+
+
 def _gaps(
     plan: ReportPlan, facts: list[IndicatorFact], series: list[SeriesCompare]
 ) -> list[str]:
-    gaps = list(plan.gaps)
+    gaps = _coalesce_cumulative_base_gaps(list(plan.gaps))
     period_facts = [fact for fact in facts if fact.period == plan.period]
     # 单公司报告缺口句省略主语，全称由标题承担
     subjects = {fact.subject for fact in facts} | {item.subject for item in series}
     single = _sole_subject(plan, subjects)
     company_type = getattr(plan, "company_type", "") or industry_of(plan.subjects)
+    # 同指标多公司都缺：概括一行，避免「没有抽到」刷屏。
+    missing_by_indicator: dict[str, list[str]] = {}
     for subject in plan.subjects:
         for name in plan.indicators:
             # 类型排除项不报假缺失（银行毛利率、Fabless 净息差等）。
             if is_excluded(company_type, name):
                 continue
             if not _has_indicator(period_facts, subject, name):
-                prefix = "" if single else f"{subject} "
-                gaps.append(f"{prefix}没有抽到 {plan.period} {name}")
-    # 「不可比」和「时点存量不跨期」是逐指标产生的同一句话，21 个指标会刷出
-    # 21 行一样的缺口，把真正的缺失项淹掉。合并成一行计数。
+                missing_by_indicator.setdefault(name, []).append(subject)
+    for name, cos in missing_by_indicator.items():
+        gaps.append(_format_missing_indicator_gap(cos, plan.period, name, single=bool(single)))
+    # 「不可比」／「时点存量」：逐指标同一句 → 合并计数。
+    # 其它 series 缺口：同一原因跨公司／跨指标 → 概括一条 + 例外单列。
     repeated: dict[str, int] = {}
+    by_reason: dict[str, list[tuple[str, str]]] = {}
     for item in series:
         for gap in item.gaps:
             if gap in {NOT_COMPARABLE_NOTE, STOCK_NOTE}:
                 repeated[gap] = repeated.get(gap, 0) + 1
                 continue
-            prefix = "" if single else item.subject
-            text = f"{prefix}{item.name}：{gap}"
-            if text not in gaps:
-                gaps.append(text)
+            by_reason.setdefault(gap, []).append((item.subject, item.name))
     for note, count in repeated.items():
         gaps.append(f"{count} 项指标：{note}")
+    for reason, hits in by_reason.items():
+        gaps.append(_format_series_gap_cluster(hits, reason, single=bool(single)))
     return gaps
+
+
+def _coalesce_cumulative_base_gaps(gaps: list[str]) -> list[str]:
+    """缺 Q1／H1 两条「累计基期」合并成一句，避免同一规则写两遍。"""
+    bases: list[str] = []
+    focus = ""
+    out: list[str] = []
+    for gap in gaps:
+        matched = _CUMULATIVE_BASE_GAP_RE.match(gap or "")
+        if matched is None:
+            out.append(gap)
+            continue
+        base = matched.group("base")
+        if base not in bases:
+            bases.append(base)
+        focus = matched.group("focus")
+    if not bases:
+        return out
+    out.append(
+        f"A 股无独立二季报；缺 {'、'.join(bases)} 的累计报告，"
+        f"{focus} 单季环比无法推导"
+    )
+    return out
+
+
+def _unique_preserve(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _format_missing_indicator_gap(
+    companies: list[str], period: str, name: str, *, single: bool
+) -> str:
+    cos = _unique_preserve(companies)
+    if single or len(cos) <= 1:
+        prefix = "" if single else f"{cos[0]} "
+        return f"{prefix}没有抽到 {period} {name}"
+    return f"{len(cos)} 家公司（{'、'.join(cos)}）没有抽到 {period} {name}"
+
+
+def _format_series_gap_cluster(
+    hits: list[tuple[str, str]], reason: str, *, single: bool
+) -> str:
+    """同一原因只写一次：多家／多指标概括；单条例外保持「公司+指标：原因」。"""
+    subjects = _unique_preserve([subject for subject, _ in hits])
+    names = _unique_preserve([name for _, name in hits])
+    if len(hits) == 1:
+        subject, name = hits[0]
+        prefix = "" if single else subject
+        return f"{prefix}{name}：{reason}"
+    name_part = "、".join(names)
+    if single or len(subjects) == 1:
+        prefix = "" if single else subjects[0]
+        if len(names) == 1:
+            return f"{prefix}{names[0]}：{reason}"
+        return f"{prefix}{len(names)} 项指标（{name_part}）：{reason}"
+    return (
+        f"{len(subjects)} 家公司（{'、'.join(subjects)}）"
+        f"{len(names)} 项指标（{name_part}）：{reason}"
+    )
 
 
 def _cite(fact: IndicatorFact) -> str:

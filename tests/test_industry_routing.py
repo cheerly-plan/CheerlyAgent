@@ -7,13 +7,33 @@ from ai_agent.report.industry import (
     EQUIPMENT,
     FABLESS,
     FOUNDRY,
+    GENERIC,
+    _INDUSTRIES_YAML,
+    _load_profiles,
+    _normalize_key,
     classify_subject,
     company_type_of,
     default_indicators,
     excluded_indicators,
     is_excluded,
+    profile_of,
 )
 from ai_agent.report.parse import parse_request
+
+
+def test_industries_yaml_loads():
+    profiles = _load_profiles(_INDUSTRIES_YAML)
+    assert GENERIC in profiles
+    equipment = profiles[EQUIPMENT]
+    assert "合同负债" in equipment.indicators
+    assert "存货" in equipment.indicators
+    assert "在手订单" in equipment.indicators
+    assert profile_of("unknown_type_xyz").indicators == profiles[GENERIC].indicators
+
+
+def test_unknown_type_falls_back_to_generic():
+    assert _normalize_key("not_a_real_industry") == GENERIC
+    assert default_indicators("not_a_real_industry") == default_indicators(GENERIC)
 
 
 def test_classify_semiconductor_roster():

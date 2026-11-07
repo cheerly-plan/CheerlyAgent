@@ -41,6 +41,15 @@ def test_normalize_million_yuan_to_yuan():
     assert value == "526,365,000,000"
 
 
+def test_normalize_thousand_yuan_to_yuan():
+    """中芯等港股／科创板常披露千元；必须 ×1000，不能当元。"""
+    value, unit, raw, converted = normalize_amount("49,510,416", "千元")
+    assert converted is True
+    assert unit == "元"
+    assert raw == "千元"
+    assert value == "49,510,416,000"
+
+
 def test_normalize_leaves_yuan_and_ratio():
     assert normalize_amount("20,297,371,376.50", "元") == (
         "20,297,371,376.50",

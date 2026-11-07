@@ -27,6 +27,21 @@ def test_read_indicator_takes_current_period_cell():
     assert "111,000,000" not in got["value"]
 
 
+def test_read_indicator_recognizes_thousand_yuan_unit():
+    """中芯等表头写「单位：千元」时必须认出，不能落成空串再默认元。"""
+    table = """
+单位：千元
+| 项目 | 本报告期 | 年初至报告期末 |
+| --- | --- | --- |
+| 营业收入 | 16,503,472 | 49,510,416 |
+"""
+    got = read_indicator(table, ["营业收入"], period="2025Q3")
+    assert got is not None
+    assert got["unit"] == "千元"
+    assert got["value"] == "49,510,416"
+    assert "单位：千元" in got["quote"]
+
+
 def test_read_indicator_prefers_the_line_itself_over_a_breakdown():
     detail_first = _TABLE.replace(
         "<tr><td>营业收入</td><td>100,924,954</td><td>111,000,000</td></tr>\n"

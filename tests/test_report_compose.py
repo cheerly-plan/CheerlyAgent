@@ -1,7 +1,9 @@
 """研报正文只复用抽取值和计算结果，不出现表格里没有的数字。"""
 
-from ai_agent.report.compose import compose_report
+from ai_agent.report.compare import NOT_COMPARABLE_NOTE, SeriesCompare
+from ai_agent.report.compose import _gaps, _segment_table_indicators, compose_report
 from ai_agent.report.extract import Evidence, IndicatorFact
+from ai_agent.report.industry import default_indicators
 from ai_agent.report.parse import OutlineItem, ReportPlan
 
 
@@ -133,16 +135,146 @@ def test_segment_peer_tables_group_by_skill_segment():
     assert "### 全行业毛利率梯队" in text
     assert "| 名次 | 公司 | 毛利率 | 出处 |" in text
     assert "### 设备" in text
-    # 设备赛道按 equipment 模板路由；组内横比前六列含合同负债／存货／在手订单。
+    # 设备赛道：前六列订单侧 + 补经营现金流（与封测表对齐）。
     assert (
-        "| 公司 | 营业收入 | 扣非净利润 | 毛利率 | 合同负债 | 存货 | 在手订单 |"
+        "| 公司 | 营业收入 | 扣非净利润 | 毛利率 | 合同负债 | 存货 | 在手订单 | "
+        "经营活动产生的现金流量净额 |"
+        in text
+    )
+    # 设计赛道同样补现金流列。
+    assert (
+        "| 公司 | 营业收入 | 扣非净利润 | 毛利率 | 研发费用率 | 存货周转率 | "
+        "大客户集中度 | 经营活动产生的现金流量净额 |"
         in text
     )
     assert "北方华创" in text and "中微公司" in text
-    # 手工构造的 fact 未经抽取归一，仍可能带千元；阅读说明声明默认元。
-    assert "千元" in text
+    # 中芯千元入口折成元，脚注保留原单位。
+    assert "49,510,416,000元" in text
+    assert "由千元折算为元" in text
     assert "金额默认统一为元" in text
     assert "WSTS" in text
     assert "深度分析" not in plan.title
     # 不再按指标拆成多张三列表标题
     assert "营业收入（合并）" not in text
+
+
+def test_segment_table_keeps_ocf_beyond_core_budget():
+    equipment = _segment_table_indicators(default_indicators("equipment"))
+    assert equipment[:6] == [
+        "营业收入",
+        "扣非净利润",
+        "毛利率",
+        "合同负债",
+        "存货",
+        "在手订单",
+    ]
+    assert equipment[-1] == "经营活动产生的现金流量净额"
+    fabless = _segment_table_indicators(default_indicators("fabless"))
+    assert "经营活动产生的现金流量净额" in fabless
+    assert fabless.index("经营活动产生的现金流量净额") >= 6
+    packaging = _segment_table_indicators(default_indicators("packaging"))
+    assert packaging[-1] == "经营活动产生的现金流量净额"
+    assert len(packaging) == 6
+
+
+def test_series_gaps_same_reason_summarized_once():
+    """同一「不推导单季环比」原因跨公司／指标只概括一条，例外单列。"""
+    reason = "2025Q3 的累计报告不齐（2025Q1、2025H1 需同为累计口径），不推导单季环比"
+    exception = "2025Q3 推导出的单季值非正，不写环比"
+    companies = ["寒武纪", "长电科技", "兆易创新", "北方华创", "中芯国际", "中微公司"]
+    indicators = ["营业收入", "扣非净利润"]
+    series = [
+        SeriesCompare(subject=co, name=name, scope="consolidated", unit="元", gaps=[reason])
+        for co in companies
+        for name in indicators
+    ]
+    series.append(
+        SeriesCompare(
+            subject="中科飞测",
+            name="营业收入",
+            scope="consolidated",
+            unit="元",
+            gaps=[exception],
+        )
+    )
+    # 再塞一批「不可比」确认计数合并仍在
+    for co in companies[:3]:
+        series.append(
+            SeriesCompare(
+                subject=co,
+                name="毛利率",
+                scope="consolidated",
+                unit="%",
+                gaps=[NOT_COMPARABLE_NOTE],
+            )
+        )
+    plan = ReportPlan(
+        title="半导体行业 2025Q3",
+        kind="industry",
+        deliverable="markdown",
+        subjects=companies + ["中科飞测"],
+        period="2025Q3",
+        indicators=["营业收入"],
+        outline=[OutlineItem("缺失与口径", "")],
+        gaps=[
+            "A 股无独立二季报；缺 2025Q1 的累计报告，2025Q3 单季环比无法推导",
+            "A 股无独立二季报；缺 2025H1 的累计报告，2025Q3 单季环比无法推导",
+        ],
+    )
+    # 每家给一条营收，避免「没有抽到」干扰断言
+    facts = [
+        IndicatorFact(
+            subject=co,
+            period="2025Q3",
+            name="营业收入",
+            value="1",
+            unit="元",
+            column="本报告期",
+            scope="consolidated",
+            evidence=Evidence(
+                file_id=co,
+                filename=f"{co}.pdf",
+                page=1,
+                page_end=1,
+                section="",
+                quote="1",
+            ),
+        )
+        for co in plan.subjects
+    ]
+    gaps = _gaps(plan, facts, series)
+    clustered = [g for g in gaps if "不推导单季环比" in g and "家公司" in g]
+    assert len(clustered) == 1
+    assert "6 家公司" in clustered[0]
+    assert "寒武纪" in clustered[0] and "兆易创新" in clustered[0]
+    assert "营业收入" in clustered[0] and "扣非净利润" in clustered[0]
+    # 不得再逐条复读（「公司+单指标：原因」）
+    per_item = [
+        g
+        for g in gaps
+        if g.endswith(f"：{reason}") and "家公司" not in g and "项指标（" not in g
+    ]
+    assert per_item == []
+    assert any(g.startswith("中科飞测营业收入：") and exception in g for g in gaps)
+    assert any("3 项指标：" in g and NOT_COMPARABLE_NOTE in g for g in gaps)
+    # Q1／H1 两条累计基期合并为一句
+    base_lines = [g for g in gaps if "缺 " in g and "累计报告" in g and "单季环比无法推导" in g]
+    assert len(base_lines) == 1
+    assert "2025Q1" in base_lines[0] and "2025H1" in base_lines[0]
+
+
+def test_missing_indicator_gaps_summarized_across_companies():
+    plan = ReportPlan(
+        title="半导体行业 2025Q3",
+        kind="industry",
+        deliverable="markdown",
+        subjects=["北方华创", "中微公司", "中科飞测"],
+        period="2025Q3",
+        indicators=["合同负债"],
+        outline=[OutlineItem("缺失与口径", "")],
+        company_type="equipment",
+    )
+    gaps = _gaps(plan, [], [])
+    assert len([g for g in gaps if "合同负债" in g]) == 1
+    assert "3 家公司" in gaps[0]
+    assert "北方华创" in gaps[0] and "中科飞测" in gaps[0]

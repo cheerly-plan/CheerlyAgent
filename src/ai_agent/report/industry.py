@@ -12,6 +12,11 @@ Foundry 看稼动率／CAPEX——一套制造业模板通吃，必然出跨行�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import yaml
 
 # —— skill 路由用的粗行业（与 SKILL.md industries / indicator_set 对齐）——
 BANK = "bank"
@@ -36,31 +41,7 @@ _SEGMENT_TO_TYPE = {
     "封测": PACKAGING,
 }
 
-# 银行专属：任何非银行模板都必须 exclude，防止观察句／缺口污染。
-_BANK_ONLY = (
-    "净息差",
-    "拨备前利润",
-    "PPOP",
-    "不良贷款率",
-    "不良贷款拨备覆盖率",
-    "资本充足率",
-    "核心一级资本充足率",
-    "成本收入比",
-    "利息净收入",
-    "非利息收入",
-    "非利息收入占比",
-    "发放贷款和垫款总额",
-    "吸收存款总额",
-)
-
-# Fabless 无自有产线，不看稼动率；银行不看毛利率／存货。
-_BANK_EXCLUDE = ("毛利率", "存货周转率", "研发费用率", "产能利用率", "合同负债")
-_FABLESS_EXCLUDE = (*_BANK_ONLY, "产能利用率")
-_FOUNDRY_EXCLUDE = (*_BANK_ONLY, "大客户集中度")
-# 设备类订单先行：不看稼动率；存货周转／资产负债率让位于合同负债／存货／在手订单。
-_EQUIPMENT_EXCLUDE = (*_BANK_ONLY, "产能利用率", "存货周转率", "资产负债率")
-_PACKAGING_EXCLUDE = (*_BANK_ONLY, "大客户集中度")
-_GENERIC_EXCLUDE = _BANK_ONLY
+_INDUSTRIES_YAML = Path(__file__).resolve().parent / "config" / "industries.yaml"
 
 
 @dataclass(frozen=True)
@@ -71,153 +52,60 @@ class IndicatorProfile:
     exclude: tuple[str, ...] = ()
 
 
-# 核心映射：industry_type → indicators / exclude
-_PROFILES: dict[str, IndicatorProfile] = {
-    BANK: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "净利润",
-            "利润总额",
-            "归属于母公司所有者的净利润",
-            "利息净收入",
-            "非利息收入",
-            "非利息收入占比",
-            "手续费及佣金净收入",
-            "业务及管理费",
-            "成本收入比",
-            "资产减值损失",
-            "净息差",
-            "平均总资产回报率",
-            "不良贷款率",
-            "不良贷款拨备覆盖率",
-            "加权平均净资产收益率",
-            "发放贷款和垫款总额",
-            "吸收存款总额",
-            "资产总计",
-            "核心一级资本充足率",
-            "资本充足率",
-        ),
-        exclude=_BANK_EXCLUDE,
-    ),
-    FABLESS: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "研发费用率",
-            "存货周转率",
-            "大客户集中度",
-            "经营活动产生的现金流量净额",
-        ),
-        exclude=_FABLESS_EXCLUDE,
-    ),
-    FOUNDRY: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "产能利用率",
-            "折旧",
-            "资本开支",
-            "存货",
-            "经营活动产生的现金流量净额",
-        ),
-        exclude=_FOUNDRY_EXCLUDE,
-    ),
-    EQUIPMENT: IndicatorProfile(
-        # 订单先行：合同负债／存货／在手订单优先于研发费用率进组内横比前六列。
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "合同负债",
-            "存货",
-            "在手订单",
-            "研发费用率",
-            "经营活动产生的现金流量净额",
-        ),
-        exclude=_EQUIPMENT_EXCLUDE,
-    ),
-    PACKAGING: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "产能利用率",
-            "资本开支",
-            "经营活动产生的现金流量净额",
-        ),
-        exclude=_PACKAGING_EXCLUDE,
-    ),
-    MANUFACTURING: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "存货周转率",
-            "经营活动产生的现金流量净额",
-            "产能利用率",
-            "资产负债率",
-        ),
-        exclude=_GENERIC_EXCLUDE,
-    ),
-    SOFTWARE: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "研发费用率",
-            "经营活动产生的现金流量净额",
-            "合同负债",
-        ),
-        exclude=(*_BANK_ONLY, "存货周转率", "产能利用率", "资本开支"),
-    ),
-    REAL_ESTATE: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "合同负债",
-            "经营活动产生的现金流量净额",
-            "资产负债率",
-        ),
-        exclude=(*_BANK_ONLY, "研发费用率", "产能利用率"),
-    ),
-    CYCLICAL: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "产能利用率",
-            "资本开支",
-            "存货",
-            "经营活动产生的现金流量净额",
-        ),
-        exclude=(*_BANK_ONLY, "研发费用率", "大客户集中度"),
-    ),
-    # 行业横比共用集：各赛道都能对上的少数指标；组内细项由 segment 模板补。
-    SEMICONDUCTOR: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "研发费用率",
-            "经营活动产生的现金流量净额",
-        ),
-        exclude=_BANK_ONLY,
-    ),
-    GENERIC: IndicatorProfile(
-        indicators=(
-            "营业收入",
-            "扣非净利润",
-            "毛利率",
-            "存货周转率",
-            "经营活动产生的现金流量净额",
-            "资产负债率",
-        ),
-        exclude=_GENERIC_EXCLUDE,
-    ),
-}
+def _as_str_tuple(raw: Any) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(str(item) for item in raw)
+
+
+def _resolve_exclude(entry: dict[str, Any], sets: dict[str, Any]) -> tuple[str, ...]:
+    names: list[str] = []
+    for ref in entry.get("exclude_refs") or []:
+        names.extend(_as_str_tuple(sets.get(str(ref))))
+    names.extend(_as_str_tuple(entry.get("exclude")))
+    # 保序去重，行为与迁出前字面量一致
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return tuple(out)
+
+
+def _load_profiles(path: Path) -> dict[str, IndicatorProfile]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    sets = raw.get("sets") or {}
+    profiles_raw = raw.get("profiles") or {}
+    if not isinstance(profiles_raw, dict) or not profiles_raw:
+        raise ValueError(f"industries.yaml 缺少 profiles: {path}")
+    profiles: dict[str, IndicatorProfile] = {}
+    for key, entry in profiles_raw.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"industries.yaml profile 非法: {key}")
+        include = _as_str_tuple(entry.get("include"))
+        if not include:
+            raise ValueError(f"industries.yaml profile 缺少 include: {key}")
+        profiles[str(key)] = IndicatorProfile(
+            indicators=include,
+            exclude=_resolve_exclude(entry, sets if isinstance(sets, dict) else {}),
+        )
+    if GENERIC not in profiles:
+        raise ValueError("industries.yaml 必须包含 generic 兜底 profile")
+    return profiles
+
+
+@lru_cache(maxsize=1)
+def _profiles() -> dict[str, IndicatorProfile]:
+    """首次调用时加载 industries.yaml；测试可 `_profiles.cache_clear()`。"""
+    return _load_profiles(_INDUSTRIES_YAML)
+
+
+def _profile_map() -> dict[str, IndicatorProfile]:
+    return _profiles()
 
 # 需求文本里可能出现的简称 → 报表正式指标名。长词放前面避免被短词吃掉。
 _ALIASES: tuple[tuple[str, str], ...] = (
@@ -326,14 +214,16 @@ def type_for_segment(segment: str) -> str:
 def default_indicators(industry_or_type: str) -> list[str]:
     """indicator_set / 公司类型 → 默认指标列表。"""
     key = _normalize_key(industry_or_type)
-    profile = _PROFILES.get(key) or _PROFILES[GENERIC]
+    profiles = _profile_map()
+    profile = profiles.get(key) or profiles[GENERIC]
     return list(profile.indicators)
 
 
 def excluded_indicators(industry_or_type: str) -> frozenset[str]:
     """该类公司不该出现的指标（抽数／缺口／观察句一律跳过）。"""
     key = _normalize_key(industry_or_type)
-    profile = _PROFILES.get(key) or _PROFILES[GENERIC]
+    profiles = _profile_map()
+    profile = profiles.get(key) or profiles[GENERIC]
     return frozenset(profile.exclude)
 
 
@@ -351,7 +241,8 @@ def is_excluded(industry_or_type: str, indicator: str) -> bool:
 
 def profile_of(industry_or_type: str) -> IndicatorProfile:
     key = _normalize_key(industry_or_type)
-    return _PROFILES.get(key) or _PROFILES[GENERIC]
+    profiles = _profile_map()
+    return profiles.get(key) or profiles[GENERIC]
 
 
 def normalize_indicator(text: str) -> str:
@@ -394,7 +285,7 @@ def _normalize_key(raw: str) -> str:
         "周期": CYCLICAL,
     }
     return aliases.get(text) or aliases.get(raw.strip()) or (
-        raw.strip() if raw.strip() in _PROFILES else GENERIC
+        raw.strip() if raw.strip() in _profile_map() else GENERIC
     )
 
 

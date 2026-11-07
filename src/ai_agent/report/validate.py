@@ -111,6 +111,7 @@ def validate_report(
         _error(result, "number", "正文为空，无法校验数字")
     else:
         _check_facts(result, facts, plan, body)
+        _check_money_units(result, facts, plan)
         _check_body_numbers(result, _body_for_numbers(body, facts, supplemental), allowed)
         _check_citations_in_body(result, facts, plan, body)
         _check_attribution_anchors(result, body)
@@ -369,6 +370,75 @@ def _check_view_evidence(result, name: str, evidence, values: tuple[str, ...]) -
 
 def _view_number(value: str) -> str:
     return _number_key(value).lstrip("+-").rstrip("%")
+
+
+_MONEY_SCALE_UNITS = frozenset(
+    {
+        "千元",
+        "人民币千元",
+        "万元",
+        "人民币万元",
+        "百万元",
+        "人民币百万元",
+        "亿元",
+        "人民币亿元",
+    }
+)
+_MONEY_INDICATORS = frozenset(
+    {
+        "营业收入",
+        "扣非净利润",
+        "净利润",
+        "利润总额",
+        "经营活动产生的现金流量净额",
+        "合同负债",
+        "存货",
+        "在手订单",
+        "资本开支",
+        "折旧",
+    }
+)
+_QUOTE_SCALE_UNIT = re.compile(
+    r"单位[:：]\s*(?:人民币)?(千元|万元|百万元|亿元)"
+)
+
+
+def _check_money_units(
+    result: ValidationResult,
+    facts: list[IndicatorFact],
+    plan: ReportPlan | None,
+) -> None:
+    """对比表金额必须统一为元：源单位千元／万元等须已折算，否则 error。"""
+    focus = plan.period if plan is not None else ""
+    for fact in facts:
+        if focus and fact.period != focus:
+            continue
+        if fact.name not in _MONEY_INDICATORS:
+            continue
+        unit = (fact.unit or "").strip()
+        if unit in _MONEY_SCALE_UNITS:
+            _error(
+                result,
+                "unit",
+                f"{fact.subject}{fact.period}{fact.name} 金额单位仍为{unit}，"
+                "须折算为元后再写入同表对比",
+                fact=fact,
+            )
+            continue
+        quote = fact.evidence.quote if fact.evidence else ""
+        matched = _QUOTE_SCALE_UNIT.search(quote or "")
+        if (
+            matched
+            and unit in {"", "元", "人民币元"}
+            and not getattr(fact, "unit_converted", False)
+        ):
+            _error(
+                result,
+                "unit",
+                f"{fact.subject}{fact.period}{fact.name} 原文为{matched.group(1)}，"
+                "但未折算为元（疑似单位丢失）",
+                fact=fact,
+            )
 
 
 def _check_facts(

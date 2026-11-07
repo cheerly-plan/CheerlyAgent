@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.ingest.chunking import (
@@ -207,8 +207,9 @@ _NUMBER = re.compile(
 )
 # 单位说明常带括号尾巴：「百万元人民币（另有说明者除外）」。
 # 只保留可换算的单位词，别把整句注记写进研报正文。
+# 千元必须写在元前面，否则「千元」会被误判成空、再被金额默认「元」吞掉（中芯千元当元）。
 _UNIT = re.compile(r"单位[:：]\s*([^\s，,。；;|<（(]+)")
-_UNIT_KEY = re.compile(r"^(亿元|百万元|万元|元)")
+_UNIT_KEY = re.compile(r"^(?:人民币)?(亿元|百万元|万元|千元|元)")
 _MD_SEPARATOR = re.compile(r"^\|[\s:\-|]+\|$")
 
 
@@ -265,6 +266,43 @@ class IndicatorFact:
 class ExtractResult:
     facts: list[IndicatorFact] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+
+
+def ensure_amount_units(facts: list[IndicatorFact]) -> list[IndicatorFact]:
+    """金额统一折成元；已折算的不改。compose／pipeline 入口双保险。"""
+    out: list[IndicatorFact] = []
+    for fact in facts:
+        if fact.unit_converted:
+            out.append(fact)
+            continue
+        raw_value = fact.value
+        value, unit, raw_unit, converted = normalize_amount(fact.value, fact.unit)
+        if not converted:
+            out.append(fact)
+            continue
+        quote = enrich_quote_for_conversion(
+            fact.evidence.quote,
+            raw_value=raw_value,
+            raw_unit=raw_unit,
+            value=value,
+            unit=unit,
+        )
+        evidence = (
+            replace(fact.evidence, quote=quote)
+            if quote != fact.evidence.quote
+            else fact.evidence
+        )
+        out.append(
+            replace(
+                fact,
+                value=value,
+                unit=unit,
+                raw_unit=raw_unit,
+                unit_converted=True,
+                evidence=evidence,
+            )
+        )
+    return out
 
 
 def extract_indicators(

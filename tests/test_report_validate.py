@@ -69,6 +69,44 @@ def test_clean_report_passes_with_provenance():
     assert "校验通过" in format_validation(result)
 
 
+def test_unconverted_thousand_yuan_is_unit_error():
+    """同表对比前金额须折成元；仍挂千元直接 error（中芯千元当元类硬伤）。"""
+    fact = _fact(
+        "2025Q3",
+        "49,510,416",
+        quote="单位：千元 | 营业收入 | 49,510,416",
+    )
+    fact.unit = "千元"
+    document = ReportDocument(
+        title="t",
+        markdown="## 组内对比\n中芯国际营业收入 49,510,416千元\n",
+        html="",
+        deliverable="markdown",
+    )
+    result = validate_report(document, [fact], plan=_plan())
+    assert not result.passed
+    assert any("须折算为元" in item.message for item in result.findings)
+
+
+def test_quote_says_thousand_yuan_but_unit_yuan_without_conversion():
+    fact = _fact(
+        "2025Q3",
+        "49,510,416",
+        quote="单位：千元 | 营业收入 | 49,510,416",
+    )
+    fact.unit = "元"
+    fact.unit_converted = False
+    document = ReportDocument(
+        title="t",
+        markdown="## 组内对比\n中芯国际营业收入 49,510,416元\n",
+        html="",
+        deliverable="markdown",
+    )
+    result = validate_report(document, [fact], plan=_plan())
+    assert not result.passed
+    assert any("原文为千元" in item.message and "未折算" in item.message for item in result.findings)
+
+
 def test_unknown_number_goes_to_review_queue():
     facts = [_fact("2025Q3", "100,924,954"), _fact("2024Q3", "111,000,000")]
     document = compose_report(_plan(), facts)

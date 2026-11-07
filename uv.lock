@@ -226,6 +226,7 @@ dependencies = [
     { name = "pymupdf" },
     { name = "pypdf" },
     { name = "python-docx" },
+    { name = "pyyaml" },
     { name = "uvicorn" },
     { name = "weasyprint" },
 ]
@@ -254,6 +255,7 @@ requires-dist = [
     { name = "pymupdf", specifier = ">=2.0" },
     { name = "pypdf", specifier = ">=6.21.2" },
     { name = "python-docx", specifier = ">=1.2.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "uvicorn", specifier = ">=0.54.0" },
     { name = "weasyprint", specifier = ">=70.0" },
 ]
