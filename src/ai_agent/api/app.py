@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+import threading
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,10 +43,18 @@ async def lifespan(app: FastAPI):
     from ai_agent.kb.retrieval.rerank import probe_reranker
 
     probe_reranker()
-    # 上次进程异常退出时卡在 parsing/embedding 的知识库文件标 failed
-    kb_pipeline.recover_stuck()
+    # 先让 HTTP 对外就绪，再恢复中断的 KB 任务——避免解析/OCR 原生崩溃
+    # 把 worker 打死在 "Waiting for application startup"，表现为登录一直转圈。
     short_term_memory.start_cleanup()
     maintenance_cleaner.start()
+
+    def _recover_kb() -> None:
+        try:
+            kb_pipeline.recover_stuck()
+        except Exception:
+            logging.getLogger(__name__).exception("kb 启动恢复失败")
+
+    threading.Thread(target=_recover_kb, name="kb-recover", daemon=True).start()
     yield
     maintenance_cleaner.stop()
     short_term_memory.stop_cleanup()

@@ -737,9 +737,19 @@ def run_migrations() -> None:
 
     ensure_schema() 保留作回滚锚点：万一迁移出问题，把 lifespan 改回
     调 store.ensure_schema() 即可恢复旧行为。
-    """
-    from alembic import command
-    from alembic.config import Config
 
-    cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
-    command.upgrade(cfg, "head")
+    用独立子进程跑 upgrade：uvicorn --reload 的 fork worker 里同进程调
+    alembic/sqlalchemy 可能卡死（表现为启动停在 transactional DDL、登录超时），
+    子进程与 CLI `alembic upgrade head` 同路径，可避开 fork 锁问题。
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=_PROJECT_ROOT,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"alembic upgrade head 失败 (exit={result.returncode})"
+        )
