@@ -79,7 +79,7 @@ def _payload(result: ReportResult) -> dict:
         key: (f"/v1/report/files/{name}" if name else "")
         for key, name in artifacts.items()
     }
-    return {
+    payload = {
         "report_id": result.report_id,
         "status": result.status,
         "deliverable": result.deliverable,
@@ -114,6 +114,32 @@ def _payload(result: ReportResult) -> dict:
         "pdf": pdf,
         "review": _review_payload(result.report_id, result.review_status, result.output_dir),
     }
+    # 未启用时**不新增任何响应键**，既有客户端与契约测试看到的 payload 逐字节不变。
+    if result.deep_analysis is not None or result.deep_error:
+        analysis = result.deep_analysis
+        payload["deep"] = {
+            "enabled": analysis is not None,
+            "error": result.deep_error,
+            "artifacts": result.deep_artifacts,
+            "downloads": {
+                key: f"/v1/report/files/{name}"
+                for key, name in result.deep_artifacts.items()
+            },
+            "llm_calls": analysis.execution.llm_calls if analysis else 0,
+            "estimated_input_tokens": (
+                analysis.execution.estimated_input_tokens if analysis else 0
+            ),
+            "estimated_output_tokens": (
+                analysis.execution.estimated_output_tokens if analysis else 0
+            ),
+            "enabled_chapters": (
+                analysis.execution.enabled_chapters if analysis else []
+            ),
+            "gaps": [asdict(gap) for gap in analysis.all_gaps] if analysis else [],
+            "pdf_merged": result.deep_pdf_merged,
+            "pdf_merge_error": result.deep_pdf_error,
+        }
+    return payload
 
 
 def _review_payload(
@@ -168,11 +194,20 @@ def create_report(
     """生成一份研报。校验未通过不是 4xx：草稿照常返回，但 PDF 会被门禁挡住。"""
     from ai_agent.core.logging import get_logger
 
+    # 深度分析是显式旁路：off 时连模块都不 import，保证既有链路零变化。
+    deep_options = None
+    if req.deep != "off":
+        from ai_agent.report.deep.bridge import DeepOptions
+
+        deep_options = DeepOptions(
+            enabled=req.deep == "full", pdf_mode=req.deep_pdf
+        )
     result = run_report(
         req.request,
         skill_id=req.report_type or "",
         deliverable=req.deliverable,
         write_pdf=req.write_pdf,
+        deep=deep_options,
     )
     get_logger(__name__).info(
         "研报生成 user=%s report_id=%s status=%s facts=%d passed=%s pdf=%s review=%s",

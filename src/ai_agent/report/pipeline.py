@@ -26,6 +26,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
@@ -36,10 +37,14 @@ from ai_agent.report.ensure_filings import ensure_filings_for_report
 from ai_agent.report.extract import IndicatorFact, ensure_amount_units, extract_indicators
 from ai_agent.report.parse import ReportPlan, parse_request
 from ai_agent.report.market_finance import supplement_facts_from_market
-from ai_agent.report.pdf import PdfFile, charts_for_report, render_report_pdf
+from ai_agent.report.pdf import ChartSpec, PdfFile, charts_for_report, render_report_pdf
 from ai_agent.report.review import create_record
 from ai_agent.report.supplemental import SupplementalResult, extract_supplemental
-from ai_agent.report.validate import ValidationResult, validate_report
+from ai_agent.report.validate import ReviewItem, ValidationResult, validate_report
+
+if TYPE_CHECKING:  # 深度分析旁路默认关闭，运行时才局部 import，避免任何导入开销
+    from ai_agent.report.deep.bridge import DeepOptions
+    from ai_agent.report.deep.schema import DeepAnalysisResult
 
 logger = get_logger(__name__)
 
@@ -78,6 +83,15 @@ class ReportResult:
     pdf_error: str = ""
     # pending / approved / rejected / finalized（由 review.create_record 回填）
     review_status: str = "pending"
+    # 深度分析旁路（默认 None）：结论不进 Markdown 正文、不进 ReportArtifacts。
+    # pdf_mode=merge 时同一份 PDF 末尾多出推断层附录，PDF 字节因此变化；
+    # create_record 在落盘之后按最终字节算指纹，不会失配。
+    deep_analysis: "DeepAnalysisResult | None" = None
+    deep_artifacts: dict[str, str] = field(default_factory=dict)
+    deep_error: str = ""
+    deep_write_artifacts: bool = True
+    deep_pdf_merged: bool = False
+    deep_pdf_error: str = ""
 
     @property
     def deliverable(self) -> str:
@@ -105,6 +119,7 @@ def run_report(
     deliverable: str | None = None,
     output_dir: Path | str | None = None,
     write_pdf: bool = True,
+    deep: "DeepOptions | None" = None,
 ) -> ReportResult:
     """跑一次研报生成。同步、确定性、可单测；不触达 /v1/chat 的 Agent 循环。
 
@@ -114,6 +129,14 @@ def run_report(
 
     deliverable 显式传 "pdf" / "markdown" 时覆盖需求文本的推断；
     write_pdf=False 用于只要 Markdown 的场景（省掉渲染开销）。
+
+    deep 是**默认关闭的深度分析旁路**：传 DeepOptions 才跑，且只在主报告
+    的正文/校验/PDF 全部定稿后执行；深度层异常被隔离在 deep_error，
+    主报告照常交付。深度结论永远单独落 .deep.json / .deep.md，不进正文。
+
+    ``deep.pdf_mode="merge"``（默认）会在事实层 PDF 末尾追加显式标注的推断层
+    附录，并往审核队列追加一条待审项，禁止自动定稿；``"separate"`` 则保持
+    PDF 纯事实层。两种模式都不改 Markdown 正文、溯源附件与校验门禁。
     """
     from ai_agent.tools.progress import emit_progress
 
@@ -178,6 +201,8 @@ def run_report(
     # M2 第一道门禁：正文数字/引用有 error，连 PDF 都不出，避免错误稿被外发。
     # 审核记录里仍能看到 error 明细，修数据后重新生成即可。
     blocked = want_pdf and not validation.passed
+    # 合并附录时要复用同一批图表，避免第二次渲染重算导致图与数字不一致。
+    charts: list[ChartSpec] = []
     result = ReportResult(
         request=request,
         plan=plan,
@@ -199,9 +224,8 @@ def run_report(
     elif want_pdf:
         emit_progress("正在渲染 PDF…")
         try:
-            result.pdf = render_report_pdf(
-                document, charts=charts_for_report(plan, facts, series)
-            )
+            charts = charts_for_report(plan, facts, series)
+            result.pdf = render_report_pdf(document, charts=charts)
             result.pdf_status = "generated"
         except Exception as exc:
             # 渲染是交付形态，不是数据正确性。缺字体/缺 Pango 时降级，
@@ -209,6 +233,29 @@ def run_report(
             result.pdf_error = f"{type(exc).__name__}: {exc}"
             document.deliverable = "markdown"
             logger.warning("研报 PDF 渲染失败，降级为 Markdown：%s", result.pdf_error)
+
+    # 深度分析旁路：主报告的正文/校验/PDF 已全部定稿，这里只做加法。
+    # 任何失败都不得影响事实层交付，故整段隔离并如实记入 deep_error。
+    if deep is not None:
+        try:
+            from ai_agent.report.deep.bridge import attach_deep
+
+            emit_progress("正在生成深度分析旁路产物…")
+            result.deep_analysis = attach_deep(result, deep)
+            result.deep_write_artifacts = deep.write_artifacts
+        except Exception as exc:
+            result.deep_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("深度分析旁路失败（不影响主报告） report_id=%s", result.report_id)
+
+        # pdf_mode=merge：把推断层附录追加进同一份 PDF。没有 PDF（markdown 交付、
+        # 校验被挡住、渲染降级）时自然退化为 separate，不影响事实层交付。
+        if (
+            result.deep_analysis is not None
+            and result.pdf is not None
+            and deep.pdf_mode == "merge"
+        ):
+            emit_progress("正在合并深度分析附录…")
+            _merge_deep_appendix(result, document, charts)
 
     emit_progress("正在落盘产物…")
     _write_artifacts(result)
@@ -280,6 +327,49 @@ def _stem(title: str, report_id: str) -> str:
     return f"{cleaned or '研报'}_{report_id}"
 
 
+def _merge_deep_appendix(
+    result: ReportResult, document: ReportDocument, charts: list[ChartSpec]
+) -> None:
+    """把推断层附录追加进事实层 PDF；失败保留原 PDF 并回退独立产物。
+
+    合并成功后往 ``validation.review_queue`` 追加一条待审项，``create_record``
+    会据此生成 pending 审核项：``gate()`` 因此拒绝自动定稿，PDF 下载端点也会
+    拦到人工批准 + 定稿之后。**这是合并档必须重定义的门禁**，原来的
+    「校验通过且无异常即自动定稿」不能替推断内容盖章，review.py 无需改动。
+    """
+    deep = result.deep_analysis
+    if deep is None:
+        return
+    from ai_agent.report.deep.pdf_appendix import (
+        APPENDIX_REVIEW_REASON,
+        render_deep_appendix_html,
+    )
+
+    try:
+        appendix = render_deep_appendix_html(deep)
+        merged = render_report_pdf(document, charts=charts, appendix_html=appendix)
+    except Exception as exc:
+        # 重渲染失败 ≠ 深度分析失败：保留纯事实层 PDF，只如实记合并错误。
+        result.deep_pdf_error = f"{type(exc).__name__}: {exc}"
+        result.deep_pdf_merged = False
+        logger.warning(
+            "深度分析附录合并失败，回退独立产物 report_id=%s error=%s",
+            result.report_id,
+            result.deep_pdf_error,
+        )
+        return
+    result.pdf = merged
+    result.deep_pdf_merged = True
+    result.validation.review_queue.append(
+        ReviewItem(
+            reason=APPENDIX_REVIEW_REASON,
+            value="deep_pdf_merge",
+            subject=deep.target,
+            period=deep.period,
+        )
+    )
+
+
 def _write_artifacts(result: ReportResult) -> None:
     """正文、溯源总是落盘；PDF 只在渲染成功时落盘。
 
@@ -305,3 +395,16 @@ def _write_artifacts(result: ReportResult) -> None:
         pdf_name = f"{stem}.pdf"
         (directory / pdf_name).write_bytes(result.pdf.content)
         result.artifacts.pdf = pdf_name
+
+    # 深度分析产物与事实层物理隔离：独立文件，不写进 document.markdown，
+    # 不进 result.artifacts（review 的 content_hash 只覆盖 md/provenance/pdf）。
+    if result.deep_analysis is not None and result.deep_write_artifacts:
+        deep_json_name = f"{stem}.deep.json"
+        deep_md_name = f"{stem}.deep.md"
+        (directory / deep_json_name).write_text(
+            result.deep_analysis.to_json(), encoding="utf-8"
+        )
+        (directory / deep_md_name).write_text(
+            result.deep_analysis.to_markdown(), encoding="utf-8"
+        )
+        result.deep_artifacts = {"json": deep_json_name, "markdown": deep_md_name}

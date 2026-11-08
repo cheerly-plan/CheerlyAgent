@@ -1,0 +1,231 @@
+"""数据溯源台账（L1-L6 源头优先级 + Tier 分级 + 缺口清单）。
+
+把 report/extract.py 的 ``IndicatorFact`` / ``Evidence`` 适配成深度分析层自己的
+``SourceRecord``：不修改事实层 dataclass，靠 duck typing 读字段，测试可传 stub。
+
+落实 data-sourcing-protocol.md 的三条硬规则：
+
+* 每个量化数字可回答「最初出现在哪个文件」→ ``SourceRecord`` 带文件/页码/原文；
+* 禁止间接引用 → L4/L5 的二手数据若无 ``backtrace_to``，不进数据来源表，只记缺口；
+* 缺口显式声明 → ``SourceLedger.gaps`` 贯穿全流程，禁止臆测填补。
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from ai_agent.report.deep.schema import DataGap, DataSourceRow
+
+# L1-L3 是可直接采信的源头；L4 需交叉验证；L5 仅线索；L6 不采信。
+LEVEL_TIER = {
+    "L1": "Tier 1",
+    "L2": "Tier 1",
+    "L3": "Tier 1",
+    "L4": "Tier 2",
+    "L5": "Tier 3",
+    "L6": "Tier 4",
+}
+# 跨模块共用的数字模式（分析层做正文数字白名单校验时要 import）。
+NUMBER_RE = re.compile(r"-?\d[\d,，]*(?:[ \t\u00a0]\d{3})*(?:\.\d+)?%?")
+
+
+def normalize_number(raw: str) -> str:
+    """数字白名单归一：去千分位/百分号，按数值比较，避免格式差异误杀。"""
+    text = raw.replace(",", "").replace("，", "").replace("%", "").strip().lstrip("+")
+    text = re.sub(r"[ \t\u00a0]", "", text)
+    try:
+        value = float(text)
+    except ValueError:
+        return ""
+    return f"{value:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def numbers_in(text: str) -> set[str]:
+    return {
+        key
+        for match in NUMBER_RE.finditer(text or "")
+        if (key := normalize_number(match.group(0)))
+    }
+
+
+@dataclass
+class SourceRecord:
+    """一条可溯源事实。``e0`` 这类短 id 只在本层内使用，不覆盖事实层的引用锚点。"""
+
+    source_id: str
+    item: str
+    value: str
+    unit: str
+    subject: str
+    period: str
+    filename: str
+    file_id: str
+    page: int | None
+    section: str
+    quote: str
+    level: str = "L1"
+    acquisition: str = "知识库定期报告原文"
+    backtrace_to: str = ""
+
+    @property
+    def tier(self) -> str:
+        return LEVEL_TIER.get(self.level, "Tier 5")
+
+    @property
+    def location(self) -> str:
+        page = f"第{self.page}页" if self.page is not None else "页码未标注"
+        section = self.section or "章节未标注"
+        return f"{page} / {section}"
+
+    def to_row(self) -> DataSourceRow:
+        return DataSourceRow(
+            item=f"{self.item} {self.value}{self.unit}".strip(),
+            source_file=self.filename or self.file_id or "（未标注源头文件）",
+            location=self.location,
+            tier=self.tier,
+            acquisition=self.acquisition,
+        )
+
+    def render(self) -> str:
+        quote = " ".join((self.quote or "").split())[:200]
+        return (
+            f"- {self.source_id}｜{self.subject} {self.period}｜"
+            f"{self.item}={self.value}{self.unit}｜{self.tier}/{self.level}｜"
+            f"{self.filename}，{self.location}｜原文：{quote}"
+        )
+
+
+@dataclass
+class SourceLedger:
+    records: list[SourceRecord] = field(default_factory=list)
+    gaps: list[DataGap] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_facts(
+        cls,
+        facts: list,
+        *,
+        level: str = "L1",
+        acquisition: str = "知识库定期报告原文",
+    ) -> SourceLedger:
+        """适配 ``IndicatorFact``：只读属性，不 import 具体类。"""
+        ledger = cls()
+        for index, fact in enumerate(facts):
+            evidence = getattr(fact, "evidence", None)
+            page = getattr(evidence, "page", None)
+            ledger.records.append(
+                SourceRecord(
+                    source_id=f"e{index}",
+                    item=str(getattr(fact, "name", "") or "指标"),
+                    value=str(getattr(fact, "value", "") or ""),
+                    unit=str(getattr(fact, "unit", "") or ""),
+                    subject=str(getattr(fact, "subject", "") or ""),
+                    period=str(getattr(fact, "period", "") or ""),
+                    filename=str(getattr(evidence, "filename", "") or ""),
+                    file_id=str(getattr(evidence, "file_id", "") or ""),
+                    page=int(page) if isinstance(page, int) else None,
+                    section=str(getattr(evidence, "section", "") or ""),
+                    quote=str(getattr(evidence, "quote", "") or ""),
+                    level=level,
+                    acquisition=acquisition,
+                )
+            )
+        if not ledger.records:
+            ledger.gaps.append(
+                DataGap(
+                    item="本期财报事实",
+                    impact="无法开展任何章节验证",
+                    handling="先补齐定期报告原文入库，再运行深度分析",
+                )
+            )
+        return ledger
+
+    def add_external(
+        self,
+        *,
+        item: str,
+        value: str,
+        source_file: str,
+        location: str = "",
+        level: str = "L3",
+        acquisition: str = "外部原始统计",
+        quote: str = "",
+        backtrace_to: str = "",
+        subject: str = "",
+        period: str = "",
+        chapters: list[int] | None = None,
+    ) -> bool:
+        """登记外部数据。L4/L5 二手数据必须回溯到 L1-L3 源头，否则拒绝入表。
+
+        返回是否入表；被拒的记入 ``rejected`` 与缺口清单，绝不静默丢弃。
+        """
+        if level in {"L4", "L5", "L6"} and not backtrace_to:
+            self.rejected.append(f"{item}（{level} 未回溯到原始出处）")
+            self.gaps.append(
+                DataGap(
+                    item=item,
+                    chapters=chapters or [],
+                    impact="二手数据未经引用链回溯，不得支撑结论",
+                    handling="找到 L1-L3 源头文件后再入表",
+                )
+            )
+            return False
+        page_match = re.search(r"第(\d+)页", location or "")
+        self.records.append(
+            SourceRecord(
+                source_id=f"e{len(self.records)}",
+                item=item,
+                value=value,
+                unit="",
+                subject=subject,
+                period=period,
+                filename=source_file,
+                file_id="",
+                page=int(page_match.group(1)) if page_match else None,
+                section=location,
+                quote=quote or f"{item}={value}",
+                level=level,
+                acquisition=acquisition,
+                backtrace_to=backtrace_to,
+            )
+        )
+        return True
+
+    @property
+    def ids(self) -> set[str]:
+        return {record.source_id for record in self.records}
+
+    @property
+    def allowed_numbers(self) -> set[str]:
+        """正文数字白名单：只允许事实台账里出现过的数字（含原文片段里的数）。"""
+        allowed: set[str] = set()
+        for record in self.records:
+            allowed |= numbers_in(record.value)
+            allowed |= numbers_in(record.quote)
+        return allowed
+
+    def source_rows(self, source_ids: list[str] | None = None) -> list[DataSourceRow]:
+        wanted = set(source_ids) if source_ids is not None else None
+        return [
+            record.to_row()
+            for record in self.records
+            if wanted is None or record.source_id in wanted
+        ]
+
+    def render_for(self, chapter_numbers: list[int] | None = None, *, limit: int = 40) -> str:
+        """按章渲染证据包。章节号只用于未来做按需检索，当前先全量按上限截断。"""
+        note = ""
+        if chapter_numbers:
+            note = f"（供第 {','.join(str(n) for n in chapter_numbers)} 章使用）"
+        if not self.records:
+            return "（台账为空：只能写数据缺口，不得写任何数字或结论）"
+        lines = [f"已授权事实台账{note}："] if note else "已授权事实台账："
+        lines.extend(record.render() for record in self.records[:limit])
+        if len(self.records) > limit:
+            lines.append(f"…另有 {len(self.records) - limit} 条未展开")
+        return "\n".join(lines)
+
+    def gap_rows(self) -> list[DataGap]:
+        return list(self.gaps)

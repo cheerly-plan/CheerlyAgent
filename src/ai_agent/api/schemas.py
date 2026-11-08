@@ -273,6 +273,23 @@ class ReportRequest(BaseModel):
     write_pdf: bool = Field(
         default=True, description="False 时跳过渲染，只出 Markdown（省渲染开销）"
     )
+    deep: Literal["off", "skeleton", "full"] = Field(
+        default="off",
+        description=(
+            "深度投资分析旁路，默认 off（完全不跑、零开销）。"
+            "skeleton=零 LLM 调用的结构化骨架（台账+缺口+checklist）；"
+            "full=10 章闭环，约 31 次模型调用、1.5-4 分钟，需确保网关超时大于该时长。"
+            "结论单独落 .deep.json / .deep.md，永不并入财报正文；PDF 行为见 deep_pdf。"
+        ),
+    )
+    deep_pdf: Literal["separate", "merge"] = Field(
+        default="merge",
+        description=(
+            "深度结论与 PDF 的关系：merge=在事实层 PDF 末尾追加带显式标注的推断层附录"
+            "（默认；会追加一条人工审核项、禁止自动定稿，PDF 需人工批准后才可下载）；"
+            "separate=PDF 保持纯事实层，深度结论只落独立文件。deep=off 时本字段忽略。"
+        ),
+    )
 
 
 class ReportDecisionRequest(BaseModel):

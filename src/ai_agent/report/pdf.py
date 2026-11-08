@@ -477,11 +477,16 @@ def apply_print_template(
     font: Path,
     logo: bytes | None = None,
     charts: list[ChartSpec] | None = None,
+    appendix_html: str | None = None,
 ) -> str:
-    """套上 A4 模板：页眉页脚、可嵌入字体、表格跨页时重复表头。"""
+    """套上 A4 模板：页眉页脚、可嵌入字体、表格跨页时重复表头。
+
+    ``appendix_html`` 是深度分析附录（推断层）。它排在图表之后、``</body>``
+    之前，且只有传入时才追加对应 CSS —— 不传时模板与既有渲染逐字节一致。
+    """
     if source.lstrip().startswith("%PDF"):
         raise ValueError("正文是 PDF 二进制，渲染只接受 HTML")
-    style = _print_css(title, font)
+    style = _print_css(title, font, appendix=bool(appendix_html))
     logo_tag = _logo_tag(logo) if logo else ""
     figures = _chart_section(charts or [])
     html_text = source
@@ -493,6 +498,12 @@ def apply_print_template(
         html_text = html_text.replace("<body>", "<body>\n" + logo_tag, 1)
     if figures:
         html_text = html_text.replace("</body>", figures + "\n</body>", 1)
+    if appendix_html:
+        if "</body>" in html_text:
+            html_text = html_text.replace("</body>", appendix_html + "\n</body>", 1)
+        else:
+            # 极少数正文没有 <body> 标签（纯片段 HTML）：直接拼在末尾。
+            html_text += appendix_html
     return html_text
 
 
@@ -502,8 +513,13 @@ def render_report_pdf(
     charts: list[ChartSpec] | None = None,
     logo: bytes | None = None,
     font_path: Path | None = None,
+    appendix_html: str | None = None,
 ) -> PdfFile:
-    """渲染一份研报 PDF。缺中文字体时直接停下，不写出乱码文件。"""
+    """渲染一份研报 PDF。缺中文字体时直接停下，不写出乱码文件。
+
+    ``appendix_html`` 非空时在正文末尾追加深度分析附录（同一份 PDF、同一个
+    文件名、一次渲染完成），不改动 ``document`` 的任何字段。
+    """
     font = font_path or find_cjk_font()
     if font is None or not font.is_file():
         raise RuntimeError("没有找到可嵌入的中文字体，已停止生成 PDF")
@@ -513,6 +529,7 @@ def render_report_pdf(
         font=font,
         logo=logo,
         charts=charts,
+        appendix_html=appendix_html,
     )
     content = _write_pdf(printable)
     if not content.startswith(b"%PDF"):
@@ -525,10 +542,42 @@ def render_report_pdf(
     )
 
 
-def _print_css(title: str, font: Path) -> str:
+# 深度分析附录专用样式。只在 appendix_html 非空时注入，避免影响既有 PDF。
+# 页眉标注走 position: running()（和 Logo 同一套机制），不依赖 named page。
+_DEEP_CSS = """
+.deep-flag { position: running(deep-flag); font-size: 9pt; color: #93370d; }
+.deep-appendix { break-before: page; border-left: 2pt solid #b54708; padding-left: 4mm; }
+.deep-appendix h1 { color: #93370d; font-size: 15pt; margin-bottom: 3mm; }
+.deep-appendix h2 { color: #93370d; font-size: 12pt; border-bottom: 0.5pt solid #f79009; }
+.deep-appendix h3 { font-size: 11pt; margin-top: 5mm; }
+.deep-appendix h4 { font-size: 9.5pt; color: #475467; }
+.deep-notice { border: 1pt solid #b54708; background: #fffaeb; padding: 3mm; margin: 0 0 5mm 0; }
+.deep-notice-title { font-weight: bold; color: #93370d; margin: 0 0 2mm 0; }
+.deep-badge { font-size: 7.5pt; color: #93370d; border: 0.4pt solid #b54708;
+              padding: 0.2mm 1mm; margin-left: 2mm; }
+.deep-claims td { font-size: 7.5pt; }
+.deep-claim-inferred td { background: #fffaeb; }
+.deep-claim-uncertain td { background: #f2f4f7; }
+.deep-verdict { background: #f9fafb; padding: 1.5mm; }
+.deep-status { font-size: 8pt; color: #667085; }
+.deep-footer { border-top: 0.5pt solid #d0d5dd; margin-top: 6mm;
+               font-size: 8.5pt; color: #667085; }
+"""
+
+
+def _print_css(title: str, font: Path, *, appendix: bool = False) -> str:
     header = _css_string(title.strip() or "研报")
     if len(header) > 42:
         header = header[:41] + "…"
+    deep_page = (
+        "  @top-right {\n"
+        "    content: element(deep-flag);\n"
+        f'    font-family: "{_FONT_FAMILY}", sans-serif;\n'
+        "    font-size: 9pt;\n"
+        "    color: #93370d;\n"
+        "  }\n"
+    ) if appendix else ""
+    deep_css = _DEEP_CSS if appendix else ""
     return f"""<style>
 @font-face {{
   font-family: "{_FONT_FAMILY}";
@@ -544,7 +593,7 @@ def _print_css(title: str, font: Path) -> str:
     font-size: 9pt;
     color: #667085;
   }}
-  @bottom-center {{
+{deep_page}  @bottom-center {{
     content: "第 " counter(page) " 页 / 共 " counter(pages) " 页";
     font-family: "{_FONT_FAMILY}", sans-serif;
     font-size: 9pt;
@@ -570,7 +619,7 @@ td, p, li {{ word-break: keep-all; overflow-wrap: break-word; }}
 .num {{ white-space: nowrap; }}
 .page-logo {{ position: running(page-logo); height: 8mm; }}
 figure {{ break-inside: avoid; page-break-inside: avoid; margin: 4mm 0; }}
-</style>
+{deep_css}</style>
 """
 
 
