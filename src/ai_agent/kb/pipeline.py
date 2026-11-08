@@ -258,7 +258,7 @@ class KbPipeline:
     ) -> None:
         """spawn 子进程跑重活；异常／超时只标该文件 failed，不拖死监督线程。"""
         # OCR／pymupdf 偶发挂死：无超时 join 会占满 worker 槽，后面 uploaded 永远不跑。
-        timeout = max(float(getattr(settings, "kb_ingest_job_timeout_seconds", 900)), 60.0)
+        timeout = max(float(getattr(settings, "kb_ingest_job_timeout_seconds", 1800)), 60.0)
         proc = self._mp_ctx.Process(
             target=target,
             args=args,

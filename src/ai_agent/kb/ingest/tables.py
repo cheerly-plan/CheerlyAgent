@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.ingest import sections
@@ -263,10 +264,29 @@ def _find_page_tables(page) -> list:
     return _replace_clipped_tables(found, alt)
 
 
+def _page_table_payload(page, pno: int) -> list[tuple[int, float, tuple, list[list[str]]]]:
+    """单页 find_tables → 可跨进程传递的清洗后表格。"""
+    out: list[tuple[int, float, tuple, list[list[str]]]] = []
+    for table in _find_page_tables(page):
+        # 一张图里可能拆出多张表（见 _split_repeated_header）：共用同一
+        # 个 bbox 即可，正文行照样整块剔掉。外框常比最后一行格子大一截，
+        # 会把表下的签字栏（法定代表人）也当成表格内文本删掉。
+        bbox = _table_content_bbox(table)
+        for rows in _clean_table(table.extract()):
+            if len(rows) < 2 or max(len(r) for r in rows) < 2:
+                continue
+            out.append((pno + 1, float(bbox[1]), bbox, rows))
+    return out
+
+
 def _pdf_tables(
     doc,
 ) -> tuple[list[tuple[int, float, tuple, list[list[str]]]], dict[int, float]]:
-    """逐页找表格，返回 (表列表, 页高)。表是 (页码, 顶部纵坐标, bbox, 清洗后的二维行)。"""
+    """逐页找表格，返回 (表列表, 页高)。表是 (页码, 顶部纵坐标, bbox, 清洗后的二维行)。
+
+    同进程调用：单测与调试用。生产路径走 ``_pdf_tables_isolated``，避免
+    MuPDF find_tables SIGSEGV 拖死整个解析子进程。
+    """
     out: list[tuple[int, float, tuple, list[list[str]]]] = []
     heights: dict[int, float] = {}
     for pno in range(doc.page_count):
@@ -275,19 +295,159 @@ def _pdf_tables(
         except Exception:
             heights[pno + 1] = 0.0
         try:
-            tables = _find_page_tables(doc[pno])
+            out.extend(_page_table_payload(doc[pno], pno))
         except Exception:
             logger.warning("PDF 第 %d 页表格识别失败，跳过", pno + 1, exc_info=True)
             continue
-        for table in tables:
-            # 一张图里可能拆出多张表（见 _split_repeated_header）：共用同一
-            # 个 bbox 即可，正文行照样整块剔掉。外框常比最后一行格子大一截，
-            # 会把表下的签字栏（法定代表人）也当成表格内文本删掉。
-            bbox = _table_content_bbox(table)
-            for rows in _clean_table(table.extract()):
-                if len(rows) < 2 or max(len(r) for r in rows) < 2:
-                    continue
-                out.append((pno + 1, float(bbox[1]), bbox, rows))
+    return _carry_page_headers(out, heights), heights
+
+
+def _pdf_tables_worker_main(path: str, start: int, out_path: str) -> None:
+    """独立解释器入口：从 ``start``（0-based）页跑 find_tables，逐页写 checkpoint。
+
+    用 ``python -c`` 拉起，不依赖 multiprocessing spawn（嵌套在解析子进程里、
+    或父进程是 stdin 时 spawn 会踩 ``__main__``）。每页写完 pickle，父进程在
+    SIGSEGV 后仍能读到 last_ok 并跳过崩溃页。
+    """
+    import pickle
+
+    import pymupdf
+
+    tables: list[tuple[int, float, tuple, list[list[str]]]] = []
+    heights: dict[int, float] = {}
+    last_ok = start - 1
+
+    def _checkpoint(*, done: bool) -> None:
+        import os
+
+        tmp = f"{out_path}.tmp"
+        with open(tmp, "wb") as fh:
+            pickle.dump(
+                {
+                    "tables": tables,
+                    "heights": heights,
+                    "last_ok": last_ok,
+                    "done": done,
+                },
+                fh,
+            )
+        os.replace(tmp, out_path)
+
+    doc = pymupdf.open(path)
+    try:
+        for pno in range(start, doc.page_count):
+            try:
+                heights[pno + 1] = float(doc[pno].rect.height)
+            except Exception:
+                heights[pno + 1] = 0.0
+            try:
+                tables.extend(_page_table_payload(doc[pno], pno))
+            except Exception:
+                # 单页 Python 异常：记空页继续，别让整段抽表停掉
+                pass
+            last_ok = pno
+            _checkpoint(done=False)
+        _checkpoint(done=True)
+    finally:
+        doc.close()
+
+
+def _pdf_tables_isolated(
+    path: Path,
+) -> tuple[list[tuple[int, float, tuple, list[list[str]]]], dict[int, float]]:
+    """在短命子进程里跑 find_tables；SIGSEGV 只丢崩溃页，正文解析继续。"""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    pdf = Path(path)
+    try:
+        import pymupdf
+    except ImportError:
+        return [], {}
+    try:
+        doc = pymupdf.open(str(pdf))
+        page_count = doc.page_count
+        doc.close()
+    except Exception:
+        logger.warning("PDF 打开失败，跳过表格识别：%s", pdf.name, exc_info=True)
+        return [], {}
+    if page_count <= 0:
+        return [], {}
+
+    out: list[tuple[int, float, tuple, list[list[str]]]] = []
+    heights: dict[int, float] = {}
+    start = 0
+    while start < page_count:
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
+            out_path = tmp.name
+        code = (
+            "from ai_agent.kb.ingest.tables import _pdf_tables_worker_main as _m; "
+            f"_m({str(pdf)!r}, {start}, {out_path!r})"
+        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=max(120, page_count * 5),
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("PDF 表格子进程超时 file=%s start_page=%d", pdf.name, start + 1)
+            try:
+                Path(out_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            break
+
+        done = False
+        last_ok = start - 1
+        try:
+            raw = Path(out_path).read_bytes()
+            # 子进程在写首个 checkpoint 前就 SIGSEGV 时，文件仍是 NamedTemporaryFile
+            # 创建的空文件——不当成读失败。
+            if raw:
+                state = pickle.loads(raw)
+                batch = state.get("tables") or []
+                out.extend(batch)
+                heights.update(state.get("heights") or {})
+                last_ok = int(state.get("last_ok", last_ok))
+                done = bool(state.get("done"))
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.warning("PDF 表格 checkpoint 读取失败 file=%s", pdf.name, exc_info=True)
+        finally:
+            try:
+                Path(out_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                Path(f"{out_path}.tmp").unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if done and proc.returncode == 0:
+            break
+        # 原生崩溃：正在处理的是 last_ok+1；若一页都没写出则是 start
+        crash_page = last_ok + 1
+        if crash_page < start:
+            crash_page = start
+        if crash_page >= page_count:
+            logger.error(
+                "PDF 表格子进程异常退出 exit=%s（已无后续页可跳过）file=%s",
+                proc.returncode,
+                pdf.name,
+            )
+            break
+        logger.warning(
+            "PDF 第 %d 页 find_tables 原生崩溃 exit=%s，跳过该页继续 file=%s",
+            crash_page + 1,
+            proc.returncode,
+            pdf.name,
+        )
+        start = crash_page + 1
     return _carry_page_headers(out, heights), heights
 
 

@@ -7,6 +7,7 @@
 from ai_agent.kb.ingest.chunking import Chunk, chunk_segments, chunk_text
 from ai_agent.kb.ingest.parsing import (
     FIGURE,
+    TABLE,
     TEXT,
     Segment,
     _attach_choice,
@@ -337,6 +338,105 @@ def test_toc_residue_chunk_is_dropped():
     ]
     chunks = chunk_segments(segments, max_chars=500, overlap=0)
     assert [c.text for c in chunks] == ["目录结构说明：本文档分为八节。"]
+
+
+def test_short_table_lead_merges_into_following_table():
+    table = (
+        "<table><tr><td>项目</td><td>金额</td></tr>"
+        "<tr><td>货币资金</td><td>1</td></tr></table>"
+    )
+    # 两张小表夹在不同页，避免「过小相邻表合并」把两段再次拼掉
+    segments = [
+        Segment("续上表：", 8, TEXT, "第八节 财务报告"),
+        Segment(table, 8, TABLE, "第八节 财务报告"),
+        Segment("其他说明", 9, TEXT, "第八节 财务报告"),
+        Segment(
+            "<table><tr><td>科目</td><td>数</td></tr>"
+            "<tr><td>存货</td><td>2</td></tr></table>",
+            9,
+            TABLE,
+            "第八节 财务报告",
+        ),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=0)
+    assert len(chunks) == 2
+    assert all(c.kind == TABLE for c in chunks)
+    assert chunks[0].text.startswith("续上表：")
+    assert "货币资金" in chunks[0].text
+    assert chunks[1].text.startswith("其他说明")
+    assert "存货" in chunks[1].text
+
+
+def test_standalone_answer_text_not_merged_into_table():
+    table = (
+        "<table><tr><td>共同投资方</td><td>金额</td></tr>"
+        "<tr><td>甲</td><td>1</td></tr></table>"
+    )
+    segments = [
+        Segment(
+            "## 九、处罚及整改情况\n□适用 ☑不适用\n公司报告期不存在处罚及整改情况。",
+            5,
+            TEXT,
+            "第五节 重要事项",
+        ),
+        Segment(f"## 十一、重大关联交易\n{table}", 5, TABLE, "第五节 重要事项"),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=0)
+    assert [c.kind for c in chunks] == ["text", "table"]
+    assert "处罚及整改" in chunks[0].text
+    assert "共同投资方" in chunks[1].text
+
+
+def test_small_adjacent_tables_merge_on_same_page():
+    t1 = (
+        "<table><tr><td>担保对象</td><td>额度</td></tr>"
+        "<tr><td>子公司A</td><td>100</td></tr></table>"
+    )
+    t2 = (
+        "<table><tr><td>担保对象</td><td>额度</td></tr>"
+        "<tr><td>子公司B</td><td>200</td></tr></table>"
+    )
+    segments = [
+        Segment(t1, 12, TABLE, "第五节 重要事项"),
+        Segment(t2, 12, TABLE, "第五节 重要事项"),
+    ]
+    chunks = chunk_segments(segments, max_chars=500, overlap=0)
+    assert len(chunks) == 1
+    assert chunks[0].kind == TABLE
+    assert "子公司A" in chunks[0].text and "子公司B" in chunks[0].text
+
+
+def test_small_tables_not_merged_across_pages_or_when_large():
+    small = (
+        "<table><tr><td>a</td><td>1</td></tr>"
+        "<tr><td>b</td><td>2</td></tr></table>"
+    )
+    # 跨页不合并
+    cross = chunk_segments(
+        [
+            Segment(small, 1, TABLE, "第八节 财务报告"),
+            Segment(small, 2, TABLE, "第八节 财务报告"),
+        ],
+        max_chars=500,
+        overlap=0,
+    )
+    assert len(cross) == 2
+    # 单表已偏大时不合并
+    fat = (
+        "<table><tr><td>项目</td><td>金额</td></tr>"
+        + "".join(f"<tr><td>科目{i}</td><td>{i}</td></tr>" for i in range(40))
+        + "</table>"
+    )
+    large = chunk_segments(
+        [
+            Segment(fat, 3, TABLE, "第八节 财务报告"),
+            Segment(small, 3, TABLE, "第八节 财务报告"),
+        ],
+        max_chars=500,
+        overlap=0,
+        table_group_mode="section",
+    )
+    assert len(large) >= 2
 
 
 # ---------- 勾选框（单选/多选） ----------

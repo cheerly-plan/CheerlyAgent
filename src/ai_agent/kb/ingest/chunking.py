@@ -47,6 +47,25 @@ _NO_CHART = re.compile(
 _NO_CHART_MAX = 120
 # 目录页被过滤后常只剩「目 录」两字，单成一片是纯噪声
 _TOC_RESIDUE = re.compile(r"^目\s*录$|^contents$", re.IGNORECASE)
+# OCR 常把「续上表：」「(2) 应付项目」拆成独立正文段；并进下一张表，少出废片。
+_TABLE_LEAD_MAX = 40
+_TABLE_LEAD_HINT = re.compile(
+    r"续上表|如下表?|见下表|单位\s*[:：]|编制单位|币种\s*[:：]"
+)
+# 「□适用 ☑不适用 / 报告期不存在…」是独立结论段，不能并进后面的表。
+_STANDALONE_ANSWER = re.compile(
+    r"[□☑■√]\s*适用|[□☑■√]\s*不适用|报告期不存在|未发生"
+)
+_TABLE_LEAD_HEADING = re.compile(
+    r"^(?:#{1,6}\s*)?"
+    r"(?:"
+    r"\(?\d{1,2}\)?[、.．]"
+    r"|[（(][\d一二三四五六七八九十]+[）)]"
+    r"|[一二三四五六七八九十]+[、.]"
+    r")"
+)
+# 同页过小相邻表合并：单表纯文字不超过此值才考虑合并，合并后总长仍受 max_chars 约束。
+_SMALL_TABLE_PLAIN = 300
 # 句子边界：中英文常见终止符后的位置（保留标点在句尾）
 _SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
 # Markdown 表格的分隔行：|---|---|
@@ -129,7 +148,9 @@ def chunk_segments(
             )
             plain.clear()
 
-    for seg in _carry_html_page_headers(_drop_noise(segments)):
+    for seg in _carry_html_page_headers(
+        _coalesce_segments(_drop_noise(segments), max_chars=max_chars)
+    ):
         if seg.kind == TABLE:
             # 表必须整表成片（超长时重复表头），不能揉进正文流
             flush_plain()
@@ -188,6 +209,97 @@ def _drop_noise(segments: list[Segment]) -> list[Segment]:
             continue
         kept.append(seg)
     return kept
+
+
+def _plain_len(text: str) -> int:
+    """去掉 HTML 标签后的可见字数，跟向量化正文同一量级。"""
+    return len(re.sub(r"<[^>]+>", "", text or ""))
+
+
+def _same_page(a: Segment, b: Segment) -> bool:
+    return a.page is not None and a.page == b.page
+
+
+def _is_table_lead(text: str) -> bool:
+    """短引导句：应贴到下一张表，而不是单独成正文片。"""
+    t = (text or "").strip()
+    if not t or len(t) > _TABLE_LEAD_MAX:
+        return False
+    if _STANDALONE_ANSWER.search(t) and not _TABLE_LEAD_HINT.search(t):
+        return False
+    if _TABLE_LEAD_HINT.search(t):
+        return True
+    if _TABLE_LEAD_HEADING.match(t):
+        return True
+    compact = re.sub(r"\s+", "", t)
+    if "。" in t:
+        return False
+    if compact.endswith(("：", ":")):
+        return True
+    # 「其他说明」这类极短词
+    return len(compact) <= 16 and "\n" not in t
+
+
+def _can_merge_small_tables(
+    prev: Segment, nxt: Segment, *, max_chars: int
+) -> bool:
+    """同页、同口径的过小相邻表：合成一段，减少半年度报告里成片的碎表。"""
+    if not _same_page(prev, nxt):
+        return False
+    if prev.section and nxt.section and prev.section != nxt.section:
+        return False
+    if prev.scope and nxt.scope and prev.scope != nxt.scope:
+        return False
+    if _plain_len(prev.text) > _SMALL_TABLE_PLAIN:
+        return False
+    if _plain_len(nxt.text) > _SMALL_TABLE_PLAIN:
+        return False
+    # 合并后仍应能整片进库；超长会走 Markdown 切分，HTML 表会被拆坏
+    return len(prev.text) + len(nxt.text) + 1 <= max_chars
+
+
+def _merge_table_segments(prev: Segment, nxt: Segment) -> Segment:
+    return replace(
+        prev,
+        text=f"{prev.text.rstrip()}\n{nxt.text.lstrip()}",
+        page_end=nxt.page_end or nxt.page or prev.page_end or prev.page,
+        section=prev.section or nxt.section,
+        scope=prev.scope or nxt.scope,
+    )
+
+
+def _coalesce_segments(
+    segments: list[Segment], *, max_chars: int
+) -> list[Segment]:
+    """切片前合并：短引导句并进下一张表；同页过小相邻表拼成一段。
+
+    半年度 OCR 产物里大量「续上表：」独立正文 + 一两行小表，各自成片会把
+    1MB 文件撑到五百多片。这里只做段级合并，不改后续按 max_chars 切大表。
+    """
+    out: list[Segment] = []
+    for seg in segments:
+        if (
+            seg.kind == TABLE
+            and out
+            and out[-1].kind == TEXT
+            and _same_page(out[-1], seg)
+            and _is_table_lead(out[-1].text)
+        ):
+            lead = out.pop()
+            seg = replace(
+                seg,
+                text=f"{lead.text.strip()}\n{seg.text.strip()}",
+                section=seg.section or lead.section,
+            )
+        if (
+            seg.kind == TABLE
+            and out
+            and out[-1].kind == TABLE
+            and _can_merge_small_tables(out[-1], seg, max_chars=max_chars)
+        ):
+            seg = _merge_table_segments(out.pop(), seg)
+        out.append(seg)
+    return out
 
 
 def _chunk_flow(
@@ -959,11 +1071,21 @@ def _split_html_table_grouped(
 def _expand_long_html_tables(
     chunks: list[Chunk], *, max_chars: int = 500, group_mode: str = "row"
 ) -> list[Chunk]:
-    """跨页接完之后再拆。先拆再接会把续页表头当成另一张表。"""
+    """跨页接完之后再拆。先拆再接会把续页表头当成另一张表。
+
+    必须是「整段恰好一张 ``<table>``」才拆。``fullmatch`` 配非贪婪
+    ``</table>`` 会把「表A + 表B」吞成一张假表再拆烂——同页小表合并后
+    会踩这个坑。
+    """
     out: list[Chunk] = []
     for chunk in chunks:
         text = chunk.text.strip()
-        if chunk.kind != TABLE or not _HTML_TABLE.fullmatch(text):
+        matches = list(_HTML_TABLE.finditer(text))
+        if (
+            chunk.kind != TABLE
+            or len(matches) != 1
+            or matches[0].group(0) != text
+        ):
             out.append(chunk)
             continue
         parts = _split_html_table(

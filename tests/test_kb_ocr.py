@@ -146,7 +146,7 @@ def test_parse_pdf_uses_ocr_body_and_text_layer_section(kb_tmp, monkeypatch):
     path = _pdf(kb_tmp)
     monkeypatch.setattr(
         "ai_agent.kb.ingest.parsing._pdf_text",
-        lambda _path: ([Segment("文本层旧正文", 2, TEXT, "第十节 财务报告")], []),
+        lambda _path, **_k: ([Segment("文本层旧正文", 2, TEXT, "第十节 财务报告")], []),
     )
     monkeypatch.setattr(
         "ai_agent.kb.ingest.ocr.ocr_pdf",
@@ -172,7 +172,7 @@ def test_cover_fields_dropped_by_ocr_are_restored_from_text_layer(kb_tmp, monkey
 
     monkeypatch.setattr(
         "ai_agent.kb.ingest.parsing._pdf_text",
-        lambda _path: (
+        lambda _path, **_k: (
             [
                 Segment(
                     "证券代码：601988\n证券简称：中国银行\n中国银行股份有限公司",
@@ -197,7 +197,7 @@ def test_cover_fields_already_in_ocr_are_not_duplicated(kb_tmp, monkeypatch):
 
     monkeypatch.setattr(
         "ai_agent.kb.ingest.parsing._pdf_text",
-        lambda _path: (
+        lambda _path, **_k: (
             [
                 Segment(
                     "证券代码：000625（200625）    证券简称：长安汽车    公告编号：2026-92",
@@ -366,7 +366,7 @@ def test_parse_pdf_falls_back_to_text_layer_when_ocr_missing(kb_tmp, monkeypatch
     monkeypatch.setattr("ai_agent.kb.ingest.ocr.ocr_pdf", lambda _path: None)
     monkeypatch.setattr(
         "ai_agent.kb.ingest.parsing._pdf_text",
-        lambda _path: ([Segment("文本层正文", 1, TEXT, "第一节")], [4]),
+        lambda _path, **_k: ([Segment("文本层正文", 1, TEXT, "第一节")], [4]),
     )
     monkeypatch.setattr("ai_agent.kb.ingest.figures._pdf_figures", lambda *_a, **_k: [])
     segments = parse_segments(_pdf(kb_tmp))

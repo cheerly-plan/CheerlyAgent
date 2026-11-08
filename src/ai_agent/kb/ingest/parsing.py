@@ -106,11 +106,15 @@ def _parse_pdf(path: Path) -> list[Segment]:
     贴在页顶、被 OCR 当成页眉丢掉的证券代码、证券简称、公告编号，从文本层补回。
     OCR 没开、模型没拉起或一页都没识别出来时，退回文本层原来的解析（含表格
     识别和图表）。
-    """
-    from ai_agent.kb.ingest.ocr import ocr_pdf
 
+    开了 OCR 时文本层先不跑 find_tables：MuPDF 的表格猎取会在部分年报上
+    SIGSEGV，try/except 拦不住，整份解析子进程直接 exit=-11，OCR 根本跑不到。
+    """
+    from ai_agent.kb.ingest.ocr import enabled as ocr_enabled, ocr_pdf
+
+    prefer_ocr = ocr_enabled()
     try:
-        text_segments, text_lens = _pdf_text(path)
+        text_segments, text_lens = _pdf_text(path, include_tables=not prefer_ocr)
     except Exception:
         logger.warning("PDF 文本层抽取失败", exc_info=True)
         text_segments, text_lens = [], []
@@ -122,6 +126,13 @@ def _parse_pdf(path: Path) -> list[Segment]:
         )
         if segments:
             return segments
+
+    # OCR 没产出：若刚才为避 SIGSEGV 跳过了抽表，补跑带表格的文本层。
+    if prefer_ocr:
+        try:
+            text_segments, text_lens = _pdf_text(path, include_tables=True)
+        except Exception:
+            logger.warning("PDF 文本层（含表格）回退抽取失败", exc_info=True)
 
     if any((s.text or "").strip() for s in text_segments):
         from ai_agent.kb.ingest.figures import _pdf_figures
@@ -366,7 +377,9 @@ def _is_weak_lead(raw: str) -> bool:
     return True
 
 
-def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
+def _pdf_text(
+    path: Path, *, include_tables: bool = True
+) -> tuple[list[Segment], list[int]]:
     """行级抽取：剔页眉页脚，按一级节分组后逐页产出 Segment；表格单独成段。
 
     返回 ([], []) 表示 pymupdf 不可用或文件打不开，由调用方降级——不用
@@ -377,6 +390,9 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
 
     表格与正文混排时按 (页, 纵向位置) 排回原顺序——表格的位置决定它
     在哪一节、挨着哪段正文，统统挪到文末会让引用张冠李戴。
+
+    ``include_tables=False``：只抽正文行（给 OCR 路径取章节用）。find_tables
+    在部分 PDF 上会原生崩溃，OCR 开着时没必要先踩这个雷。
     """
     # 表格函数已拆到 tables.py，延迟 import 避免循环依赖
     from ai_agent.kb.ingest.tables import (
@@ -384,7 +400,7 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
         _drop_table_lines,
         _merge_continued_tables,
         _pdf_glossary_tables,
-        _pdf_tables,
+        _pdf_tables_isolated,
         _table_meta_above,
         _table_prefix,
         _table_scope,
@@ -408,12 +424,13 @@ def _pdf_text(path: Path) -> tuple[list[Segment], list[int]]:
     # 勾选框符号归一化要在任何按文本的比较（页眉去重、标题识别、表格剔除）
     # 之前做，否则同一符号在两处长得不一样，去重去不干净
     lines = normalize_choice_lines(lines)
-    # 表格识别只是「多产出几段」，失败不该拖累正文解析
+    # 表格识别只是「多产出几段」，失败不该拖累正文解析。
+    # find_tables 的 SIGSEGV 拦不住，放到短命子进程里按页推进。
     tables: list[tuple[int, float, tuple, list[list[str]]]] = []
     page_heights: dict[int, float] = {}
-    if settings.kb_pdf_table_extraction:
+    if include_tables and settings.kb_pdf_table_extraction:
         try:
-            tables, page_heights = _pdf_tables(doc)
+            tables, page_heights = _pdf_tables_isolated(path)
         except Exception:
             logger.warning("PDF 表格识别失败，本次只出正文切片", exc_info=True)
         try:
