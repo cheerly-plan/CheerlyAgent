@@ -111,6 +111,11 @@ def test_robotics_segment_columns_override_shared_profile():
     body = columns_for_segment("本体", "robotics")
     assert body is not None
     assert "产能利用率" in body
+    assert "合同负债" in body
+    reducer = columns_for_segment("减速器", "robotics")
+    assert reducer is not None
+    assert "产能利用率" in reducer
+    assert "合同负债" in reducer
 
 
 def test_semiconductor_and_bank_segment_columns_are_explicit():

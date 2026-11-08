@@ -169,13 +169,16 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
 
     plan.subjects = _mentioned_subjects(request, rows)
     plan.industry = _industry_of(request)
-    if plan.subjects:
+    # 「机器人行业」里的行业词会命中新松证券简称／又名，不能因此改成公司单报。
+    if plan.industry and f"{plan.industry}行业" in request:
+        plan.kind = "industry"
+        plan.subjects = []
+    elif plan.subjects:
         plan.kind = "company"
     elif plan.industry:
+        # 主体等 skill 路由后再定：有花名册用花名册，没有才靠 KB tags。
         plan.kind = "industry"
-        plan.subjects = _industry_subjects(plan.industry, rows, plan.period)
-        if not plan.subjects:
-            plan.gaps.append(f"知识库里没有标成{plan.industry}行业的公司，无法确定要调取哪些季报")
+        plan.subjects = []
     else:
         plan.gaps.append("没有点到知识库里的公司，也没有写行业")
 
@@ -193,14 +196,21 @@ def parse_request(text: str, skill_id: str = "") -> ReportPlan:
             f"「{plan.industry}」没有专属报告模板，已按通用行业模板生成；"
             "要定制大纲或指标集请新增 SKILL.md"
         )
-    # 行业 skill 自带宇宙名单：空库也能定标的，再靠巨潮补齐原文。
-    if plan.kind == "industry" and not plan.subjects and skill.companies:
-        plan.subjects = [name for name, _code, _segment, _aka in skill.companies]
-        plan.gaps = [
-            gap
-            for gap in plan.gaps
-            if "无法确定要调取哪些季报" not in gap
-        ]
+    # 行业主体：skill.companies 是宇宙唯一来源；KB 只决定有没有原文／要不要补齐。
+    # 禁止用行业词扫公司名／文件名——「机器人」会撞上新松简称，把花名册挡住。
+    if plan.kind == "industry":
+        if skill.companies:
+            plan.subjects = [
+                name for name, _code, _segment, _aka in skill.companies
+            ]
+        else:
+            plan.subjects = _industry_subjects(
+                plan.industry, rows, plan.period
+            )
+            if not plan.subjects:
+                plan.gaps.append(
+                    f"知识库里没有标成{plan.industry}行业的公司，无法确定要调取哪些季报"
+                )
     if plan.kind == "company":
         plan.company_type = company_type_of(plan.subjects)
         if plan.subjects and plan.company_type == GENERIC:
@@ -343,23 +353,23 @@ def _industry_of(text: str) -> str:
 
 
 def _industry_subjects(industry: str, rows: list[dict], period: str) -> list[str]:
+    """通用行业模板兜底：只认 tags 里的行业标注，不扫公司名／文件名。
+
+    有专属 skill 花名册时不会走到这里；子串扫 subject／filename 会把
+    「机器人」误判成新松独家成员。
+    """
     found: list[str] = []
+    token = (industry or "").strip()
+    if not token:
+        return found
     for row in rows:
         if period and (row.get("period") or "") != period:
             continue
         subject = str(row.get("subject") or "").strip()
         if not subject or subject in found:
             continue
-        blob = " ".join(
-            [
-                subject,
-                " ".join(str(item) for item in (row.get("subject_aliases") or [])),
-                str(row.get("filename") or ""),
-                " ".join(str(item) for item in (row.get("tags") or [])),
-                str(row.get("description") or ""),
-            ]
-        )
-        if industry in blob:
+        tags = [str(item) for item in (row.get("tags") or [])]
+        if token in tags:
             found.append(subject)
     return found
 

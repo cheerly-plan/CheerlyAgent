@@ -203,7 +203,9 @@ def test_robotics_integrator_table_omits_capacity_utilization():
     integrator_header = _header_after("### 系统集成")
     assert "产能利用率" not in integrator_header
     assert "合同负债" in integrator_header
-    assert "产能利用率" in _header_after("### 本体")
+    body_header = _header_after("### 本体")
+    assert "产能利用率" in body_header
+    assert "合同负债" in body_header
 
 
 def test_segment_table_keeps_ocf_beyond_core_budget():

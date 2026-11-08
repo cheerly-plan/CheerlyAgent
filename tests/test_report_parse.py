@@ -92,15 +92,44 @@ def test_markdown_only_request_skips_pdf(monkeypatch):
     assert plan.deliverable == "markdown"
 
 
-def test_industry_members_come_from_file_tags(monkeypatch):
+def test_industry_roster_ignores_miscategorized_kb_tags(monkeypatch):
+    """有花名册的行业 skill：KB 误标 tag 不能独吞／替换宇宙名单。"""
     monkeypatch.setattr(
         "ai_agent.report.parse.store.list_kb_files",
         lambda **k: [_CEEC, _GOLD],
     )
     plan = parse_request("半导体行业 2025Q3深度分析报告")
-    assert plan.subjects == ["中国黄金集团黄金珠宝股份有限公司"]
-    assert [item.role for item in plan.files] == ["本期"]
+    assert plan.kind == "industry"
+    assert plan.skill_id == "semiconductor_industry_report"
+    assert "中芯国际" in plan.subjects
+    assert "中国黄金集团黄金珠宝股份有限公司" not in plan.subjects
     assert "中国能源建设" not in plan.subjects
+
+
+def test_robotics_roster_not_shadowed_by_xinsong_short_name(monkeypatch):
+    """新松证券简称／文件名含「机器人」时，仍用花名册 8 家，不缩成一家。"""
+    xinsong = {
+        "file_id": uuid.uuid4(),
+        "filename": "机器人2026年第三季度报告.pdf",
+        "status": "ready",
+        "subject": "沈阳新松机器人自动化股份有限公司",
+        "subject_aliases": ["机器人", "新松机器人"],
+        "period": "2026Q3",
+        "tags": ["source:cninfo", "code:300024"],
+        "description": "",
+    }
+    monkeypatch.setattr(
+        "ai_agent.report.parse.store.list_kb_files",
+        lambda **k: [xinsong],
+    )
+    plan = parse_request("生成机器人行业2026Q3财报对比分析")
+    assert plan.kind == "industry"
+    assert plan.industry == "机器人"
+    assert plan.skill_id == "robotics_industry_report"
+    assert "汇川技术" in plan.subjects
+    assert "绿的谐波" in plan.subjects
+    assert "新松机器人" in plan.subjects
+    assert len(plan.subjects) == 8
 
 
 def test_named_indicator_replaces_the_default_set(monkeypatch):
