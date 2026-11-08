@@ -31,7 +31,7 @@ READING_NOTE_SEGMENT_TAIL = (
 
 NEXT_PERIOD_NOTE = (
     "景气周期依赖外部数据源，本期流水线未接入，不推断周期位置。",
-    "下一期预告需明确：数据源清单、入库表结构、更新频率；接入前本报告只做公司财报赛道分组对比。",
+    "下一期需明确数据源清单、入库表结构与更新频率；接入前本报告只做公司财报赛道分组对比底稿，不构成行业深度研究。",
 )
 
 
@@ -53,7 +53,7 @@ def subject_prefix(plan: ReportPlan, subject: str, subjects: set[str]) -> str:
 
 def segment_reading_note(plan: ReportPlan) -> tuple[str, ...]:
     industry = (plan.industry or "").strip() or "行业"
-    head = f"阅读说明：本文为{industry}代表公司财报对比分析（赛道分组版）；"
+    head = f"阅读说明：本文为{industry}代表公司财报对比底稿（赛道分组版）；"
     return (head + READING_NOTE_SEGMENT_TAIL[0],) + READING_NOTE_SEGMENT_TAIL[1:]
 
 

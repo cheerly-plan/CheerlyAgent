@@ -48,6 +48,7 @@ __all__ = (
     "EvidenceItem",
     "analyze_operations",
     "collect_evidence_pack",
+    "evidence_quote_lines",
 )
 
 logger = get_logger(__name__)
@@ -98,14 +99,29 @@ def analyze_operations(
     if not current:
         return AnalysisSection(lines=[_FALLBACK], gaps=["本期没有可解读的抽取指标"])
 
-    # 赛道分组报告：用已抽取数字写梯队与结构关系，不跑 LLM 复述/乱引模板条款。
+    # 赛道分组报告：梯队／质量交叉用确定性数字；归因只引季报原文（不跑 LLM）。
     from ai_agent.report.skills import is_segment_skill
     from ai_agent.report.industry import structure_for_plan
 
     if is_segment_skill(plan.skill_id):
         lines, derived = segment_structure_lines(plan, current)
+        pack = evidence if evidence is not None else collect_evidence_pack(plan, current)
+        quotes = evidence_quote_lines(pack, max_quotes=4, max_per_file=1)
+        gaps: list[str] = []
+        if quotes:
+            if lines and lines[-1].startswith("以上判断"):
+                lines = lines[:-1]
+            lines.extend(quotes)
+            lines.append(
+                "以上判断仅基于本期已抽取或结构化补齐的指标与季报原文引述，"
+                "不引入无出处的订单／景气推断。"
+            )
+        elif not quotes and lines:
+            gaps.append("本期未召回可引述的经营分析原文，归因从略")
         if lines:
-            return AnalysisSection(lines=lines, used_llm=False, derived_facts=derived)
+            return AnalysisSection(
+                lines=lines, gaps=gaps, used_llm=False, derived_facts=derived
+            )
         wanted = structure_for_plan(plan)
         gap = (
             f"缺少可排序的结构指标（{'、'.join(wanted)}）"
@@ -179,22 +195,15 @@ def analyze_operations(
     return AnalysisSection(lines=lines, gaps=gaps, used_llm=True)
 
 
-def deterministic_lines(
-    plan: ReportPlan,
-    facts: list[IndicatorFact],
+def evidence_quote_lines(
     pack: list[EvidenceItem],
+    *,
+    max_quotes: int = 2,
+    max_per_file: int | None = None,
 ) -> list[str]:
-    """无可靠 LLM 输出时：①并列已授权数字事实；②引述经营分析原文（带出处）。
-
-    不写第三方推断。证据不足时返回空，由调用方落从略句。
-    """
-    from ai_agent.report.skills import is_segment_skill
-
-    if is_segment_skill(plan.skill_id):
-        lines, _derived = segment_structure_lines(plan, facts)
-        return lines
-
-    lines: list[str] = []
+    """从证据包抽出带出处的原文引述；不够格的丢掉，绝不补无出处推断。"""
+    if max_quotes <= 0:
+        return []
     keys = operating_snippet_keys()
     ban = (
         "被合并方",
@@ -207,9 +216,13 @@ def deterministic_lines(
         "是否经审计",
     )
     narrative_keep = ("量价", "存储", "出货", "毛利润增加", "经营业绩")
-    used = 0
+    lines: list[str] = []
     seen_snippets: set[str] = set()
+    per_file: dict[str, int] = {}
     for item in pack:
+        file_key = (item.file_id or item.filename or "").strip() or "_"
+        if max_per_file is not None and per_file.get(file_key, 0) >= max_per_file:
+            continue
         raw = extract_operating_narrative(plain_evidence_quote(item.quote or ""))
         if len(raw) < 20 or not any(token in raw for token in keys):
             continue
@@ -219,6 +232,7 @@ def deterministic_lines(
             token in raw for token in narrative_keep
         ):
             continue
+        added = False
         for snippet in iter_reason_snippets(raw):
             snippet = extract_operating_narrative(snippet)
             if not snippet or not is_usable_operating_quote(snippet):
@@ -232,11 +246,42 @@ def deterministic_lines(
             quote = safe_truncate(snippet, 120)
             cite = _format_citation([item])
             lines.append(f"原文披露：{quote}{cite}。")
-            used += 1
-            if used >= 2:
+            per_file[file_key] = per_file.get(file_key, 0) + 1
+            added = True
+            if len(lines) >= max_quotes:
+                return lines
+            if max_per_file is not None and per_file[file_key] >= max_per_file:
                 break
-        if used >= 2:
+        if added and len(lines) >= max_quotes:
             break
+    return lines
+
+
+def deterministic_lines(
+    plan: ReportPlan,
+    facts: list[IndicatorFact],
+    pack: list[EvidenceItem],
+) -> list[str]:
+    """无可靠 LLM 输出时：①并列已授权数字事实；②引述经营分析原文（带出处）。
+
+    不写第三方推断。证据不足时返回空，由调用方落从略句。
+    """
+    from ai_agent.report.skills import is_segment_skill
+
+    if is_segment_skill(plan.skill_id):
+        lines, _derived = segment_structure_lines(plan, facts)
+        quotes = evidence_quote_lines(pack, max_quotes=4, max_per_file=1)
+        if quotes:
+            if lines and lines[-1].startswith("以上判断"):
+                lines = lines[:-1]
+            lines.extend(quotes)
+            lines.append(
+                "以上判断仅基于本期已抽取或结构化补齐的指标与季报原文引述，"
+                "不引入无出处的订单／景气推断。"
+            )
+        return lines
+
+    lines = evidence_quote_lines(pack, max_quotes=2)
     cited = "\n".join(lines)
     structure = company_structure_line(
         plan, facts, has_narrative=bool(lines), cited_text=cited

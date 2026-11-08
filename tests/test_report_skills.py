@@ -87,11 +87,14 @@ def test_semiconductor_skill_has_universe_and_outline():
         "reading_note",
         "segment_roster",
         "segment_peer",
+        "change",
         "analysis",
         "chart_guide",
         "gaps",
         "next_period",
     )
+    assert "同比与趋势" in titles
+    assert "财报对比底稿" in skill.name
 
 
 def test_semiconductor_roster_renders_from_frontmatter():

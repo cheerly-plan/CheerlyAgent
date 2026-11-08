@@ -524,6 +524,7 @@ def change_lines(
         )
         for item in series
     }
+    incomparable: list[str] = []
     for item in series:
         if plan.indicators and item.name not in plan.indicators:
             continue
@@ -563,7 +564,37 @@ def change_lines(
             lines.append(
                 change_sentence(prefix, item.name, "环比", base, qoq.delta, qoq.rate, note)
             )
-    return lines or ["没有可写入的同比或环比。"]
+        if not yoy and not qoq:
+            for gap in item.gaps:
+                if any(
+                    token in gap
+                    for token in ("同比", "环比", "口径", "不可比", "覆盖期", "基期")
+                ):
+                    incomparable.append(f"{prefix}{item.name}：{gap}")
+                    break
+            else:
+                if any(period == plan.period for period, _value in item.points):
+                    # 有本期点、无同比／环比结果：明确缺基期，不装作「没有趋势议题」。
+                    incomparable.append(
+                        f"{prefix}{item.name}：缺同比／环比基期或口径不可比，本期不做跨期增减"
+                    )
+    if lines:
+        if incomparable:
+            lines.append(
+                "其余主体／指标因缺基期或口径不可比未写入同比（详见缺失与口径）。"
+            )
+        return lines
+    if incomparable:
+        head = (
+            "本期无可用同比／环比数字；下列为已识别的不可比或缺基期说明"
+            "（不放弃趋势议题，亦不编造增减）："
+        )
+        # 多公司时控制篇幅，完整清单仍在「缺失与口径」。
+        body = incomparable[:12]
+        if len(incomparable) > 12:
+            body.append("其余同类说明见缺失与口径。")
+        return [head, *body]
+    return ["没有可写入的同比或环比。"]
 
 
 def basis_note(
