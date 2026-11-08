@@ -91,9 +91,14 @@ _turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-fin
 
 
 def shutdown_turn_finalizer(wait: bool = True) -> None:
-    """等待在途的记忆抽取/摘要任务完成后再关停，避免重启丢长期记忆。"""
-    _turn_finalizer.shutdown(wait=wait, cancel_futures=False)
-    _tool_progress_pool.shutdown(wait=wait, cancel_futures=False)
+    """关闭 turn-finalize / 工具进度线程池。
+
+    wait=True 会等在途记忆抽取跑完（生产停机）；热重载必须 wait=False，
+    且 lifespan 还需 os._exit 跳过 ThreadPoolExecutor 的 atexit join，
+    否则长工具仍会钉死旧 worker。
+    """
+    _turn_finalizer.shutdown(wait=wait, cancel_futures=not wait)
+    _tool_progress_pool.shutdown(wait=wait, cancel_futures=not wait)
 
 
 def _run_tool_with_progress(

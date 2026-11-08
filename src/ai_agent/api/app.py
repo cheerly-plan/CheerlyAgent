@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 import logging
+import os
 import threading
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +30,8 @@ from ai_agent.storage.store import store
 from ai_agent.tasks.cleanup import maintenance_cleaner
 from ai_agent.tasks.title import shutdown_title_jobs
 
+_logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -53,17 +57,30 @@ async def lifespan(app: FastAPI):
             # 有独立 ingest-worker 时不要把 parsing 打回 uploaded，避免抢跑中的任务被打断
             kb_pipeline.recover_stuck(requeue=settings.kb_ingest_inline)
         except Exception:
-            logging.getLogger(__name__).exception("kb 启动恢复失败")
+            _logger.exception("kb 启动恢复失败")
 
     threading.Thread(target=_recover_kb, name="kb-recover", daemon=True).start()
     yield
     maintenance_cleaner.stop()
     short_term_memory.stop_cleanup()
     shutdown_title_jobs()
-    # 等在途的长期记忆抽取/摘要跑完再关连接池，重启不丢记忆
-    shutdown_turn_finalizer()
-    kb_pipeline.shutdown()
+    # 关服务不等在途长任务跑完：热重载/重启后由队列或客户端重跑即可。
+    # wait=False 只让 lifespan 立刻返回；ThreadPoolExecutor 的 atexit 仍会
+    # join 非 daemon 线程，研报/巨潮可卡数十分钟 → 旧 worker 占 8000 假死。
+    # 热重载直接硬退；其它场景靠看门狗兜底。
+    shutdown_turn_finalizer(wait=False)
+    kb_pipeline.shutdown(wait=False)
     store.close()
+
+    def _exit_watchdog() -> None:
+        time.sleep(5)
+        _logger.error("关闭后仍有线程未退出，强制结束进程（避免 8000 假死）")
+        os._exit(1)
+
+    threading.Thread(target=_exit_watchdog, name="exit-watchdog", daemon=True).start()
+    if os.environ.get("ALMOST_AGENT_RELOAD") == "1":
+        _logger.info("热重载：跳过线程池 atexit join，硬退 worker")
+        os._exit(0)
 
 
 def create_app() -> FastAPI:
