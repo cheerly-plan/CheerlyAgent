@@ -438,6 +438,7 @@ def test_generate_report_tool_accepts_report_type(monkeypatch):
 
     def fake_run(request, *, skill_id="", **kwargs):
         captured["skill_id"] = skill_id
+        captured["deep"] = kwargs.get("deep")
         return FakeResult()
 
     monkeypatch.setattr(rg, "run_report", fake_run)
@@ -447,6 +448,9 @@ def test_generate_report_tool_accepts_report_type(monkeypatch):
         write_pdf=False,
     )
     assert captured["skill_id"] == "industry_report"
+    assert captured["deep"] is not None
+    assert captured["deep"].enabled is True
+    assert captured["deep"].pdf_mode == "separate"
     assert "/v1/report/files/a.md" in out
 
 

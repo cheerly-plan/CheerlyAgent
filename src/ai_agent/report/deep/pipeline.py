@@ -184,6 +184,32 @@ class _Budget:
         return int(self.output_chars / 1.5)
 
 
+def pick_industry_sample(ledger: SourceLedger) -> tuple[str, str]:
+    """行业深度先选定样本公司，避免「行业深度」实际只默写一家却不声明。
+
+    选取规则：本期台账里事实条数最多的主体；并列时按名称稳定排序。
+    返回 (样本公司, 选取说明)；台账无主体时样本为空串。
+    """
+    counts: dict[str, int] = {}
+    for record in ledger.records:
+        subject = (record.subject or "").strip()
+        if subject:
+            counts[subject] = counts.get(subject, 0) + 1
+    if not counts:
+        return "", "行业深度暂无可用样本公司（台账无主体字段）；不得假装覆盖全行业。"
+    sample, n = max(counts.items(), key=lambda item: (item[1], item[0]))
+    others = sorted(name for name in counts if name != sample)
+    note = (
+        f"样本公司：{sample}（本期台账事实 {n} 条，按条数最多选取）；"
+        "第 2-9 章以该公司为推断对象，其余代表公司仅作对照背景，不逐家展开 10 章。"
+        "行业格局（产能/份额/价格）仍依赖 L3 外部数据，未接入前第 6 章应诚实从略。"
+    )
+    if others:
+        shown = "、".join(others[:8])
+        note += f" 对照池：{shown}" + (" 等" if len(others) > 8 else "") + "。"
+    return sample, note
+
+
 def generate_mainlines(ledger: SourceLedger, mode: str) -> tuple[list[Mainline], str]:
     """第 1 章：五规则扫描，确定性生成候选主线（假设），不调用 LLM。"""
     hits: dict[str, Any] = {}
@@ -371,9 +397,19 @@ def run_deep_analysis(
     chapter_numbers = list(cfg.chapters or chapters_for(mode))
     enabled_set = set(chapter_numbers)
     skipped = [n for n in range(1, 11) if n not in enabled_set]
+    sample, sample_note = ("", "")
+    display_target = target
+    if mode == "industry":
+        sample, sample_note = pick_industry_sample(ledger)
+        if sample:
+            display_target = f"{target}（样本：{sample}）"
     mainlines, company_type = generate_mainlines(ledger, mode)
+    if mode == "industry" and sample:
+        company_type = (
+            f"行业横比（样本公司={sample}；其余主体仅作对照）；{CONTROL_GROUP_NOTE}"
+        )
     result = DeepAnalysisResult(
-        target=target, period=period, mode=mode,
+        target=display_target, period=period, mode=mode,
         mainlines=mainlines, company_type=company_type,
         ledger_gaps=list(ledger.gaps),
     )
@@ -411,6 +447,8 @@ def run_deep_analysis(
         + ("（全量 12 视角）" if cfg.full_panel else "（非 12专家×5轮全量，成本折中）"),
         "token 为字符 /1.5 粗估，项目当前未接 LLM usage 统计",
     ]
+    if sample_note:
+        notes.insert(0, sample_note)
     if use_llm:
         notes.append(
             f"模型路由：{plan.route}；章节/评审={plan.chapter_label or '—'}，"
@@ -432,7 +470,7 @@ def run_deep_analysis(
             continue
         try:
             chapter = analyze_chapter(
-                spec, ledger, target=target, period=period, mode=mode,
+                spec, ledger, target=display_target, period=period, mode=mode,
                 prior=_prior_text(chapters), complete=call,
                 max_claims=cfg.max_claims_per_chapter,
             )
@@ -465,7 +503,7 @@ def run_deep_analysis(
         ) or "（无候选主线）"
         try:
             convergence, tracking, scenario_rows, falsifier_rows = converge(
-                target=target, period=period, mainlines_text=mainlines_text,
+                target=display_target, period=period, mainlines_text=mainlines_text,
                 prior=_prior_text(chapters), ledger=ledger, complete=converge_call,
             )
             for row in scenario_rows:

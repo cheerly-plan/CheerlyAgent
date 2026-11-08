@@ -20,11 +20,12 @@ from ai_agent.report import review as review_store
 logger = get_logger(__name__)
 
 # title_reportid.md / .pdf / .provenance.md / .review.json
-# 以及深度分析旁路的 .deep.md / .deep.json —— 不列进来旧版清理会留下孤儿文件。
-# 长后缀放前面，避免 .md / .json 先抢匹配（尽管 $ 锚定已能保证正确性）。
+# 以及深度分析旁路的 .deep.md / .deep.json / .deep.pdf —— 不列进来旧版清理
+# 会留下孤儿文件。长后缀放前面，避免 .md / .json / .pdf 先抢匹配
+# （尽管 $ 锚定已能保证正确性）。
 _ARTIFACT = re.compile(
     r"^(?P<title>.+)_(?P<id>[0-9a-f]{10})"
-    r"(?:\.provenance\.md|\.review\.json|\.deep\.md|\.deep\.json|\.md|\.pdf)$"
+    r"(?:\.provenance\.md|\.review\.json|\.deep\.md|\.deep\.json|\.deep\.pdf|\.md|\.pdf)$"
 )
 
 

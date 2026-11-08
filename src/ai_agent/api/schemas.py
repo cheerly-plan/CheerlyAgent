@@ -274,20 +274,25 @@ class ReportRequest(BaseModel):
         default=True, description="False 时跳过渲染，只出 Markdown（省渲染开销）"
     )
     deep: Literal["off", "skeleton", "full"] = Field(
-        default="off",
+        default="full",
         description=(
-            "深度投资分析旁路，默认 off（完全不跑、零开销）。"
+            "深度投资分析旁路，默认 full：与事实层底稿一起交付两份报告。"
+            "full=10 章闭环，约 31 次模型调用、1.5-4 分钟，需确保网关超时大于该时长；"
             "skeleton=零 LLM 调用的结构化骨架（台账+缺口+checklist）；"
-            "full=10 章闭环，约 31 次模型调用、1.5-4 分钟，需确保网关超时大于该时长。"
-            "结论单独落 .deep.json / .deep.md，永不并入财报正文；PDF 行为见 deep_pdf。"
+            "off=只出事实层底稿。"
+            "结论单独落 .deep.json / .deep.md / .deep.pdf，永不并入财报正文；"
+            "PDF 行为见 deep_pdf。"
         ),
     )
     deep_pdf: Literal["separate", "merge"] = Field(
-        default="merge",
+        default="separate",
         description=(
-            "深度结论与 PDF 的关系：merge=在事实层 PDF 末尾追加带显式标注的推断层附录"
-            "（默认；会追加一条人工审核项、禁止自动定稿，PDF 需人工批准后才可下载）；"
-            "separate=PDF 保持纯事实层，深度结论只落独立文件。deep=off 时本字段忽略。"
+            "深度结论与 PDF 的关系。separate（默认）= 生成两份 PDF：事实层底稿"
+            "保持纯数字事实、沿用现有门禁可自动定稿外发；推断层单独出 "
+            "<stem>.deep.pdf，带警示标注并走独立审核记录，须人工批准后才可下载。"
+            "merge（兼容档）= 把推断层附录追加进同一份 PDF，整份报告追加一条"
+            "人工审核项、禁止自动定稿。deep=off 时本字段忽略；事实层未生成 PDF 时"
+            "两种模式都只落 .deep.json / .deep.md。"
         ),
     )
 

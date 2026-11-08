@@ -478,15 +478,19 @@ def apply_print_template(
     logo: bytes | None = None,
     charts: list[ChartSpec] | None = None,
     appendix_html: str | None = None,
+    deep_css: bool = False,
 ) -> str:
     """套上 A4 模板：页眉页脚、可嵌入字体、表格跨页时重复表头。
 
     ``appendix_html`` 是深度分析附录（推断层）。它排在图表之后、``</body>``
     之前，且只有传入时才追加对应 CSS —— 不传时模板与既有渲染逐字节一致。
+
+    ``deep_css=True`` 只注入推断层样式、不追加任何 HTML，供**独立深度 PDF**
+    复用同一套标注样式；两个参数都不传时输出与既有渲染逐字节一致。
     """
     if source.lstrip().startswith("%PDF"):
         raise ValueError("正文是 PDF 二进制，渲染只接受 HTML")
-    style = _print_css(title, font, appendix=bool(appendix_html))
+    style = _print_css(title, font, appendix=bool(appendix_html) or deep_css)
     logo_tag = _logo_tag(logo) if logo else ""
     figures = _chart_section(charts or [])
     html_text = source
@@ -542,11 +546,36 @@ def render_report_pdf(
     )
 
 
+def render_html_pdf(
+    source: str,
+    *,
+    title: str,
+    font_path: Path | None = None,
+    deep_css: bool = False,
+) -> PdfFile:
+    """把一份完整 HTML 文档排成独立 PDF（不依赖 ``ReportDocument``）。
+
+    用于双 PDF 档的推断层文件：正文就是 ``deep_standalone_document()`` 的输出，
+    ``deep_css=True`` 复用附录的警示样式与 running 页眉。缺中文字体时和
+    ``render_report_pdf`` 一样直接失败，绝不写出乱码文件。
+    """
+    font = font_path or find_cjk_font()
+    if font is None or not font.is_file():
+        raise RuntimeError("没有找到可嵌入的中文字体，已停止生成 PDF")
+    printable = apply_print_template(source, title=title, font=font, deep_css=deep_css)
+    content = _write_pdf(printable)
+    if not content.startswith(b"%PDF"):
+        raise RuntimeError("WeasyPrint 没有写出 PDF")
+    return PdfFile(filename=_filename(title), content=content, pages=_page_count(content))
+
+
 # 深度分析附录专用样式。只在 appendix_html 非空时注入，避免影响既有 PDF。
 # 页眉标注走 position: running()（和 Logo 同一套机制），不依赖 named page。
 _DEEP_CSS = """
 .deep-flag { position: running(deep-flag); font-size: 9pt; color: #93370d; }
 .deep-appendix { break-before: page; border-left: 2pt solid #b54708; padding-left: 4mm; }
+/* 独立深度 PDF 里这份 section 就是第一页，强制分页会多出一张空白页。 */
+.deep-appendix.deep-standalone { break-before: auto; }
 .deep-appendix h1 { color: #93370d; font-size: 15pt; margin-bottom: 3mm; }
 .deep-appendix h2 { color: #93370d; font-size: 12pt; border-bottom: 0.5pt solid #f79009; }
 .deep-appendix h3 { font-size: 11pt; margin-top: 5mm; }

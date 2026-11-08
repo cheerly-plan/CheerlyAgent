@@ -365,7 +365,9 @@ def converge(
         final_chain=_text(payload.get("final_chain"), 600),
         decisions=decisions,
         delta=_text(payload.get("delta"), 400),
-        moat_rating=_text(payload.get("moat_rating"), 40) or "数据不足",
+        moat_rating=normalize_moat_rating(
+            _text(payload.get("moat_rating"), 40), moat_sources
+        ),
         moat_sources=moat_sources,
         falsifiers=[row["signal"] for row in falsifier_rows],
     )
@@ -400,6 +402,34 @@ _DEPTH_MARKERS = (
 )
 _MOAT_DIMENSIONS = ("品牌", "成本", "网络", "转换", "特许")
 _VALID_DECISIONS = frozenset({"确认", "修正", "推翻"})
+_MOAT_MISSING = ("未找到实证", "无实证", "数据不足", "无法验证")
+
+
+def normalize_moat_rating(rating: str, moat_sources: dict[str, str] | None) -> str:
+    """证据不足时不允许给出「中等」等听起来有结论的分档。
+
+    有效实证：分项文本含星级且不是「未找到实证」类空话。
+    有效来源 ≤2 或缺失项 ≥3 → 强制「暂无法评级」。
+    """
+    sources = moat_sources or {}
+    values = [str(v or "").strip() for v in sources.values()]
+    missing = 0
+    evidenced = 0
+    for value in values:
+        if not value or any(token in value for token in _MOAT_MISSING):
+            missing += 1
+            continue
+        if "★" in value or re.search(r"[1-5]\s*分", value):
+            evidenced += 1
+        else:
+            # 有文字但无星级：算弱证据，不计入 evidenced
+            missing += 1
+    raw = (rating or "").strip() or "数据不足"
+    if evidenced <= 2 or missing >= 3:
+        return "暂无法评级"
+    if raw in {"中等", "中", "一般"} and evidenced <= 3 and missing >= 2:
+        return "暂无法评级"
+    return raw
 
 
 def _probability(item: Any) -> float:
@@ -451,6 +481,16 @@ def assess_convergence(
             f"⚠️ 护城河分项仅覆盖 {len(covered)}/5；未覆盖项须显式标注「未找到实证」"
         )
         incomplete = True
+    rating = (convergence.moat_rating or "").strip()
+    if rating == "暂无法评级":
+        checks.append("✅ 护城河证据不足，已降级为「暂无法评级」")
+    elif rating in {"中等", "中", "一般"}:
+        normalized = normalize_moat_rating(rating, {
+            str(k): str(v) for k, v in (convergence.moat_sources or {}).items()
+        })
+        if normalized == "暂无法评级":
+            checks.append("❌ 护城河证据不足却给出「中等」，应降为「暂无法评级」")
+            incomplete = True
 
     if mainlines:
         valid = [

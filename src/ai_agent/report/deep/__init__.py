@@ -7,11 +7,13 @@
 
 * 事实层的 Markdown 正文仍是数字事实的唯一权威来源，本层结论按
   已知/推断/不确定三分，推断不得伪装成事实；
-* 深度产物单独落 ``.deep.json`` / ``.deep.md``，**不进 Markdown 正文、不进
-  ``ReportArtifacts``**（PDF 附录是唯一例外，见下一条）；
-* PDF 默认 ``pdf_mode="merge"`` 会在事实层末尾追加**带警示标注的推断层附录**，
-  并强制进入人工审核队列（禁止自动定稿）；``"separate"`` 则完全不碰 PDF。
-  两种模式都不改 Markdown 正文、溯源附件与数字校验门禁；
+* 深度产物单独落 ``.deep.json`` / ``.deep.md`` / ``.deep.pdf``，**不进
+  Markdown 正文、不进 ``ReportArtifacts``**；
+* PDF 默认 ``pdf_mode="separate"`` 生成**两份 PDF**：事实层底稿沿用原门禁、
+  可自动定稿外发；推断层独立成文件，由 ``<report_id>-deep`` 这条独立审核
+  记录强制人工批准。``"merge"`` 是兼容档，把带警示标注的推断层附录追加进
+  同一份 PDF 并让整份报告进入人工审核。两种模式都不改 Markdown 正文、
+  溯源附件与数字校验门禁；
 * ``run_report(deep=None)`` 时本包完全不被 import，零开销、零行为变化；
 * 不做估值、不给买卖建议，只输出投资逻辑与需跟踪验证的关键经营变量。
 
@@ -30,11 +32,13 @@
 
        result = run_report(..., deep=DeepOptions(enabled=True))
        result.deep_analysis.to_json()           # 结构化结论
-       result.deep_artifacts                    # 落盘文件名
-       result.deep_pdf_merged                   # 附录是否已并入同一份 PDF
+       result.artifacts.pdf                     # 事实层底稿 PDF（可自动定稿）
+       result.deep_artifacts["pdf"]             # 独立深度 PDF（单独人工审）
+       result.deep_pdf_review_id                # "<report_id>-deep"
 
-   想让 PDF 保持纯事实层：``DeepOptions(enabled=True, pdf_mode="separate")``。
-   合并档会多一次 PDF 渲染（约数秒），且必须经人工审核才能下载 PDF。
+   回退档：``pdf_mode="merge"`` 合成一份含附录的 PDF（整份强制人工审）；
+   ``write_deep_pdf=False`` 则只落 ``.deep.json`` / ``.deep.md``，不渲染深度 PDF。
+   事实层未生成 PDF 时，两种模式都只落结构化产物。
 
 3. **手动调用**（不经过主流水线，便于 A/B 与 bad case 回归）::
 
@@ -49,7 +53,7 @@ L1-L3 才准进 ``SourceLedger``。本层不解析 PDF 附注、不内置任何�
 
 **模型策略（决策 ④）**：章节分析与专家评审走 ``SMALL_MODEL`` + 本地网关，
 第 9 章收敛**及其终审**走 ``MODEL``（主模型 + 主网关）。实际模型名与路由
-写进 ``ExecutionReport``，合并进 PDF 后可在附录 A 看到，供 A/B 与成本归因核查；
+写进 ``ExecutionReport``，在推断层 PDF 的 A 节可见，供 A/B 与成本归因核查；
 ``SMALL_MODEL`` 未配置时会显式告警，不会静默变成全流程主模型。
 想退回全流程小模型：``DeepConfig(convergence_model="<小模型名>")``；
 想做单章 A/B：给 ``run_deep_analysis`` 注入 ``convergence_complete``。
@@ -67,12 +71,14 @@ from ai_agent.report.deep.chapters import CHAPTERS, chapters_for
 from ai_agent.report.deep.ledger import SourceLedger
 from ai_agent.report.deep.pdf_appendix import (
     APPENDIX_REVIEW_REASON,
+    deep_standalone_document,
     render_deep_appendix_html,
 )
-from ai_agent.report.deep.analyzer import assess_convergence
+from ai_agent.report.deep.analyzer import assess_convergence, normalize_moat_rating
 from ai_agent.report.deep.pipeline import (
     DeepConfig,
     ModelPlan,
+    pick_industry_sample,
     resolve_model_plan,
     run_deep_analysis,
 )
@@ -105,6 +111,9 @@ __all__ = [
     "attach_deep",
     "chapters_for",
     "collect_sources",
+    "deep_standalone_document",
+    "normalize_moat_rating",
+    "pick_industry_sample",
     "render_deep_appendix_html",
     "resolve_model_plan",
     "run_deep_analysis",

@@ -223,13 +223,33 @@ def test_generate_report_tool_returns_links_not_body_numbers(monkeypatch):
             provenance="bank.provenance.md",
             review="bank.review.json",
         ),
+        deep_artifacts={
+            "pdf": "bank.deep.pdf",
+            "markdown": "bank.deep.md",
+            "json": "bank.deep.json",
+        },
+        deep_error="",
+        deep_pdf_error="",
+        deep_pdf_review_id="abc1234567-deep",
         pdf_error="",
         gaps=["没有找到 2025Q3 的季报，同比基期的绝对值无法调取，无法跨期重算"],
     )
-    monkeypatch.setattr("ai_agent.tools.report.report_generate.run_report", lambda *a, **k: fake)
+    captured: dict = {}
+
+    def _fake_run(*a, **k):
+        captured.update(k)
+        return fake
+
+    monkeypatch.setattr("ai_agent.tools.report.report_generate.run_report", _fake_run)
     text = generate_report_tool.run(request="生成中国银行2026Q3财报深度分析PDF研报")
 
+    assert captured.get("deep") is not None
+    assert captured["deep"].enabled is True
+    assert captured["deep"].pdf_mode == "separate"
     assert "/v1/report/files/bank.pdf" in text
+    assert "/v1/report/files/bank.deep.pdf" in text
+    assert "底稿 PDF" in text
+    assert "深度解析 PDF" in text
     assert "/v1/report/files/bank.provenance.md" in text
     assert "校验通过" in text
     assert "缺口（如实转述，不要补数）" in text

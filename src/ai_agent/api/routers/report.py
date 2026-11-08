@@ -17,6 +17,8 @@ report_extract_indicators / report_compare / report_validate 注册进聊天循�
 M2 门禁：校验有 error 的报告在生成阶段就不渲染 PDF；审核项未全部批准、
 或被驳回、或定稿后文件被改动，PDF 一律 409。Markdown 正文与溯源附件仍可
 下载，供审核员核对草稿。审批/定稿要求管理员白名单，且不留「强制放行」后门。
+双 PDF 档的 ``<stem>.deep.pdf`` 映射到 ``<report_id>-deep`` 这条独立审核记录，
+须人工批准**并**定稿后才放行；事实层底稿仍按主记录自动定稿，互不影响。
 
 流水线本身不调用 LLM（见 report/pipeline.py 的说明），所以这里没有
 流式输出、没有超时/限流配置，也没有 token 成本；耗时主要是知识库检索
@@ -137,9 +139,40 @@ def _payload(result: ReportResult) -> dict:
             ),
             "gaps": [asdict(gap) for gap in analysis.all_gaps] if analysis else [],
             "pdf_merged": result.deep_pdf_merged,
-            "pdf_merge_error": result.deep_pdf_error,
+            "pdf_mode": result.deep_pdf_mode,
+            # 历史键只在 merge 档有意义，双 PDF 档统一看 pdf_error。
+            "pdf_merge_error": (
+                result.deep_pdf_error if result.deep_pdf_mode == "merge" else ""
+            ),
+            "pdf": (
+                {
+                    "filename": result.deep_artifacts["pdf"],
+                    "pages": result.deep_pdf.pages if result.deep_pdf else 0,
+                    "download_url": f"/v1/report/files/{result.deep_artifacts['pdf']}",
+                }
+                if result.deep_artifacts.get("pdf")
+                else None
+            ),
+            "pdf_error": result.deep_pdf_error,
+            "review": _deep_review_payload(result),
         }
     return payload
+
+
+def _deep_review_payload(result: ReportResult) -> dict | None:
+    """独立深度 PDF 的审核摘要。两份 PDF 各有一条记录，前端要分别展示。"""
+    if not result.deep_pdf_review_id:
+        return None
+    record = review_store.get_record(result.deep_pdf_review_id, result.output_dir)
+    _, reason = review_store.gate(record, result.output_dir)
+    return {
+        "report_id": result.deep_pdf_review_id,
+        "status": record.status if record else "pending",
+        "finalized": bool(record and record.status == FINALIZED),
+        "gate_reason": reason,
+        "queue_url": f"/v1/report/reviews/{result.deep_pdf_review_id}",
+        "final_url": f"/v1/report/reviews/{result.deep_pdf_review_id}/final",
+    }
 
 
 def _review_payload(
@@ -194,7 +227,7 @@ def create_report(
     """生成一份研报。校验未通过不是 4xx：草稿照常返回，但 PDF 会被门禁挡住。"""
     from ai_agent.core.logging import get_logger
 
-    # 深度分析是显式旁路：off 时连模块都不 import，保证既有链路零变化。
+    # 默认 full+separate：底稿与深度两份 PDF；off 时连模块都不 import。
     deep_options = None
     if req.deep != "off":
         from ai_agent.report.deep.bridge import DeepOptions

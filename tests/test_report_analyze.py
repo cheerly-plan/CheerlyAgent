@@ -280,6 +280,10 @@ def test_operating_quote_excises_hollow_tail_keeps_narrative():
     assert not _is_usable_operating_quote(hollow_only)
     assert _extract_operating_narrative(hollow_only) == ""
 
+    # 拓斯达类：strip 数字后留下「实现营业收入 万元」不得当经营引述
+    hollow_revenue = "报告期内，注塑装备业务实现营业收入 万元。"
+    assert not _is_usable_operating_quote(hollow_revenue)
+
     # 经营句 + 空缺尾巴粘在同一段：切尾巴、留经营
     glued = (
         "公司前三季度围绕重点应用板块，持续优化技术、产能与客户布局，"

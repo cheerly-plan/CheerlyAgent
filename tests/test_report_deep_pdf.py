@@ -223,10 +223,14 @@ def test_deep_off_leaves_pdf_rendering_untouched(out_dir, monkeypatch):
     assert "deep" not in report_router._payload(result)
 
 
-def test_merge_default_appends_appendix_and_requires_manual_review(out_dir, monkeypatch):
+def test_merge_mode_appends_appendix_and_requires_manual_review(out_dir, monkeypatch):
+    """merge 是兼容档：一份 PDF 含推断层附录，整份强制人工审。"""
     calls: list = []
     _mock_pipeline(monkeypatch, calls)
-    result = _run(out_dir, DeepOptions(enabled=False, collect_external=False))
+    result = _run(
+        out_dir,
+        DeepOptions(enabled=False, collect_external=False, pdf_mode="merge"),
+    )
 
     assert result.deep_error == ""
     assert result.deep_pdf_merged is True
@@ -257,27 +261,36 @@ def test_merge_default_appends_appendix_and_requires_manual_review(out_dir, monk
     assert payload["pdf"]["filename"] == result.artifacts.pdf
 
 
-def test_separate_mode_keeps_fact_only_pdf_and_auto_finalizes(out_dir, monkeypatch):
+def test_write_deep_pdf_false_keeps_fact_only_pdf_and_auto_finalizes(out_dir, monkeypatch):
+    """回退档：只落 .deep.json / .deep.md，事实层 PDF 不变、照常自动定稿。"""
     calls: list = []
     _mock_pipeline(monkeypatch, calls)
     result = _run(
         out_dir,
-        DeepOptions(enabled=False, collect_external=False, pdf_mode="separate"),
+        DeepOptions(enabled=False, collect_external=False, write_deep_pdf=False),
     )
     assert len(calls) == 1 and calls[0] is None
     assert result.deep_pdf_merged is False
+    assert result.deep_pdf is None
+    assert "pdf" not in result.deep_artifacts
     assert result.validation.review_queue == []
     assert (out_dir / result.artifacts.pdf).read_bytes() == b"%PDF-1.4\nFACT"
     record = review_store.get_record(result.report_id, out_dir)
     assert record.status == review_store.FINALIZED
     assert review_store.pdf_download_gate(result.artifacts.pdf, out_dir)[0] is True
-    assert report_router._payload(result)["deep"]["pdf_merged"] is False
+    payload = report_router._payload(result)
+    assert payload["deep"]["pdf_merged"] is False
+    assert payload["deep"]["pdf"] is None
+    assert payload["deep"]["review"] is None
 
 
 def test_merge_failure_falls_back_to_fact_pdf_without_false_gate(out_dir, monkeypatch):
     calls: list = []
     _mock_pipeline(monkeypatch, calls, fail_on_appendix=True)
-    result = _run(out_dir, DeepOptions(enabled=False, collect_external=False))
+    result = _run(
+        out_dir,
+        DeepOptions(enabled=False, collect_external=False, pdf_mode="merge"),
+    )
     assert len(calls) == 2
     assert result.deep_pdf_merged is False
     assert "stub render boom" in result.deep_pdf_error
@@ -309,10 +322,13 @@ def test_markdown_delivery_never_merges(out_dir, monkeypatch):
     assert result.pdf is None
     assert result.deep_pdf_merged is False
     assert result.deep_analysis is not None
+    # 事实层没有底稿 PDF 时，独立深度 PDF 也一并跳过（避免推断单独外流）
+    assert result.deep_pdf is None
+    assert "事实层 PDF 未生成" in result.deep_pdf_error
 
 
-def test_api_request_defaults_to_merge():
+def test_api_request_defaults_to_separate():
     request = ReportRequest(request=_REQUEST)
     assert request.deep == "off"
-    assert request.deep_pdf == "merge"
-    assert ReportRequest(request=_REQUEST, deep_pdf="separate").deep_pdf == "separate"
+    assert request.deep_pdf == "separate"
+    assert ReportRequest(request=_REQUEST, deep_pdf="merge").deep_pdf == "merge"

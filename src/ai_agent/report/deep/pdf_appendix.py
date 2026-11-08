@@ -31,6 +31,7 @@ APPENDIX_REVIEW_REASON = (
     "深度分析附录已合并进 PDF：含大模型推断结论，"
     "需人工确认推断标注、证据边界与免责声明完整性"
 )
+# 双 PDF 档的审核项文案定义在 review.py（门禁侧），避免两处文案漂移。
 APPENDIX_FLAG = "推断层 · 未经事实层校验"
 
 _CLAIM_CLASS = {
@@ -88,22 +89,49 @@ def _list(items: list[str], *, empty: str = "无记录。") -> str:
     return "<ul>" + "".join(f"<li>{_esc(item)}</li>" for item in items) + "</ul>"
 
 
-def render_deep_appendix_html(result: DeepAnalysisResult) -> str:
-    """渲染完整附录 section。返回值直接插到打印模板的 ``</body>`` 前。"""
+def render_deep_appendix_html(
+    result: DeepAnalysisResult, *, standalone: bool = False
+) -> str:
+    """渲染推断层 section。返回值插到打印模板的 ``</body>`` 前，或作为独立 PDF 全文。
+
+    ``standalone=True`` 时这份 section 是**独立深度 PDF 的全部内容**：去掉
+    「附录」措辞与首页强制分页（否则首页会空一页），警示文案改为指向配套的
+    事实层底稿 PDF。两种形态共用同一套三分标签、Tier、证据 id 与转义逻辑。
+    """
     execution = result.execution
+    if standalone:
+        section_class = "deep-appendix deep-standalone"
+        notice = [
+            '<p class="deep-notice-title">【警示】独立深度投资分析报告（推断层）</p>',
+            "<p>本报告由大模型基于事实台账生成，含【推断】与【不确定】结论，"
+            "<strong>不属于已核验财报数据</strong>。全部量化事实以配套生成的"
+            "事实层底稿 PDF 及其溯源附件为准；本报告不构成估值或买卖建议。</p>",
+            "<p>与底稿的分界：底稿数字来自财报原文并逐条通过校验门禁；本报告数字"
+            "仅来自深度分析台账，情景概率与置信度是模型主观赋值，不是财报披露值。"
+            "本 PDF 有独立的人工审核记录，未经批准不得作为定稿件外发。</p>",
+        ]
+        heading = (
+            f"<h1>{_esc(result.target)} {_esc(result.period)} 深度投资分析（推断层）</h1>"
+        )
+    else:
+        section_class = "deep-appendix"
+        notice = [
+            '<p class="deep-notice-title">【警示】附录 · 深度投资分析（推断层）</p>',
+            "<p>本附录由大模型基于事实台账生成，含【推断】与【不确定】结论，"
+            "<strong>不属于已核验财报数据</strong>。全部量化事实以本报告正文及"
+            "其溯源附件为准；本附录不构成估值或买卖建议。</p>",
+            "<p>与正文的分界：正文数字来自财报原文并逐条通过校验门禁；本附录数字"
+            "仅来自深度分析台账，情景概率与置信度是模型主观赋值，不是财报披露值。"
+            "附录已随本 PDF 一并进入人工审核队列，未经批准不得作为定稿件外发。</p>",
+        ]
+        heading = f"<h1>附录：{_esc(result.target)} {_esc(result.period)} 深度投资分析</h1>"
     parts: list[str] = [
-        '<section class="deep-appendix" id="deep-analysis-appendix">',
+        f'<section class="{section_class}" id="deep-analysis-appendix">',
         f'<div class="deep-flag">{_esc(APPENDIX_FLAG)}</div>',
         '<div class="deep-notice">',
-        '<p class="deep-notice-title">【警示】附录 · 深度投资分析（推断层）</p>',
-        "<p>本附录由大模型基于事实台账生成，含【推断】与【不确定】结论，"
-        "<strong>不属于已核验财报数据</strong>。全部量化事实以本报告正文及"
-        "其溯源附件为准；本附录不构成估值或买卖建议。</p>",
-        "<p>与正文的分界：正文数字来自财报原文并逐条通过校验门禁；本附录数字"
-        "仅来自深度分析台账，情景概率与置信度是模型主观赋值，不是财报披露值。"
-        "附录已随本 PDF 一并进入人工审核队列，未经批准不得作为定稿件外发。</p>",
+        *notice,
         "</div>",
-        f"<h1>附录：{_esc(result.target)} {_esc(result.period)} 深度投资分析</h1>",
+        heading,
         "<h2>附录 A · 执行报告</h2>",
         _table(
             ["项", "值"],
@@ -316,4 +344,24 @@ def render_deep_appendix_html(result: DeepAnalysisResult) -> str:
             "</section>",
         ]
     )
-    return "\n".join(parts)
+    text = "\n".join(parts)
+    if standalone:
+        # 独立 PDF 不是任何报告的附录：小节保留 A-H 编号便于与底稿对照，
+        # 但去掉「附录」字样，并把正文里所有「本附录」统一换成「本报告」。
+        text = text.replace("<h2>附录 ", "<h2>").replace("本附录", "本报告")
+    return text
+
+
+def deep_standalone_document(result: DeepAnalysisResult) -> str:
+    """把推断层 section 包成完整 HTML 文档，交给 ``render_html_pdf`` 排版。
+
+    ``render_report_pdf`` 吃的是 HTML ``ReportDocument``，直接把 ``.deep.md``
+    的 Markdown 喂进去会印成一坨没样式的纯文本；这里复用已经带三分标签、
+    Tier、证据 id、警示框与转义的 HTML，避免另写一套渲染逻辑。
+    """
+    section = render_deep_appendix_html(result, standalone=True)
+    title = f"{result.target} {result.period} 深度投资分析（推断层）"
+    return (
+        '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
+        f"<title>{_esc(title)}</title></head><body>{section}</body></html>"
+    )

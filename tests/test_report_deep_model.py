@@ -13,10 +13,13 @@ import ai_agent.report.deep.pipeline as deep_pipeline
 from ai_agent.report.deep import (
     DeepConfig,
     assess_convergence,
+    normalize_moat_rating,
+    pick_industry_sample,
     render_deep_appendix_html,
     resolve_model_plan,
     run_deep_analysis,
 )
+from ai_agent.report.deep.ledger import SourceLedger
 from ai_agent.report.deep.schema import (
     Convergence,
     DeepAnalysisResult,
@@ -260,6 +263,55 @@ def test_quality_incomplete_when_required_pieces_are_missing():
     assert quality == "incomplete"
     assert any("护城河分项" in item for item in checks)
     assert any("概率合计" in item for item in checks)
+
+
+def test_moat_rating_downgrades_when_evidence_thin():
+    sources = {
+        "品牌": "未找到实证",
+        "成本优势": "★★☆",
+        "网络效应": "无",
+        "转换成本": "★★",
+        "特许/牌照": "未找到实证",
+    }
+    assert normalize_moat_rating("中等", sources) == "暂无法评级"
+    assert normalize_moat_rating("宽", {
+        "品牌": "★★★★", "成本优势": "★★★", "网络效应": "★★",
+        "转换成本": "★★★", "特许/牌照": "★★",
+    }) == "宽"
+
+
+def test_industry_sample_is_declared_in_target_and_notes():
+    evidence_a = SimpleNamespace(
+        file_id="a", filename="鸣志.pdf", page=1, page_end=1,
+        section="", quote="营业收入 1 元",
+    )
+    evidence_b = SimpleNamespace(
+        file_id="b", filename="汇川.pdf", page=1, page_end=1,
+        section="", quote="营业收入 2 元",
+    )
+    rows = [
+        SimpleNamespace(
+            subject="鸣志电器", period="2026Q3", name="营业收入",
+            value="1", unit="元", evidence=evidence_a,
+        ),
+        SimpleNamespace(
+            subject="鸣志电器", period="2026Q3", name="毛利率",
+            value="38", unit="%", evidence=evidence_a,
+        ),
+        SimpleNamespace(
+            subject="汇川技术", period="2026Q3", name="营业收入",
+            value="2", unit="元", evidence=evidence_b,
+        ),
+    ]
+    result = run_deep_analysis(
+        "机器人", "2026Q3", rows, mode="industry",
+        config=DeepConfig(enabled=False),
+    )
+    assert "样本：鸣志电器" in result.target
+    assert any("样本公司：鸣志电器" in note for note in result.execution.notes)
+    sample, note = pick_industry_sample(SourceLedger.from_facts(rows))
+    assert sample == "鸣志电器"
+    assert "对照池" in note
 
 
 def test_quality_is_propagated_to_cross_checks_and_checklist():

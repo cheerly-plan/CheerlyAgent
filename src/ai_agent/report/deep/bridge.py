@@ -7,10 +7,14 @@ compose/validate 任何一步。事实层的 Markdown 正文始终是数字事�
 
 PDF 有两种模式（``DeepOptions.pdf_mode``）：
 
-* ``separate``：PDF 只有事实层，深度产物独立文件；
-* ``merge``（默认）：在事实层 PDF **末尾追加显式标注的推断层附录**，
+* ``separate``（默认）：**两份 PDF**。事实层底稿保持纯数字事实、可自动定稿；
+  推断层单独渲染成 ``<stem>.deep.pdf``，由 ``<report_id>-deep`` 这条独立
+  审核记录强制人工批准，底稿外发不受推断拖住；
+* ``merge``（兼容档）：在事实层 PDF **末尾追加显式标注的推断层附录**，
   正文页面、Markdown、溯源、校验门禁一字不改；合并成功后 pipeline 会往
-  ``validation.review_queue`` 追加一条待审项，强制人工审核，禁止自动定稿。
+  ``validation.review_queue`` 追加一条待审项，整份报告禁止自动定稿。
+
+两条审核记录都走 ``review.py`` 同一套状态机与指纹门禁，不为推断层另开弱门禁。
 
 ``run_report(deep=None)`` 时本模块完全不会被 import，零开销、零行为变化。
 """
@@ -51,8 +55,11 @@ class DeepOptions:
     target: str = ""  # 空 = 按 plan.subjects / plan.industry 推断
     years: int = DEFAULT_YEARS
     write_artifacts: bool = True
-    # separate = 深度产物独立成文件（PDF 不变）；merge = 追加推断层附录进同一份 PDF
-    pdf_mode: str = "merge"
+    # separate（默认）= 两份 PDF，深度 PDF 单独审核；merge = 兼容档，附录进同一份 PDF
+    pdf_mode: str = "separate"
+    # False 回退到上一轮的「只落 .deep.json / .deep.md，不渲染独立深度 PDF」。
+    # API 侧等价回退是 deliverable="markdown"（事实层无 PDF 时深度 PDF 一并跳过）。
+    write_deep_pdf: bool = True
     collect_external: bool = True
     facts_dir: Path | str | None = None
     config: DeepConfig | None = None

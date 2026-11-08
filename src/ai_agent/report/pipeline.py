@@ -37,8 +37,14 @@ from ai_agent.report.ensure_filings import ensure_filings_for_report
 from ai_agent.report.extract import IndicatorFact, ensure_amount_units, extract_indicators
 from ai_agent.report.parse import ReportPlan, parse_request
 from ai_agent.report.market_finance import supplement_facts_from_market
-from ai_agent.report.pdf import ChartSpec, PdfFile, charts_for_report, render_report_pdf
-from ai_agent.report.review import create_record
+from ai_agent.report.pdf import (
+    ChartSpec,
+    PdfFile,
+    charts_for_report,
+    render_html_pdf,
+    render_report_pdf,
+)
+from ai_agent.report.review import create_deep_record, create_record
 from ai_agent.report.supplemental import SupplementalResult, extract_supplemental
 from ai_agent.report.validate import ReviewItem, ValidationResult, validate_report
 
@@ -84,14 +90,19 @@ class ReportResult:
     # pending / approved / rejected / finalized（由 review.create_record 回填）
     review_status: str = "pending"
     # 深度分析旁路（默认 None）：结论不进 Markdown 正文、不进 ReportArtifacts。
-    # pdf_mode=merge 时同一份 PDF 末尾多出推断层附录，PDF 字节因此变化；
-    # create_record 在落盘之后按最终字节算指纹，不会失配。
+    # pdf_mode=merge 时同一份 PDF 末尾多出推断层附录（PDF 字节变化，
+    # create_record 在落盘之后按最终字节算指纹，不会失配）；
+    # separate 时另有 <stem>.deep.pdf，由独立审核记录覆盖，不参与主记录指纹。
     deep_analysis: "DeepAnalysisResult | None" = None
     deep_artifacts: dict[str, str] = field(default_factory=dict)
     deep_error: str = ""
     deep_write_artifacts: bool = True
     deep_pdf_merged: bool = False
     deep_pdf_error: str = ""
+    # 双 PDF 档的推断层 PDF：单独落盘、单独审核，不影响底稿自动定稿。
+    deep_pdf: PdfFile | None = None
+    deep_pdf_review_id: str = ""
+    deep_pdf_mode: str = ""  # 本次实际生效的 pdf_mode，供响应精确区分错误口径
 
     @property
     def deliverable(self) -> str:
@@ -134,9 +145,11 @@ def run_report(
     的正文/校验/PDF 全部定稿后执行；深度层异常被隔离在 deep_error，
     主报告照常交付。深度结论永远单独落 .deep.json / .deep.md，不进正文。
 
-    ``deep.pdf_mode="merge"``（默认）会在事实层 PDF 末尾追加显式标注的推断层
-    附录，并往审核队列追加一条待审项，禁止自动定稿；``"separate"`` 则保持
-    PDF 纯事实层。两种模式都不改 Markdown 正文、溯源附件与校验门禁。
+    ``deep.pdf_mode="separate"``（默认）生成**两份 PDF**：事实层底稿保持纯
+    数字事实、沿用原门禁可自动定稿；推断层单独出 ``<stem>.deep.pdf``，由
+    ``<report_id>-deep`` 这条独立审核记录强制人工批准后才可下载。
+    ``"merge"`` 是兼容档，仍把带标注的附录追加进同一份 PDF 并让整份报告
+    进入人工审核。两种模式都不改 Markdown 正文、溯源附件与校验门禁。
     """
     from ai_agent.tools.progress import emit_progress
 
@@ -237,6 +250,7 @@ def run_report(
     # 深度分析旁路：主报告的正文/校验/PDF 已全部定稿，这里只做加法。
     # 任何失败都不得影响事实层交付，故整段隔离并如实记入 deep_error。
     if deep is not None:
+        result.deep_pdf_mode = deep.pdf_mode
         try:
             from ai_agent.report.deep.bridge import attach_deep
 
@@ -256,12 +270,30 @@ def run_report(
         ):
             emit_progress("正在合并深度分析附录…")
             _merge_deep_appendix(result, document, charts)
+        elif (
+            result.deep_analysis is not None
+            and deep.pdf_mode == "separate"
+            and deep.write_deep_pdf
+        ):
+            # 双 PDF 档：推断层单独成文件。事实层 PDF 缺失时函数内部会跳过，
+            # 避免出现「没有底稿可对照的推断文件」单独外流。
+            emit_progress("正在生成独立深度分析 PDF…")
+            _render_separate_deep_pdf(result)
 
     emit_progress("正在落盘产物…")
     _write_artifacts(result)
     # 产物全部落盘后再登记审核：指纹才覆盖最终字节。登记失败宁可整体抛错，
     # 也不能出现「有 PDF、没有审核记录」的漏网之鱼。
     result.review_status = create_record(result, result.output_dir).status
+    # 深度 PDF 的第二条审核记录也必须在落盘之后建，指纹才覆盖 .deep.* 三份文件。
+    # 它失败不影响事实层交付：没有审核记录时下载端点一律拒绝（fail-closed）。
+    if result.deep_artifacts.get("pdf"):
+        try:
+            deep_record = create_deep_record(result, result.output_dir)
+            result.deep_pdf_review_id = deep_record.report_id if deep_record else ""
+        except Exception as exc:
+            result.deep_pdf_error = f"深度审核记录登记失败：{type(exc).__name__}: {exc}"
+            logger.exception("独立深度 PDF 审核记录登记失败 report_id=%s", result.report_id)
     # 同标题旧版当场裁掉，避免「中行 2026Q3」连生成五份堆在目录里。
     try:
         from ai_agent.report.cleanup import prune_older_editions
@@ -327,6 +359,50 @@ def _stem(title: str, report_id: str) -> str:
     return f"{cleaned or '研报'}_{report_id}"
 
 
+_SAMPLE_IN_TARGET = re.compile(r"（样本：[^）]*）")
+
+
+def deep_report_title(result: ReportResult) -> str:
+    """深度层对外标题／文件名前缀：``{标的} {期间} 财报深度分析报告``。
+
+    优先从事实层标题改写（行业底稿 → 「机器人行业 2026Q3 财报深度分析报告」），
+    不把「样本：某某」写进文件名；回退时再拼 ``deep.target`` / ``deep.period``。
+    """
+    base = (result.document.title or "").strip()
+    if base:
+        title = (
+            base.replace("财报对比底稿（赛道分组版）", "财报深度分析报告")
+            .replace("对比底稿（赛道分组版）", "深度分析报告")
+            .replace("财报对比底稿", "财报深度分析报告")
+            .replace("对比底稿", "深度分析报告")
+        )
+        if "底稿" in title:
+            title = title.replace("底稿", "深度分析报告")
+        if title.endswith("财报深度分析") or (
+            title.endswith("深度分析") and "深度分析报告" not in title
+        ):
+            title = f"{title}报告"
+        if "深度分析" not in title:
+            title = f"{title} 财报深度分析报告"
+        return title
+
+    deep = result.deep_analysis
+    if deep is None:
+        return "财报深度分析报告"
+    target = _SAMPLE_IN_TARGET.sub("", deep.target or "").strip()
+    if deep.mode == "industry" and target and not target.endswith("行业"):
+        target = f"{target}行业"
+    period = (deep.period or "").strip()
+    if target and period:
+        return f"{target} {period} 财报深度分析报告"
+    return f"{target or period} 财报深度分析报告".strip()
+
+
+def _deep_stem(result: ReportResult) -> str:
+    """深度产物用独立文件名前缀，避免沿用事实层「底稿」标题看起来像同一份。"""
+    return _stem(deep_report_title(result), result.report_id)
+
+
 def _merge_deep_appendix(
     result: ReportResult, document: ReportDocument, charts: list[ChartSpec]
 ) -> None:
@@ -370,6 +446,43 @@ def _merge_deep_appendix(
     )
 
 
+def _render_separate_deep_pdf(result: ReportResult) -> None:
+    """双 PDF 档：把推断层单独渲染成 ``<stem>.deep.pdf``。
+
+    前置是事实层 PDF 已成功生成——校验被挡、markdown 交付或渲染降级时，
+    宁可只留 ``.deep.json`` / ``.deep.md``，也不让一份没有底稿可对照的推断
+    PDF 单独流出去。渲染失败只记 ``deep_pdf_error``，事实层照常交付。
+
+    注意这里**不往主审核队列追加任何条目**：底稿因此保持 clean、可自动定稿，
+    推断层的强制人工审由 ``create_deep_record`` 的独立记录承担。
+    """
+    deep = result.deep_analysis
+    if deep is None:
+        return
+    if result.pdf is None:
+        result.deep_pdf_error = "事实层 PDF 未生成，独立深度 PDF 一并跳过"
+        return
+    if not result.deep_write_artifacts:
+        result.deep_pdf_error = "深度层产物落盘被关闭，独立深度 PDF 一并跳过"
+        return
+    from ai_agent.report.deep.pdf_appendix import deep_standalone_document
+
+    try:
+        result.deep_pdf = render_html_pdf(
+            deep_standalone_document(deep),
+            title=f"{deep_report_title(result)}（推断层）",
+            deep_css=True,
+        )
+    except Exception as exc:
+        result.deep_pdf = None
+        result.deep_pdf_error = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "独立深度 PDF 渲染失败，仅保留结构化产物 report_id=%s error=%s",
+            result.report_id,
+            result.deep_pdf_error,
+        )
+
+
 def _write_artifacts(result: ReportResult) -> None:
     """正文、溯源总是落盘；PDF 只在渲染成功时落盘。
 
@@ -396,11 +509,12 @@ def _write_artifacts(result: ReportResult) -> None:
         (directory / pdf_name).write_bytes(result.pdf.content)
         result.artifacts.pdf = pdf_name
 
-    # 深度分析产物与事实层物理隔离：独立文件，不写进 document.markdown，
-    # 不进 result.artifacts（review 的 content_hash 只覆盖 md/provenance/pdf）。
+    # 深度分析产物与事实层物理隔离：独立文件名前缀 + 独立后缀，
+    # 不写进 document.markdown，不进 result.artifacts。
     if result.deep_analysis is not None and result.deep_write_artifacts:
-        deep_json_name = f"{stem}.deep.json"
-        deep_md_name = f"{stem}.deep.md"
+        deep_stem = _deep_stem(result)
+        deep_json_name = f"{deep_stem}.deep.json"
+        deep_md_name = f"{deep_stem}.deep.md"
         (directory / deep_json_name).write_text(
             result.deep_analysis.to_json(), encoding="utf-8"
         )
@@ -408,3 +522,7 @@ def _write_artifacts(result: ReportResult) -> None:
             result.deep_analysis.to_markdown(), encoding="utf-8"
         )
         result.deep_artifacts = {"json": deep_json_name, "markdown": deep_md_name}
+        if result.deep_pdf is not None:
+            deep_pdf_name = f"{deep_stem}.deep.pdf"
+            (directory / deep_pdf_name).write_bytes(result.deep_pdf.content)
+            result.deep_artifacts["pdf"] = deep_pdf_name

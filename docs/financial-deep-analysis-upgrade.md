@@ -24,8 +24,10 @@
 
 因此架构结论是：**分层，不是改造**。L0 事实层保持不变，新增 L1 深度分析层，两层之间
 用结构化事实契约连接；Markdown 正文与溯源附件永远是纯事实层，推断内容只在深度层出现。
-第三轮起支持把推断层作为**带警示标注的附录**追加到同一份 PDF（默认），但绝不改写正文
-页面，且合并档强制人工审核、禁止自动定稿（见 5.6）。
+第三轮起支持把推断层作为**带警示标注的附录**追加到同一份 PDF（见 5.6，第五轮起降为
+兼容档）。第五轮按用户复判改成**默认生成两份 PDF**：事实层底稿仍是纯数字事实、沿用
+原门禁可自动定稿；推断层独立成 `<stem>.deep.pdf`，由独立审核记录强制人工审。这样底稿
+外发不被推断拖住，也避开「一份文件里事实/推断混装」的合规纠结（见 5.8）。
 
 ---
 
@@ -320,8 +322,12 @@ HTTP 侧：`POST /v1/report` 传 `"deep": "skeleton" | "full"`；`off` 时响应
 
 ## 5.6 Phase 2.5 已落地：深度分析合并进现有 PDF（第三轮交付）
 
-用户在决策 ① 上拍板 **「合并进现有 PDF」**。这不只是换个落盘位置：它会改变
-「PDF = 已核验事实」这个产品语义，所以配套重定义了审核门禁。
+> **历史决策**：第三轮在决策 ① 上拍板 **「合并进现有 PDF」**；第五轮用户复判为
+> **默认双 PDF**（见 5.8），本节描述自此降为「兼容档」行为，但实现与门禁全部保留。
+
+这不只是换个落盘位置：它会改变「PDF = 已核验事实」这个产品语义，所以配套重定义了
+审核门禁——合并档下**整份报告**都进人工队列，纯事实底稿也因此不能自动定稿外发，
+这正是第五轮改双 PDF 的主因。
 
 ### 5.6.1 版面与标注（防误读三层）
 
@@ -357,8 +363,8 @@ md / provenance / review / pdf 四个键，深度文件不进审核指纹。
 | 入口 | 值 | 行为 |
 | --- | --- | --- |
 | `POST /v1/report` | `deep: "off"`（默认） | 完全不跑，`deep_pdf` 忽略，响应不新增任何键 |
-| | `deep: "skeleton"/"full"` + `deep_pdf: "merge"`（默认） | 同一份 PDF 末尾追加附录 + 强制人工审核 |
-| | `deep_pdf: "separate"` | 回退第二轮行为：PDF 纯事实层、深度结论只落独立文件、可自动定稿 |
+| | `deep: "skeleton"/"full"` + `deep_pdf: "merge"` | 同一份 PDF 末尾追加附录 + 整份强制人工审核（第三轮默认，第五轮起为兼容档） |
+| | `deep_pdf: "separate"` | 第三轮时＝纯事实层 PDF + 独立结构化文件；**第五轮起改为双 PDF**（见 5.8） |
 | Python | `DeepOptions(pdf_mode="merge"/"separate")` | 同上 |
 
 自动退化：markdown 交付、校验未通过被挡住、PDF 渲染降级这三种情况没有 PDF 可合并，
@@ -420,8 +426,9 @@ md / provenance / review / pdf 四个键，深度文件不进审核指纹。
 
 判定 `solid` / `shallow` / `incomplete`，**只标注、不删改结论**，不承诺准确率。
 判定写入 `ExecutionReport.convergence_quality` / `convergence_checks`，并在
-`to_markdown()` 执行报告、第 10 章 checklist、Gate 5 跨章审查，以及**合并进 PDF 的
-附录 A / 附录 D** 中可见——审核人能在同一份定稿件里看到「本次收敛被判为浅层」。
+`to_markdown()` 执行报告、第 10 章 checklist、Gate 5 跨章审查，以及**推断层 PDF 的
+A / D 节**中可见——审核人能在定稿件里看到「本次收敛被判为浅层」（双 PDF 档是独立的
+`<stem>.deep.pdf`，merge 兼容档是同一份 PDF 的附录 A / D）。
 
 ### 5.7.3 配置与 A/B 入口
 
@@ -450,14 +457,85 @@ run_deep_analysis(..., convergence_complete=stub)      # 只替换第 9 章通�
 
 ---
 
+## 5.8 决策 ① 复判：默认改为双 PDF（第五轮交付）
+
+用户复核后把 ① 从「推断合并进现有 PDF」改成「**生成两份 PDF**」，`separate` 直接承载
+新语义并设为默认，不新增档位；`merge` 保留为兼容档。
+
+| 文件 | 内容 | 审核 |
+| --- | --- | --- |
+| `<stem>.pdf` | 纯事实层底稿，正文/Markdown/溯源零改写 | 沿用现有门禁，校验通过且无异常即**自动定稿**，可独立外发 |
+| `<stem>.deep.pdf` | 推断层全文 + 警示标注 | `<report_id>-deep` 独立审核记录，**强制人工批准 + 定稿**后才可下载 |
+
+收益：底稿外发不被推断拖住（merge 档的整份报告都会卡在人工队列）；深度分析可独立
+下载、审阅、迭代；事实与推断不共用一份可下载文件，避开合规纠结。
+
+### 5.8.1 关键发现：单记录门禁做不到「两种命运」
+
+`review.py` 是**一个 `report_id` 一条 `ReviewRecord`**，本轮查到三个硬约束：
+
+1. `pdf_download_gate()` 写死 `record.artifacts["pdf"] == name`，`*.deep.pdf` 必被拒；
+2. `content_hash()` 只绑 markdown/provenance/pdf，深度 PDF 不在指纹内，被替换发现不了；
+3. **最致命**：`decide()` 规定记录一旦 `FINALIZED`，除 `reset` 外不能再 approve。
+   单记录下底稿自动定稿 → 深度审核项永远批不了；为深度审核不自动定稿 → 底稿被拖住。
+
+因此给深度 PDF 建**第二条记录**，复用同一套状态机，不另开弱门禁：
+
+* `create_deep_record()` 用 `<report_id>-deep` 登记，`artifacts` 复用既有键名
+  （`markdown`→`.deep.md`、`provenance`→`.deep.json`、`pdf`→`.deep.pdf`），
+  于是 `content_hash` / `_verify` / `gate` / `pdf_download_gate` 全部原样生效；
+* 自带一条 pending 审核项，且**不进** `create_record` 的 `clean` 分支，永不自动定稿；
+* `record_for_artifact()` 只对 `*.deep.pdf` 映射到 `-deep` 记录，其余产物归属不变；
+* `pdf_download_gate()` 对新增的 `.deep.pdf` 路径再收一格：必须 `FINALIZED`
+  （`gate()` 对 `APPROVED` 返回的是「可以定稿」，主记录沿用既有语义不改）；
+* `remove_records()` 删主记录时连带清掉 `-deep`，返回值只统计显式请求的 id，
+  `cleanup.py` 的 `removed == len(ids)` 告警语义不变；`cleanup._ARTIFACT` 正则补
+  `.deep.pdf`，否则旧版清理会留孤儿文件。
+
+主记录的 `validation.review_queue` 在双 PDF 档**一条都不加**，底稿因此保持 clean。
+
+### 5.8.2 渲染与降级
+
+`.deep.md` 是 Markdown，而 `render_report_pdf()` 吃 HTML `ReportDocument`，直接喂会印成
+没样式的纯文本。实际做法是复用 `render_deep_appendix_html(standalone=True)`（三分标签、
+Tier、证据 id、警示框、HTML 转义全都在），包一层完整 HTML 文档，再用新增的
+`render_html_pdf(..., deep_css=True)` 走同一套打印模板。独立首页用
+`.deep-appendix.deep-standalone { break-before: auto }` 避免空白页；警示文案从
+「本附录／以本报告正文为准」改成「本报告／以配套事实层底稿 PDF 为准」，
+小节保留 A-H 编号便于与底稿对照。
+
+降级：事实层 PDF 未生成（markdown 交付 / 校验被挡 / 渲染降级）时**不出深度 PDF**，
+避免没有底稿可对照的推断文件单独外流；独立渲染失败只写 `deep_pdf_error`，
+`deep_error` 保持空、底稿照常自动定稿，也不会凭空造一条没有文件的审核记录。
+`DeepOptions(write_deep_pdf=False)` 是 Python 侧回退档，只落 `.deep.json` / `.deep.md`。
+
+API：`deep_pdf` 默认值改为 `separate`；`deep` 响应块新增 `pdf`（filename/pages/
+download_url）、`pdf_error`、`review`（独立审核 id / 状态 / gate_reason / 审核与定稿 URL），
+`deep=off` 时响应仍不新增任何键。
+
+**验证**：第五轮新增 13 个单测（PDF 渲染打桩，零真实 token / 零字体依赖），覆盖
+独立 HTML 标注与转义、双产物落盘、双审核记录、底稿自动定稿 vs 深度待审、
+approve + finalize 后放行、深度 PDF 字节指纹防篡改、merge 档不产生第二份、
+独立渲染失败隔离、清理正则与连带删记录、API payload；既有
+`test_report_deep_pdf.py` 里 4 个断言按新契约同步订正（用例数不变）。
+深度层合计 **88 个用例全绿**，`ruff check` 零告警。
+全量 `pytest -q`：**1329 passed / 20 failed / 13 errors**（上轮为
+1316 passed / 20 failed / 13 errors）—— 通过数恰好 +13，失败与错误数**一个没多**。
+`test_report_review.py::test_queue_listing_detail_and_unknown_ids` 单独跑也失败，
+原因是 `report_keep_latest_per_title=1` 会清掉同标题的第一份报告，属存量红灯；
+该用例走 `deep=off`，本轮改动分支一行都不执行。
+
+---
+
 ## 6. 后续路线
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | Phase 2 | `run_report` 旁路挂接；深度结论独立落 JSON/MD、不进正文；API 三档开关 | ✅ 已落地 |
 | Phase 3 | 数据源契约：源文件盘点、近 5 年窗口、具体到章节的缺口清单、本地结构化事实注入、行业统计 fetcher 注入点、L4/L5 回溯门禁 | ✅ 已落地 |
-| Phase 2.5 | 推断层附录合并进现有 PDF（默认）+ 警示标注 + 审核门禁重定义（禁止自动定稿）+ `separate` 回退 | ✅ 第三轮已落地 |
+| Phase 2.5 | 推断层附录合并进现有 PDF + 警示标注 + 审核门禁重定义（禁止自动定稿） | ✅ 第三轮已落地，第五轮起为兼容档 |
 | 决策 ④ | 分章模型策略（仅第 9 章收敛+终审用主模型）、模型路由可观测与漂移告警、第 9 章收敛质量门禁 | ✅ 第四轮已落地 |
+| 决策 ① 复判 | 默认双 PDF：底稿纯事实层沿用原门禁可自动定稿，推断层独立 PDF + 独立审核记录强制人工审 | ✅ 第五轮已落地（见 5.8） |
 | Phase 2 剩余 | 章节间并发把延迟压到 30-60s；异步任务 + 进度轮询；接 `usage` 做真实 token 统计（当前是字符 /1.5 粗估） | ⏳ 未做 |
 | Phase 3 剩余 | **PDF 附注/审计报告/问询函的结构化解析**（把源文件变成事实清单）；行业统计合规授权数据源接入；行业侧花名册动态化、第 6 章对照组净效果落地 | ⏳ 依赖数据/授权，代码绕不过去 |
 | Phase 4 | 评测集 + A/B + 跟踪证伪闭环：结构化结论落 Postgres（现有 `review.py` 自注多副本需换行锁），证伪信号触发时回查章节并标记「假设被证伪」 | ⏳ 依赖评测标注人力 |
@@ -513,7 +591,8 @@ run_deep_analysis(..., convergence_complete=stub)      # 只替换第 9 章通�
 
 | 风险 | 应对 |
 | --- | --- |
-| 推断被误当事实 | 三分标注 + Tier + evidence_ids + 附录警示框/页眉标注 + HTML 转义；Markdown 正文永远不含推断；合并进 PDF 时**强制人工审核、禁止自动定稿**；`separate` 可回退纯事实层 PDF |
+| 推断被误当事实 | 三分标注 + Tier + evidence_ids + 警示框/页眉标注 + HTML 转义；Markdown 正文永远不含推断；默认双 PDF 让事实与推断**物理分文件**，推断层独立审核记录强制人工批准 + 定稿；`merge` 兼容档整份强制人工审（见 5.6 / 5.8） |
+| 底稿被推断拖住无法外发 | 双 PDF 档主记录不追加任何审核项，底稿沿用原门禁可自动定稿；两条记录状态独立，深度 PDF 被篡改也只作废它自己的定稿 |
 | 数据源不足导致「深度」名不副实 | 缺口显式声明、禁止臆测填补；Phase 3 数据源清单已列明，接入前不承诺效果 |
 | 模型能力不足（停在断言层） | 第 9 章收敛与终审用主模型 + `assess_convergence()` 代码级门禁（判 `shallow` 并在 PDF 附录 D 明示）；评测集量化 shallow 占比后再决定是否继续升级；不承诺准确率 |
 | 模型路由静默漂移 | `resolve_model_plan()` 解析实际模型名写进 `ExecutionReport` 与 PDF 附录 A；`SMALL_MODEL` 缺失进 `notes` 并 `logger.warning`，不再悄悄走主模型 |
@@ -521,7 +600,7 @@ run_deep_analysis(..., convergence_complete=stub)      # 只替换第 9 章通�
 | 评审流于形式 | 空驳回拦截、每条意见必须采纳/驳回、评审记录随报告落盘 |
 | 行业侧硬套 10 章 | 章节裁剪 + 对照组口径；技能边界写进 `chapters.py` 注释 |
 | 版本/网关兼容 | `openai>=3.33.0` 的 `response_format` 并非所有网关支持，已实现去掉 JSON mode 重试一次；换模型/网关后必须回归 `tests/test_report_deep_*.py`。SDK 参数请以所用版本官方文档为准 |
-| 安全合规 | API Key 继续走 `.env`，不进代码库；财报原文属用户上传件，沿用项目 `user_id` 隔离；深度分析产物若新增下载端点须过现有定稿门禁与管理员白名单 |
+| 安全合规 | API Key 继续走 `.env`，不进代码库；财报原文属用户上传件，沿用项目 `user_id` 隔离；`.deep.pdf` 走既有 `/v1/report/files/{name}` 端点，但映射到独立审核记录且要求 `FINALIZED`；审批/定稿仍需管理员白名单 |
 | 多副本部署 | 现有 `review.py` 自注审核状态存在文件 `_review/index.json`，多副本需换 Postgres + 行锁；深度分析结论落库时一并解决 |
 
 ---
@@ -553,7 +632,7 @@ bad case 按三层归因定位：提示词契约问题 / 台账（检索与数�
 | --- | --- | --- |
 | ② | 外部数据源先接哪几类 | ✅ 已按「近 5 年定期报告 → 审计报告/问询函 → 行业统计」落地，前两类可运行，行业统计留注入点（见 5.5.1） |
 | ③ | 是否挂进 `run_report` | ✅ 已挂，默认关闭、三档开关、深度结论不进 Markdown 正文（见 5.5.2） |
-| ① | **推断能否进入对外交付物**：只出独立文件，还是合并进现有 PDF？ | ✅ 拍板**合并进现有 PDF**。已按「正文不改写 + 附录三层标注 + 强制人工审核」实现，另留 `deep_pdf:"separate"` 回退（见 5.6） |
+| ① | **推断能否进入对外交付物**：只出独立文件，还是合并进现有 PDF？ | ✅ 第三轮拍板「合并进现有 PDF」，第五轮**复判为默认双 PDF**：`separate`（默认）＝底稿纯事实层可自动定稿 + 推断层独立 PDF 单独强制人工审；`merge` 保留为兼容档（见 5.6 / 5.8） |
 | ④ | **模型选型**：全流程小模型 / 全流程主模型 / 仅第 9 章主模型？ | ✅ 拍板**仅第 9 章收敛与终审用主模型**，其余走 SMALL_MODEL。曾先选全流程小模型后改口（担心停在断言层）；最终取成本与质量的中间方案。已落地 `resolve_model_plan()` 路由可观测、`SMALL_MODEL` 缺失显式告警、收敛质量门禁（见 5.7） |
 
 **接下来最该推的一件事**：把近 5 年年报附注 / 审计报告 / 问询函**解析成

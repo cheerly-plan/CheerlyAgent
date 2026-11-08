@@ -14,6 +14,9 @@
 * 门禁是硬的：``validation.passed=False`` 的报告**不渲染 PDF**；PDF 下载端点
   只放行 ``finalized`` 的定稿。无异常且校验通过的报告在生成时自动定稿，
   保证聊天侧正常链路不用人工多点一次。
+* 双 PDF 档另有 ``<report_id>-deep`` 这条**独立**审核记录（见
+  ``create_deep_record``）：底稿记录仍可自动定稿，推断层记录自带一条 pending
+  且永不自动定稿，两条状态互不影响。
 
 并发：进程内用 RLock 串行化「读-改-写」，落盘用同目录临时文件 + os.replace
 原子替换。多进程 / 多副本部署时请换成 Postgres 表 + 行锁（见交付文档风险项）。
@@ -48,6 +51,15 @@ _INDEX_FILE = "index.json"
 _LOCK = threading.RLock()
 # 报告产物名末尾是 10 位十六进制 report_id（见 pipeline._stem）
 _ID_IN_NAME = re.compile(r"_([0-9a-f]{10})(?:\.[^.]+)+$")
+# 双 PDF 档的推断层文件有**独立审核记录**。不能复用主记录：主记录一旦自动
+# 定稿，decide() 就不允许再 approve，深度 PDF 的审核项会永远批不下来；
+# 反之为了深度审核不自动定稿，纯事实底稿又被一起拖住。
+DEEP_SUFFIX = "-deep"
+_DEEP_PDF_SUFFIX = ".deep.pdf"
+DEEP_REVIEW_REASON = (
+    "独立深度分析 PDF：含大模型推断结论，需人工确认推断标注、"
+    "证据边界与免责声明完整性（不得自动定稿）"
+)
 
 
 class ReviewError(ValueError):
@@ -195,10 +207,18 @@ def remove_records(
     with _LOCK:
         records = _read_index(output_dir)
         removed = 0
+        changed = False
         for report_id in wanted:
             if records.pop(report_id, None) is not None:
                 removed += 1
-        if removed:
+                changed = True
+            # 双 PDF 档的推断层审核记录必须跟着主记录一起清掉，否则文件删了、
+            # 索引里还留着一条孤儿 pending。返回值只统计调用方显式请求的 id，
+            # 保持 cleanup.py 里 removed == len(ids) 的告警语义不变。
+            if not report_id.endswith(DEEP_SUFFIX):
+                if records.pop(f"{report_id}{DEEP_SUFFIX}", None) is not None:
+                    changed = True
+        if changed:
             _write_index(records, output_dir)
         return removed
 
@@ -293,6 +313,64 @@ def create_record(
             record.finalized_at = now
             record.auto_finalized = True
             _decision(record, "auto_finalize", "system", "校验通过且无待审异常，自动定稿", [], FINALIZED)
+        return _save_record(record, output_dir)
+
+
+def create_deep_record(
+    result: ReportResult, output_dir: Path | str | None = None
+) -> ReviewRecord | None:
+    """给**独立深度分析 PDF** 登记一条单独的审核记录，永不自动定稿。
+
+    只在双 PDF 档真的产出了 ``.deep.pdf`` 时调用，且必须在产物全部落盘之后，
+    指纹才能覆盖深度层的三份文件。``artifacts`` 刻意复用 ``markdown`` /
+    ``provenance`` / ``pdf`` 三个键名（分别指向 ``.deep.md`` / ``.deep.json`` /
+    ``.deep.pdf``），这样 ``content_hash``、``gate``、``pdf_download_gate``
+    这套硬门禁原样生效，不需要为推断层另写一条更弱的门禁。
+
+    底稿那条主记录不因此追加任何审核项，仍可自动定稿、独立外发。
+    """
+    names = result.deep_artifacts
+    if not all(names.get(key) for key in ("pdf", "markdown", "json")):
+        return None
+    deep = result.deep_analysis
+    report_id = f"{result.report_id}{DEEP_SUFFIX}"
+    with _LOCK:
+        existing = _read_index(output_dir).get(report_id)
+        if existing:
+            return ReviewRecord.from_dict(existing)
+        now = _now()
+        from ai_agent.report.pipeline import deep_report_title
+
+        deep_title = f"{deep_report_title(result)}（推断层）"
+        record = ReviewRecord(
+            report_id=report_id,
+            title=deep_title,
+            report_status=result.status,
+            created_at=now,
+            updated_at=now,
+            validation_passed=result.validation.passed,
+            error_count=sum(
+                1 for item in result.validation.findings if item.severity == "error"
+            ),
+            artifacts={
+                "markdown": names["markdown"],
+                "provenance": names["json"],
+                "pdf": names["pdf"],
+                # 唯一权威源是 index.json；不另写 .deep.review.json 快照。
+                "review": "",
+            },
+            items=[
+                ReviewEntry(
+                    id="r001",
+                    reason=DEEP_REVIEW_REASON,
+                    value="deep_pdf_standalone",
+                    subject=deep.target if deep else "",
+                    period=deep.period if deep else "",
+                )
+            ],
+        )
+        record.content_hash = _current_hash(record, output_dir)
+        # 有意不进 create_record 的 clean 分支：推断层必须人工批准 + 定稿。
         return _save_record(record, output_dir)
 
 
@@ -454,11 +532,18 @@ def gate(record: ReviewRecord | None, output_dir: Path | str | None = None) -> t
 def record_for_artifact(
     name: str, output_dir: Path | str | None = None
 ) -> ReviewRecord | None:
-    """从产物文件名反查审核记录（report_id 在文件名末尾）。"""
+    """从产物文件名反查审核记录（report_id 在文件名末尾）。
+
+    ``<stem>.deep.pdf`` 属于独立推断层文件，映射到 ``<report_id>-deep`` 那条
+    单独记录；其余产物（含 ``.deep.md`` / ``.deep.json``）仍归属主记录。
+    """
     match = _ID_IN_NAME.search(name)
     if not match:
         return None
-    return get_record(match.group(1), output_dir)
+    report_id = match.group(1)
+    if name.endswith(_DEEP_PDF_SUFFIX):
+        report_id = f"{report_id}{DEEP_SUFFIX}"
+    return get_record(report_id, output_dir)
 
 
 def pdf_download_gate(
@@ -473,4 +558,9 @@ def pdf_download_gate(
     allowed, reason = gate(record, output_dir)
     if not allowed:
         return False, f"报告未定稿：{reason}"
+    # gate() 对 APPROVED 返回的是「审核通过，可以定稿」，主记录沿用这个既有
+    # 语义不改；独立推断层则再收一格：必须真正 finalize 才算可外发定稿件。
+    # 只作用于新的 .deep.pdf 路径，既有报告下载行为逐字节不变。
+    if name.endswith(_DEEP_PDF_SUFFIX) and record.status != FINALIZED:
+        return False, "独立深度分析 PDF 需人工批准并定稿后才可下载"
     return True, reason

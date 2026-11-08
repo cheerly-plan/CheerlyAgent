@@ -11,8 +11,8 @@
 * ``report_pdf`` 仍不注册：渲染含落盘与 M2 审核门禁（校验不过不出 PDF、
   下载须过定稿门禁），只能由服务端流水线触发，不能交给模型自主调用。
 
-服务端确定性流水线（解析 → 抽取 → 计算 → 撰写 → 校验 → 渲染）不调用 LLM，
-所以这个工具本身零 token 成本，耗时主要是知识库检索与 PDF 渲染。
+默认交付**两份报告**：事实层底稿 PDF + 独立深度解析 PDF（``.deep.pdf``）。
+深度结论永不并入 Markdown 正文；深度 PDF 走独立审核记录。
 """
 
 from __future__ import annotations
@@ -65,10 +65,17 @@ class GenerateReportArgs(BaseModel):
 
 
 def _generate_report(request: str, report_type: str = "", write_pdf: bool = True) -> str:
+    from ai_agent.report.deep.bridge import DeepOptions
     from ai_agent.tools.progress import emit_progress
 
-    emit_progress("正在生成研报…")
-    result = run_report(request, skill_id=report_type or "", write_pdf=write_pdf)
+    emit_progress("正在生成底稿与深度解析…")
+    # 聊天入口默认双 PDF：底稿可自动定稿；深度 .deep.pdf 单独强制人工审。
+    result = run_report(
+        request,
+        skill_id=report_type or "",
+        write_pdf=write_pdf,
+        deep=DeepOptions(enabled=True, pdf_mode="separate"),
+    )
     gaps = len(getattr(result, "gaps", []) or [])
     if gaps:
         emit_progress(f"研报已生成（另有 {gaps} 处数据缺口待说明）")
@@ -77,6 +84,7 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
     artifacts = result.artifacts
     lines = [
         "研报已由服务端确定性流水线生成（正文数字只来自知识库表格，已过校验门禁）。",
+        "默认同时交付：事实层底稿 + 独立深度解析（推断层，不并入底稿正文）。",
         f"标题：{result.document.title or '（未识别到标题）'}",
         f"状态：{result.status} / 实际交付：{result.deliverable} / PDF：{result.pdf_status}",
         (
@@ -84,8 +92,10 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
             f"（错误 {sum(1 for item in result.validation.findings if item.severity == 'error')} 条，"
             f"待人工审核 {len(result.validation.review_queue)} 条）"
         ),
-        "把下面的 Markdown 下载链接原样发给用户（方括号标题 + 圆括号路径不要改），"
-        "并简要说明校验结论与缺口；不要自己撰写研报正文、不要复述或改写报告里的数字。"
+        "把下面的 Markdown 下载链接**逐字原样**发给用户（方括号标题 + 圆括号路径一个字符都不要改），"
+        "底稿与深度两套都要发；并简要说明校验结论与缺口；"
+        "禁止改成 http/https、example.com、其它域名或绝对 URL，必须保持 /v1/report/files/ 开头；"
+        "不要自己撰写研报正文、不要复述或改写报告里的数字。"
         "若缺口里出现「入库等待超时」或「尚未 ready」，请明确告诉用户是原文还在解析、"
         "不是聊天超时；可建议稍后重试或到知识库查看文件状态。",
     ]
@@ -93,16 +103,16 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
     review_status = getattr(result, "review_status", PENDING)
     report_id = getattr(result, "report_id", "")
     if review_status == FINALIZED:
-        lines.append("审核：已定稿，PDF 可直接下载。")
+        lines.append("审核：事实层底稿已定稿，底稿 PDF 可直接下载。")
     else:
         lines.append(
-            f"审核：尚未定稿（{review_status}），PDF 链接需要管理员在"
+            f"审核：事实层尚未定稿（{review_status}），底稿 PDF 链接需要管理员在"
             f" /v1/report/reviews/{report_id} 处置审核项并定稿后才能下载；"
             "Markdown 正文与溯源附件可先预览。请如实告知用户。"
         )
     downloads = [
-        ("PDF", artifacts.pdf),
-        ("Markdown 正文", artifacts.markdown),
+        ("底稿 PDF", artifacts.pdf),
+        ("底稿 Markdown", artifacts.markdown),
         ("溯源附件", artifacts.provenance),
         ("人工审核队列", artifacts.review),
     ]
@@ -111,7 +121,32 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
             # 前端认 Markdown 链与裸路径；中文文件名做百分号编码，避免空格截断
             lines.append(f"- [{label}](/v1/report/files/{quote(name, safe='')})")
     if result.pdf_error:
-        lines.append(f"PDF 未生成的原因：{result.pdf_error[:150]}")
+        lines.append(f"底稿 PDF 未生成的原因：{result.pdf_error[:150]}")
+
+    deep_artifacts = getattr(result, "deep_artifacts", None) or {}
+    deep_error = getattr(result, "deep_error", "") or ""
+    lines.append(
+        "深度解析为推断层，与事实层物理隔离；深度 PDF 须单独人工批准后才能下载。"
+    )
+    deep_downloads = [
+        ("深度解析 PDF", deep_artifacts.get("pdf")),
+        ("深度解析 Markdown", deep_artifacts.get("markdown")),
+        ("深度解析 JSON", deep_artifacts.get("json")),
+    ]
+    for label, name in deep_downloads:
+        if name:
+            lines.append(f"- [{label}](/v1/report/files/{quote(name, safe='')})")
+    deep_review_id = getattr(result, "deep_pdf_review_id", "") or ""
+    if deep_review_id:
+        lines.append(
+            f"深度 PDF 审核队列：/v1/report/reviews/{deep_review_id}"
+            "（与事实层底稿分开审核，互不影响）。"
+        )
+    if deep_error:
+        lines.append(f"深度解析失败（不影响底稿）：{deep_error[:180]}")
+    pdf_err = getattr(result, "deep_pdf_error", "") or ""
+    if pdf_err and not deep_artifacts.get("pdf"):
+        lines.append(f"深度 PDF 未生成的原因：{pdf_err[:150]}")
 
     gaps = result.gaps[:_MAX_GAPS]
     if gaps:
