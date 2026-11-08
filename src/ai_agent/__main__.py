@@ -52,6 +52,8 @@ def _serve(host: str, port: int, reload: bool) -> None:
         port=port,
         reload=reload,
         reload_dirs=[str(Path(__file__).resolve().parents[1])],
+        # 研报/巨潮工具会挂很长的 SSE；热重载若无限等优雅退出，8000 会半死不活。
+        timeout_graceful_shutdown=10,
         proxy_headers=settings.trust_forwarded_for,
         forwarded_allow_ips=settings.forwarded_allow_ips,
     )

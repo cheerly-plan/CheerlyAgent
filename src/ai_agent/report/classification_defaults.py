@@ -78,7 +78,7 @@ SEGMENT_TO_TYPE = (
 INDUSTRY_SEGMENTS = {
     'bank': {'国有大行': 'bank', '股份制': 'bank', '城商行': 'bank'},
     'semiconductor': {'设计': 'fabless', '制造': 'foundry', '设备': 'equipment', '封测': 'packaging'},
-    'robotics': {'本体': 'manufacturing', '减速器': 'manufacturing', '伺服控制': 'equipment', '系统集成': 'manufacturing'},
+    'robotics': {'伺服控制': 'equipment', '本体': 'manufacturing', '减速器': 'manufacturing', '系统集成': 'software'},
 }
 
 INDUSTRY_LEAD = {

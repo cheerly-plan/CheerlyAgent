@@ -8,6 +8,7 @@ from ai_agent.report.compare import SeriesCompare, parse_number
 from ai_agent.report.extract import IndicatorFact
 from ai_agent.report.industry import (
     INDUSTRY_SHARED,
+    columns_for_segment,
     default_indicators,
     profile_key_for_plan,
     structure_for_plan,
@@ -279,9 +280,14 @@ def segment_peer_lines(
             lines.append("本期未抽到该赛道代表公司指标。")
             lines.append("")
             continue
-        typed = default_indicators(type_for_segment(segment, segment_key))
-        # 赛道专属指标优先；抽不到的列在宽表里留空，缺口进「缺失」节。
-        indicators = segment_table_indicators(typed or list(shared))
+        # 赛道显式 columns 优先（系统集成不要「产能利用率」）；未声明才回退模板截列。
+        override = columns_for_segment(segment, segment_key)
+        if override:
+            indicators = override
+        else:
+            typed = default_indicators(type_for_segment(segment, segment_key))
+            # 赛道专属指标优先；抽不到的列在宽表里留空，缺口进「缺失」节。
+            indicators = segment_table_indicators(typed or list(shared))
         lines.extend(wide_segment_table(segment, names, segment_facts, indicators))
         lines.append("")
     while lines and lines[-1] == "":

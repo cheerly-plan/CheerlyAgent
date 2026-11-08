@@ -161,6 +161,51 @@ def test_segment_peer_tables_group_by_skill_segment():
     assert "营业收入（合并）" not in text
 
 
+def test_robotics_integrator_table_omits_capacity_utilization():
+    """系统集成组内表走赛道 columns，不得混入制造向的产能利用率。"""
+    from ai_agent.report.compose_segment import segment_peer_lines
+
+    plan = ReportPlan(
+        title="机器人行业 2026H1 财报对比分析（赛道分组版）",
+        kind="industry",
+        deliverable="markdown",
+        skill_id="robotics_industry_report",
+        industry="机器人",
+        subjects=["拓斯达", "埃斯顿"],
+        period="2026H1",
+        indicators=["营业收入", "产能利用率", "合同负债"],
+        outline=[OutlineItem("组内对比", "")],
+    )
+
+    def make(subject: str, name: str, value: str, unit: str = "%") -> IndicatorFact:
+        fact = _fact("2026H1", value, name=name)
+        fact.subject = subject
+        fact.unit = unit
+        fact.evidence.file_id = f"{subject}-{name}"
+        return fact
+
+    lines = segment_peer_lines(
+        plan,
+        [
+            make("拓斯达", "营业收入", "1", "元"),
+            make("拓斯达", "毛利率", "12"),
+            make("埃斯顿", "营业收入", "2", "元"),
+            make("埃斯顿", "产能利用率", "80"),
+        ],
+    )
+    text = "\n".join(lines)
+    assert "### 系统集成" in text
+
+    def _header_after(title: str) -> str:
+        block = text.split(title, 1)[1].split("### ", 1)[0]
+        return next(line for line in block.splitlines() if line.startswith("| 公司 |"))
+
+    integrator_header = _header_after("### 系统集成")
+    assert "产能利用率" not in integrator_header
+    assert "合同负债" in integrator_header
+    assert "产能利用率" in _header_after("### 本体")
+
+
 def test_segment_table_keeps_ocf_beyond_core_budget():
     equipment = _segment_table_indicators(default_indicators("equipment"))
     assert equipment[:6] == [

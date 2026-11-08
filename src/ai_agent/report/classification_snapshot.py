@@ -63,9 +63,15 @@ def render_defaults(indicators: Path, industries: Path) -> str:
 
     # 行业级赛道语义也要进降级快照：主配置读不到时不能退化成「所有行业共用
     # 一份全局映射」，否则同名赛道又会在降级路径里串味。
+    def _segment_profile(value: object) -> str:
+        # segments 值可以是 profile 字符串，或 {profile, columns?} 映射。
+        if isinstance(value, dict):
+            return str(value.get("profile") or "").strip()
+        return str(value).strip()
+
     industry_segments = {
         str(key): {
-            str(segment): str(value)
+            str(segment): _segment_profile(value)
             for segment, value in (entry.get("segments") or {}).items()
         }
         for key, entry in profiles.items()

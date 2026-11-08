@@ -8,6 +8,8 @@
 # 声明了 segments 的行业只用自己这份，不再回退 indicators.yaml 的全局
 # classification.segment_to_type。这样不同行业的同名赛道（如都叫「设备」）
 # 可以指向不同指标模板，不会串味；全局字典只服务没有行业上下文的调用。
+# 值可以是 profile 字符串，或 {profile, columns?}：columns 覆写组内宽表列，
+# 未声明时仍按 profile.include 截前几列。项目型赛道可借此去掉「产能利用率」。
 #
 # lead / lead_hint 是该行业的「本期结论」口径：
 #   lead      本行业结论的指标出句顺序；不写则走 indicators.yaml 的 lead_generic。
@@ -97,10 +99,23 @@ profiles:
       - 核心一级资本充足率
       - 资本充足率
     exclude_refs: [bank_exclude]
+    # 三类机构共用银行指标；组内宽表显式列息差／资产质量，避免截到利润总额等次要列。
     segments:
-      国有大行: bank
-      股份制: bank
-      城商行: bank
+      国有大行:
+        profile: bank
+        columns: &bank_peer_columns
+          - 营业收入
+          - 归属于母公司所有者的净利润
+          - 净息差
+          - 不良贷款率
+          - 不良贷款拨备覆盖率
+          - 资本充足率
+      股份制:
+        profile: bank
+        columns: *bank_peer_columns
+      城商行:
+        profile: bank
+        columns: *bank_peer_columns
     # 银行结论口径：息差／资产质量在前，不再靠 compose 里的 skill_id 判断。
     lead:
       - 营业收入
@@ -240,11 +255,47 @@ profiles:
   semiconductor:
     include: *shared_include
     exclude: *bank_only
+    # 组内列按赛道固化：设计看客户／周转，制造／封测看稼动与开支，设备看订单。
     segments:
-      设计: fabless
-      制造: foundry
-      设备: equipment
-      封测: packaging
+      设计:
+        profile: fabless
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 存货周转率
+          - 大客户集中度
+          - 经营活动产生的现金流量净额
+      制造:
+        profile: foundry
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 产能利用率
+          - 折旧
+          - 资本开支
+          - 经营活动产生的现金流量净额
+      设备:
+        profile: equipment
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 合同负债
+          - 存货
+          - 在手订单
+          - 经营活动产生的现金流量净额
+      封测:
+        profile: packaging
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 产能利用率
+          - 资本开支
+          - 经营活动产生的现金流量净额
     structure:
       - 毛利率
       - 研发费用率
@@ -265,11 +316,47 @@ profiles:
       - 经营活动产生的现金流量净额
       - 合同负债
     exclude: *bank_only
+    # 组内宽表列按赛道覆写：制造类保留产能利用率，系统集成（项目型）不要该列。
     segments:
-      本体: manufacturing
-      减速器: manufacturing
-      伺服控制: equipment
-      系统集成: manufacturing
+      伺服控制:
+        profile: equipment
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 合同负债
+          - 在手订单
+          - 经营活动产生的现金流量净额
+      本体:
+        profile: manufacturing
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 存货周转率
+          - 产能利用率
+          - 经营活动产生的现金流量净额
+      减速器:
+        profile: manufacturing
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 存货周转率
+          - 产能利用率
+          - 经营活动产生的现金流量净额
+      系统集成:
+        profile: software
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 合同负债
+          - 经营活动产生的现金流量净额
     structure:
       - 毛利率
       - 研发费用率

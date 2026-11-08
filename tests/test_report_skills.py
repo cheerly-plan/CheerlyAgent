@@ -186,7 +186,9 @@ def test_bank_industry_skill_groups_and_routes(monkeypatch):
     assert skill.segment_of("宁波银行") == "城商行"
     assert "净息差" in skill.indicators
     assert "不良贷款率" in skill.indicators
-    segments = dict(profile_of("bank").segments)
+    segments = {
+        name: spec.profile for name, spec in profile_of("bank").segments
+    }
     assert segments == {"国有大行": "bank", "股份制": "bank", "城商行": "bank"}
     monkeypatch.setattr(
         "ai_agent.report.parse.store.list_kb_files",

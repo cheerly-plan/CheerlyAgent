@@ -77,15 +77,27 @@ class IndustryNotes:
 
 
 @dataclass(frozen=True)
+class SegmentSpec:
+    """行业内一条赛道：指向公司类型模板，并可覆写组内宽表列。
+
+    ``columns`` 为空时，组内表仍按 ``profile`` 的 include 截前几列；
+    显式声明后只出这些列——系统集成不该出现「产能利用率」这类制造向指标。
+    """
+
+    profile: str
+    columns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class IndicatorProfile:
     """一类公司该看／不该看的核心指标（5–8 个，不是三张表全抄）。"""
 
     indicators: tuple[str, ...]
     exclude: tuple[str, ...] = ()
     notes: IndustryNotes = IndustryNotes()
-    # 该行业的赛道名 → 公司类型；声明后即为权威，不再回退全局 segment_to_type。
+    # 该行业的赛道名 → SegmentSpec；声明后即为权威，不再回退全局 segment_to_type。
     # 用 tuple 保序且可哈希，避免 frozen dataclass 里塞可变 dict。
-    segments: tuple[tuple[str, str], ...] = ()
+    segments: tuple[tuple[str, SegmentSpec], ...] = ()
     # 「本期结论」的指标出句顺序；声明后即接管该行业的结论口径，
     # 渲染层不再按 skill_id 写分支（原来是 bank / generic 两套写死）。
     lead: tuple[str, ...] = ()
@@ -201,24 +213,65 @@ def _parse_name_list(
     return tuple(out)
 
 
-def _parse_segments(entry: dict[str, Any], where: str) -> tuple[tuple[str, str], ...]:
-    """行业级赛道语义：赛道名 → 公司类型（profile key）。
+def _parse_segment_columns(raw: Any, where: str) -> tuple[str, ...]:
+    """赛道级 columns：保序去重；空列表视为未声明。"""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}.columns 必须是列表")
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        name = str(item).strip() if isinstance(item, str) else ""
+        if not name:
+            raise ValueError(f"{where}.columns 不得含空指标名：{item!r}")
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return tuple(out)
 
-    严格 schema：值必须是合法的 profile key 形态；「值确实存在」由
+
+def _parse_segment_spec(value: Any, where: str) -> SegmentSpec:
+    """赛道值：字符串 profile，或 ``{profile, columns?}`` 映射。"""
+    if isinstance(value, str):
+        company_type = value.strip()
+        if not _PROFILE_KEY_RE.fullmatch(company_type):
+            raise ValueError(f"{where} 非法：{value!r}（值须为 profile key）")
+        return SegmentSpec(company_type)
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"{where} 非法：{value!r}（须为 profile key 或 {{profile, columns?}}）"
+        )
+    unknown = set(value) - {"profile", "columns"}
+    if unknown:
+        raise ValueError(f"{where} 含未声明字段 {sorted(unknown)}")
+    company_type = str(value.get("profile") or "").strip()
+    if not _PROFILE_KEY_RE.fullmatch(company_type):
+        raise ValueError(f"{where}.profile 非法：{value.get('profile')!r}")
+    return SegmentSpec(
+        company_type,
+        columns=_parse_segment_columns(value.get("columns"), where),
+    )
+
+
+def _parse_segments(
+    entry: dict[str, Any], where: str
+) -> tuple[tuple[str, SegmentSpec], ...]:
+    """行业级赛道语义：赛道名 → SegmentSpec（公司类型 + 可选组内列）。
+
+    严格 schema：profile 必须是合法的 profile key 形态；「值确实存在」由
     _load_profiles 在全部 profile 构建完后统一校验，避免解析顺序造成误判。
     """
     raw = entry.get("segments") or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{where}.segments 必须是映射")
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str, SegmentSpec]] = []
     for key, value in raw.items():
         segment = str(key).strip()
-        company_type = str(value).strip()
-        if not segment or not _PROFILE_KEY_RE.fullmatch(company_type):
-            raise ValueError(
-                f"{where}.segments 非法：{key!r} → {value!r}（值须为 profile key）"
-            )
-        pairs.append((segment, company_type))
+        if not segment:
+            raise ValueError(f"{where}.segments 不得含空赛道名")
+        pairs.append((segment, _parse_segment_spec(value, f"{where}.segments[{segment}]")))
     return tuple(pairs)
 
 
@@ -280,11 +333,11 @@ def _load_profiles(path: Path) -> dict[str, IndicatorProfile]:
     # 赛道类型必须指向本文件里真实存在的 profile：新增行业写错类型名时
     # fail-fast，而不是在渲染期静默落到 generic 指标集。
     for key, profile in profiles.items():
-        for segment, company_type in profile.segments:
-            if company_type not in profiles:
+        for segment, spec in profile.segments:
+            if spec.profile not in profiles:
                 raise ValueError(
                     f"industries.yaml profile {key} 的赛道 {segment!r} "
-                    f"指向未知公司类型 {company_type!r}"
+                    f"指向未知公司类型 {spec.profile!r}"
                 )
     return profiles
 
@@ -444,7 +497,7 @@ def segment_map_for(industry_key: str | None = None) -> dict[str, str]:
         if pairs is not None:
             return dict(pairs)
     if profile is not None and profile.segments:
-        return dict(profile.segments)
+        return {segment: spec.profile for segment, spec in profile.segments}
     return dict(registry.segment_map())
 
 
@@ -456,6 +509,24 @@ def type_for_segment(segment: str, industry_key: str | None = None) -> str:
     产出跨行业污染且零报错。漏配由 lint 显式拦截。
     """
     return segment_map_for(industry_key).get((segment or "").strip(), GENERIC)
+
+
+def columns_for_segment(
+    segment: str, industry_key: str | None = None
+) -> list[str] | None:
+    """赛道级组内宽表列；未声明时返回 None，调用方回退到 profile include。"""
+    key = _normalize_key(industry_key or "")
+    name = (segment or "").strip()
+    try:
+        profile = _profiles().get(key)
+    except Exception:
+        return None
+    if profile is None:
+        return None
+    for segment_name, spec in profile.segments:
+        if segment_name == name and spec.columns:
+            return list(spec.columns)
+    return None
 
 
 def default_indicators(industry_or_type: str) -> list[str]:
