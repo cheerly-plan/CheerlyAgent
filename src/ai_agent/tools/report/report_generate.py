@@ -65,7 +65,7 @@ class GenerateReportArgs(BaseModel):
 
 
 def _generate_report(request: str, report_type: str = "", write_pdf: bool = True) -> str:
-    from ai_agent.report.deep import ENTRY_CHAPTER_CONCURRENCY
+    from ai_agent.report.deep import ENTRY_CHAPTER_CONCURRENCY, default_facts_dir
     from ai_agent.report.deep.bridge import DeepOptions
     from ai_agent.tools.progress import emit_progress
 
@@ -78,6 +78,9 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
         deep=DeepOptions(
             enabled=True, pdf_mode="separate",
             chapter_concurrency=ENTRY_CHAPTER_CONCURRENCY,
+            # 对外入口显式挂载结构化事实清单；库级 DeepOptions 默认不启用，
+            # 目录不存在时由 LocalFactsProvider 如实记缺口，不假装有数据。
+            facts_dir=default_facts_dir(),
         ),
     )
     gaps = len(getattr(result, "gaps", []) or [])

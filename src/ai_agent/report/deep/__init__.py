@@ -90,9 +90,13 @@ from ai_agent.report.deep.schema import (
 )
 from ai_agent.report.deep.sources import (
     ExternalFact,
+    FactsLintReport,
     SourceBundle,
     SourceProvider,
     collect_sources,
+    default_facts_dir,
+    inspect_fact_row,
+    lint_facts_dir,
 )
 
 __all__ = [
@@ -104,6 +108,7 @@ __all__ = [
     "DeepConfig",
     "DeepOptions",
     "ExternalFact",
+    "FactsLintReport",
     "ModelPlan",
     "QUALITY_LABELS",
     "SourceBundle",
@@ -114,6 +119,9 @@ __all__ = [
     "chapters_for",
     "collect_sources",
     "deep_standalone_document",
+    "default_facts_dir",
+    "inspect_fact_row",
+    "lint_facts_dir",
     "normalize_moat_rating",
     "pick_industry_sample",
     "render_deep_appendix_html",

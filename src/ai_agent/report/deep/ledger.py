@@ -109,6 +109,10 @@ class SourceRecord:
     level: str = "L1"
     acquisition: str = "知识库定期报告原文"
     backtrace_to: str = ""
+    # 外部结构化事实清单登记时置 True，并记下它服务的章节；仅用于证据包
+    # 超限时的挑选，不改变台账本身与数字白名单。
+    external: bool = False
+    chapters: tuple[int, ...] = ()
 
     @property
     def tier(self) -> str:
@@ -231,6 +235,8 @@ class SourceLedger:
                 level=level,
                 acquisition=acquisition,
                 backtrace_to=backtrace_to,
+                external=True,
+                chapters=tuple(chapters or ()),
             )
         )
         return True
@@ -271,16 +277,43 @@ class SourceLedger:
         ]
 
     def render_for(self, chapter_numbers: list[int] | None = None, *, limit: int = 40) -> str:
-        """按章渲染证据包。章节号只用于未来做按需检索，当前先全量按上限截断。"""
+        """按章渲染证据包。
+
+        记录数没超限（当前默认数据条件）时逐字沿用「按台账顺序全量展开」，
+        行为与加外部事实通道之前完全一致。超限时才做挑选：优先「清单里
+        声明服务本章」的外部事实，其次是其它外部事实，最后才是本期事实层。
+        否则外部事实统一排在事实层之后，一旦清单变大就会被 ``limit`` 整段
+        截掉，通道接了等于没接。挑完仍按原顺序输出，``eN`` 编号可对照。
+        """
         note = ""
         if chapter_numbers:
             note = f"（供第 {','.join(str(n) for n in chapter_numbers)} 章使用）"
         if not self.records:
             return "（台账为空：只能写数据缺口，不得写任何数字或结论）"
+        records = self.records
+        if len(records) > limit:
+            wanted = set(chapter_numbers or ())
+
+            def priority(index: int) -> tuple[int, int]:
+                record = records[index]
+                if wanted and wanted.intersection(record.chapters):
+                    rank = 2
+                elif record.external:
+                    rank = 1
+                else:
+                    rank = 0
+                return rank, -index  # 同优先级下靠前的记录优先
+
+            picked = sorted(
+                range(len(records)), key=priority, reverse=True
+            )[:limit]
+            shown = [records[index] for index in sorted(picked)]
+        else:
+            shown = list(records)
         lines = [f"已授权事实台账{note}："] if note else "已授权事实台账："
-        lines.extend(record.render() for record in self.records[:limit])
-        if len(self.records) > limit:
-            lines.append(f"…另有 {len(self.records) - limit} 条未展开")
+        lines.extend(record.render() for record in shown)
+        if len(records) > len(shown):
+            lines.append(f"…另有 {len(records) - len(shown)} 条未展开")
         return "\n".join(lines)
 
     def gap_rows(self) -> list[DataGap]:

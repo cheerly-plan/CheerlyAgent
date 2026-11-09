@@ -31,6 +31,7 @@ L1-L3 源头一律拒绝入表并记缺口。本层不做二次放行。
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -51,7 +52,19 @@ DOC_CHAPTERS: dict[str, tuple[int, ...]] = {
 # 公司模式必需的三类源文件；行业模式额外需要行业统计。
 COMPANY_REQUIRED = ("annual", "audit", "inquiry")
 INDUSTRY_REQUIRED = ("industry_stat",)
+# 用户决策（2026-11-08 ②③）的外部数据源优先级，覆盖度报告按此顺序逐类列示。
+# 「定期报告」拆成 periodic（季报/半年报，通常已入库）与 annual（年报，常缺）：
+# 拆开才不会用一堆季报冒充「近 5 年纵向数据齐备」。
+SOURCE_PRIORITY = ("periodic", "annual", "audit", "inquiry", "industry_stat")
+SOURCE_LABELS = {
+    "periodic": "定期报告（季报/半年报）",
+    "annual": "年度报告",
+    "audit": "审计报告/关键审计事项",
+    "inquiry": "问询函及回复",
+    "industry_stat": "行业原始统计",
+}
 DEFAULT_YEARS = 5
+DEFAULT_FACTS_DIR_NAME = "deep_facts"
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_FACTS = 500
 _YEAR_RE = re.compile(r"(?:19|20)\d{2}")
@@ -63,8 +76,10 @@ _DOC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("inquiry", re.compile(r"问询函|监管函|关注函|问询回复|回复函|反馈意见")),
     ("audit", re.compile(r"审计报告|关键审计事项|审计意见|KAM|会计师", re.I)),
     ("industry_stat", re.compile(r"行业协会|统计局|产能统计|价格指数|行业统计|协会发布")),
-    ("annual", re.compile(r"年度报告|年报|年度审计")),
+    # periodic 必须先于 annual：「半年度报告」里含「年度报告」子串，若 annual
+    # 先判会把半年报误登记成年报，凭空消掉「近 5 年年报未入库」这条真缺口。
     ("periodic", re.compile(r"季度报告|季报|半年度|半年报|中期报告|临时公告")),
+    ("annual", re.compile(r"年度报告|年报|年度审计")),
 )
 _REQUIRED_GAP: dict[str, tuple[list[int], str, str]] = {
     "annual": (
@@ -88,6 +103,21 @@ _REQUIRED_GAP: dict[str, tuple[list[int], str, str]] = {
         "接入合规授权的行业原始统计（L3），L4 二手数据须回溯到 L1-L3",
     ),
 }
+
+
+def default_facts_dir() -> Path:
+    """结构化事实清单的默认落点：``<report_output_dir>/../deep_facts``。
+
+    与产物目录同级，方便部署时用 ``REPORT_DEEP_FACTS_DIR`` 指向外挂数据卷；
+    库级 ``DeepOptions`` 不自动启用，只有对外入口（HTTP / 聊天工具）显式传入，
+    避免测试与零 token 骨架因为本机恰好放了数据而改变行为。
+    """
+    override = os.getenv("REPORT_DEEP_FACTS_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    from ai_agent.core.config import settings
+
+    return Path(settings.report_output_dir).parent / DEFAULT_FACTS_DIR_NAME
 
 
 def classify_doc(filename: str, doc_type: str = "", description: str = "") -> str:
@@ -187,6 +217,62 @@ class ExternalFact:
         )
 
 
+def inspect_fact_row(
+    row: Any,
+    *,
+    default_doc_type: str = "annual",
+    strict: bool = False,
+    known_files: Sequence[str] | None = None,
+) -> tuple[ExternalFact | None, list[str], list[str]]:
+    """检查一行清单，返回 ``(可入账事实, 阻断错误, 可溯源警告)``。
+
+    ``strict=False``（运行时）只对 ``item/value/source_file`` 三项必填做阻断，
+    其余问题降级为警告并照旧交给台账 —— 保证 ``SourceLedger.add_external``
+    是唯一准入门，不在 provider 里另开一套强门禁。``strict=True``（人工 lint）
+    把页码/原文/回溯链缺失也视为错误，逼录入者补齐后再提交。
+
+    这里只读字段、只做结构判断，**绝不解析 PDF、绝不生成或换算数字**。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not isinstance(row, dict):
+        return None, ["条目不是 JSON 对象"], warnings
+    item = str(row.get("item") or "").strip()
+    value = str(row.get("value") or "").strip()
+    source_file = str(row.get("source_file") or row.get("filename") or "").strip()
+    for label, text in (("item", item), ("value", value), ("source_file", source_file)):
+        if not text:
+            errors.append(f"缺 {label}")
+    level = str(row.get("level") or "L1").upper()
+    if level not in _VALID_LEVELS:
+        (errors if strict else warnings).append(f"level={level} 非法，按 L4 最保守处理")
+    backtrace = str(row.get("backtrace_to") or "").strip()
+    if level in {"L4", "L5", "L6"} and not backtrace:
+        (errors if strict else warnings).append(
+            f"{level} 二手数据缺 backtrace_to，台账将拒绝入表"
+        )
+    if not str(row.get("location") or "").strip():
+        (errors if strict else warnings).append("缺 location（页码/附注号），无法定位原文")
+    if not str(row.get("quote") or "").strip():
+        (errors if strict else warnings).append("缺 quote（原文片段），无法核对数值")
+    if value and not re.search(r"\d", value):
+        warnings.append("value 不含数字，可能不是结构化数值事实")
+    period = str(row.get("period") or "").strip()
+    if period and not year_of(period):
+        warnings.append(f"period={period} 无法识别年份，窗口筛选将跳过年份过滤")
+    if known_files is not None and source_file:
+        if not any(
+            source_file == name or source_file in name or name in source_file
+            for name in known_files
+        ):
+            (errors if strict else warnings).append(
+                f"source_file 不在知识库已入库文件清单：{source_file[:60]}"
+            )
+    if errors:
+        return None, errors, warnings
+    return ExternalFact.from_row(row, default_doc_type=default_doc_type), errors, warnings
+
+
 @dataclass(frozen=True)
 class SourceDocument:
     """知识库里一份可用的源头文件（有文件 ≠ 已抽出可溯源事实）。"""
@@ -228,6 +314,84 @@ class SourceBundle:
         present = {document.doc_type for document in self.documents}
         present |= {fact.doc_type for fact in self.facts}
         return [kind for kind in required if kind not in present]
+
+    def _counts(self) -> tuple[dict[str, int], dict[str, int]]:
+        docs: dict[str, int] = {}
+        facts: dict[str, int] = {}
+        for document in self.documents:
+            docs[document.doc_type] = docs.get(document.doc_type, 0) + 1
+        for fact in self.facts:
+            key = fact.doc_type or classify_doc(fact.source_file)
+            facts[key] = facts.get(key, 0) + 1
+        return docs, facts
+
+    def coverage_report(self, mode: str = "company") -> list[str]:
+        """按外部数据源优先级逐类报告「源文件数 / 已抽出结构化事实数」。
+
+        核心是把「库里有 PDF」和「数字已进台账」分开计数：前者只是可回溯
+        出处，后者才是章节能引用的事实。绝不因为文件存在就宣称数据齐备。
+        """
+        docs, facts = self._counts()
+        required = set(COMPANY_REQUIRED if mode != "industry" else INDUSTRY_REQUIRED)
+        lines: list[str] = []
+        for kind in SOURCE_PRIORITY:
+            doc_n, fact_n = docs.get(kind, 0), facts.get(kind, 0)
+            flag = ""
+            if fact_n == 0 and doc_n:
+                flag = "【有源文件但未抽出数字】"
+            elif fact_n == 0 and kind in required:
+                flag = "【缺】"
+            lines.append(
+                f"覆盖度 {SOURCE_LABELS[kind]}：源文件 {doc_n} 份 / "
+                f"结构化事实 {fact_n} 条{flag}"
+            )
+        return lines
+
+    def unextracted_documents(self) -> list[str]:
+        """已入库但没有任何结构化事实的源文件名（按 file_id 或名称回溯）。"""
+        sources = [fact.source_file for fact in self.facts]
+        result: list[str] = []
+        for document in self.documents:
+            matched = any(
+                (document.file_id and document.file_id in source)
+                or (document.filename and (
+                    document.filename in source or source in document.filename
+                ))
+                for source in sources
+            )
+            if not matched:
+                result.append(document.filename)
+        return result
+
+    def extraction_gaps(self) -> list[DataGap]:
+        """「库里有文件 ≠ 附注数字已抽出」变成可执行的缺口清单。"""
+        docs, facts = self._counts()
+        gaps: list[DataGap] = []
+        for kind in SOURCE_PRIORITY:
+            if docs.get(kind, 0) and not facts.get(kind, 0):
+                gaps.append(
+                    DataGap(
+                        item=f"{SOURCE_LABELS[kind]}已入库 {docs[kind]} 份但无结构化事实",
+                        chapters=list(DOC_CHAPTERS.get(kind, ())),
+                        impact="源文件只是可回溯出处，附注数字未进台账，章节不得引用其中的数值",
+                        handling="由人工核对原文后按清单 schema 录入，或用 "
+                                 "scripts/export_deep_facts.py 从溯源附件确定性导出；"
+                                 "禁止让 LLM 现场从 PDF 抽数",
+                    )
+                )
+        unextracted = self.unextracted_documents()
+        if unextracted:
+            sample = "、".join(unextracted[:3])
+            gaps.append(
+                DataGap(
+                    item=f"已入库源文件 {len(unextracted)} 份未抽出结构化事实"
+                         f"（如 {sample}）",
+                    chapters=[3, 4, 6, 7, 9],
+                    impact="近 5 年纵向对比只能停留在定性描述",
+                    handling="先补齐结构化事实清单再重跑深度分析",
+                )
+            )
+        return gaps
 
     def requirement_gaps(self, mode: str = "company") -> list[DataGap]:
         """把「缺哪类文件」变成带章节归属和处理办法的具体缺口。"""
@@ -377,6 +541,10 @@ class LocalFactsProvider:
             if path.is_file() and path.suffix.lower() in {".json", ".jsonl"}
         )
         dropped = 0
+        warning_count = 0
+        rejection_samples: list[str] = []
+        warning_samples: list[str] = []
+        seen: set[tuple[str, ...]] = set()
         for path in paths:
             try:
                 if path.stat().st_size > _MAX_FILE_BYTES:
@@ -385,23 +553,60 @@ class LocalFactsProvider:
                 rows = _read_rows(path)
             except Exception as exc:
                 bundle.notes.append(f"事实清单解析失败 {path.name}：{type(exc).__name__}")
+                # 解析失败也要显式记缺口，不能只留一条 note 就当没发生。
+                bundle.gaps.append(
+                    DataGap(
+                        item=f"结构化事实清单 {path.name} 解析失败",
+                        chapters=[2, 3, 4, 6, 7, 9],
+                        impact="该文件里的原文数字未进入台账，相关章节不得据此下结论",
+                        handling="修正 JSON/JSONL 语法后重跑，不得用其它来源补写",
+                    )
+                )
                 continue
-            for row in rows:
-                fact = ExternalFact.from_row(row, default_doc_type=classify_doc(path.name))
-                if fact is None:
+            for index, row in enumerate(rows, 1):
+                fact, errors, warnings = inspect_fact_row(
+                    row, default_doc_type=classify_doc(path.name)
+                )
+                if errors or fact is None:
                     dropped += 1
+                    if len(rejection_samples) < 5:
+                        rejection_samples.append(
+                            f"{path.name}#{index}：{'；'.join(errors) or '必填字段缺失'}"
+                        )
                     continue
+                warning_count += len(warnings)
+                for warning in warnings:
+                    if len(warning_samples) < 5:
+                        warning_samples.append(f"{path.name}#{index}：{warning}")
                 if fact.subject and target and target not in fact.subject:
                     continue
                 fact_year = year_of(fact.period) or year_of(fact.source_file)
                 if fact_year and not (start <= fact_year <= end):
                     continue
+                # 同一事实被多个清单文件重复录入时只保留首条，避免台账出现
+                # 两份同值来源、把「多条佐证」误当成「多个独立数据点」。
+                key = (fact.subject, fact.period, fact.item, fact.value, fact.source_file)
+                if key in seen:
+                    continue
+                seen.add(key)
                 if len(bundle.facts) >= _MAX_FACTS:
                     bundle.notes.append(f"事实条数达到上限 {_MAX_FACTS}，其余已跳过")
                     break
                 bundle.facts.append(fact)
         if dropped:
             bundle.notes.append(f"事实清单里 {dropped} 条缺 item/value/source_file，已丢弃")
+            bundle.notes.extend(f"  拒绝明细：{sample}" for sample in rejection_samples)
+            bundle.gaps.append(
+                DataGap(
+                    item=f"结构化事实清单 {dropped} 条未通过结构校验",
+                    chapters=[3, 4, 6, 7, 9],
+                    impact="这些条目未进入台账，不得在章节里当作已溯源事实引用",
+                    handling="按清单 schema 补齐 item/value/source_file/location/quote 后重跑",
+                )
+            )
+        if warning_count:
+            bundle.notes.append(f"事实清单可溯源警告 {warning_count} 条")
+            bundle.notes.extend(f"  警告明细：{sample}" for sample in warning_samples)
         bundle.notes.append(
             f"本地事实清单：{len(paths)} 个文件、{len(bundle.facts)} 条入账候选"
             "（L4/L5 仍须过台账回溯门禁）"
@@ -422,6 +627,78 @@ def _read_rows(path: Path) -> list[dict]:
     else:
         rows = payload
     return [row for row in rows if isinstance(row, dict)]
+
+
+@dataclass
+class FactsLintReport:
+    """人工录入清单的静态校验结果（脚本与 CI 用，运行时不参与）。"""
+
+    files: list[str] = field(default_factory=list)
+    rows: int = 0
+    accepted: int = 0
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    duplicates: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def lint_facts_dir(
+    directory: Path | str,
+    *,
+    strict: bool = True,
+    known_files: Sequence[str] | None = None,
+) -> FactsLintReport:
+    """静态检查一份结构化事实清单目录，不做任何数值生成或 PDF 解析。
+
+    ``strict=True`` 时页码/原文片段/回溯链缺失都算错误；``known_files`` 传入
+    知识库文件名清单后可校验 ``source_file`` 是否真的有已入库原件可回溯。
+    """
+    root = Path(directory)
+    report = FactsLintReport()
+    if not root.is_dir():
+        report.errors.append(f"事实清单目录不存在：{root}")
+        return report
+    paths = sorted(
+        path for path in root.iterdir()
+        if path.is_file() and path.suffix.lower() in {".json", ".jsonl"}
+    )
+    if not paths:
+        report.errors.append(f"事实清单目录里没有 .json / .jsonl 文件：{root}")
+        return report
+    seen: dict[tuple[str, ...], str] = {}
+    for path in paths:
+        report.files.append(path.name)
+        try:
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                report.errors.append(f"{path.name}：超过 2MB 上限")
+                continue
+            rows = _read_rows(path)
+        except Exception as exc:
+            report.errors.append(f"{path.name}：解析失败 {type(exc).__name__}: {exc}")
+            continue
+        for index, row in enumerate(rows, 1):
+            report.rows += 1
+            marker = f"{path.name}#{index}"
+            fact, errors, warnings = inspect_fact_row(
+                row,
+                default_doc_type=classify_doc(path.name),
+                strict=strict,
+                known_files=known_files,
+            )
+            report.errors.extend(f"{marker}：{error}" for error in errors)
+            report.warnings.extend(f"{marker}：{warning}" for warning in warnings)
+            if fact is None:
+                continue
+            report.accepted += 1
+            key = (fact.subject, fact.period, fact.item, fact.value, fact.source_file)
+            if key in seen:
+                report.duplicates.append(f"{marker} 与 {seen[key]} 完全重复")
+            else:
+                seen[key] = marker
+    return report
 
 
 class IndustryStatProvider:
@@ -533,6 +810,10 @@ def collect_sources(
                 f"第{n}章 {len(names)} 份" for n, names in sorted(coverage.items())
             )
         )
+    # 盘点层只报覆盖度与缺口：按用户拍板的优先级逐类列「文件数 / 已抽出事实数」，
+    # 并对「有 PDF 但零结构化事实」单独报缺，避免把文件存在误读成数据齐备。
+    merged.notes.extend(merged.coverage_report(mode))
+    merged.gaps.extend(merged.extraction_gaps())
     return merged
 
 

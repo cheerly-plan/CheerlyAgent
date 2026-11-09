@@ -230,7 +230,10 @@ def _run_request(req: ReportRequest) -> ReportResult:
     # 默认 full+separate：底稿与深度两份 PDF；off 时连模块都不 import。
     deep_options = None
     if req.deep != "off":
-        from ai_agent.report.deep import ENTRY_CHAPTER_CONCURRENCY
+        from ai_agent.report.deep import (
+            ENTRY_CHAPTER_CONCURRENCY,
+            default_facts_dir,
+        )
         from ai_agent.report.deep.bridge import DeepOptions
 
         deep_options = DeepOptions(
@@ -238,6 +241,9 @@ def _run_request(req: ReportRequest) -> ReportResult:
             pdf_mode=req.deep_pdf,
             # 对外入口显式开启章节并行；库级 run_report 默认仍是串行。
             chapter_concurrency=ENTRY_CHAPTER_CONCURRENCY,
+            # 显式挂载结构化事实清单目录；库级 DeepOptions 默认 None 不启用，
+            # 目录缺失时由 LocalFactsProvider 记缺口，绝不假装有外部数据。
+            facts_dir=default_facts_dir(),
         )
     return run_report(
         req.request,

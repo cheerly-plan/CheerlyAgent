@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "schema": "deep-facts/v1",
+    "note": "格式模板，仅示范字段与写法，不是真实数据；复制到 data/deep_facts/ 后按原文改写。value 必须逐字来自源文件，禁止换算或心算。",
+    "fact_count": 2
+  },
+  "facts": [
+    {
+      "item": "分部收入-存储芯片",
+      "value": "1,234,567.00元",
+      "source_file": "甲公司2024年年度报告（00000000-0000-0000-0000-000000000000）",
+      "doc_type": "annual",
+      "level": "L1",
+      "location": "第88页 附注十二、分部信息",
+      "quote": "存储芯片分部收入 1,234,567.00 元",
+      "subject": "甲公司",
+      "period": "2024Y",
+      "acquisition": "人工核对年报附注原文录入",
+      "chapters": [3, 4, 6]
+    },
+    {
+      "item": "关键审计事项数量",
+      "value": "3",
+      "source_file": "甲公司2025年审计报告（00000000-0000-0000-0000-000000000001）",
+      "doc_type": "audit",
+      "level": "L1",
+      "location": "第2页 关键审计事项",
+      "quote": "我们识别的关键审计事项共 3 项",
+      "subject": "甲公司",
+      "period": "2025Y",
+      "acquisition": "人工核对审计报告原文录入",
+      "chapters": [2, 3]
+    }
+  ]
+}

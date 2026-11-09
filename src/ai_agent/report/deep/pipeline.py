@@ -477,9 +477,13 @@ def run_deep_analysis(
     cfg = config or DeepConfig()
     if mode not in {"company", "industry"}:
         raise ValueError("mode 只能是 company 或 industry")
-    ledger = SourceLedger.from_facts(list(facts or []))
-    for item in external_sources or []:
+    base_facts = list(facts or [])
+    ledger = SourceLedger.from_facts(base_facts)
+    external_candidates = list(external_sources or [])
+    for item in external_candidates:
         ledger.add_external(**item)
+    # 外部事实的准入结果必须可观测：候选 ≠ 入表，L4/L5 未回溯会被台账拒绝。
+    external_accepted = len(ledger.records) - len(base_facts)
     if mode == "industry":
         ledger.gaps.append(
             DataGap(
@@ -550,6 +554,12 @@ def run_deep_analysis(
     ]
     if sample_note:
         notes.insert(0, sample_note)
+    if external_candidates:
+        notes.append(
+            f"外部事实准入：{len(external_candidates)} 条候选 / "
+            f"{external_accepted} 条入表 / {len(ledger.rejected)} 条被台账拒绝"
+        )
+        notes.extend(f"  拒绝明细：{item}" for item in ledger.rejected[:5])
     if ledger.unit_conversions:
         notes.append(
             f"单位换算白名单：{len(ledger.unit_conversions)} 条台账金额已放行万元/亿元"
