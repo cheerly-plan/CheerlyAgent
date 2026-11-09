@@ -22,6 +22,13 @@ from typing import Any
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.report.progress import (
+    msg_deep_chapter_progress,
+    msg_deep_chapter_serial,
+    msg_deep_chapters_batch,
+    msg_deep_converge_ch9,
+)
+from ai_agent.tools.progress import emit_progress
 from ai_agent.report.deep.analyzer import (
     BudgetExceeded,
     analyze_chapter,
@@ -646,6 +653,8 @@ def run_deep_analysis(
     chapter_2_8 = [n for n in chapter_numbers if 2 <= n <= 8]
     workers = max(1, min(int(cfg.chapter_concurrency or 1), len(chapter_2_8) or 1))
     parallel = workers > 1 and call is not None
+    if use_llm and chapter_2_8:
+        emit_progress(msg_deep_chapters_batch(workers=workers, parallel=parallel))
     if parallel:
         # 章节之间本来是独立验证；并行时不能引用尚未产出的前序结论，否则
         # prompt 会随线程完成顺序变化。统一换成确定性基线快照。
@@ -678,18 +687,37 @@ def run_deep_analysis(
             max_workers=workers, thread_name_prefix="deep-chapter"
         ) as pool:
             futures = {n: pool.submit(run_one, n) for n in chapter_2_8}
+            done = 0
             for number in chapter_2_8:
                 chapter, reason = futures[number].result()
+                done += 1
+                # 进度必须在主线程推：ContextVar 不会进 worker
+                emit_progress(
+                    msg_deep_chapter_progress(
+                        done=done,
+                        total=len(chapter_2_8),
+                        number=number,
+                        title=spec_of(number).title,
+                    )
+                )
                 if reason and not budget_hit:
                     budget_hit = True
                     notes.append(f"预算闸触发：{reason}；后续章节标 skipped")
                 chapters.append(_skipped_chapter(number) if budget_hit else chapter)
     else:
-        for number in chapter_2_8:
+        for index, number in enumerate(chapter_2_8, start=1):
             spec = spec_of(number)
             if call is None or budget_hit:
                 chapters.append(_skipped_chapter(number))
                 continue
+            emit_progress(
+                msg_deep_chapter_serial(
+                    number=number,
+                    title=spec.title,
+                    index=index,
+                    total=len(chapter_2_8),
+                )
+            )
             try:
                 chapter = analyze_chapter(
                     spec, ledger, target=display_target, period=period, mode=mode,
@@ -715,6 +743,7 @@ def run_deep_analysis(
     falsifiers: list[Falsifier] = []
     scenarios: list[Scenario] = []
     if 9 in enabled_set and converge_call is not None and not budget_hit:
+        emit_progress(msg_deep_converge_ch9())
         spec = spec_of(9)
         mainlines_text = "\n".join(
             f"- {item.business}（{item.rule}）：{item.chain}｜{item.tier}｜{item.status}"

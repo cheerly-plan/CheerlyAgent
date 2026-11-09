@@ -24,27 +24,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ai_agent.core.logging import get_logger
+from ai_agent.report.progress import advance_progress
 from ai_agent.tools.progress import reset_progress, set_progress
 
 logger = get_logger(__name__)
 
 Runner = Callable[[], dict[str, Any]]
 
-# 阶段关键字 → 进度百分比。命中即取，进度只增不减，成功时置 100。
-_STAGE_PERCENT: tuple[tuple[str, int], ...] = (
-    ("理解研报需求", 5),
-    ("准备财报原文", 12),
-    ("核对／补齐财报原文", 12),
-    ("抽取财务指标", 30),
-    ("计算同比", 45),
-    ("校验数字", 58),
-    ("渲染 PDF", 70),
-    ("深度分析", 86),
-    ("合并深度", 88),
-    ("落盘产物", 94),
-    ("研报已生成", 96),
-)
-_MAX_PROGRESS = 96
 _TERMINAL = frozenset({"succeeded", "failed"})
 
 
@@ -138,13 +124,12 @@ class ReportJobManager:
                 reset_progress(token)
 
     def _on_progress(self, job_id: str, message: str) -> None:
-        percent = next((p for key, p in _STAGE_PERCENT if key in message), 0)
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.status in _TERMINAL:
                 return
             job.stage = message
-            job.progress = max(job.progress, min(_MAX_PROGRESS, percent))
+            job.progress = advance_progress(job.progress, message)
             if not job.messages or job.messages[-1] != message:
                 job.messages.append(message)
             del job.messages[:-30]

@@ -26,6 +26,11 @@ from ai_agent.report.deep.sources import (
 from ai_agent.report.extract import IndicatorFact, _files_for, extract_indicators
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.skills import get_skill
+from ai_agent.report.progress import (
+    msg_ensure_deep_annuals,
+    msg_extract_deep_facts,
+    msg_deep_facts_ready,
+)
 from ai_agent.tools.progress import emit_progress
 
 logger = get_logger(__name__)
@@ -112,7 +117,7 @@ def ensure_deep_annuals(
     max_full = deep_full_size_limit_bytes()
     limit = max(int(settings.cninfo_auto_fetch_max), 1)
 
-    emit_progress(f"正在核对／补齐近 {years} 年年报（深度台账）…")
+    emit_progress(msg_ensure_deep_annuals(years=years))
     wait_ids: list[str] = []
     fetch_slots = 0
     summary_hits = 0
@@ -204,7 +209,7 @@ def ensure_deep_annuals(
                 + (f" 等共 {len(not_ready)} 份" if len(not_ready) > 8 else "")
             )
 
-    emit_progress("正在从年报抽取主指标写入深度事实清单…")
+    emit_progress(msg_extract_deep_facts())
     rows: list[dict] = []
     skipped = 0
     for period in periods:
@@ -264,6 +269,7 @@ def ensure_deep_annuals(
         f"深度年报事实清单已写入 {path.name}（{len(rows)} 条；"
         f"窗口 {window}；摘要降级 {summary_hits} 份）"
     )
+    emit_progress(msg_deep_facts_ready(fact_count=len(rows)))
     return result
 
 

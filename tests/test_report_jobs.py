@@ -142,3 +142,27 @@ def test_job_routes_are_registered():
     assert "/v1/report/jobs/{job_id}/result" in paths
     # 既有同步端点没被替换
     assert "/v1/report" in paths
+
+
+def test_manager_advances_progress_via_shared_stage_map():
+    """jobs 只消费 progress.advance_progress，深度细档须离开抽数档。"""
+    manager = ReportJobManager()
+
+    def runner():
+        from ai_agent.report.progress import (
+            msg_deep_bypass,
+            msg_deep_converge_ch9,
+            msg_extract_indicators,
+        )
+
+        emit_progress(msg_extract_indicators())
+        emit_progress(msg_deep_bypass())
+        emit_progress(msg_deep_converge_ch9())
+        return {"report_id": "stage-map"}
+
+    job = manager.submit(owner="alice", request_text="x", runner=runner)
+    done = _wait(manager, job.job_id, "alice")
+    assert done.status == "succeeded" and done.progress == 100
+    assert any("抽取财务指标" in m for m in done.messages)
+    assert any("深度分析旁路" in m for m in done.messages)
+    assert any("收敛深度分析第 9 章" in m for m in done.messages)

@@ -71,9 +71,10 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
         default_facts_dir,
     )
     from ai_agent.report.deep.bridge import DeepOptions
+    from ai_agent.report.progress import msg_entry_with_deep, msg_report_done
     from ai_agent.tools.progress import emit_progress
 
-    emit_progress("正在生成底稿与深度解析…")
+    emit_progress(msg_entry_with_deep())
     # 聊天入口默认双 PDF：底稿可自动定稿；深度 .deep.pdf 单独强制人工审。
     result = run_report(
         request,
@@ -91,10 +92,7 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
         ),
     )
     gaps = len(getattr(result, "gaps", []) or [])
-    if gaps:
-        emit_progress(f"研报已生成（另有 {gaps} 处数据缺口待说明）")
-    else:
-        emit_progress("研报已生成")
+    emit_progress(msg_report_done(gaps=gaps))
     artifacts = result.artifacts
     lines = [
         "研报已由服务端确定性流水线生成（正文数字只来自知识库表格，已过校验门禁）。",

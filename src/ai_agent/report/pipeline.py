@@ -151,12 +151,24 @@ def run_report(
     ``"merge"`` 是兼容档，仍把带标注的附录追加进同一份 PDF 并让整份报告
     进入人工审核。两种模式都不改 Markdown 正文、溯源附件与校验门禁。
     """
+    from ai_agent.report.progress import (
+        msg_compare_and_compose,
+        msg_deep_bypass,
+        msg_ensure_filings,
+        msg_extract_indicators,
+        msg_merge_deep,
+        msg_render_pdf,
+        msg_separate_deep_pdf,
+        msg_understanding,
+        msg_validate,
+        msg_write_artifacts,
+    )
     from ai_agent.tools.progress import emit_progress
 
     # skill_id 为空时保持旧调用形态（只传 request）：外部对 parse_request
     # 的替身多为单参数 lambda，统一带 kwarg 会让它们全部 TypeError。
     # 用「理解需求」避免和 PDF 入库「解析中」混淆。
-    emit_progress("正在理解研报需求…")
+    emit_progress(msg_understanding())
     plan = parse_request(request, skill_id=skill_id) if skill_id else parse_request(request)
     if deliverable in {"pdf", "markdown"}:
         plan.deliverable = deliverable
@@ -166,11 +178,7 @@ def run_report(
     ensure_notes: list[str] = []
     try:
         subject_n = len(plan.subjects) or 1
-        emit_progress(
-            f"正在核对／补齐财报原文（{subject_n} 家公司）…"
-            if subject_n > 1
-            else "正在核对／补齐财报原文…"
-        )
+        emit_progress(msg_ensure_filings(subject_count=subject_n))
         ensured = ensure_filings_for_report(plan, request_text=request)
         ensure_notes = list(ensured.notes)
         if ensured.fetched_any:
@@ -186,13 +194,13 @@ def run_report(
         logger.exception("研报自动补齐原文失败，继续用现有知识库抽数")
         ensure_notes.append("自动补齐原文失败，已跳过")
 
-    emit_progress("正在抽取财务指标…")
+    emit_progress(msg_extract_indicators())
     facts, missing, views = _extract_all(plan)
     if ensure_notes:
         missing = [*ensure_notes, *missing]
     facts = ensure_amount_units(facts)
     measures = [f.to_measure() for f in facts]
-    emit_progress("正在计算同比／环比与撰写正文…")
+    emit_progress(msg_compare_and_compose())
     series = compare_measures(measures)
     analysis = analyze_operations(plan, facts, series=series, views=views)
     if analysis.derived_facts:
@@ -206,7 +214,7 @@ def run_report(
     # series 显式传进去：和撰写用的是同一批 Measure，校验允许的数字集合
     # 才和正文一致，不会出现「正文写了、校验说没算过」的假错。
     # views 也要传：单季列与较上年末变动的数字必须过原文核对。
-    emit_progress("正在校验数字与出处…")
+    emit_progress(msg_validate())
     validation = validate_report(
         document, facts, plan=plan, series=series, views=views
     )
@@ -235,7 +243,7 @@ def run_report(
         result.pdf_error = "校验未通过：禁止渲染 PDF，请在审核队列处置错误后重新生成"
         document.deliverable = "markdown"
     elif want_pdf:
-        emit_progress("正在渲染 PDF…")
+        emit_progress(msg_render_pdf())
         try:
             charts = charts_for_report(plan, facts, series)
             result.pdf = render_report_pdf(document, charts=charts)
@@ -254,7 +262,7 @@ def run_report(
         try:
             from ai_agent.report.deep.bridge import attach_deep
 
-            emit_progress("正在生成深度分析旁路产物…")
+            emit_progress(msg_deep_bypass())
             result.deep_analysis = attach_deep(result, deep)
             result.deep_write_artifacts = deep.write_artifacts
         except Exception as exc:
@@ -268,7 +276,7 @@ def run_report(
             and result.pdf is not None
             and deep.pdf_mode == "merge"
         ):
-            emit_progress("正在合并深度分析附录…")
+            emit_progress(msg_merge_deep())
             _merge_deep_appendix(result, document, charts)
         elif (
             result.deep_analysis is not None
@@ -277,10 +285,10 @@ def run_report(
         ):
             # 双 PDF 档：推断层单独成文件。事实层 PDF 缺失时函数内部会跳过，
             # 避免出现「没有底稿可对照的推断文件」单独外流。
-            emit_progress("正在生成独立深度分析 PDF…")
+            emit_progress(msg_separate_deep_pdf())
             _render_separate_deep_pdf(result)
 
-    emit_progress("正在落盘产物…")
+    emit_progress(msg_write_artifacts())
     _write_artifacts(result)
     # 产物全部落盘后再登记审核：指纹才覆盖最终字节。登记失败宁可整体抛错，
     # 也不能出现「有 PDF、没有审核记录」的漏网之鱼。
