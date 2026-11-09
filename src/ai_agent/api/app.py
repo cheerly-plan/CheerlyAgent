@@ -43,6 +43,16 @@ async def lifespan(app: FastAPI):
     app.state.report_config_lint = lint_report_config(strict=settings.report_config_strict)
     # schema 迁移走 Alembic（版本化、可回滚）；ensure_schema 保留作回滚锚点
     run_migrations()
+    # 补登记历史深度层审核记录：旧清理逻辑曾把 <id>-deep 当磁盘残留删掉，
+    # 那些 .deep.pdf 会因「没有审核记录」既不能预览也不能下载。幂等、只补不删。
+    try:
+        from ai_agent.report.review import repair_deep_records
+
+        repaired = repair_deep_records()
+        if repaired:
+            _logger.warning("已补登记 %s 条深度层审核记录（历史清理误删）", repaired)
+    except Exception:
+        _logger.exception("深度层审核记录补登记失败，不影响启动")
     # 重排后端自检：默认 local_ce，未装依赖/无权重时显式告警并退回 LLM
     from ai_agent.kb.retrieval.rerank import probe_reranker
 

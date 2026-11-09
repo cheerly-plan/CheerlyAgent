@@ -374,6 +374,66 @@ def create_deep_record(
         return _save_record(record, output_dir)
 
 
+def repair_deep_records(output_dir: Path | str | None = None) -> int:
+    """补齐缺失的 ``<id>-deep`` 审核记录，返回补建条数。
+
+    背景：清理任务曾把「索引里有、但文件不按自己 id 命名」的深度层记录当成
+    磁盘残留（mtime=0）删掉，导致已经生成的 ``.deep.pdf`` 既不能下载也不能
+    预览（409 没有审核记录）。清理逻辑已修，但历史文件需要一次性补登记。
+
+    只补「主记录还在 + ``.deep.pdf``/``.deep.md``/``.deep.json`` 齐全」的，
+    一律登记为 pending —— 仍然必须人工批准 + 定稿才能下载，不存在绕过门禁。
+    幂等：已有记录直接跳过。
+    """
+    root = Path(output_dir) if output_dir else settings.report_output_dir
+    if not root.is_dir():
+        return 0
+    created = 0
+    with _LOCK:
+        records = _read_index(root)
+        for pdf_path in sorted(root.glob("*" + _DEEP_PDF_SUFFIX)):
+            match = _ID_IN_NAME.search(pdf_path.name)
+            if not match:
+                continue
+            report_id = f"{match.group(1)}{DEEP_SUFFIX}"
+            if report_id in records:
+                continue
+            main = records.get(match.group(1))
+            if main is None:
+                continue
+            stem = pdf_path.name[: -len(_DEEP_PDF_SUFFIX)]
+            markdown_path = root / f"{stem}.deep.md"
+            json_path = root / f"{stem}.deep.json"
+            if not (markdown_path.is_file() and json_path.is_file()):
+                continue
+            now = _now()
+            record = ReviewRecord(
+                report_id=report_id,
+                title=f"{main.get('title') or stem}（推断层）",
+                report_status=str(main.get("report_status") or ""),
+                created_at=now,
+                updated_at=now,
+                validation_passed=bool(main.get("validation_passed")),
+                artifacts={
+                    "markdown": markdown_path.name,
+                    "provenance": json_path.name,
+                    "pdf": pdf_path.name,
+                    "review": "",
+                },
+                items=[
+                    ReviewEntry(
+                        id="r001",
+                        reason=DEEP_REVIEW_REASON,
+                        value="deep_pdf_standalone",
+                    )
+                ],
+            )
+            record.content_hash = _current_hash(record, root)
+            _save_record(record, root)
+            created += 1
+    return created
+
+
 def get_record(
     report_id: str, output_dir: Path | str | None = None, *, verify: bool = True
 ) -> ReviewRecord | None:

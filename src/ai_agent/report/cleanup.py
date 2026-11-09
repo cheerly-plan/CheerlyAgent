@@ -42,6 +42,10 @@ class _Edition:
     title: str
     mtime: float
     files: list[Path] = field(default_factory=list)
+    # 版本标题是从 .deep.* 文件名取的（深度文件名比正文多一个「报告」后缀）。
+    # 一旦看到正文文件，就用正文标题覆盖，否则同一份报告会因为两种标题
+    # 分进两个「同标题」组，同标题清理就漏掉旧版。
+    title_from_deep: bool = False
 
 
 def cleanup_reports(
@@ -142,24 +146,42 @@ def _scan(root: Path) -> dict[str, _Edition]:
             continue
         report_id = match.group("id")
         title = match.group("title")
+        is_deep = ".deep." in path.name
         edition = editions.get(report_id)
         if edition is None:
-            edition = _Edition(report_id=report_id, title=title, mtime=0.0)
+            edition = _Edition(
+                report_id=report_id, title=title, mtime=0.0, title_from_deep=is_deep
+            )
             editions[report_id] = edition
+        elif edition.title_from_deep and not is_deep:
+            edition.title = title
+            edition.title_from_deep = False
         edition.files.append(path)
         try:
             edition.mtime = max(edition.mtime, path.stat().st_mtime)
         except OSError:
             continue
-    # 审核索引里有、磁盘已空的残留，也纳入可删集合（仅 id，无文件）
+    # 索引里有、但文件不按自己的 id 命名的记录（典型是 <id>-deep：产物文件名
+    # 里写的是主 id），_scan 永远配不到它的 edition。若它指向的文件还在，就不是
+    # 「磁盘已空的残留」，要按文件 mtime 参与保留期判断——否则每次维护清理都会
+    # 把深度层审核记录当过期删掉，已生成的 .deep.pdf 随即既不能下载也不能预览
+    # （409 没有审核记录）。files 刻意留空：这些文件归主 edition，不能重复删。
     try:
         for report_id, data in review_store.list_index_records(root).items():
             if report_id in editions:
                 continue
+            mtime = 0.0
+            for name in (data.get("artifacts") or {}).values():
+                if not name:
+                    continue
+                try:
+                    mtime = max(mtime, (root / str(name)).stat().st_mtime)
+                except OSError:
+                    continue
             editions[report_id] = _Edition(
                 report_id=report_id,
                 title=str(data.get("title") or report_id),
-                mtime=0.0,
+                mtime=mtime,
             )
     except review_store.ReviewError:
         logger.exception("读取研报审核索引失败，本次只按磁盘文件清理")

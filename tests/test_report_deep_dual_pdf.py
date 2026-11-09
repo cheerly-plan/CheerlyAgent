@@ -487,3 +487,33 @@ def test_cors_exposes_preview_gate_headers():
     exposed = cors[0].kwargs.get("expose_headers", [])
     assert "X-Report-Download-Allowed" in exposed
     assert "X-Report-Review-Status" in exposed
+
+
+def test_repair_deep_records_restores_one_lost_by_cleanup(tmp_path, monkeypatch):
+    """历史清理 bug 把 <id>-deep 记录删了；启动时补登记，救回已生成的 deep.pdf。"""
+    import json as _json
+
+    from ai_agent.report import review as review_store
+
+    rid = "aaaaaaaa13"
+    title = "中国银行 2026Q3 财报深度分析"
+    stem = f"{title}报告_{rid}"
+    for name in (f"{title}_{rid}.md", f"{title}_{rid}.pdf",
+                 f"{stem}.deep.md", f"{stem}.deep.json", f"{stem}.deep.pdf"):
+        (tmp_path / name).write_bytes(b"x")
+    index = tmp_path / "_review" / "index.json"
+    index.parent.mkdir(parents=True)
+    index.write_text(_json.dumps({"version": 1, "records": {rid: {
+        "report_id": rid, "title": title, "status": "finalized",
+        "report_status": "ok", "validation_passed": True,
+        "artifacts": {"markdown": f"{title}_{rid}.md", "pdf": f"{title}_{rid}.pdf"},
+        "items": [], "decisions": [],
+    }}}, ensure_ascii=False), encoding="utf-8")
+
+    assert review_store.repair_deep_records(tmp_path) == 1
+    record = review_store.get_record(f"{rid}-deep", tmp_path)
+    assert record is not None
+    assert record.status == review_store.PENDING
+    assert record.artifacts["pdf"] == f"{stem}.deep.pdf"
+    # 幂等：再跑一次不重复登记
+    assert review_store.repair_deep_records(tmp_path) == 0

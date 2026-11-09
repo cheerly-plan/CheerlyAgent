@@ -93,3 +93,59 @@ def test_remove_records_is_idempotent(tmp_path: Path):
     _edition(tmp_path, "x", "deadbeef01")
     assert remove_records(["deadbeef01"], tmp_path) == 1
     assert remove_records(["deadbeef01"], tmp_path) == 0
+
+
+def _deep_edition(root: Path, title: str, report_id: str, *, age_days: float = 0) -> None:
+    """主记录 + 三份 .deep.* 文件 + `<id>-deep` 审核记录（文件名里是主 id）。"""
+    _edition(root, title, report_id, age_days=age_days)
+    # 深度产物名比正文多一个「报告」后缀（pipeline.deep_report_title），
+    # 和真实数据一致；_scan 必须用正文标题归一化版本标题。
+    stem = f"{title}报告_{report_id}"
+    deep_pdf = root / f"{stem}.deep.pdf"
+    deep_md = root / f"{stem}.deep.md"
+    deep_json = root / f"{stem}.deep.json"
+    for path in (deep_pdf, deep_md, deep_json):
+        _touch(path, age_days=age_days)
+    index = root / "_review" / "index.json"
+    payload = json.loads(index.read_text(encoding="utf-8"))
+    payload["records"][f"{report_id}-deep"] = {
+        "report_id": f"{report_id}-deep",
+        "title": f"{title}报告（推断层）",
+        "status": "pending",
+        "artifacts": {
+            "markdown": deep_md.name,
+            "provenance": deep_json.name,
+            "pdf": deep_pdf.name,
+            "review": "",
+        },
+    }
+    index.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_cleanup_keeps_deep_record_whose_files_still_exist(tmp_path: Path):
+    """<id>-deep 的文件名写的是主 id，_scan 配不到 edition；不能当残留删掉。
+
+    历史 bug：删掉后 .deep.pdf 因「没有审核记录」既不能下载也不能预览。
+    """
+    title = "中国银行 2026Q3 财报深度分析"
+    _deep_edition(tmp_path, title, "aaaaaaaa11")
+
+    cleanup_reports(tmp_path, keep_latest=1, retention_days=30)
+
+    records = list_index_records(tmp_path)
+    assert "aaaaaaaa11" in records
+    assert "aaaaaaaa11-deep" in records
+    assert (tmp_path / f"{title}报告_aaaaaaaa11.deep.pdf").exists()
+
+
+def test_cleanup_deletes_deep_record_with_its_main_edition(tmp_path: Path):
+    title = "中国银行 2026Q3 财报深度分析"
+    _deep_edition(tmp_path, title, "aaaaaaaa12", age_days=2)
+    _deep_edition(tmp_path, title, "bbbbbbbb12", age_days=0)
+
+    result = cleanup_reports(tmp_path, keep_latest=1, retention_days=0)
+
+    assert "aaaaaaaa12" in result.deleted_report_ids
+    records = list_index_records(tmp_path)
+    assert "aaaaaaaa12-deep" not in records
+    assert "bbbbbbbb12-deep" in records
