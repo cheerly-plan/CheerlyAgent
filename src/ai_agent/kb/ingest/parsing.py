@@ -761,6 +761,10 @@ def _rows_to_markdown(rows: list[list[str]]) -> str:
     """二维单元格 → Markdown 表格。PDF/DOCX/Excel 三路共用同一份输出格式。"""
     if not rows:
         return ""
+    # 延迟导入：table_cells 顶部依赖本模块的 _escape_cell / normalize_choices
+    from ai_agent.kb.ingest.table_cells import _ensure_row_header
+
+    rows = _ensure_row_header(rows)
     width = max(len(row) for row in rows)
     rows = [row + [""] * (width - len(row)) for row in rows]
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * width]

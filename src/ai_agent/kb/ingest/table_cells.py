@@ -26,13 +26,36 @@ _CELL_WS = re.compile(r"\s+")
 _NUM_DECIMAL = re.compile(r"(\d[\d,]*)\s+(\d+)\s*\.\s*(\d*)")
 # 千分位也逃不过断行："114 376 427 06 , , ." 是 114,376,427.06
 # （PDF 把逗号和小数点排到单元格末尾，前面只剩一串数字碎片）
-_NUM_THOUSANDS = re.compile(r"^(\d+(?:\s+\d+)+)\s*(?:[,]\s*)*\.\s*(\d*)$")
+# 可选的「-」：负数常被排成 "47 987 216 45\n- , , ."
+_NUM_THOUSANDS = re.compile(
+    r"^(\d+(?:\s+\d+)+)\s*(-)?\s*(?:[,，]\s*)*\.\s*(\d*)$"
+)
+# 小数被拆成两个一位数组："665 661 530 3 8" → 665,661,530.38
+_NUM_SPLIT_DEC = re.compile(r"^(\d+(?:\s+\d+)*)\s+(\d)\s+(\d)\s*$")
+# 整数千分位空格："1 788 827 976" / "+586 594" / "1 500 000 000 KRW"
+# 要求第一段后每段恰 3 位，避开日期「2016 12 31」和「1 6月」
+_NUM_INT_SPACED = re.compile(
+    r"^([+-]?)(\d{1,3}(?: \d{3})+)(?:\s+([A-Za-z]{2,4}))?$"
+)
+_NUM_INT_SPACED_RUN = re.compile(r"(?<![\d.,])(\d{1,3}(?: \d{3})+)(?![\d.])")
 # "2006年 1 6月 -" 是 2006年1-6月：连字符被甩到单元格最后
 _NUM_RANGE = re.compile(r"(\d+)\s+(\d+月)\s*-\s*$")
 # 中文字之间的空格也是排版字距（"木粉 复合油 ，"），不是真空格
 _CJK = "\u4e00-\u9fff\u3040-\u30ff"
 _CJK_SPACE = re.compile(f"([{_CJK}])\\s+([{_CJK}])")
 _CJK_RE = re.compile(f"[{_CJK}]")
+# 合并单元格把「一、」甩到标题下一行，且顺序颠倒：「账面原值\n一、 ：」
+_ORDINAL_GLUE = re.compile(
+    rf"^((?:[{_CJK}0-9A-Za-z（）()]){{2,40}})"
+    rf"([一二三四五六七八九十]+)、\s*：?$"
+)
+# 附注表「1期初余额」缺分隔符
+_NOTE_INDEX = re.compile(
+    rf"^(\d{{1,2}})(期初余额|期末余额|本期增加金额|本期减少金额|"
+    rf"购置|处置|在建工程转入|企业合并增加)$"
+)
+# 末行孤儿标点：只含正负号/千分位/小数点，是数字甩尾不是正文句号
+_NUM_TAIL_PUNCT = re.compile(r"^[\s\-－,，.]+$")
 # 标点被单独排版时前后会多出空格："复合油 ，" / "（ 注"
 _SPACE_BEFORE_PUNCT = re.compile(r"\s+([，。、；：？！）】》」』%])")
 _SPACE_AFTER_PUNCT = re.compile(r"([（【《「『])\s+")
@@ -97,6 +120,22 @@ def _tidy_header(row: list[str]) -> list[str]:
     return [re.sub(r"^项目[^：]{1,10}：$", "项目", cell) if cell else cell for cell in row]
 
 
+def _ensure_row_header(rows: list[list[str]]) -> list[list[str]]:
+    """首行是科目/数据时补一行列名。
+
+    Markdown 表格约定首行即表头；续表漏补头时，科目名会顶成列名，
+    切片层再把这一行复制到每一片，检索全是「长期股权投资 | …」假表头。
+    """
+    if not rows:
+        return rows
+    first = rows[0]
+    if _is_header_row(first) or not (_is_item_row(first) or _is_data_row(first)):
+        return rows
+    width = max(len(row) for row in rows)
+    header = ["项目"] + [f"列{i}" for i in range(2, width + 1)]
+    return [header, *rows]
+
+
 def _is_data_row(row: list[str]) -> bool:
     """数据行：至少有一个纯数字单元格。"""
     return any(cell and _NUM_ONLY.match(cell) for cell in row)
@@ -153,7 +192,10 @@ def _clean_table(raw: list[list[str | None]]) -> list[list[list[str]]]:
         part = _merge_header(part)
         part = _split_interleaved(part)
         part = _align_header(part)
-        out.append(_add_kv_header(_fill_header_corner(_drop_empty_cols(part))))
+        part = _add_kv_header(_fill_header_corner(_drop_empty_cols(part)))
+        if part and _is_header_row(part[0]):
+            part = [_tidy_header(part[0]), *part[1:]]
+        out.append(part)
     return out
 
 
@@ -267,6 +309,7 @@ def _fill_wrap_punct(text: str, marks: list[str]) -> str:
 
 def _clean_cell(value: str | None) -> str:
     text = value or ""
+    trailing_minus = False
     if "\n" in text:
         # 多行单元格里的孤儿标点行分三类（都是 PDF 把标点排成独立块）：
         # - 只有点的「. / , .」：是前面数字被甩出的小数点（可带千分位逗号），
@@ -274,18 +317,32 @@ def _clean_cell(value: str | None) -> str:
         #   是 2,000.00；
         # - 纯中文标点（「， 、 ；」）：插回上一行空格缝，职责表靠这个还原；
         # - 中英文混杂（", ，" / ". 。 ，"）：数字碎片和句读搅在一起，
-        #   位置不可考，删掉。末行句号仍保留。
+        #   位置不可考，删掉。末行中文句号仍保留；「- , , .」是负数甩尾，不留。
         dots = 0
         kept: list[str] = []
         lines = text.split("\n")
         for i, ln in enumerate(lines):
-            if _DOT_ROW.match(ln.strip()):
+            stripped = ln.strip()
+            if _DOT_ROW.match(stripped):
                 dots += 1
             elif _WRAP_PUNCT.match(ln) and kept:
                 kept[-1] = _fill_wrap_punct(
                     kept[-1], _WRAP_PUNCT_MARK.findall(ln)
                 )
-            elif _PUNCT_ROW.match(ln) and i < len(lines) - 1:
+            elif _PUNCT_ROW.match(stripped) and _NUM_TAIL_PUNCT.match(stripped):
+                # 「. .」是日期甩尾，留给后面的 _DATE_DOTS*；
+                # 「- , , .」才是金额甩尾；裸「-」留给「1-6月」还原。
+                if re.fullmatch(r"[.\s]+", stripped) and stripped.count(".") >= 2:
+                    kept.append(ln)
+                elif "." in stripped or "," in stripped or "，" in stripped:
+                    if re.search(r"[-－]", stripped):
+                        trailing_minus = True
+                    dots += stripped.count(".")
+                elif i < len(lines) - 1:
+                    continue
+                else:
+                    kept.append(ln)
+            elif _PUNCT_ROW.match(stripped) and i < len(lines) - 1:
                 continue
             else:
                 kept.append(ln)
@@ -302,12 +359,28 @@ def _clean_cell(value: str | None) -> str:
     m = _NUM_THOUSANDS.match(text)
     if m:
         groups = m.group(1).split()
-        text = ",".join(groups[:-1]) + "." + groups[-1] + m.group(2)
+        sign = "-" if m.group(2) or trailing_minus else ""
+        text = sign + ",".join(groups[:-1]) + "." + groups[-1] + m.group(3)
+        trailing_minus = False
     else:
-        text = _NUM_DECIMAL.sub(
-            lambda m: f"{m.group(1)}.{m.group(2)}{m.group(3)}", text
-        )
-        text = _NUM_RANGE.sub(r"\1-\2", text)
+        split = _NUM_SPLIT_DEC.match(text)
+        if split and any(len(p) >= 2 for p in split.group(1).split()):
+            ints = split.group(1).split()
+            sign = "-" if trailing_minus else ""
+            text = sign + ",".join(ints) + "." + split.group(2) + split.group(3)
+            trailing_minus = False
+        else:
+            rebuilt = _rebuild_int_spaced(text)
+            if rebuilt is not None:
+                if trailing_minus and not rebuilt.startswith("-"):
+                    rebuilt = "-" + rebuilt.lstrip("+")
+                text = rebuilt
+                trailing_minus = False
+            else:
+                text = _NUM_DECIMAL.sub(
+                    lambda m: f"{m.group(1)}.{m.group(2)}{m.group(3)}", text
+                )
+                text = _NUM_RANGE.sub(r"\1-\2", text)
     text = _CJK_SPACE.sub(r"\1\2", text)
     # 数字与中文之间也是排版间距："2005年12月31 日" → "2005年12月31日"
     text = re.sub(rf"([{_CJK}])\s+(\d)", r"\1\2", text)
@@ -318,14 +391,49 @@ def _clean_cell(value: str | None) -> str:
     text = _DATE_DASH.sub(r"\1-\2-\3", text)
     # 日期区间里的空格："2009.08.07- 2019.08.06"
     text = re.sub(r"(\d)\s*-\s+(\d)", r"\1-\2", text)
+    # 整段没吃掉时，再扫一遍文内的整数千分位空格（抵押说明等）
+    text = _NUM_INT_SPACED_RUN.sub(lambda m: m.group(1).replace(" ", ","), text)
     m = _NUM_TRAIL_SIGNS.match(text)
     if m:
-        text = ("-" if m.group(2) else "") + m.group(1)
+        text = ("-" if m.group(2) or trailing_minus else "") + m.group(1)
+        trailing_minus = False
+    elif trailing_minus and re.match(r"^[\d.,]+$", text):
+        text = "-" + text
     text = _SPACE_AFTER_PUNCT_2.sub(r"\1", text)
     text = _TRAIL_COMMA.sub("", text)
     text = _CJK_COMMA.sub("", text)
+    text = _untangle_ordinal_label(text)
+    note = _NOTE_INDEX.match(text)
+    if note:
+        text = f"{note.group(1)}.{note.group(2)}"
     # 表格里也有勾选（「是否 √是 □否」），和正文同一个符号字体问题
     return _escape_cell(normalize_choices(text))
+
+
+def _rebuild_int_spaced(text: str) -> str | None:
+    """整格都是「空格千分位」整数（可带正负号、币种后缀）时还原成逗号。"""
+    m = _NUM_INT_SPACED.match(text)
+    if not m:
+        return None
+    sign, body, unit = m.group(1), m.group(2), m.group(3)
+    out = sign + body.replace(" ", ",")
+    if unit:
+        out = f"{out} {unit}"
+    return out
+
+
+def _untangle_ordinal_label(text: str) -> str:
+    """还原颠倒的「一、标题」。
+
+    合并单元格常把章节序号甩到下一视觉行，抽出来变成「账面原值一、：」。
+    表头「项目」有时再粘一层：「项目账面原值一、」。
+    """
+    if text.startswith("项目") and _ORDINAL_GLUE.match(text[2:]):
+        text = text[2:]
+    m = _ORDINAL_GLUE.match(text)
+    if not m:
+        return text
+    return f"{m.group(2)}、{m.group(1)}："
 
 
 def _regroup_tail(text: str) -> str:

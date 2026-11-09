@@ -613,6 +613,23 @@ def test_chunk_long_table_repeats_header():
     assert all(c.kind == "table" for c in chunks)
 
 
+def test_chunk_table_demotes_item_row_fake_header():
+    """漏补头时科目行顶成了 Markdown 表头，切片不能把它复制到每一片。"""
+    rows = "\n".join(
+        f"| 科目{i} | {i}00 | {i}11 |" for i in range(40)
+    )
+    text = "| 长期股权投资 | 100 | 90 |\n|---|---|---|\n" + rows
+    chunks = chunk_segments([Segment(text, 92, "table")], max_chars=180)
+    assert len(chunks) > 1
+    assert all(c.text.startswith("| 项目 | 列2 | 列3 |") for c in chunks)
+    # 原假表头降回数据行，至少出现在某一片里，而不是消失
+    assert any("长期股权投资" in c.text for c in chunks)
+    # 不能再让每一片都以科目名当表头
+    assert not any(
+        c.text.splitlines()[0].startswith("| 长期股权投资 |") for c in chunks
+    )
+
+
 def test_chunk_long_table_repeats_caption_too():
     """表题（「母公司利润表」）要跟着每一片走。
 
@@ -705,6 +722,49 @@ def test_chunk_merged_table_keeps_page_span():
     assert len(chunks) == 1
     assert chunks[0].page == 7
     assert chunks[0].page_end == 8
+
+
+def test_md_table_group_mode_section_packs_rows():
+    """文字层 Markdown 表也要吃 section：片数应明显少于默认 row。"""
+    rows = "\n".join(
+        f"| 科目{i:02d}名称较长一些 | {i},234,567.89 | {i},876,543.21 |"
+        for i in range(40)
+    )
+    text = "合并资产负债表\n| 项目 | 期末 | 期初 |\n|---|---|---|\n" + rows
+    row_chunks = chunk_segments(
+        [Segment(text, 92, "table")], max_chars=500, overlap=0
+    )
+    sec_chunks = chunk_segments(
+        [Segment(text, 92, "table")],
+        max_chars=500,
+        overlap=0,
+        table_group_mode="section",
+    )
+    assert len(sec_chunks) > 1
+    assert len(sec_chunks) < len(row_chunks)
+    assert all(c.text.startswith("合并资产负债表\n| 项目 | 期末 | 期初 |") for c in sec_chunks)
+
+
+def test_md_table_group_mode_section_breaks_on_section_label():
+    """「流动资产：」分组标题强制起新片，不与上一组混在一起。"""
+    flow = "\n".join(f"| 流动项{i:02d} | {i}00 | {i}11 |" for i in range(6))
+    nonflow = "\n".join(f"| 非流动项{i:02d} | {i}00 | {i}11 |" for i in range(6))
+    text = (
+        "合并资产负债表\n| 项目 | 期末 | 期初 |\n|---|---|---|\n"
+        f"| 流动资产： |  |  |\n{flow}\n"
+        f"| 非流动资产： |  |  |\n{nonflow}"
+    )
+    chunks = chunk_segments(
+        [Segment(text, 91, "table")],
+        max_chars=500,
+        overlap=0,
+        table_group_mode="section",
+    )
+    hosts = [c for c in chunks if "非流动资产：" in c.text]
+    assert hosts
+    # 用 "| 流动项" 锚，避开「非流动项」子串误匹配
+    assert all("| 流动项" not in c.text for c in hosts)
+    assert all(c.text.startswith("合并资产负债表\n| 项目 | 期末 | 期初 |") for c in chunks)
 
 
 def test_table_group_mode_section_aggregates_by_section():

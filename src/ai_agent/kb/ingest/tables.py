@@ -451,6 +451,61 @@ def _pdf_tables_isolated(
     return _carry_page_headers(out, heights), heights
 
 
+# 续表清洗时常丢掉的空列名。table-stitcher 叫 width drift：列数差几列
+# 仍可能是同一张表，不能因为「附注」空列被删就放弃补头。
+_OPTIONAL_HEADER_COLS = frozenset({"附注", "注释", "行次", "序号"})
+_MAX_WIDTH_DRIFT = 2
+
+
+def _fit_header_to_width(header: list[str], width: int) -> list[str] | None:
+    """把上页表头压到本页列数。压不动就返回 None（不硬凑）。"""
+    cells = list(header)
+    if len(cells) == width:
+        return _tidy_header(cells)
+    if len(cells) < width or len(cells) - width > _MAX_WIDTH_DRIFT:
+        return None
+    trimmed = [c for c in cells if c not in _OPTIONAL_HEADER_COLS]
+    if len(trimmed) == width:
+        return _tidy_header(trimmed)
+    trimmed = [c for c in trimmed if c]
+    if len(trimmed) == width:
+        return _tidy_header(trimmed)
+    trimmed = [c for c in cells if c]
+    if len(trimmed) == width:
+        return _tidy_header(trimmed)
+    return None
+
+
+def _pad_rows_to_header(
+    rows: list[list[str]], header: list[str]
+) -> list[list[str]] | None:
+    """本页列数偏少时，按表头里的可选列位置补空格，对齐到上页宽度。"""
+    hw = len(header)
+    if hw <= 0:
+        return None
+    out: list[list[str]] = []
+    for row in rows:
+        cells = list(row)
+        if len(cells) == hw:
+            out.append(cells)
+            continue
+        if len(cells) > hw or hw - len(cells) > _MAX_WIDTH_DRIFT:
+            return None
+        for i, name in enumerate(header):
+            if len(cells) >= hw:
+                break
+            if name in _OPTIONAL_HEADER_COLS and (
+                i >= len(cells) or cells[i] != name
+            ):
+                cells.insert(i, "")
+        if len(cells) < hw:
+            cells.extend([""] * (hw - len(cells)))
+        if len(cells) != hw:
+            return None
+        out.append(cells)
+    return out
+
+
 def _carry_page_headers(
     tables: list[tuple[int, float, tuple, list[list[str]]]],
     page_heights: dict[int, float],
@@ -466,7 +521,7 @@ def _carry_page_headers(
     - 表格在页面顶部（续表只会从顶部开始）；
     - 首行是科目行（有数字，或金额格是空的）；
     - 上一页最后一张表排到了页底（说明它是被切断的，不是自己结束的）；
-    - 列数与最近一次见到的表头一致。
+    - 列数一致，或仅差可选空列（附注等，width drift ≤ 2）。
     """
     prev_bottom: dict[int, float] = {}
     for pno, _y, bbox, _rows in tables:
@@ -480,12 +535,21 @@ def _carry_page_headers(
             y <= _HEAD_CARRY_Y
             and _is_item_row(rows[0])
             and last_header is not None
-            and len(last_header) == width
             and _reached_page_bottom(
                 prev_bottom.get(pno - 1), page_heights.get(pno - 1)
             )
         ):
-            rows = [_tidy_header(last_header), *rows]
+            header = _tidy_header(last_header)
+            if len(header) == width:
+                rows = [header, *rows]
+            else:
+                fitted = _fit_header_to_width(header, width)
+                if fitted is not None:
+                    rows = [fitted, *rows]
+                else:
+                    padded = _pad_rows_to_header(rows, header)
+                    if padded is not None:
+                        rows = [header, *padded]
         out.append((pno, y, bbox, rows))
         if _is_header_row(rows[0]):
             last_header = rows[0]
@@ -525,10 +589,54 @@ def _merge_continued_tables(
     return out
 
 
+def _normalize_table_widths(
+    head: list[list[str]], tail: list[list[str]]
+) -> tuple[list[list[str]], list[list[str]]] | None:
+    """合并前把两段表对齐到同一列数；差太多则放弃。"""
+    hw = max(len(r) for r in head)
+    tw = max(len(r) for r in tail)
+    if hw == tw:
+        return head, tail
+    if abs(hw - tw) > _MAX_WIDTH_DRIFT:
+        return None
+    if hw > tw and _is_header_row(head[0]):
+        padded = _pad_rows_to_header(tail, head[0])
+        if padded is not None:
+            return head, padded
+        fitted = _fit_header_to_width(head[0], tw)
+        if fitted is None:
+            return None
+        # 表头可压到本页宽度：整段 head 也压（去掉对应可选列）
+        drop = [
+            i
+            for i, cell in enumerate(head[0])
+            if cell in _OPTIONAL_HEADER_COLS and cell not in fitted
+        ]
+        if not drop:
+            return None
+        slim_head = [
+            [cell for i, cell in enumerate(row) if i not in drop]
+            for row in head
+        ]
+        return slim_head, tail
+    if tw > hw and _is_header_row(tail[0]):
+        padded = _pad_rows_to_header(head, tail[0])
+        if padded is not None:
+            return padded, tail
+    return None
+
+
 def _concat_table_rows(
     head: list[list[str]], tail: list[list[str]]
 ) -> list[list[str]]:
-    if tail and head and tail[0] == head[0]:
+    aligned = _normalize_table_widths(head, tail)
+    if aligned is None:
+        return [*head, *tail]
+    head, tail = aligned
+    if tail and head and (
+        tail[0] == head[0] or _is_header_row(tail[0])
+    ):
+        # 重印表头或补过头的续表：丢掉下段表头行
         return [*head, *tail[1:]]
     return [*head, *tail]
 
@@ -542,12 +650,18 @@ def _is_table_continuation(
     c_page, c_y, c_bbox, c_rows, c_cap = cur
     if not p_rows or not c_rows:
         return False
-    if max(len(r) for r in p_rows) != max(len(r) for r in c_rows):
+    pw = max(len(r) for r in p_rows)
+    cw = max(len(r) for r in c_rows)
+    if abs(pw - cw) > _MAX_WIDTH_DRIFT:
+        return False
+    if pw != cw and _normalize_table_widths(p_rows, c_rows) is None:
         return False
     if p_cap and c_cap and p_cap != c_cap:
         return False
     # 续表要么重印同一行表头，要么第一行已经是科目（金额可以为空）
-    if p_rows[0] != c_rows[0] and not _is_item_row(c_rows[0]):
+    if p_rows[0] != c_rows[0] and not _is_item_row(c_rows[0]) and not _is_header_row(
+        c_rows[0]
+    ):
         return False
     if not _boxes_vertically_stacked(p_bbox, c_bbox):
         return False

@@ -1123,6 +1123,10 @@ def _chunk_table(text: str, *, max_chars: int, group_mode: str = "row") -> list[
     「项目 | 本期 | 上期 + 一堆数字」，看不出这张表属于谁、单位是什么。
 
     「其中：」子项、金融工具三个计量类别、合计 / 总计都跟所属科目走。
+
+    ``group_mode``：``row`` 每个科目一片；``section`` 按 max_chars 在科目
+    边界累积（与 HTML 表同一策略）。文字层产出的是 Markdown 表，以前漏接
+    了 section，年报会切出上千片几乎等长的单行表。
     """
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
@@ -1133,7 +1137,9 @@ def _chunk_table(text: str, *, max_chars: int, group_mode: str = "row") -> list[
     html_parts = _chunk_html_table(text, max_chars=max_chars, group_mode=group_mode)
     if html_parts is not None:
         return html_parts
-    if len(text) <= max_chars:
+    # row 模式短表整片留；section 模式要进打包器，才能在「流动资产：」这类
+    # 分组标题处强制起新片（与 HTML section 行为一致）。
+    if group_mode != "section" and len(text) <= max_chars:
         return [text]
 
     caption: list[str] = []
@@ -1145,14 +1151,47 @@ def _chunk_table(text: str, *, max_chars: int, group_mode: str = "row") -> list[
         None,
     )
     if sep_index is not None:
-        header, data = [*caption, *lines[: sep_index + 1]], lines[sep_index + 1 :]
+        header, data = _demote_fake_md_header(
+            caption, lines[:sep_index], lines[sep_index], lines[sep_index + 1 :]
+        )
     else:
         header, data = [*caption, *lines[:1]], lines[1:]
     if not data:
         # 不是表格形态（单行超长），退回普通切分
         return chunk_text(text, max_chars=max_chars, overlap=0)
 
-    return _pack_table_units(header, _table_row_units(data)) or [text]
+    units = _table_row_units(data)
+    if group_mode == "section":
+        return _pack_table_units_section(header, units, max_chars=max_chars) or [text]
+    return _pack_table_units(header, units) or [text]
+
+
+def _md_row_cells(line: str) -> list[str]:
+    raw = line.strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [part.strip() for part in re.split(r"(?<!\\)\|", raw)]
+
+
+def _demote_fake_md_header(
+    caption: list[str],
+    header_rows: list[str],
+    separator: str,
+    data: list[str],
+) -> tuple[list[str], list[str]]:
+    """科目行误当 Markdown 表头时降回数据行，换成中性列名再切。"""
+    from ai_agent.kb.ingest.table_cells import _is_data_row, _is_item_row
+
+    if not header_rows:
+        return [*caption, separator], data
+    cells = _md_row_cells(header_rows[-1])
+    if not (_is_item_row(cells) or _is_data_row(cells)):
+        return [*caption, *header_rows, separator], data
+    width = max(1, len(cells))
+    synth = "| " + " | ".join(["项目"] + [f"列{i}" for i in range(2, width + 1)]) + " |"
+    return [*caption, synth, separator], [*header_rows, *data]
 
 
 def _md_first_cell(line: str) -> str:
@@ -1224,6 +1263,52 @@ def _pack_table_units(header: list[str], units: list[list[str]]) -> list[str]:
             emit()
             restart()
         buf.extend(unit)
+    emit()
+    return _merge_orphan_total_chunks(header, out)
+
+
+def _lines_len(lines: list[str]) -> int:
+    return sum(len(line) + 1 for line in lines)
+
+
+def _pack_table_units_section(
+    header: list[str], units: list[list[str]], *, max_chars: int
+) -> list[str]:
+    """Markdown 表的 section 模式：按 max_chars 在科目边界累积。
+
+    与 ``_split_html_table_grouped`` 对齐——分组标题（「流动资产：」）强制
+    起新片；「其中：」/合计已收进 unit，不会被窗口切断。
+    """
+    out: list[str] = []
+    section: list[str] = []
+    buf: list[str] = list(header)
+    cur_len = _lines_len(buf)
+
+    def has_account() -> bool:
+        return any(line not in header and not _is_section_label(line) for line in buf)
+
+    def emit() -> None:
+        if has_account():
+            out.append("\n".join(buf))
+
+    def restart() -> None:
+        nonlocal buf, cur_len
+        buf = [*header, *section]
+        cur_len = _lines_len(buf)
+
+    for unit in units:
+        if len(unit) == 1 and _is_section_label(unit[0]):
+            if has_account():
+                emit()
+            section = list(unit)
+            restart()
+            continue
+        unit_len = _lines_len(unit)
+        if has_account() and cur_len + unit_len > max_chars:
+            emit()
+            restart()
+        buf.extend(unit)
+        cur_len += unit_len
     emit()
     return _merge_orphan_total_chunks(header, out)
 
