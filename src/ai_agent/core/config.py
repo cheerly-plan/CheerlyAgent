@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     # 调用可跑十几分钟，期间没有进度事件时网关会直接掐断连接。
     # 0 或负数 = 关闭心跳（旧行为）。
     sse_heartbeat_seconds: float = 15.0
+    # 深度分析（研报）第 2-8 章并行度，只作用于对外入口（HTTP / 聊天工具），
+    # 库级 DeepConfig 仍是 1。7 章在 3 路下是 3+3+1 三波，4 路是 4+3 两波；
+    # 网关并发额度宽裕时可调到 4–7，超出额度会 429。
+    report_deep_chapter_concurrency: int = 3
+    # 单章评审轮次并行度：0 = 该章所有轮次一起发（默认 3 路）；1 = 逐轮串行
+    # （网关并发额度紧张时回退）；其它正整数 = 线程池上限。
+    report_deep_review_round_concurrency: int = 0
+    # 对外入口章节/评审通道：primary=直接主模型（默认）；small=小模型优先、
+    # 空 content 自动升级主模型。
+    report_deep_chapter_channel: str = "primary"
     # 数据库连接池上限，需 ≥ 聊天并发 + 标题线程池 + 收尾线程池之和
     db_pool_max_size: int = 28
     # 允许的跨域来源，逗号分隔，如 "http://localhost:5173,https://chat.example.com"

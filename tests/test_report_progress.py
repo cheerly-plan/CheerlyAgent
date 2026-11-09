@@ -7,7 +7,9 @@ from ai_agent.report.progress import (
     advance_progress,
     msg_compare_and_compose,
     msg_deep_bypass,
+    msg_deep_chapter_analyzed,
     msg_deep_chapter_progress,
+    msg_deep_chapter_round,
     msg_deep_chapter_serial,
     msg_deep_chapters_batch,
     msg_deep_converge_ch9,
@@ -45,6 +47,14 @@ def test_stage_percent_maps_msg_builders():
         msg_deep_chapter_serial(number=3, title="护城河", index=2, total=7)
     ) == 80
     assert stage_percent(
+        msg_deep_chapter_analyzed(
+            number=2, title="收入", rounds=3, concurrent=True
+        )
+    ) == 82
+    assert stage_percent(
+        msg_deep_chapter_round(number=2, title="收入", done=2, total=3)
+    ) == 84
+    assert stage_percent(
         msg_deep_chapter_progress(done=3, total=7, number=4, title="估值")
     ) == 86
     assert stage_percent(msg_deep_converge_ch9()) == 92
@@ -52,7 +62,11 @@ def test_stage_percent_maps_msg_builders():
     assert stage_percent(msg_separate_deep_pdf()) == 94
     assert stage_percent(msg_write_artifacts()) == 95
     assert stage_percent(msg_report_done()) == 96
-    assert "10–15 分钟" in msg_entry_with_deep()
+    assert "5–8 分钟" in msg_entry_with_deep()
+    # 细档进度必须在 80-86 之间单调爬，不能被笼统「深度分析」抢成 86
+    assert stage_percent(
+        msg_deep_chapter_analyzed(number=2, title="收入", rounds=3, concurrent=False)
+    ) == 82
 
 
 def test_deep_stage_progress_is_monotonic_and_leaves_extract_tier():
@@ -66,6 +80,11 @@ def test_deep_stage_progress_is_monotonic_and_leaves_extract_tier():
         msg_extract_deep_facts(),
         msg_deep_facts_ready(fact_count=8),
         msg_deep_chapters_batch(workers=3, parallel=True),
+        msg_deep_chapter_analyzed(
+            number=2, title="收入", rounds=3, concurrent=True
+        ),
+        msg_deep_chapter_round(number=2, title="收入", done=1, total=3),
+        msg_deep_chapter_round(number=2, title="收入", done=3, total=3),
         msg_deep_chapter_progress(done=1, total=7, number=2, title="收入"),
         msg_deep_chapter_progress(done=7, total=7, number=8, title="风险"),
         msg_deep_converge_ch9(),

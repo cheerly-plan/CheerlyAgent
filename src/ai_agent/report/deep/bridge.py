@@ -69,6 +69,9 @@ class DeepOptions:
     # 第 2-8 章并行度，只在未显式传 config 时生效。1（库级默认）= 原有逐章
     # 串行与前序结论链；对外入口会显式设为 ENTRY_CHAPTER_CONCURRENCY 提速。
     chapter_concurrency: int = 1
+    # 单章评审轮次并行度，只在未显式传 config 时生效。1（库级默认）= 逐轮串行；
+    # 0 = 该章所有轮次一起发（对外入口用 ENTRY_REVIEW_ROUND_CONCURRENCY）。
+    review_round_concurrency: int = 1
     # 章节/评审通道策略："" = 跟随 DeepConfig 库级默认（small，小模型优先）；
     # ``"primary"`` = 直接主模型（决策 ④-B）。对外入口显式设为 ENTRY_CHAPTER_CHANNEL。
     chapter_channel: str = ""
@@ -155,6 +158,7 @@ def attach_deep(result: "ReportResult", options: DeepOptions) -> DeepAnalysisRes
     cfg = options.config or DeepConfig(
         enabled=options.enabled,
         chapter_concurrency=options.chapter_concurrency,
+        review_round_concurrency=options.review_round_concurrency,
         chapter_channel=options.chapter_channel or "small",
     )
     deep = run_deep_analysis(

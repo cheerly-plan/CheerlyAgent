@@ -68,6 +68,7 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
     from ai_agent.report.deep import (
         ENTRY_CHAPTER_CHANNEL,
         ENTRY_CHAPTER_CONCURRENCY,
+        ENTRY_REVIEW_ROUND_CONCURRENCY,
         default_facts_dir,
     )
     from ai_agent.report.deep.bridge import DeepOptions
@@ -83,6 +84,9 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
         deep=DeepOptions(
             enabled=True, pdf_mode="separate",
             chapter_concurrency=ENTRY_CHAPTER_CONCURRENCY,
+            # 单章内 3 轮评审并发发出：轮次互不依赖，单章耗时从 1 写+3 审
+            # 压成 1 写+1 审，深度层整体约减半（不改评审 prompt 与合并顺序）。
+            review_round_concurrency=ENTRY_REVIEW_ROUND_CONCURRENCY,
             # 对外入口章节/评审直接主模型（决策 ④-B）：小模型空响应已实测 100%，
             # 先跑一轮只会白付延迟；库级默认仍是 small。
             chapter_channel=ENTRY_CHAPTER_CHANNEL,

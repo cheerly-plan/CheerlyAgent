@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from ai_agent.core.exceptions import LLMError
@@ -383,6 +384,15 @@ def render_chapter_for_review(chapter: ChapterResult) -> str:
     return "\n".join(parts)
 
 
+def planned_review_rounds(rounds: int) -> list[int]:
+    """评审实际会跑的轮次：``rounds`` 轮 + 第 5 轮终审（与 rounds 重合时去重）。"""
+    return list(dict.fromkeys(list(range(1, max(1, int(rounds)) + 1)) + [5]))
+
+
+def review_round_count(rounds: int) -> int:
+    return len(planned_review_rounds(rounds))
+
+
 def review_chapter(
     chapter: ChapterResult,
     ledger: SourceLedger,
@@ -392,23 +402,28 @@ def review_chapter(
     prior: str,
     complete: Complete,
     max_opinions: int = 4,
+    round_concurrency: int = 1,
+    on_round: Callable[[int, int], None] | None = None,
 ) -> list[ReviewOpinion]:
     """按轮次执行专家评审。默认 2 轮 + 1 次一致性与终审（合并第 4/5 轮）。
 
     12 专家 × 5 轮全开会到 600 次调用量级；这里把同一轮的多个视角合并进
     **一次**调用，是成本与质量的工程折中。full_panel 可切回全量视角。
+
+    轮次之间**互不依赖**：``render_review_user`` 只吃章节正文与台账，不带上
+    上一轮的意见，所以同一章的 3 次评审可以并发跑。``round_concurrency``：
+    ``1`` = 逐轮串行（库级默认，行为逐字不变）；``0``/负数 = 所有轮一起发；
+    其它正整数 = 线程池上限。并发时结果仍按轮次顺序合并，输出顺序与串行一致。
     """
+
     expert_block = "\n".join(
         f"- {name}：{EXPERT_VIEWS.get(name, '独立审查视角')}" for name in experts
     )
     goals = {1: "初审（求广）", 2: "修订审查", 3: "深度审查", 4: "一致性检查", 5: "终审确认"}
-    opinions: list[ReviewOpinion] = []
-    schedule = list(range(1, max(1, rounds) + 1)) + [5]
-    seen_rounds: set[int] = set()
-    for round_no in schedule:
-        if round_no in seen_rounds:
-            continue
-        seen_rounds.add(round_no)
+    schedule = planned_review_rounds(rounds)
+    limit = max_opinions * len(schedule)
+
+    def run_round(round_no: int) -> list[ReviewOpinion]:
         user = render_review_user(
             ROUND=str(round_no),
             ROUND_GOAL=goals.get(round_no, "终审确认"),
@@ -425,9 +440,10 @@ def review_chapter(
             raise
         except Exception as exc:
             logger.warning("第 %s 章第 %s 轮评审失败：%s", chapter.number, round_no, exc)
-            continue
+            return []
         if not isinstance(payload, dict):
-            continue
+            return []
+        rows: list[ReviewOpinion] = []
         for raw in _as_list(payload, "opinions")[: max_opinions * 2]:
             if not isinstance(raw, dict):
                 continue
@@ -443,16 +459,72 @@ def review_chapter(
                 len(reason) < 8 or any(reason.startswith(word) for word in _EMPTY_REASON)
             ):
                 continue  # 空驳回不算处理，按协议丢弃
-            opinions.append(
+            rows.append(
                 ReviewOpinion(
                     round_no=round_no, expert=expert, issue=issue,
                     disposition=disposition, reason=reason,
                     revision=_text(raw.get("revision"), 200),
                 )
             )
-            if len(opinions) >= max_opinions * len(schedule):
-                return opinions
+        return rows
+
+    if round_concurrency != 1 and len(schedule) > 1:
+        return _review_rounds_concurrently(
+            run_round, schedule, limit=limit,
+            workers=len(schedule) if round_concurrency <= 0 else round_concurrency,
+            on_round=on_round,
+        )
+
+    opinions: list[ReviewOpinion] = []
+    for index, round_no in enumerate(schedule, start=1):
+        opinions.extend(run_round(round_no))
+        if on_round is not None:
+            on_round(index, len(schedule))
+        if len(opinions) >= limit:
+            # 串行时旧实现是在 append 的瞬间就返回（恰好 limit 条）；截断保持同序同量
+            return opinions[:limit]
     return opinions
+
+
+def _review_rounds_concurrently(
+    run_round: Callable[[int], list[ReviewOpinion]],
+    schedule: list[int],
+    *,
+    limit: int,
+    workers: int,
+    on_round: Callable[[int, int], None] | None,
+) -> list[ReviewOpinion]:
+    """轮次并发执行，按 ``schedule`` 顺序合并，保证输出与串行逐字同序。
+
+    ``on_round`` 在调用方线程里递增回调（不并发），进度文案不会乱序。
+    预算闸：任一轮抛 ``BudgetExceeded`` 时，等在途轮次收尾后原样上抛；已产出的
+    意见随异常一起丢弃，与串行「超预算即中断评审」的语义一致。
+    """
+    results: dict[int, list[ReviewOpinion]] = {}
+    finished = 0
+    budget_error: BudgetExceeded | None = None
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(workers, len(schedule))),
+        thread_name_prefix="deep-review",
+    ) as pool:
+        futures = {pool.submit(run_round, round_no): round_no for round_no in schedule}
+        for future in as_completed(futures):
+            round_no = futures[future]
+            try:
+                results[round_no] = future.result()
+            except BudgetExceeded as exc:
+                budget_error = budget_error or exc
+                continue
+            finished += 1
+            if on_round is not None:
+                on_round(finished, len(schedule))
+    if budget_error is not None:
+        raise budget_error
+
+    opinions: list[ReviewOpinion] = []
+    for round_no in schedule:
+        opinions.extend(results.get(round_no, []))
+    return opinions[:limit]
 
 
 def converge(

@@ -82,6 +82,7 @@ from ai_agent.report.deep.analyzer import assess_convergence, normalize_moat_rat
 from ai_agent.report.deep.pipeline import (
     ENTRY_CHAPTER_CHANNEL,
     ENTRY_CHAPTER_CONCURRENCY,
+    ENTRY_REVIEW_ROUND_CONCURRENCY,
     DeepConfig,
     ModelPlan,
     pick_industry_sample,
@@ -109,6 +110,7 @@ __all__ = [
     "CHAPTERS",
     "ENTRY_CHAPTER_CHANNEL",
     "ENTRY_CHAPTER_CONCURRENCY",
+    "ENTRY_REVIEW_ROUND_CONCURRENCY",
     "ChapterResult",
     "DeepAnalysisResult",
     "DeepConfig",

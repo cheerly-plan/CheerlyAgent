@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -23,12 +22,14 @@ from typing import Any
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.report.progress import (
+    msg_deep_chapter_analyzed,
     msg_deep_chapter_progress,
+    msg_deep_chapter_round,
     msg_deep_chapter_serial,
     msg_deep_chapters_batch,
     msg_deep_converge_ch9,
 )
-from ai_agent.tools.progress import emit_progress
+from ai_agent.tools.progress import current_progress, emit_progress
 from ai_agent.report.deep.analyzer import (
     BudgetExceeded,
     analyze_chapter,
@@ -38,6 +39,7 @@ from ai_agent.report.deep.analyzer import (
     guard_conclusion,
     guard_numbers,
     review_chapter,
+    review_round_count,
 )
 from ai_agent.report.deep.chapters import (
     CONTROL_GROUP_NOTE,
@@ -67,7 +69,21 @@ logger = get_logger(__name__)
 # 对外入口（HTTP / 聊天工具）的默认章节并行度：库级 DeepConfig 仍是 1（既有
 # 行为逐字不变），入口显式提速。理由：章节之间本来是独立验证，串行只为了把
 # 前序结论带进 prompt；并行改用基线快照可把整份报告耗时压到接近单章。
-ENTRY_CHAPTER_CONCURRENCY = 3
+# 可用 REPORT_DEEP_CHAPTER_CONCURRENCY 覆盖（读 Settings，故 .env 与真环境变量
+# 都生效）：7 章在 3 路下是 3+3+1 三波，4 路是 4+3 两波；网关并发额度宽裕时
+# 可调到 4–7，否则保持 3 更稳。
+ENTRY_CHAPTER_CONCURRENCY = max(
+    1, min(7, int(settings.report_deep_chapter_concurrency or 3))
+)
+
+# 对外入口的评审轮次并发：0 = 该章所有轮次一起发（默认 3 轮 → 3 路）。
+# 轮次之间互不依赖（prompt 只带章节正文与台账，不带上一轮意见），所以并发
+# 不改变评审语义，只把「1 写 + 3 审」的 4 段串行压成 2 段。
+# 库级 DeepConfig 默认仍是 1（逐轮串行），既有调用方与测试行为逐字不变。
+# 可用 REPORT_DEEP_REVIEW_ROUND_CONCURRENCY=1 回退（例如网关并发额度紧张）。
+ENTRY_REVIEW_ROUND_CONCURRENCY = int(
+    settings.report_deep_review_round_concurrency or 0
+)
 
 # 对外入口（HTTP / 聊天工具）的章节通道默认值：直接主模型（决策 ④-B）。
 # 起因：本地唯一对话模型 qwen3:4b 是思考型，reasoning 吃满 max_tokens 后 content=""
@@ -76,7 +92,7 @@ ENTRY_CHAPTER_CONCURRENCY = 3
 # 想撤回小模型优先（例如换成本地 instruct 模型）：``REPORT_DEEP_CHAPTER_CHANNEL=small``
 # 或显式 ``DeepConfig(chapter_channel="small")``。
 ENTRY_CHAPTER_CHANNEL = (
-    os.getenv("REPORT_DEEP_CHAPTER_CHANNEL", "primary").strip().lower() or "primary"
+    (settings.report_deep_chapter_channel or "primary").strip().lower() or "primary"
 )
 
 
@@ -110,6 +126,10 @@ class DeepConfig:
     # 第 2-8 章并行度。1（默认）= 原有逐章串行、保留前序章节结论链；>1 时
     # 前序上下文改用基线快照（候选主线 + 台账要点），结果仍按章节号确定性汇总。
     chapter_concurrency: int = 1
+    # 单章内评审轮次的并行度：1（默认）= 逐轮串行（与旧行为一致）；0/负数 =
+    # 该章所有轮次一起发；其它正整数 = 线程池上限。轮次之间互不依赖，并发
+    # 只影响耗时，不影响评审 prompt 与合并顺序。
+    review_round_concurrency: int = 1
 
     def active_experts(self) -> tuple[str, ...]:
         return EXPERT_NAMES if self.full_panel else self.experts
@@ -653,6 +673,20 @@ def run_deep_analysis(
     chapter_2_8 = [n for n in chapter_numbers if 2 <= n <= 8]
     workers = max(1, min(int(cfg.chapter_concurrency or 1), len(chapter_2_8) or 1))
     parallel = workers > 1 and call is not None
+    rounds_planned = review_round_count(cfg.review_rounds)
+    rounds_concurrent = cfg.review_round_concurrency != 1 and rounds_planned > 1
+    # ContextVar 不跨线程：主线程先取出回调，章节/评审 worker 显式调用。
+    # 回调约定线程安全（聊天侧 queue.put、任务表侧有锁）。
+    notify = current_progress()
+
+    def notify_worker(message: str) -> None:
+        if notify is None:
+            return
+        try:
+            notify(message)
+        except Exception:  # 进度推送失败不能拖垮研报
+            logger.debug("深度章节进度推送失败", exc_info=True)
+
     if use_llm and chapter_2_8:
         emit_progress(msg_deep_chapters_batch(workers=workers, parallel=parallel))
     if parallel:
@@ -663,6 +697,11 @@ def run_deep_analysis(
             f"章节并行：第 2-8 章 {workers} 并发，前序上下文改用基线快照"
             "（候选主线+台账要点），结果按章节号确定性汇总；模型事件按完成顺序记录"
         )
+        if rounds_concurrent:
+            notes.append(
+                f"评审轮次并行：每章 {rounds_planned} 轮并发发出（轮次互不依赖，"
+                "结果仍按轮次顺序合并），单章耗时由「1 写 + N 审」压成「1 写 + 1 审」"
+            )
 
         def run_one(number: int) -> tuple[ChapterResult, str]:
             spec = spec_of(number)
@@ -672,10 +711,22 @@ def run_deep_analysis(
                     prior=baseline, complete=call,
                     max_claims=cfg.max_claims_per_chapter,
                 )
+                notify_worker(
+                    msg_deep_chapter_analyzed(
+                        number=number, title=spec.title,
+                        rounds=rounds_planned, concurrent=rounds_concurrent,
+                    )
+                )
                 chapter.review = review_chapter(
                     chapter, ledger, experts=cfg.active_experts(), rounds=cfg.review_rounds,
                     prior=baseline, complete=call,
                     max_opinions=cfg.max_review_opinions,
+                    round_concurrency=cfg.review_round_concurrency,
+                    on_round=lambda done, total: notify_worker(
+                        msg_deep_chapter_round(
+                            number=number, title=spec.title, done=done, total=total
+                        )
+                    ),
                 )
                 if chapter.review and chapter.status != "fallback":
                     chapter.status = "reviewed"
@@ -700,7 +751,8 @@ def run_deep_analysis(
                 if reason:
                     reasons[number] = reason
                 done += 1
-                # 进度必须在主线程推：ContextVar 不会进 worker
+                # 完成进度在主线程推；章节 worker 内的中间进度（已撰写/评审 x/y）
+                # 走 notify_worker 显式回调，不依赖 ContextVar 跨线程。
                 emit_progress(
                     msg_deep_chapter_progress(
                         done=done,
@@ -741,10 +793,22 @@ def run_deep_analysis(
                     prior=_prior_text(chapters), complete=call,
                     max_claims=cfg.max_claims_per_chapter,
                 )
+                emit_progress(
+                    msg_deep_chapter_analyzed(
+                        number=number, title=spec.title,
+                        rounds=rounds_planned, concurrent=rounds_concurrent,
+                    )
+                )
                 chapter.review = review_chapter(
                     chapter, ledger, experts=cfg.active_experts(), rounds=cfg.review_rounds,
                     prior=_prior_text(chapters), complete=call,
                     max_opinions=cfg.max_review_opinions,
+                    round_concurrency=cfg.review_round_concurrency,
+                    on_round=lambda done, total: emit_progress(
+                        msg_deep_chapter_round(
+                            number=number, title=spec.title, done=done, total=total
+                        )
+                    ),
                 )
                 if chapter.review and chapter.status != "fallback":
                     chapter.status = "reviewed"
@@ -797,6 +861,8 @@ def run_deep_analysis(
                     ch9, ledger, experts=cfg.active_experts(), rounds=1,
                     prior=_prior_text(chapters), complete=converge_call,
                     max_opinions=cfg.max_review_opinions,
+                    # 第 9 章的 2 轮评审同样互不依赖，跟着入口开关一起并发
+                    round_concurrency=cfg.review_round_concurrency,
                 )
                 ch9.status = "reviewed"
                 chapters.append(ch9)

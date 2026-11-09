@@ -23,6 +23,16 @@ def reset_progress(token: Token) -> None:
     _progress.reset(token)
 
 
+def current_progress() -> ProgressFn | None:
+    """取当前线程绑定的进度回调。
+
+    ContextVar 不跨线程继承：深层并发（如深度分析章节/评审 worker）要推进度，
+    必须在主线程先取出回调再显式传进去。回调本身约定线程安全（聊天侧是
+    ``queue.put``，任务表侧有锁），所以 worker 直接调用即可。
+    """
+    return _progress.get()
+
+
 def emit_progress(message: str) -> None:
     text = (message or "").strip()
     if not text:

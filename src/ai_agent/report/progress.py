@@ -29,6 +29,8 @@ STAGE_NEEDLES: tuple[tuple[str, int], ...] = (
     ("开始撰写深度章节", 74),
     ("正在撰写深度分析第 2–8 章", 76),
     ("正在撰写深度分析第", 80),
+    ("已撰写，进入评审", 82),
+    ("评审进度", 84),
     ("深度分析章节进度", 86),
     ("正在收敛深度分析第 9 章", 92),
     ("合并深度", 93),
@@ -38,7 +40,7 @@ STAGE_NEEDLES: tuple[tuple[str, int], ...] = (
     ("研报已生成", 96),
 )
 
-DEEP_ETA_HINT = "深度层约 10–15 分钟，主模型多章评审，进度会持续更新"
+DEEP_ETA_HINT = "深度层约 5–8 分钟，多章并行撰写＋评审，进度会持续更新"
 
 
 def stage_percent(message: str) -> int:
@@ -132,6 +134,16 @@ def msg_deep_chapter_serial(*, number: int, title: str, index: int, total: int) 
 
 def msg_deep_chapter_progress(*, done: int, total: int, number: int, title: str) -> str:
     return f"深度分析章节进度 {done}/{total}（第{number}章 {title}）…"
+
+
+def msg_deep_chapter_analyzed(*, number: int, title: str, rounds: int, concurrent: bool) -> str:
+    """章节正文刚写完、评审还没开始时推一条，避免整章只看到开头一条文案。"""
+    how = f"{rounds} 轮并发" if concurrent else f"{rounds} 轮"
+    return f"深度分析第{number}章 {title} 已撰写，进入评审（{how}）…"
+
+
+def msg_deep_chapter_round(*, number: int, title: str, done: int, total: int) -> str:
+    return f"深度分析第{number}章 {title} 评审进度 {done}/{total}…"
 
 
 def msg_deep_converge_ch9() -> str:
