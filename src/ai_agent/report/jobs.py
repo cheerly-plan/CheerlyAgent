@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from ai_agent.core.logging import get_logger
 from ai_agent.report.progress import advance_progress
+from ai_agent.storage.db import user_scope
 from ai_agent.tools.progress import reset_progress, set_progress
 
 logger = get_logger(__name__)
@@ -100,6 +101,18 @@ class ReportJobManager:
             job = self._jobs.get(job_id)
             return job if job is not None and job.owner == owner else None
 
+    def find_running(self, *, owner: str, request_text: str) -> ReportJob | None:
+        """同一用户同一需求的在跑任务：聊天侧重复提交时复用它，别重复烧模型。"""
+        with self._lock:
+            for job in self._jobs.values():
+                if (
+                    job.owner == owner
+                    and job.request_text == request_text
+                    and job.status in {"queued", "running"}
+                ):
+                    return job
+        return None
+
     def _execute(self, job: ReportJob, runner: Runner) -> None:
         # 信号量满时状态保持 queued，前端轮询看到的就是真实的排队。
         with self._slots:
@@ -108,7 +121,10 @@ class ReportJobManager:
             # ContextVar 是线程本地的：必须在这个 worker 线程里注册回调。
             token = set_progress(lambda message: self._on_progress(job.job_id, message))
             try:
-                payload = runner()
+                # 任务线程不继承请求线程的 ContextVar：显式按 owner 设好用户作用域，
+                # 否则任务里任何 current_user_id() 都会静默退回 "default"。
+                with user_scope(job.owner):
+                    payload = runner()
             except Exception as exc:
                 logger.exception("研报后台任务失败 job_id=%s", job.job_id)
                 self._update(

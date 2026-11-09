@@ -13,6 +13,7 @@ from ai_agent.tools.report import (
     generate_report_tool,
     report_compare_tool,
     report_extract_tool,
+    report_job_status_tool,
     report_validate_tool,
 )
 
@@ -30,6 +31,7 @@ TOOLS = [
     kb_search_tool,
     kg_search_tool,
     generate_report_tool,
+    report_job_status_tool,
     report_extract_tool,
     report_compare_tool,
     report_validate_tool,
@@ -43,6 +45,8 @@ _TOOL_SCHEMAS = [t.schema() for t in TOOLS]
 # 其余沿用 Tool 声明的默认值；裁剪统一走 clip_text（保头保尾 + 显式标记）。
 TOOL_OUTPUT_LIMITS: dict[str, int] = {
     "generate_report": 4000,
+    # 任务完成后返回的是一整段带链接的摘要，截断会把深度链接从中间切掉
+    "report_job_status": 4000,
     "kb_search": 4000,
     "report_extract_indicators": 4000,
 }

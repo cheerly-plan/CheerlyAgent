@@ -41,7 +41,8 @@ from ai_agent.storage.store import store, user_scope
 from ai_agent.tools.progress import reset_progress, set_progress
 from ai_agent.tools.registry import execute_tool, tool_schemas
 
-# 会长时间阻塞（巨潮补齐 + OCR 入库）的工具：丢到工作线程，边跑边推 tool_progress。
+# 会长时间阻塞的工具：丢到工作线程，边跑边推 tool_progress。generate_report
+# 现在只提交后台任务（秒回），留在集合里是为了统一 user_scope / 引用收集的调用路径。
 _PROGRESS_TOOLS = frozenset({"generate_report"})
 # 知识库能力清单按 doc_type 分组，库里类型多了会线性撑大 system；只列文档数
 # 最多的几类，其余让模型用 kb_list_files 现查。整体还有 system_dynamic_max_chars 兜底。

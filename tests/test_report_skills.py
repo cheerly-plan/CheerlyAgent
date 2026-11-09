@@ -442,8 +442,9 @@ def test_generate_report_tool_accepts_report_type(monkeypatch):
         return FakeResult()
 
     monkeypatch.setattr(rg, "run_report", fake_run)
-    out = rg.generate_report_tool.run(
-        request="生成半导体行业 2026Q3 深度分析",
+    # 报告类型透传发生在同步链路里；工具本身只负责提交后台任务
+    out = rg._report_text(
+        "生成半导体行业 2026Q3 深度分析",
         report_type="industry_report",
         write_pdf=False,
     )

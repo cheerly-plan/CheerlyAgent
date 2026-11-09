@@ -13,6 +13,10 @@
 
 默认交付**两份报告**：事实层底稿 PDF + 独立深度解析 PDF（``.deep.pdf``）。
 深度结论永不并入 Markdown 正文；深度 PDF 走独立审核记录。
+
+**异步契约**：工具只提交后台任务并返回 ``job_id``（深度层 5–8 分钟，同步等待
+会把 SSE 拖到网关超时）；结果由 ``report_job_status`` 查，链接与同步链路逐字相同。
+聊天流断开不影响后台任务，同一用户同一需求重复提交会复用在跑的那条。
 """
 
 from __future__ import annotations
@@ -64,7 +68,8 @@ class GenerateReportArgs(BaseModel):
     )
 
 
-def _generate_report(request: str, report_type: str = "", write_pdf: bool = True) -> str:
+def _report_text(request: str, report_type: str = "", write_pdf: bool = True) -> str:
+    """同步跑完整条研报链路，返回给模型的摘要 + 下载链接。"""
     from ai_agent.report.deep import (
         ENTRY_CHAPTER_CHANNEL,
         ENTRY_CHAPTER_CONCURRENCY,
@@ -173,6 +178,45 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
     if result.status != "ok":
         lines.append("状态不是 ok：请如实说明没有生成有效研报及原因，不要补写数字。")
     return "\n".join(lines)
+
+
+def _submitted_text(job, *, reused: bool = False) -> str:
+    head = "已复用在跑的同一研报任务" if reused else "已提交研报生成任务"
+    return "\n".join(
+        [
+            f"{head}：job_id={job.job_id}（服务端后台执行，预估 5–8 分钟）。",
+            "任务跑在服务端后台：聊天连接断开也不会中断，也不会重复扣费。",
+            "现在请如实告诉用户「任务已提交、预计 5–8 分钟、稍后回来查结果」，"
+            "**不要**说报告已生成，**不要**给下载链接，也不要自己撰写正文或复述数字。",
+            "用户问进度或要结果时，调用 report_job_status(job_id) 取最新状态与下载链接；"
+            f"也可以让用户自己轮询 /v1/report/jobs/{job.job_id}。",
+        ]
+    )
+
+
+def _generate_report(request: str, report_type: str = "", write_pdf: bool = True) -> str:
+    """聊天入口：提交后台任务并立刻返回 job_id。
+
+    深度层 5–8 分钟，同步等待会把 SSE 长连接拖到网关超时。改成「提交即返回 +
+    轮询取结果」后，聊天流几秒内结束；断线也不丢活（任务在服务端跑完、产物落盘），
+    结果由 report_job_status 取回。同一用户同一需求重复提交时复用在跑任务。
+    """
+    from ai_agent.report.jobs import job_manager
+    from ai_agent.storage.db import current_user_id
+
+    owner = current_user_id()
+    running = job_manager.find_running(owner=owner, request_text=request)
+    if running is not None:
+        return _submitted_text(running, reused=True)
+    job = job_manager.submit(
+        owner=owner,
+        request_text=request,
+        runner=lambda: {
+            "kind": "chat_report",
+            "text": _report_text(request, report_type, write_pdf),
+        },
+    )
+    return _submitted_text(job)
 
 
 generate_report_tool = Tool(

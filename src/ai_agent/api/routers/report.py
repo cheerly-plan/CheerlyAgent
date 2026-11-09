@@ -294,6 +294,9 @@ def submit_report_job(
 
     ``full`` 档会跑数分钟，网关超时短的场景应走这里。任务表只在进程内存里，
     进程重启后未完成任务会丢失，但已落盘的报告仍可从审核队列/文件端点取回。
+
+    聊天入口的 ``generate_report`` 也提交到这张表（结果存 ``{"kind": "chat_report",
+    "text": …}``）：断线的聊天用户可以用同一个 job_id 在这里轮询与取回。
     """
     job = job_manager.submit(
         owner=user.username,

@@ -241,7 +241,11 @@ def test_generate_report_tool_returns_links_not_body_numbers(monkeypatch):
         return fake
 
     monkeypatch.setattr("ai_agent.tools.report.report_generate.run_report", _fake_run)
-    text = generate_report_tool.run(request="生成中国银行2026Q3财报深度分析PDF研报")
+    # 聊天入口已改「提交后台任务 + 轮询」：这里直接验同步链路产出的摘要与链接，
+    # 工具包装层的异步语义由 tests/test_report_chat_async.py 覆盖。
+    from ai_agent.tools.report.report_generate import _report_text
+
+    text = _report_text("生成中国银行2026Q3财报深度分析PDF研报")
 
     assert captured.get("deep") is not None
     assert captured["deep"].enabled is True
