@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     auth_token: str = ""
     # 聊天流并发上限，超出返回 429
     max_concurrent_chats: int = 20
+    # SSE 保活间隔（秒）：生成器静默超过此时长就发一个标准注释帧
+    # ``: keepalive``，让反代/网关的 idle 计时器归零。研报深度层单次工具
+    # 调用可跑十几分钟，期间没有进度事件时网关会直接掐断连接。
+    # 0 或负数 = 关闭心跳（旧行为）。
+    sse_heartbeat_seconds: float = 15.0
     # 数据库连接池上限，需 ≥ 聊天并发 + 标题线程池 + 收尾线程池之和
     db_pool_max_size: int = 28
     # 允许的跨域来源，逗号分隔，如 "http://localhost:5173,https://chat.example.com"

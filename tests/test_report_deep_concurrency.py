@@ -131,6 +131,43 @@ def test_parallel_reduces_wall_clock_with_slow_completion():
     assert parallel < serial * 0.75, f"串行 {serial:.3f}s / 并发 {parallel:.3f}s"
 
 
+def test_parallel_progress_follows_completion_order():
+    """第 2 章慢时，先完成的章节要立刻推进度，不能被按章号阻塞压住。"""
+    import time
+
+    from ai_agent.tools.progress import reset_progress, set_progress
+
+    messages: list[str] = []
+    token = set_progress(messages.append)
+
+    def slow(system: str, user: str) -> str:
+        # 只有章节分析（不是评审）里能定位章号；让第 2 章明显最慢
+        if (
+            system.startswith("你是上市公司结构化深度投资分析助手")
+            and "第 2 章" in user
+        ):
+            time.sleep(0.2)
+        return payload(system)
+
+    try:
+        result = run_deep_analysis(
+            "甲公司", "2026Q3", facts(),
+            config=DeepConfig(
+                enabled=True, chapters=(2, 3, 4, 9), review_rounds=1,
+                chapter_concurrency=3,
+            ),
+            complete=slow,
+        )
+    finally:
+        reset_progress(token)
+
+    progress = [m for m in messages if "深度分析章节进度" in m]
+    assert len(progress) == 3
+    assert "第2章" not in progress[0], progress
+    # 进度按完成顺序推，结果汇总仍按章节号
+    assert [c.number for c in result.chapters] == [2, 3, 4, 9]
+
+
 def test_parallel_budget_gate_never_exceeds_limit():
     result = run_deep_analysis(
         "甲公司", "2026Q3", facts(),

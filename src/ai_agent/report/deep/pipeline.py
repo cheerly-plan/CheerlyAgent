@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -686,10 +686,19 @@ def run_deep_analysis(
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="deep-chapter"
         ) as pool:
-            futures = {n: pool.submit(run_one, n) for n in chapter_2_8}
+            futures = {pool.submit(run_one, n): n for n in chapter_2_8}
+            results: dict[int, ChapterResult] = {}
+            reasons: dict[int, str] = {}
             done = 0
-            for number in chapter_2_8:
-                chapter, reason = futures[number].result()
+            # 按**完成顺序**推进度：原来按章节号阻塞 futures[n].result()，
+            # 只要第 2 章慢，后面已完成的章节进度全被压住，SSE 在十几分钟
+            # 的章节段里只有开头一条「正在撰写…3 路并行」。
+            for future in as_completed(futures):
+                number = futures[future]
+                chapter, reason = future.result()
+                results[number] = chapter
+                if reason:
+                    reasons[number] = reason
                 done += 1
                 # 进度必须在主线程推：ContextVar 不会进 worker
                 emit_progress(
@@ -700,10 +709,18 @@ def run_deep_analysis(
                         title=spec_of(number).title,
                     )
                 )
-                if reason and not budget_hit:
-                    budget_hit = True
-                    notes.append(f"预算闸触发：{reason}；后续章节标 skipped")
-                chapters.append(_skipped_chapter(number) if budget_hit else chapter)
+            # 结果仍按章节号确定性汇总；预算闸触发点及其之后的章标 skipped，
+            # 与旧「按章节号顺序遇到第一个触发点」的语义逐字等价。
+            budget_at = min(reasons) if reasons else None
+            if budget_at is not None:
+                budget_hit = True
+                notes.append(f"预算闸触发：{reasons[budget_at]}；后续章节标 skipped")
+            for number in chapter_2_8:
+                chapters.append(
+                    _skipped_chapter(number)
+                    if budget_at is not None and number >= budget_at
+                    else results[number]
+                )
     else:
         for index, number in enumerate(chapter_2_8, start=1):
             spec = spec_of(number)
