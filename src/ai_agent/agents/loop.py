@@ -38,7 +38,12 @@ from ai_agent.memory.short_term import (
     short_term_memory,
 )
 from ai_agent.storage.store import store, user_scope
-from ai_agent.tools.progress import reset_progress, set_progress
+from ai_agent.tools.progress import (
+    reset_event_emitter,
+    reset_progress,
+    set_event_emitter,
+    set_progress,
+)
 from ai_agent.tools.registry import execute_tool, tool_schemas
 
 # 会长时间阻塞的工具：丢到工作线程，边跑边推 tool_progress。generate_report
@@ -111,24 +116,31 @@ def _run_tool_with_progress(
     messages: list[ChatMessage],
 ) -> Iterator[dict]:
     """在工作线程跑工具，主循环把进度转成 tool_progress；末尾 yield _tool_result。"""
-    progress_q: queue.Queue[str | None] = queue.Queue()
+    # 队列里可能是进度文案（str），也可能是工具抛出的结构化事件（dict）：
+    # 后者原样下发给前端（如研报后台任务的 job_id），不塞进进度文案。
+    progress_q: queue.Queue[str | dict | None] = queue.Queue()
     prev_turn = extract_prev_turn(messages, settings.kb_rewrite_history_turns)
     question = _latest_user_text(messages)
 
     def _emit(message: str) -> None:
         progress_q.put(message)
 
+    def _emit_event(event: dict) -> None:
+        progress_q.put(dict(event))
+
     def _worker() -> tuple[str, list[dict]]:
         scope_token = set_kb_scope(kb_file_ids)
         rewrite_token = set_rewrite_context(prev_turn)
         question_token = set_kb_question(question)
         progress_token = set_progress(_emit)
+        event_token = set_event_emitter(_emit_event)
         try:
             with collect_citations() as cited:
                 with user_scope(user_id):
                     output = execute_tool(name, arguments)
             return output, list(cited)
         finally:
+            reset_event_emitter(event_token)
             reset_progress(progress_token)
             reset_kb_scope(scope_token)
             reset_rewrite_context(rewrite_token)
@@ -145,6 +157,9 @@ def _run_tool_with_progress(
             continue
         if item is None:
             break
+        if isinstance(item, dict):
+            yield item  # 结构化事件：type 由工具给出，缺 type 的在 emit_event 已挡掉
+            continue
         yield {"type": "tool_progress", "name": name, "message": item}
     while True:
         try:
@@ -152,6 +167,9 @@ def _run_tool_with_progress(
         except queue.Empty:
             break
         if item is None:
+            continue
+        if isinstance(item, dict):
+            yield item
             continue
         yield {"type": "tool_progress", "name": name, "message": item}
     output, cited = future.result()

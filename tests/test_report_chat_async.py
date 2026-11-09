@@ -262,3 +262,25 @@ def test_job_id_input_is_normalized():
     assert _normalize_job_id(" job_id=abc12345 ") == "abc12345"
     assert _normalize_job_id("`abc12345`") == "abc12345"
     assert _normalize_job_id("abc12345") == "abc12345"
+
+
+def test_generate_report_emits_report_job_sse_event(monkeypatch):
+    """前端要渲染任务卡片，得先拿到 job_id：工具通过结构化事件把它抛出去。"""
+    from ai_agent.tools.progress import reset_event_emitter, set_event_emitter
+
+    _patch_run(monkeypatch, lambda *_a, **_k: fake_result())
+    events: list[dict] = []
+    token = set_event_emitter(events.append)
+    try:
+        out = rg.generate_report_tool.run(request="生成中国银行2026Q3财报深度分析PDF研报-事件")
+    finally:
+        reset_event_emitter(token)
+    job_id = JOB_RE.search(out).group(1)
+    assert events == [
+        {
+            "type": "report_job",
+            "job_id": job_id,
+            "poll_url": f"/v1/report/jobs/{job_id}",
+        }
+    ]
+    wait_job(job_id)

@@ -180,6 +180,15 @@ def _report_text(request: str, report_type: str = "", write_pdf: bool = True) ->
     return "\n".join(lines)
 
 
+def _job_event(job) -> dict:
+    """提交/复用时给前端的结构化事件：只给 id 与轮询地址，不带报告正文。"""
+    return {
+        "type": "report_job",
+        "job_id": job.job_id,
+        "poll_url": f"/v1/report/jobs/{job.job_id}",
+    }
+
+
 def _submitted_text(job, *, reused: bool = False) -> str:
     head = "已复用在跑的同一研报任务" if reused else "已提交研报生成任务"
     return "\n".join(
@@ -203,10 +212,12 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
     """
     from ai_agent.report.jobs import job_manager
     from ai_agent.storage.db import current_user_id
+    from ai_agent.tools.progress import emit_event
 
     owner = current_user_id()
     running = job_manager.find_running(owner=owner, request_text=request)
     if running is not None:
+        emit_event(_job_event(running))
         return _submitted_text(running, reused=True)
     job = job_manager.submit(
         owner=owner,
@@ -216,6 +227,9 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
             "text": _report_text(request, report_type, write_pdf),
         },
     )
+    # 前端据此渲染「研报任务卡片」：轮询 /v1/report/jobs/{id} 直到出链接。
+    # 没有订阅者（非聊天入口）时 emit_event 静默丢弃，不影响同步调用方。
+    emit_event(_job_event(job))
     return _submitted_text(job)
 
 
