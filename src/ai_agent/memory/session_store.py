@@ -117,6 +117,32 @@ class SessionStore(Database):
             )
             conn.commit()
 
+    def attach_report_delivery(self, job_id: str, text: str) -> int:
+        """把已完成研报任务的交付文本写回发起它的那条回答。
+
+        任务表是内存的，进程重启就没了；交付文本落到 ``meta.report_delivery``
+        之后，前端刷新或服务重启都能直接从历史消息里把下载链接渲染出来，
+        不必再依赖 ``GET /v1/report/jobs/{id}``。返回命中的消息条数。
+        """
+        if not job_id or not text:
+            return 0
+        with self._get_pool().connection() as conn:
+            cur = conn.execute(
+                """
+                UPDATE agent_chat_history
+                SET meta = jsonb_set(
+                        coalesce(meta, '{}'::jsonb),
+                        '{report_delivery}',
+                        to_jsonb(%s::text),
+                        true
+                    )
+                WHERE meta->>'report_job_id' = %s
+                """,
+                (text, job_id),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     def replace_chat_after_last_user(
         self, user_id: str, chat_session_id: str, messages: list[ChatMessage]
     ) -> None:

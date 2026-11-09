@@ -166,3 +166,41 @@ def test_manager_advances_progress_via_shared_stage_map():
     assert any("抽取财务指标" in m for m in done.messages)
     assert any("深度分析旁路" in m for m in done.messages)
     assert any("收敛深度分析第 9 章" in m for m in done.messages)
+
+
+def test_chat_report_delivery_is_written_back_to_message(monkeypatch):
+    """任务表是内存的：交付文本必须回写到发起它的那条回答里，重启后才有链接。"""
+    from ai_agent.storage.store import store as message_store
+
+    manager = ReportJobManager()
+    seen: dict[str, str] = {}
+
+    def fake_attach(job_id: str, text: str) -> int:
+        seen["job_id"] = job_id
+        seen["text"] = text
+        return 1
+
+    monkeypatch.setattr(message_store, "attach_report_delivery", fake_attach)
+    payload = {
+        "kind": "chat_report",
+        "text": "研报已生成\n- [底稿 PDF](/v1/report/files/a.pdf)",
+    }
+    job = manager.submit(owner="u-1", request_text="x", runner=lambda: payload)
+    done = _wait(manager, job.job_id, "u-1")
+    assert done.status == "succeeded"
+    assert seen == {"job_id": job.job_id, "text": payload["text"]}
+
+
+def test_http_report_payload_is_not_written_back(monkeypatch):
+    from ai_agent.storage.store import store as message_store
+
+    manager = ReportJobManager()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        message_store,
+        "attach_report_delivery",
+        lambda job_id, text: calls.append(job_id) or 0,
+    )
+    job = manager.submit(owner="u-1", request_text="x", runner=lambda: {"report_id": "r1"})
+    _wait(manager, job.job_id, "u-1")
+    assert calls == []

@@ -139,6 +139,17 @@ class ReportJobManager:
                     job.job_id, status="succeeded", stage="已完成", progress=100,
                     result=payload, finished_at=time.time(),
                 )
+                # 聊天任务把交付文本写回发起它的那条回答：任务表是内存的，
+                # 进程重启后前端仍能从历史消息里拿到下载链接。
+                if isinstance(payload, dict) and payload.get("kind") == "chat_report":
+                    try:
+                        from ai_agent.storage.store import store
+
+                        store.attach_report_delivery(
+                            job.job_id, str(payload.get("text") or "")
+                        )
+                    except Exception:
+                        logger.exception("研报交付文本落库失败 job_id=%s", job.job_id)
             finally:
                 reset_progress(token)
 
