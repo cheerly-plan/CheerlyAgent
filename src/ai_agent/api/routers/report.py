@@ -299,7 +299,10 @@ def submit_report_job(
     "text": …}``）：断线的聊天用户可以用同一个 job_id 在这里轮询与取回。
     """
     job = job_manager.submit(
-        owner=user.username,
+        # 任务归属用 user_id（UUID）而不是登录名：聊天入口的 generate_report
+        # 也提交到这张表，它只拿得到 current_user_id()；两边必须同一个键，
+        # 否则聊天任务在前端轮询 /v1/report/jobs/{id} 时会被判成「不是你的任务」。
+        owner=user.user_id,
         request_text=req.request,
         runner=lambda: _payload(_run_request(req)),
     )
@@ -311,7 +314,7 @@ def get_report_job_result(
     job_id: str, _user: UserRecord = Depends(get_current_user)
 ) -> dict:
     """只取已完成任务的完整 payload；未完成返回 409。"""
-    job = job_manager.get(job_id, _user.username)
+    job = job_manager.get(job_id, _user.user_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"没有 job_id={job_id} 的任务")
     if job.status != "succeeded":
@@ -326,7 +329,7 @@ def get_report_job(
     job_id: str, _user: UserRecord = Depends(get_current_user)
 ) -> dict:
     """轮询任务状态。完成时顺带返回 payload，省一次请求。"""
-    job = job_manager.get(job_id, _user.username)
+    job = job_manager.get(job_id, _user.user_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"没有 job_id={job_id} 的任务")
     return job.to_dict(include_result=job.status == "succeeded")

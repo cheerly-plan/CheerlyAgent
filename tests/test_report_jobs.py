@@ -70,7 +70,7 @@ def test_manager_isolates_jobs_by_owner():
 
 
 def _queued_job(manager: ReportJobManager) -> ReportJob:
-    job = ReportJob(job_id="job-fixed-1", owner="alice", request_text="x")
+    job = ReportJob(job_id="job-fixed-1", owner=_ALICE.user_id, request_text="x")
     manager._jobs[job.job_id] = job
     return job
 
@@ -113,7 +113,7 @@ def test_submit_endpoint_shares_sync_pipeline_and_enables_concurrency(monkeypatc
     req = ReportRequest(request="生成甲公司 2026Q3 研报", deep="full", write_pdf=False)
     submitted = router.submit_report_job(req, _ALICE)
     assert submitted["status"] in {"queued", "running", "succeeded"}
-    job = _wait(manager, submitted["job_id"], "alice")
+    job = _wait(manager, submitted["job_id"], _ALICE.user_id)
     assert job.result == {"marker": "result"}
     assert captured["req"] is req
 

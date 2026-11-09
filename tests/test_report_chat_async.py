@@ -284,3 +284,46 @@ def test_generate_report_emits_report_job_sse_event(monkeypatch):
         }
     ]
     wait_job(job_id)
+
+
+def test_chat_job_is_reachable_through_http_endpoint(monkeypatch):
+    """聊天入口提交的任务，前端用同一账号轮询 /v1/report/jobs/{id} 必须查得到。
+
+    任务归属统一用 user_id：聊天侧只有 current_user_id()（UUID），HTTP 侧原先
+    用登录名当 owner，两边不一致时前端轮询会 404。
+    """
+    from fastapi import HTTPException
+
+    from ai_agent.api.routers import report as report_router
+    from ai_agent.storage.db import UserRecord
+
+    release = threading.Event()
+
+    def slow(*_a, **_k):
+        release.wait(5)
+        return fake_result()
+
+    _patch_run(monkeypatch, slow)
+    alice = UserRecord(user_id="uid-alice", username="alice", display_name="alice")
+    with user_scope(alice.user_id):
+        out = rg.generate_report_tool.run(request="生成中国银行2026Q3财报深度分析PDF研报-跨入口")
+    job_id = JOB_RE.search(out).group(1)
+    try:
+        seen = report_router.get_report_job(job_id, alice)
+        assert seen["job_id"] == job_id
+        # 别的账号仍然是 404：不因为统一成 user_id 就放松了隔离
+        bob = UserRecord(user_id="uid-bob", username="bob", display_name="bob")
+        try:
+            report_router.get_report_job(job_id, bob)
+        except HTTPException as exc:
+            assert exc.status_code == 404
+        else:  # pragma: no cover - 走到这里说明隔离失效
+            raise AssertionError("别人不该看到这个任务")
+    finally:
+        release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = job_manager.get(job_id, alice.user_id)
+            if job is not None and job.status in {"succeeded", "failed"}:
+                break
+            time.sleep(0.02)
