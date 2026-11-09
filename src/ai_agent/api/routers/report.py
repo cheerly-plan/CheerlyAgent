@@ -40,7 +40,7 @@ from fastapi.responses import FileResponse
 from ai_agent.api.dependencies import get_current_user
 from ai_agent.api.schemas import ReportDecisionRequest, ReportRequest
 from ai_agent.core.config import settings
-from ai_agent.storage.db import UserRecord
+from ai_agent.storage.db import UserRecord, user_scope
 from ai_agent.report.pipeline import ReportResult, run_report
 from ai_agent.report.jobs import job_manager
 from ai_agent.report import review as review_store
@@ -267,7 +267,9 @@ def create_report(
     """生成一份研报。校验未通过不是 4xx：草稿照常返回，但 PDF 会被门禁挡住。"""
     from ai_agent.core.logging import get_logger
 
-    result = _run_request(req)
+    # 审核记录要按生成者收敛，这里必须带上用户作用域（后台任务由 job 线程设置）
+    with user_scope(user.user_id):
+        result = _run_request(req)
     get_logger(__name__).info(
         "研报生成 user=%s report_id=%s status=%s facts=%d passed=%s pdf=%s review=%s",
         user.username,
@@ -391,10 +393,21 @@ def download_report(
 # ---------------------------------------------------------------------------
 
 
-def _require_reviewer(user: UserRecord) -> None:
-    """审批/定稿的管理员守卫。放在函数体内，直接调用路由也会执行。"""
-    if not settings.is_admin_username(user.username):
-        raise HTTPException(status_code=403, detail="只有管理员可以审核与定稿研报")
+def _is_review_admin(user: UserRecord) -> bool:
+    return settings.is_admin_username(user.username)
+
+
+def _require_review_access(record: review_store.ReviewRecord | None, user: UserRecord) -> None:
+    """审批权：管理员可审全部；普通用户只能审自己生成的那份。
+
+    放在函数体内显式校验，直接调用路由也会执行。``record.owner`` 为空的旧记录
+    只有管理员能动（不知道当初是谁生成的，不能默认放给所有人）。
+    """
+    if _is_review_admin(user):
+        return
+    if record is not None and record.owner and record.owner == user.user_id:
+        return
+    raise HTTPException(status_code=403, detail="只能审核自己生成的研报")
 
 
 def _record_payload(record: review_store.ReviewRecord) -> dict:
@@ -413,23 +426,23 @@ def list_reviews(
     status: str | None = Query(default=None, pattern=r"^(pending|approved|rejected|finalized)$"),
     user: UserRecord = Depends(get_current_user),
 ) -> dict:
-    """审核队列（仅管理员）。不传 status 看全部；pending 即待人工处置的报告。
+    """审核队列。管理员看全部，普通用户只看自己生成的那批。
 
-    队列是全局的（审核记录不绑定提交者），普通登录用户不应看到别人的报告
-    标题与待审项，所以读接口也按管理员收敛，不只是写接口。
+    审核记录是全局索引，但按 ``owner`` 收敛：谁生成的谁审。``pending`` 即
+    待人工处置的报告；默认按创建时间倒序。
     """
-    _require_reviewer(user)
-    items = review_store.list_records(status=status)
+    owner = None if _is_review_admin(user) else user.user_id
+    items = review_store.list_records(status=status, owner=owner)
     return {"total": len(items), "items": items}
 
 
 @router.get("/reviews/{report_id}")
 def get_review(report_id: str, user: UserRecord = Depends(get_current_user)) -> dict:
-    """单条审核详情（仅管理员）。"""
-    _require_reviewer(user)
+    """单条审核详情：管理员或该报告的生成者。"""
     record = review_store.get_record(report_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"没有 report_id={report_id} 的审核记录")
+    _require_review_access(record, user)
     return _record_payload(record)
 
 
@@ -439,8 +452,11 @@ def decide_review(
     req: ReportDecisionRequest,
     user: UserRecord = Depends(get_current_user),
 ) -> dict:
-    """逐条或整批处置审核项。权限在函数体内显式校验，不依赖 DI 注入。"""
-    _require_reviewer(user)
+    """逐条或整批处置审核项（管理员或该报告的生成者）。"""
+    record = review_store.get_record(report_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"没有 report_id={report_id} 的审核记录")
+    _require_review_access(record, user)
     try:
         record = review_store.decide(
             report_id,
@@ -458,8 +474,11 @@ def decide_review(
 def finalize_review(
     report_id: str, user: UserRecord = Depends(get_current_user)
 ) -> dict:
-    """定稿。校验未过 / 有待审项 / 被驳回 / 内容被改动，一律 409。"""
-    _require_reviewer(user)
+    """定稿（管理员或该报告的生成者）。校验未过 / 有待审项 / 被驳回 / 内容被改动，一律 409。"""
+    record = review_store.get_record(report_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"没有 report_id={report_id} 的审核记录")
+    _require_review_access(record, user)
     try:
         record = review_store.finalize(report_id, user.username)
     except ReviewError as exc:

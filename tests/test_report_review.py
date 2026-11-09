@@ -17,7 +17,7 @@ import ai_agent.api.routers.report as router
 import ai_agent.report.pipeline as pipeline
 from ai_agent.api.schemas import ReportDecisionRequest
 from ai_agent.core.config import settings
-from ai_agent.storage.db import UserRecord
+from ai_agent.storage.db import UserRecord, user_scope
 from ai_agent.report import review
 from ai_agent.report.extract import Evidence, ExtractResult, IndicatorFact
 from ai_agent.report.parse import OutlineItem, ReportPlan, SourceFile
@@ -226,12 +226,14 @@ def test_non_admin_cannot_review_or_finalize(env, monkeypatch):
         ReportDecisionRequest(action="approve"),
         _USER,
     )
-    assert "管理员" in err.detail
+    assert "只能审核自己生成的研报" in err.detail
     _expect_http(403, router.finalize_review, result.report_id, _USER)
     assert review.get_record(result.report_id).status == review.PENDING
 
 
 def test_queue_listing_detail_and_unknown_ids(env, monkeypatch):
+    # 同标题默认只留最新一版，这里要同时看到两份报告，关掉清理
+    monkeypatch.setattr(settings, "report_keep_latest_per_title", 0)
     pending = _report(env, monkeypatch, page=None, write_pdf=True)
     final = _report(env, monkeypatch, write_pdf=True)
 
@@ -275,9 +277,36 @@ def test_corrupted_index_is_never_silently_overwritten(env, monkeypatch):
     assert index.read_text(encoding="utf-8") == "{ broken json"
 
 
-def test_review_queue_reads_are_admin_only(env):
-    """队列是全局的：普通登录用户不能读别人的报告标题与待审项。"""
-    _expect_http(403, router.list_reviews, None, _USER)
-    _expect_http(403, router.get_review, "deadbeef00", _USER)
-    # 管理员仍可访问（空队列也返回 200 结构）
-    assert router.list_reviews(None, _REVIEWER)["total"] == 0
+def test_review_queue_scoped_to_owner(env, monkeypatch):
+    """谁生成的谁审：本人能读能批能定稿，别人的看不到，管理员看全部。"""
+    monkeypatch.setattr(settings, "report_keep_latest_per_title", 0)
+    with user_scope("u-1"):
+        mine = _report(env, monkeypatch, page=None, write_pdf=True)
+    with user_scope("u-2"):
+        other = _report(env, monkeypatch, page=None, write_pdf=True)
+
+    mine_items = router.list_reviews(None, _USER)["items"]
+    assert [item["report_id"] for item in mine_items] == [mine.report_id]
+    assert router.get_review(mine.report_id, _USER)["report_id"] == mine.report_id
+    _expect_http(403, router.get_review, other.report_id, _USER)
+    _expect_http(403, router.finalize_review, other.report_id, _USER)
+
+    all_items = router.list_reviews(None, _REVIEWER)["items"]
+    assert {item["report_id"] for item in all_items} == {mine.report_id, other.report_id}
+
+    router.decide_review(
+        mine.report_id, ReportDecisionRequest(action="approve"), _USER
+    )
+    done = router.finalize_review(mine.report_id, _USER)
+    assert done["status"] == "finalized"
+
+
+def test_legacy_record_without_owner_is_admin_only(env, monkeypatch):
+    """旧记录没有 owner：不知道当初是谁生成的，只有管理员能动。"""
+    result = _report(env, monkeypatch, page=None, write_pdf=True)
+    record = review.get_record(result.report_id)
+    assert record is not None and record.owner == "default"  # 无 user_scope 时
+
+    with user_scope("u-1"):
+        assert router.list_reviews(None, _USER)["total"] == 0
+        _expect_http(403, router.finalize_review, result.report_id, _USER)

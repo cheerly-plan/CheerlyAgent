@@ -96,6 +96,9 @@ class ReviewEntry:
 class ReviewRecord:
     report_id: str
     title: str = ""
+    # 生成者（user_id）。审核记录是全局的，但审批权按 owner 收敛：
+    # 谁生成的谁审，管理员可以审全部。旧记录没有这个字段 = 仅管理员可审。
+    owner: str = ""
     report_status: str = ""  # pipeline 的 ok / no_data / no_request
     status: str = PENDING
     created_at: str = ""
@@ -132,6 +135,16 @@ class ReviewRecord:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _current_owner() -> str:
+    """当前请求的用户（user_scope 里设置的 user_id）；离线调用时为空串。"""
+    try:
+        from ai_agent.storage.db import current_user_id
+
+        return current_user_id() or ""
+    except Exception:  # pragma: no cover - 导入失败只影响归属，不影响审核
+        return ""
 
 
 def _root(output_dir: Path | str | None = None) -> Path:
@@ -291,6 +304,7 @@ def create_record(
         record = ReviewRecord(
             report_id=result.report_id,
             title=result.document.title,
+            owner=_current_owner(),
             report_status=result.status,
             created_at=now,
             updated_at=now,
@@ -342,9 +356,14 @@ def create_deep_record(
         from ai_agent.report.pipeline import deep_report_title
 
         deep_title = f"{deep_report_title(result)}（推断层）"
+        main_owner = ""
+        main = _read_index(output_dir).get(result.report_id)
+        if main is not None:
+            main_owner = str(main.get("owner") or "")
         record = ReviewRecord(
             report_id=report_id,
             title=deep_title,
+            owner=main_owner or _current_owner(),
             report_status=result.status,
             created_at=now,
             updated_at=now,
@@ -410,6 +429,7 @@ def repair_deep_records(output_dir: Path | str | None = None) -> int:
             record = ReviewRecord(
                 report_id=report_id,
                 title=f"{main.get('title') or stem}（推断层）",
+                owner=str(main.get("owner") or ""),
                 report_status=str(main.get("report_status") or ""),
                 created_at=now,
                 updated_at=now,
@@ -466,12 +486,19 @@ def _verify(record: ReviewRecord, output_dir: Path | str | None = None) -> Revie
 
 
 def list_records(
-    output_dir: Path | str | None = None, status: str | None = None
+    output_dir: Path | str | None = None,
+    status: str | None = None,
+    owner: str | None = None,
 ) -> list[dict]:
-    """队列列表。按创建时间倒序，附带门禁结论，方便前端直接渲染。"""
+    """队列列表。按创建时间倒序，附带门禁结论，方便前端直接渲染。
+
+    ``owner`` 非空时只返回该用户生成的那批（"我的审核"）；管理员不传看全部。
+    """
     records = [ReviewRecord.from_dict(data) for data in _read_index(output_dir).values()]
     if status:
         records = [item for item in records if item.status == status]
+    if owner:
+        records = [item for item in records if item.owner == owner]
     records.sort(key=lambda item: item.created_at, reverse=True)
     output = []
     for record in records:
