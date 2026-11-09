@@ -411,15 +411,22 @@ def _record_payload(record: review_store.ReviewRecord) -> dict:
 @router.get("/reviews")
 def list_reviews(
     status: str | None = Query(default=None, pattern=r"^(pending|approved|rejected|finalized)$"),
-    _user: UserRecord = Depends(get_current_user),
+    user: UserRecord = Depends(get_current_user),
 ) -> dict:
-    """审核队列。不传 status 看全部；pending 即待人工处置的报告。"""
+    """审核队列（仅管理员）。不传 status 看全部；pending 即待人工处置的报告。
+
+    队列是全局的（审核记录不绑定提交者），普通登录用户不应看到别人的报告
+    标题与待审项，所以读接口也按管理员收敛，不只是写接口。
+    """
+    _require_reviewer(user)
     items = review_store.list_records(status=status)
     return {"total": len(items), "items": items}
 
 
 @router.get("/reviews/{report_id}")
-def get_review(report_id: str, _user: UserRecord = Depends(get_current_user)) -> dict:
+def get_review(report_id: str, user: UserRecord = Depends(get_current_user)) -> dict:
+    """单条审核详情（仅管理员）。"""
+    _require_reviewer(user)
     record = review_store.get_record(report_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"没有 report_id={report_id} 的审核记录")

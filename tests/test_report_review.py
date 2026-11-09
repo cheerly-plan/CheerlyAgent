@@ -115,7 +115,7 @@ def test_clean_report_auto_finalizes_and_allows_pdf_download(env, monkeypatch):
 
     assert router.download_report(result.artifacts.pdf, _USER).status_code == 200
     assert router.download_final(result.report_id, _USER).status_code == 200
-    assert router.get_review(result.report_id, _USER)["finalizable"] is True
+    assert router.get_review(result.report_id, _REVIEWER)["finalizable"] is True
 
 
 def test_pending_items_block_pdf_until_approved_and_finalized(env, monkeypatch):
@@ -235,19 +235,19 @@ def test_queue_listing_detail_and_unknown_ids(env, monkeypatch):
     pending = _report(env, monkeypatch, page=None, write_pdf=True)
     final = _report(env, monkeypatch, write_pdf=True)
 
-    all_items = router.list_reviews(None, _USER)["items"]
+    all_items = router.list_reviews(None, _REVIEWER)["items"]
     assert {item["report_id"] for item in all_items} == {
         pending.report_id,
         final.report_id,
     }
-    pending_list = router.list_reviews("pending", _USER)["items"]
+    pending_list = router.list_reviews("pending", _REVIEWER)["items"]
     assert [item["report_id"] for item in pending_list] == [pending.report_id]
     assert pending_list[0]["pending_items"] == 1
     assert pending_list[0]["finalizable"] is False
 
-    detail = router.get_review(pending.report_id, _USER)
+    detail = router.get_review(pending.report_id, _REVIEWER)
     assert detail["queue_url"] == f"/v1/report/reviews/{pending.report_id}"
-    _expect_http(404, router.get_review, "deadbeef00", _USER)
+    _expect_http(404, router.get_review, "deadbeef00", _REVIEWER)
     _expect_http(404, router.download_final, "deadbeef00", _USER)
 
 
@@ -273,3 +273,11 @@ def test_corrupted_index_is_never_silently_overwritten(env, monkeypatch):
     with pytest.raises(review.ReviewError):
         pipeline.run_report("生成研报", output_dir=env, write_pdf=False)
     assert index.read_text(encoding="utf-8") == "{ broken json"
+
+
+def test_review_queue_reads_are_admin_only(env):
+    """队列是全局的：普通登录用户不能读别人的报告标题与待审项。"""
+    _expect_http(403, router.list_reviews, None, _USER)
+    _expect_http(403, router.get_review, "deadbeef00", _USER)
+    # 管理员仍可访问（空队列也返回 200 结构）
+    assert router.list_reviews(None, _REVIEWER)["total"] == 0
