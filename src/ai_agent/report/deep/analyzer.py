@@ -73,6 +73,8 @@ def default_complete(
 
     连续 ``circuit_break_after`` 次空响应即熔断：后续调用直接走升级模型，
     避免「每次都先空跑一轮必空的小模型」把整份报告的耗时拖到十几分钟。
+    ``escalation_model`` 为空表示本条通道本来就在主模型上（决策 ④-B 的
+    ``chapter_channel="primary"``），此时不重试——同一模型重试只会多付一次延迟。
     """
 
     def once(use_model: str, system: str, user: str) -> tuple[str, str, dict]:

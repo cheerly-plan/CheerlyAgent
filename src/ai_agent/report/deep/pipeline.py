@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -61,6 +62,16 @@ logger = get_logger(__name__)
 # 前序结论带进 prompt；并行改用基线快照可把整份报告耗时压到接近单章。
 ENTRY_CHAPTER_CONCURRENCY = 3
 
+# 对外入口（HTTP / 聊天工具）的章节通道默认值：直接主模型（决策 ④-B）。
+# 起因：本地唯一对话模型 qwen3:4b 是思考型，reasoning 吃满 max_tokens 后 content=""
+# （实测 100% 触发），每章先空跑一次小模型再升级，等价全主模型还多付一轮延迟。
+# 库级 ``DeepConfig`` 默认仍是 ``"small"``：既有调用方与测试行为逐字不变；
+# 想撤回小模型优先（例如换成本地 instruct 模型）：``REPORT_DEEP_CHAPTER_CHANNEL=small``
+# 或显式 ``DeepConfig(chapter_channel="small")``。
+ENTRY_CHAPTER_CHANNEL = (
+    os.getenv("REPORT_DEEP_CHAPTER_CHANNEL", "primary").strip().lower() or "primary"
+)
+
 
 @dataclass
 class DeepConfig:
@@ -78,8 +89,12 @@ class DeepConfig:
     max_tokens: int = 1600
     temperature: float = 0.1
     timeout: float = 90.0
-    # 章节分析与专家评审的业务模型名；空 = 跟随 SMALL_MODEL + 本地网关。
+    # 章节分析与专家评审的业务模型名；空 = 跟随 chapter_channel 策略。
     model: str = ""
+    # 章节/评审通道策略：``"small"``（默认）= SMALL_MODEL + 本地网关，空 content 时
+    # 升级主模型重试；``"primary"`` = 直接用 MODEL + 主网关，**不尝试小模型**
+    # （决策 ④-B，对外入口默认）。显式 ``model`` 仍优先于本字段。
+    chapter_channel: str = "small"
     # 决策 ④：第 9 章收敛与其终审走主模型。空 = settings.model（主网关）。
     # 想退回全流程小模型，显式填小模型名；填别的值可做单章 A/B。
     convergence_model: str = ""
@@ -102,6 +117,9 @@ class ModelPlan:
     chapter_label: str = ""  # 审计展示用（解析后的真实模型名）
     convergence_label: str = ""
     route: str = "none"
+    # 章节通道是否已直接落在主模型：True 时不再做「空 content 升级」重试
+    # （同一模型重试没有意义，只会多付一次延迟）。
+    primary_channel: bool = False
     warnings: tuple[str, ...] = ()
 
 
@@ -116,25 +134,55 @@ def resolve_model_plan(
 
     已核对 ``llm/client.py:55-68`` 的既有语义：``lightweight_llm("")`` 在
     SMALL_MODEL 已配置时走小模型 + 本地网关，**未配置时静默退回主模型 + 主网关**；
-    传入与 SMALL_MODEL 不同的显式模型名则走该模型 + 主网关。因此「第 9 章用主模型」
+    传入与 SMALL_MODEL 不同的显式模型名则走该模型 + 主网关。因此「用主模型」
     = 把 ``settings.model`` 作为业务模型名传入；而 SMALL_MODEL 缺失必须显式告警，
     不能让决策 ④ 悄悄变成全流程主模型（成本差一个量级）。
+
+    优先级：``cfg.model``（显式模型名）> ``cfg.chapter_channel="primary"`` >
+    默认的小模型优先。``route="primary"`` 是**主动选择**全主模型（无告警）；
+    ``route="all-primary"`` 是 SMALL_MODEL 未配置时的**被动退回**（带告警），
+    两者不可混用，否则成本归因会失真。
     """
     if injected:
-        return ModelPlan(route="injected", chapter_label="外部注入", convergence_label="外部注入")
+        return ModelPlan(
+            route="injected", chapter_label="外部注入", convergence_label="外部注入",
+            primary_channel=True,
+        )
 
     small = (small_model or "").strip()
     primary = (primary_model or "").strip()
     chapter_override = (cfg.model or "").strip()
     convergence_override = (cfg.convergence_model or "").strip()
+    channel = (cfg.chapter_channel or "small").strip().lower()
     warnings: list[str] = []
+    if channel not in {"small", "primary"}:
+        warnings.append(
+            f"未知的章节通道配置 chapter_channel={cfg.chapter_channel!r}："
+            "按 small（小模型优先）处理，可选值为 small / primary"
+        )
+        channel = "small"
 
     if chapter_override:
         chapter_label, chapter_model = chapter_override, chapter_override
+        primary_channel = chapter_override == primary and bool(primary)
+    elif channel == "primary" and primary:
+        # 决策 ④-B：章节/评审直接主模型 + 主网关，完全绕开 SMALL_MODEL。
+        chapter_label, chapter_model = primary, primary
+        primary_channel = True
+    elif channel == "primary" and not primary:
+        # 选了主模型通道但主模型没配：不能静默变成「小模型优先」而不留痕。
+        chapter_label, chapter_model = (small or "未配置"), ""
+        primary_channel = False
+        warnings.append(
+            "已选择主模型通道（chapter_channel=primary）但 MODEL 未配置："
+            "章节与评审退回小模型优先通道，请检查 .env"
+        )
     elif small:
         chapter_label, chapter_model = small, ""  # 交给 lightweight_llm 走本地网关
+        primary_channel = False
     else:
         chapter_label, chapter_model = (primary or "未配置"), ""
+        primary_channel = False
         warnings.append(
             "SMALL_MODEL 未配置：章节与评审按 lightweight_llm 既有语义退回主模型 + 主网关，"
             "成本高于决策 ④ 的预期，请检查 .env"
@@ -149,7 +197,12 @@ def resolve_model_plan(
 
     # route 描述的是**实际生效**的两条通道，而不是配置写法：
     # 显式把收敛模型设回小模型名时，应识别为 all-small 而非笼统的 override。
-    if small and convergence_label == small and chapter_label == small:
+    if (
+        primary_channel and chapter_label == primary and convergence_label == primary
+        and bool(primary)
+    ):
+        route = "primary"
+    elif small and convergence_label == small and chapter_label == small:
         route = "all-small"
     elif chapter_override or convergence_override:
         route = "override"
@@ -163,6 +216,7 @@ def resolve_model_plan(
         chapter_label=chapter_label,
         convergence_label=convergence_label,
         route=route,
+        primary_channel=primary_channel,
         warnings=tuple(warnings),
     )
 
@@ -470,7 +524,8 @@ def run_deep_analysis(
     分别对应章节通道与第 9 章收敛通道，便于零成本单测与单章 A/B。
     ``external_sources`` 每项传给 ``SourceLedger.add_external``，用于接 L2-L3 数据源。
 
-    决策 ④：章节分析与专家评审走 SMALL_MODEL，第 9 章收敛**及其终审**走主模型；
+    决策 ④：章节分析与专家评审默认走 SMALL_MODEL，第 9 章收敛**及其终审**走主模型；
+    决策 ④-B（对外入口默认）：章节与评审也直接走主模型，不再先跑小模型；
     实际模型名与路由写进 ExecutionReport。默认（``enabled=False`` 且未注入 complete）
     只产出零 token 骨架，且完全不读取模型配置。
     """
@@ -534,9 +589,11 @@ def run_deep_analysis(
         )
         # 思考型小模型会把 token 全耗在 reasoning 上返回空 content；此时用收敛通道
         # 的主模型重试一次，事件写进 ExecutionReport 与 PDF 附录 A，便于成本归因。
+        # 章节通道已在主模型时不再重试——同一模型重试只会多付一次延迟。
         call = budget.wrap(default_complete(
             cfg.max_tokens, cfg.temperature, cfg.timeout, plan.chapter_model,
-            escalation_model=plan.convergence_model, events=model_events,
+            escalation_model="" if plan.primary_channel else plan.convergence_model,
+            events=model_events,
         ))
         converge_call = budget.wrap(default_complete(
             cfg.max_tokens, cfg.temperature, cfg.timeout, plan.convergence_model,
@@ -567,11 +624,20 @@ def run_deep_analysis(
             "同比、差值、占比等计算派生值仍一律遮蔽）"
         )
     if use_llm:
-        notes.append(
-            f"模型路由：{plan.route}；章节/评审={plan.chapter_label or '—'}，"
-            f"第 9 章收敛与终审={plan.convergence_label or '—'}"
-            "（决策 ④：小模型优先；空 content 自动升级主模型重试一次）"
-        )
+        if plan.primary_channel:
+            route_note = (
+                f"模型路由：{plan.route}；章节/评审与第 9 章收敛统一走 "
+                f"{plan.chapter_label or '—'}"
+                "（决策 ④-B：直接主模型，不先跑 SMALL_MODEL；"
+                "空 content 不再用同一模型重试，避免白付一次延迟）"
+            )
+        else:
+            route_note = (
+                f"模型路由：{plan.route}；章节/评审={plan.chapter_label or '—'}，"
+                f"第 9 章收敛与终审={plan.convergence_label or '—'}"
+                "（决策 ④：小模型优先；空 content 自动升级主模型重试一次）"
+            )
+        notes.append(route_note)
         notes.extend(plan.warnings)
 
     chapters: list[ChapterResult] = []

@@ -246,6 +246,10 @@ def test_generate_report_tool_returns_links_not_body_numbers(monkeypatch):
     assert captured.get("deep") is not None
     assert captured["deep"].enabled is True
     assert captured["deep"].pdf_mode == "separate"
+    # 聊天入口同样直接主模型（决策 ④-B），库级默认不受影响
+    from ai_agent.report.deep import ENTRY_CHAPTER_CHANNEL
+
+    assert captured["deep"].chapter_channel == ENTRY_CHAPTER_CHANNEL
     assert "/v1/report/files/bank.pdf" in text
     assert "/v1/report/files/bank.deep.pdf" in text
     assert "底稿 PDF" in text

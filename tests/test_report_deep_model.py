@@ -174,6 +174,75 @@ def test_injected_stub_is_marked_as_injected():
     assert result.execution.convergence_model == "外部注入"
 
 
+# ——— 决策 ④-B：对外入口直接主模型 ———
+
+def test_library_default_stays_small_first_but_entry_defaults_to_primary():
+    from ai_agent.report.deep.pipeline import ENTRY_CHAPTER_CHANNEL
+
+    assert DeepConfig().chapter_channel == "small"  # 库级默认行为不变
+    assert ENTRY_CHAPTER_CHANNEL == "primary"  # 对外入口直接主模型
+
+
+def test_primary_channel_goes_straight_to_main_model():
+    plan = resolve_model_plan(
+        DeepConfig(chapter_channel="primary"),
+        small_model="qwen-small", primary_model="gpt-main",
+    )
+    assert plan.route == "primary"
+    assert plan.primary_channel is True
+    assert plan.chapter_label == "gpt-main"
+    assert plan.chapter_model == "gpt-main"  # 显式主模型名 → lightweight_llm 走主网关
+    assert plan.convergence_label == "gpt-main"
+    assert plan.warnings == ()
+
+
+def test_primary_channel_without_primary_model_warns_and_falls_back():
+    plan = resolve_model_plan(
+        DeepConfig(chapter_channel="primary"), small_model="qwen-small", primary_model="",
+    )
+    assert plan.primary_channel is False
+    assert plan.chapter_label == "qwen-small"
+    assert any("MODEL 未配置" in warning for warning in plan.warnings)
+
+
+def test_unknown_chapter_channel_warns_and_keeps_small_first():
+    plan = resolve_model_plan(
+        DeepConfig(chapter_channel="weird"),
+        small_model="qwen-small", primary_model="gpt-main",
+    )
+    assert plan.route == "small+primary"
+    assert plan.chapter_model == ""
+    assert any("未知的章节通道" in warning for warning in plan.warnings)
+
+
+def test_primary_channel_disables_same_model_escalation(monkeypatch):
+    """直接主模型后不能再「空跑一轮再升级」：同一模型重试只是白付延迟。"""
+    seen: list[tuple[str, str]] = []
+    log: list = []
+
+    def fake_default(max_tokens, temperature, timeout, model, **kwargs):
+        seen.append((model, kwargs.get("escalation_model", "")))
+        return stub(log, "fake")
+
+    monkeypatch.setattr(
+        deep_pipeline, "settings",
+        SimpleNamespace(model="gpt-main", small_model="qwen-small"),
+    )
+    monkeypatch.setattr(deep_pipeline, "default_complete", fake_default)
+    result = run_deep_analysis(
+        "甲公司", "2026Q3", facts(),
+        config=DeepConfig(enabled=True, review_rounds=1, chapter_channel="primary"),
+    )
+    assert result.execution.model_route == "primary"
+    assert result.execution.chapter_model == "gpt-main"
+    assert result.execution.convergence_model == "gpt-main"
+    assert seen and all(model == "gpt-main" for model, _ in seen)
+    assert all(escalation == "" for _, escalation in seen)
+    notes = "\n".join(result.execution.notes)
+    assert "决策 ④-B" in notes
+    assert "qwen-small" not in notes
+
+
 # ——— 真实通道（default_complete 打桩，不触网）———
 
 def test_convergence_and_its_final_review_use_primary_channel():

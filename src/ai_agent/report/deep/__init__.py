@@ -47,15 +47,19 @@
        deep = run_deep_analysis("兆易创新", "2026Q3", facts,
                                 config=DeepConfig(enabled=True))
 
-外部数据源（Phase 3）：``sources.collect_sources`` 盘点知识库近 5 年源文件、
+外部数据源（Phase 3）：``sources.collect_sources`` 盘点知识库近 3 年源文件、
 读取本地结构化事实清单、并为行业统计留注入点；L4/L5 二手数据必须回溯到
 L1-L3 才准进 ``SourceLedger``。本层不解析 PDF 附注、不内置任何第三方 API。
 
-**模型策略（决策 ④）**：章节分析与专家评审走 ``SMALL_MODEL`` + 本地网关，
-第 9 章收敛**及其终审**走 ``MODEL``（主模型 + 主网关）。实际模型名与路由
-写进 ``ExecutionReport``，在推断层 PDF 的 A 节可见，供 A/B 与成本归因核查；
+**模型策略（决策 ④ / ④-B）**：库级默认章节分析与专家评审走 ``SMALL_MODEL`` +
+本地网关，第 9 章收敛**及其终审**走 ``MODEL``（主模型 + 主网关）；
+**对外入口（HTTP / 聊天工具）默认 ``chapter_channel="primary"``**——章节与评审
+直接走主模型，不再先跑小模型（决策 ④-B：本地思考型小模型空响应实测 100%，
+先跑一轮只会白付延迟）。实际模型名与路由写进 ``ExecutionReport``，在推断层
+PDF 的 A 节可见，供 A/B 与成本归因核查。
+想回小模型优先：``DeepConfig(chapter_channel="small")`` 或环境变量
+``REPORT_DEEP_CHAPTER_CHANNEL=small``（对外入口生效）；
 ``SMALL_MODEL`` 未配置时会显式告警，不会静默变成全流程主模型。
-想退回全流程小模型：``DeepConfig(convergence_model="<小模型名>")``；
 想做单章 A/B：给 ``run_deep_analysis`` 注入 ``convergence_complete``。
 
 第 9 章另有代码级收敛质量门禁（断言层 / 护城河分项覆盖 / 主线处置 /
@@ -76,6 +80,7 @@ from ai_agent.report.deep.pdf_appendix import (
 )
 from ai_agent.report.deep.analyzer import assess_convergence, normalize_moat_rating
 from ai_agent.report.deep.pipeline import (
+    ENTRY_CHAPTER_CHANNEL,
     ENTRY_CHAPTER_CONCURRENCY,
     DeepConfig,
     ModelPlan,
@@ -102,6 +107,7 @@ from ai_agent.report.deep.sources import (
 __all__ = [
     "APPENDIX_REVIEW_REASON",
     "CHAPTERS",
+    "ENTRY_CHAPTER_CHANNEL",
     "ENTRY_CHAPTER_CONCURRENCY",
     "ChapterResult",
     "DeepAnalysisResult",

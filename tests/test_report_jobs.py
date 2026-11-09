@@ -12,7 +12,7 @@ from ai_agent.api.app import create_app
 from ai_agent.api.routers import report as router
 from ai_agent.api.schemas import ReportRequest
 from ai_agent.report.jobs import ReportJob, ReportJobManager
-from ai_agent.report.deep.pipeline import ENTRY_CHAPTER_CONCURRENCY
+from ai_agent.report.deep.pipeline import ENTRY_CHAPTER_CHANNEL, ENTRY_CHAPTER_CONCURRENCY
 from ai_agent.storage.db import UserRecord
 from ai_agent.tools.progress import emit_progress
 
@@ -129,6 +129,7 @@ def test_api_entry_uses_entry_concurrency_for_deep_options(monkeypatch):
     monkeypatch.setattr(router, "run_report", fake_run_report)
     router._run_request(ReportRequest(request="x", deep="full", write_pdf=False))
     assert seen["deep"].chapter_concurrency == ENTRY_CHAPTER_CONCURRENCY
+    assert seen["deep"].chapter_channel == ENTRY_CHAPTER_CHANNEL
     assert seen["deep"].enabled is True
     assert seen["deep"].pdf_mode == "separate"
 

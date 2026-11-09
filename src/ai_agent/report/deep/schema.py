@@ -167,11 +167,12 @@ class ExecutionReport:
     estimated_output_tokens: int = 0
     review_rounds: int = 0
     notes: list[str] = field(default_factory=list)
-    # 模型路由（决策 ④）：章节/评审走 SMALL_MODEL，第 9 章收敛与终审走主模型。
-    # 记录的是**实际解析出的模型名**，不是配置占位符，供 A/B 与成本归因核查。
+    # 模型路由（决策 ④ / ④-B）：记录实际生效的通道，不是配置占位符。
     chapter_model: str = ""
     convergence_model: str = ""
-    model_route: str = ""  # none / injected / small+primary / all-primary / all-small / override
+    # none / injected / primary（显式全主模型）/ small+primary / all-small /
+    # all-primary（SMALL_MODEL 缺失被迫退回）/ override
+    model_route: str = ""
     # 第 9 章收敛质量门禁：代码级检查，不依赖模型自觉遵守 system prompt。
     convergence_quality: str = ""  # solid / shallow / incomplete / ""（未执行收敛）
     convergence_checks: list[str] = field(default_factory=list)
