@@ -1931,3 +1931,51 @@ def test_clamp_only_touches_out_of_range_numeric_fields():
     assert clamped["top_k"] == 10
     assert clamped["query"] == "安克创新"  # 非数值字段不动
 
+
+
+def test_report_job_id_lands_on_final_assistant_message():
+    """研报任务 id 要随回答落库：刷新后前端凭它续上卡片、把下载链接长回来。"""
+    from ai_agent.tools.progress import emit_event
+
+    calls = {"n": 0}
+
+    def fake_stream(messages, tools, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_job",
+                            "name": "generate_report",
+                            "arguments": {"request": "生成中国银行 2026Q3 研报"},
+                        }
+                    ],
+                },
+            )
+            return
+        yield ("text", "已提交，稍后回来看结果")
+        yield ("result", {"content": "已提交，稍后回来看结果", "tool_calls": []})
+
+    def fake_execute(_name, _arguments):
+        emit_event(
+            {
+                "type": "report_job",
+                "job_id": "job-xyz",
+                "poll_url": "/v1/report/jobs/job-xyz",
+            }
+        )
+        return "已提交研报生成任务：job_id=job-xyz"
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=fake_execute),
+        patch("ai_agent.agents.loop.store.append_chat") as append,
+    ):
+        run("生成中国银行 2026Q3 研报", chat_session_id="s-job")
+
+    turn = append.call_args.args[2]
+    assert turn[-1]["role"] == "assistant"
+    assert turn[-1]["meta"]["report_job_id"] == "job-xyz"

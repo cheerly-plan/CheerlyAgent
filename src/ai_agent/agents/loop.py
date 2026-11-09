@@ -176,10 +176,23 @@ def _run_tool_with_progress(
     yield {"type": "_tool_result", "content": output, "sources": cited}
 
 
-def _attach_sources(messages: list[ChatMessage], turn_sources: list[dict]) -> None:
-    """引用挂在最终回答上。挂在带 tool_calls 的中间消息上，历史回放会跳过。"""
-    if turn_sources and messages and messages[-1].get("role") == "assistant":
-        messages[-1]["meta"] = {"sources": turn_sources}
+def _attach_sources(
+    messages: list[ChatMessage], turn_sources: list[dict], report_job_id: str = ""
+) -> None:
+    """引用与研报任务 id 挂在最终回答上。
+
+    挂在带 tool_calls 的中间消息上，历史回放会跳过。``report_job_id`` 随消息
+    落库，刷新页面后前端还能凭它继续轮询任务、把下载链接长回来。
+    """
+    if not messages or messages[-1].get("role") != "assistant":
+        return
+    meta = dict(messages[-1].get("meta") or {})
+    if turn_sources:
+        meta["sources"] = turn_sources
+    if report_job_id:
+        meta["report_job_id"] = report_job_id
+    if meta:
+        messages[-1]["meta"] = meta
 
 
 def _llm_error_message(error: LLMError) -> str:
@@ -611,6 +624,8 @@ def run_loop(
     # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
     # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库
     turn_sources: list[dict] = []
+    # 本轮提交的研报后台任务：挂在回答消息的 meta 上，刷新后卡片能续上
+    report_job_id = ""
     # 本轮已执行过的 (工具, 参数)：完全相同的调用结果不会变，短路掉。
     # 本地模型会陷入「再查一次试试」的循环——实测同一 kg_search 原样
     # 调了 6 次，每次都返回同样的实体列表，把预算轮数烧光后没有轮次
@@ -735,7 +750,7 @@ def run_loop(
                 budget.max_steps,
                 len(str((messages[-1].get("content") if messages else "") or "")),
             )
-            _attach_sources(messages, turn_sources)
+            _attach_sources(messages, turn_sources, report_job_id)
             done_event: ChatEvent = {"type": "done"}
             if turn_sources:
                 done_event["sources"] = turn_sources
@@ -779,6 +794,8 @@ def run_loop(
                         output = str(event.get("content") or "")
                         cited = list(event.get("sources") or [])
                         continue
+                    if event.get("type") == "report_job":
+                        report_job_id = str(event.get("job_id") or "")
                     yield event  # type: ignore[misc]
             else:
                 scope_token = set_kb_scope(kb_file_ids)
@@ -854,7 +871,7 @@ def run_loop(
         if run_id:
             step += 1
             _checkpoint_update(run_id, messages, step)
-        _attach_sources(messages, turn_sources)
+        _attach_sources(messages, turn_sources, report_job_id)
         done_event: ChatEvent = {"type": "done"}
         if turn_sources:
             done_event["sources"] = turn_sources
