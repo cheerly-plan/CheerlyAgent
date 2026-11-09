@@ -39,8 +39,16 @@ def _describe_parallel(jobs: list[tuple[bytes, str]]) -> list[str | None]:
         )
 
 
-def _pdf_figures(path: Path, text_lens: list[int] | None = None) -> list[Segment]:
-    """含图页渲染成 PNG 交视觉模型描述；关闭或失败都只是少几段，不阻断解析。"""
+def _pdf_figures(
+    path: Path,
+    text_lens: list[int] | None = None,
+    skip_pages: set[int] | None = None,
+) -> list[Segment]:
+    """含图页渲染成 PNG 交视觉模型描述；关闭或失败都只是少几段，不阻断解析。
+
+    ``skip_pages`` 是 1-based 页码集合：混合解析里这些页已被整页 OCR 覆盖，
+    再送视觉模型只是重复烧预算。默认 None = 逐字保持原来的全文扫描行为。
+    """
     if not vision.available():
         return []
     try:
@@ -60,6 +68,8 @@ def _pdf_figures(path: Path, text_lens: list[int] | None = None) -> list[Segment
     try:
         targets: list[int] = []
         for i, page in enumerate(doc):
+            if skip_pages and (i + 1) in skip_pages:
+                continue
             text_len = text_lens[i] if text_lens and i < len(text_lens) else None
             if not _page_has_chart(page, text_len):
                 continue

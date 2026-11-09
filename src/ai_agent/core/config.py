@@ -187,6 +187,11 @@ class Settings(BaseSettings):
     kb_ocr_model: str = ""
     # 0 = 不截断页数。整页识别按页计时，长文档先设一个上限再放开。
     kb_ocr_max_pages: int = 0
+    # 按页混合：文字层字符数 ≥ 此值视为密页，跳过 OCR；更少才送 OCR。
+    # 0 = 关闭混合，退回「整页 OCR 有产出就整本采用」的旧行为。
+    # 对齐 OCRmyPDF skip-text / PyMuPDF4LLM 的「有字用字」策略，避免半截 OCR
+    # 盖掉整本电子年报（飞测年报实测：OCR 熔断后只剩前 30 页）。
+    kb_ocr_min_text_chars: int = 80
     kb_ocr_dpi: int = 150
     # 长边像素上限，对齐官方 fit_image（超过会降采样，避免视觉 token 爆上下文）
     kb_ocr_max_edge: int = 2048

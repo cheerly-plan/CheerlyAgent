@@ -99,53 +99,131 @@ _OCR_PAGE_MARK = re.compile(
 
 
 def _parse_pdf(path: Path) -> list[Segment]:
-    """整页 OCR 的正文为准，文本层只提供每页章节。
+    """按页混合：密页用文字层，只有稀字页（图片/扫描页）才送整页 OCR。
 
-    财报表格的数字以视觉模型读出的 HTML 表为准。文本层仍跑一遍，但只用它的
-    章节标签：每一块挂上所在页的 section，表前一行表题决定合并/母公司口径。
-    贴在页顶、被 OCR 当成页眉丢掉的证券代码、证券简称、公告编号，从文本层补回。
-    OCR 没开、模型没拉起或一页都没识别出来时，退回文本层原来的解析（含表格
-    识别和图表）。
+    电子年报的正文与三大表本来就在文字层里，逐页 OCR 一遍既慢、又会把
+    「有字用字」的精确数字换成视觉模型近似值；更糟的是长文档 OCR 熔断时
+    只产出前几十页，旧逻辑只要 OCR 非空就整本采用，后半本全丢（飞测年报
+    实测只剩前 30 页）。故：
 
-    开了 OCR 时文本层先不跑 find_tables：MuPDF 的表格猎取会在部分年报上
-    SIGSEGV，try/except 拦不住，整份解析子进程直接 exit=-11，OCR 根本跑不到。
+    - 文字层字符数 ≥ ``kb_ocr_min_text_chars`` = 密页，保留文字层正文与表格；
+    - 更少 = 稀字页，送 OCR；**OCR 没产出的页仍保留文字层，绝不整本覆盖**；
+    - ``kb_ocr_min_text_chars = 0`` 关闭混合，退回「OCR 有产出就整本采用」旧行为。
+
+    章节标签始终来自文字层，封面字段仍由文字层补回 OCR 结果。OCR 未开启、
+    不可用或一页都没识别出来时，走文字层原解析（含表格识别与图表页）。
+    混合模式密页依赖文字层表格，不能为躲 SIGSEGV 跳过抽表：
+    ``_pdf_tables_isolated`` 已在短命子进程里按页推进，崩溃只丢该页。
     """
+    from ai_agent.kb.ingest.figures import _pdf_figures
     from ai_agent.kb.ingest.ocr import enabled as ocr_enabled, ocr_pdf
 
     prefer_ocr = ocr_enabled()
+    min_chars = settings.kb_ocr_min_text_chars
+    hybrid = prefer_ocr and min_chars > 0
+    include_tables = (not prefer_ocr) or hybrid
     try:
-        text_segments, text_lens = _pdf_text(path, include_tables=not prefer_ocr)
+        text_segments, text_lens = _pdf_text(path, include_tables=include_tables)
     except Exception:
         logger.warning("PDF 文本层抽取失败", exc_info=True)
         text_segments, text_lens = [], []
 
-    ocr_pages = ocr_pdf(path)
-    if ocr_pages:
-        segments = _segments_from_ocr(
-            ocr_pages, _section_by_page(text_segments), text_segments
+    ocr_targets: list[int] | None = None
+    if hybrid:
+        ocr_targets = _sparse_pages(path, text_lens, min_chars)
+
+    # 整本都是密页：一次 OCR 都不用跑，直接文字层 + 图表页识别。
+    ocr_pages: list[Segment] | None = None
+    if ocr_targets != [] or not hybrid:
+        ocr_pages = (
+            ocr_pdf(path, pages=ocr_targets) if hybrid else ocr_pdf(path)
         )
-        if segments:
-            return segments
+
+    if ocr_pages:
+        if hybrid:
+            merged = _merge_hybrid_pages(ocr_pages, text_segments)
+            if merged:
+                covered = {s.page for s in ocr_pages if s.page}
+                merged.extend(
+                    _pdf_figures(path, text_lens, skip_pages=covered or None)
+                )
+                merged.sort(key=lambda s: s.page or 0)
+                logger.info(
+                    "kb 混合解析：密页用文字层，OCR 覆盖 %d 页，共 %d 段",
+                    len(covered),
+                    len(merged),
+                )
+                return merged
+        else:
+            segments = _segments_from_ocr(
+                ocr_pages, _section_by_page(text_segments), text_segments
+            )
+            if segments:
+                return segments
 
     # OCR 没产出：若刚才为避 SIGSEGV 跳过了抽表，补跑带表格的文本层。
-    if prefer_ocr:
+    if prefer_ocr and not hybrid:
         try:
             text_segments, text_lens = _pdf_text(path, include_tables=True)
         except Exception:
             logger.warning("PDF 文本层（含表格）回退抽取失败", exc_info=True)
 
+    covered = (
+        {s.page for s in ocr_pages or [] if s.page} if hybrid else None
+    )
+    figures = _pdf_figures(path, text_lens, skip_pages=covered or None)
     if any((s.text or "").strip() for s in text_segments):
-        from ai_agent.kb.ingest.figures import _pdf_figures
-
-        text_segments.extend(_pdf_figures(path, text_lens))
+        text_segments.extend(figures)
         return text_segments
-
-    from ai_agent.kb.ingest.figures import _pdf_figures
-
-    figures = _pdf_figures(path, text_lens)
     if not figures:
         raise ParseError("PDF 中没有可提取的文本（可能是扫描件/图片版）")
     return figures
+
+
+def _sparse_pages(
+    path: Path, text_lens: list[int], min_chars: int
+) -> list[int] | None:
+    """文字层字符数 < ``min_chars`` 的页（1-based），只有这些页值得送 OCR。
+
+    ``_page_char_counts`` 只统计有文字行的页，长度可能短于总页数（末尾
+    纯图片页没有文字行）。所以先向 pymupdf 问总页数再补零；取不到页数时
+    返回 None，让调用方退回全文 OCR——保守优先，不因拿不到页数就丢内容。
+    """
+    try:
+        import pymupdf
+
+        with pymupdf.open(str(path)) as doc:
+            total = doc.page_count
+    except Exception:
+        logger.warning("混合解析取页数失败，退回全文 OCR", exc_info=True)
+        return None
+    if total <= 0:
+        return []
+    counts = list(text_lens[:total]) + [0] * max(0, total - len(text_lens))
+    return [i + 1 for i, n in enumerate(counts) if n < min_chars]
+
+
+def _merge_hybrid_pages(
+    ocr_pages: list[Segment], text_segments: list[Segment]
+) -> list[Segment]:
+    """密页保留文字层，稀字页用 OCR 段替换，按页码归并。
+
+    只替换「OCR 确实产出内容的页」：熔断时没产出的稀字页仍保留文字层，
+    避免半截 OCR 把整本电子年报盖掉。已知限制：``_segments_from_ocr`` 的
+    报表口径（合并/母公司）在 OCR 页之间连续传递，稀字页分散时中间密页的
+    表名不会参与；但表格页文字密度高通常是密页，且深度层数字不取 OCR 值。
+
+    章节标签、封面字段、HTML 表拆分仍复用 ``_segments_from_ocr``，与全文
+    OCR 路径逐字一致。
+    """
+    ocr_segments = _segments_from_ocr(
+        ocr_pages, _section_by_page(text_segments), text_segments
+    )
+    replaced = {s.page for s in ocr_segments if s.page is not None}
+    kept = [s for s in text_segments if s.page not in replaced]
+    merged = kept + ocr_segments
+    merged.sort(key=lambda s: s.page or 0)
+    return merged
 
 
 def _section_by_page(segments: list[Segment]) -> dict[int, str]:

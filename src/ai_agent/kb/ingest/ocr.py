@@ -12,6 +12,7 @@ page 流程直接打本地网关（LOCAL_BASE_URL，未配则 BASE_URL），不�
 from __future__ import annotations
 
 import base64
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -153,8 +154,14 @@ def _recognize_parallel(pngs: list[bytes]) -> list[str | None]:
         return list(pool.map(_recognize, pngs))
 
 
-def ocr_pdf(path: Path) -> list[Segment] | None:
-    """逐页识别。未开启、打不开或一页都没有时返回 None，调用方走文字层。"""
+def ocr_pdf(
+    path: Path, *, pages: Sequence[int] | None = None
+) -> list[Segment] | None:
+    """按页识别。未开启、打不开或一页都没有时返回 None，调用方走文字层。
+
+    ``pages`` 为 1-based 页码列表时只跑这些页（混合解析只送稀字页）；
+    为 None 时按 ``kb_ocr_max_pages`` 截断后跑全文。
+    """
     if not available():
         return None
     try:
@@ -169,37 +176,50 @@ def ocr_pdf(path: Path) -> list[Segment] | None:
         return None
     try:
         total = doc.page_count
-        limit = settings.kb_ocr_max_pages
-        if limit > 0:
-            total = min(total, limit)
         if total <= 0:
+            return None
+        if pages is not None:
+            targets = sorted({int(p) for p in pages if 1 <= int(p) <= total})
+        else:
+            limit = settings.kb_ocr_max_pages
+            end = min(total, limit) if limit > 0 else total
+            targets = list(range(1, end + 1))
+        if not targets:
             return None
         batch = max(1, settings.kb_ocr_concurrency)
         out: list[Segment] = []
-        for start in range(0, total, batch):
+        for start in range(0, len(targets), batch):
             if not available():
                 break
+            chunk = targets[start : start + batch]
             pngs: list[tuple[int, bytes]] = []
-            for i in range(start, min(start + batch, total)):
+            for page_no in chunk:
                 try:
                     pngs.append(
                         (
-                            i,
+                            page_no,
                             _render_page(
-                                doc[i], settings.kb_ocr_dpi, settings.kb_ocr_max_edge
+                                doc[page_no - 1],
+                                settings.kb_ocr_dpi,
+                                settings.kb_ocr_max_edge,
                             ),
                         )
                     )
                 except Exception:
-                    logger.warning("PDF 第 %d 页渲染失败，跳过", i + 1, exc_info=True)
+                    logger.warning("PDF 第 %d 页渲染失败，跳过", page_no, exc_info=True)
             if not pngs:
                 continue
-            texts = _recognize_parallel([png for _i, png in pngs])
-            for (i, _png), text in zip(pngs, texts):
+            texts = _recognize_parallel([png for _page, png in pngs])
+            for (page_no, _png), text in zip(pngs, texts):
                 if text:
-                    out.append(Segment(text, i + 1, TEXT))
+                    out.append(Segment(text, page_no, TEXT))
         if out:
-            logger.info("kb 整页 OCR 完成：%d/%d 页", len(out), total)
+            logger.info(
+                "kb 整页 OCR 完成：%d/%d 页（目标 %d 页）",
+                len(out),
+                total,
+                len(targets),
+            )
         return out or None
     finally:
         doc.close()
