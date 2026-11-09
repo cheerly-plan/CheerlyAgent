@@ -8,6 +8,7 @@ JSON mode 失败降级、``load_llm_json`` 稳健解析、代码级后处理门�
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any, Callable
 
 from ai_agent.core.exceptions import LLMError
@@ -98,9 +99,13 @@ def default_complete(
             raw = complete_chat(messages, diagnostics=diag, **kwargs)
         return raw or "", name, diag
 
+    # 章节并行时同一个补全函数会被多个线程共用；熔断状态与事件列表必须同步。
+    state_lock = threading.RLock()
+
     def record(event: str) -> None:
-        if events is not None:
-            events.append(event)
+        with state_lock:
+            if events is not None:
+                events.append(event)
         logger.warning("深度分析模型事件：%s", event)
 
     empty_streak = 0
@@ -108,14 +113,19 @@ def default_complete(
 
     def call(system: str, user: str) -> str:
         nonlocal empty_streak, fused
-        if fused and escalation_model:
+        with state_lock:
+            bypass = bool(fused and escalation_model)
+        if bypass:
             raw, _, _ = once(escalation_model, system, user)
             return raw
         raw, name, diag = once(model, system, user)
         if raw.strip():
-            empty_streak = 0
+            with state_lock:
+                empty_streak = 0
             return raw
-        empty_streak += 1
+        with state_lock:
+            empty_streak += 1
+            streak = empty_streak
         detail = (
             f"finish_reason={diag.get('finish_reason') or '未知'}、"
             f"completion_tokens={diag.get('completion_tokens') or '未知'}、"
@@ -132,12 +142,17 @@ def default_complete(
             f"[{name}] 返回空 content（{detail}，多为思考型模型 reasoning 耗尽 token）；"
             f"已自动升级 [{upgraded_name}] 重试：{outcome}"
         )
-        if empty_streak >= max(1, circuit_break_after):
-            fused = True
-            record(
-                f"[{name}] 连续 {empty_streak} 次空 content，后续调用直接走 "
-                f"[{upgraded_name}]（熔断，免每章空跑小模型）"
-            )
+        if streak >= max(1, circuit_break_after):
+            with state_lock:
+                already_fused = fused
+                fused = True
+            # 并发下多个线程可能同时跨过阈值；熔断事件只记一次，避免
+            # 「连续 2 次」「连续 3 次」重复刷屏，也避免误导成本归因。
+            if not already_fused:
+                record(
+                    f"[{name}] 连续 {streak} 次空 content，后续调用直接走 "
+                    f"[{upgraded_name}]（熔断，免每章空跑小模型）"
+                )
         return upgraded
 
     return call

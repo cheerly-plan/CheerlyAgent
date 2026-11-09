@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +56,11 @@ from ai_agent.report.deep.schema import (
 
 logger = get_logger(__name__)
 
+# 对外入口（HTTP / 聊天工具）的默认章节并行度：库级 DeepConfig 仍是 1（既有
+# 行为逐字不变），入口显式提速。理由：章节之间本来是独立验证，串行只为了把
+# 前序结论带进 prompt；并行改用基线快照可把整份报告耗时压到接近单章。
+ENTRY_CHAPTER_CONCURRENCY = 3
+
 
 @dataclass
 class DeepConfig:
@@ -78,6 +85,9 @@ class DeepConfig:
     convergence_model: str = ""
     # 硬预算闸：超了就把剩余章节标 skipped，不静默缩水
     max_llm_calls: int = 60
+    # 第 2-8 章并行度。1（默认）= 原有逐章串行、保留前序章节结论链；>1 时
+    # 前序上下文改用基线快照（候选主线 + 台账要点），结果仍按章节号确定性汇总。
+    chapter_concurrency: int = 1
 
     def active_experts(self) -> tuple[str, ...]:
         return EXPERT_NAMES if self.full_panel else self.experts
@@ -165,15 +175,19 @@ class _Budget:
         self.calls = 0
         self.input_chars = 0
         self.output_chars = 0
+        # 章节并行时多个线程会同时经过 wrap，计数与字符累加必须原子化。
+        self._lock = threading.Lock()
 
     def wrap(self, fn):
         def call(system: str, user: str) -> str:
-            if self.calls >= self.limit:
-                raise BudgetExceeded(f"LLM 调用达到上限 {self.limit}")
-            self.calls += 1
-            self.input_chars += len(system) + len(user)
+            with self._lock:
+                if self.calls >= self.limit:
+                    raise BudgetExceeded(f"LLM 调用达到上限 {self.limit}")
+                self.calls += 1
+                self.input_chars += len(system) + len(user)
             raw = fn(system, user)
-            self.output_chars += len(raw or "")
+            with self._lock:
+                self.output_chars += len(raw or "")
             return raw or ""
         return call
 
@@ -252,6 +266,32 @@ def _prior_text(chapters: list[ChapterResult]) -> str:
             line += "；已知：" + "；".join(known[:2])
         parts.append(line)
     return "\n".join(parts) if parts else "（无前序章节）"
+
+
+def _baseline_prior(result: DeepAnalysisResult, ledger: SourceLedger) -> str:
+    """章节并行时的静态上下文：候选主线 + 台账要点，不含其它章节的结论。
+
+    串行模式靠 ``_prior_text`` 把前序章节结论带进 prompt；并行时章节同时开跑，
+    不能引用尚未产出的结论，否则同一份报告两次运行会得到不同输入。这里换成
+    对每章都相同的确定性快照，保证并发结果与章节执行顺序无关。
+    """
+    lines = [
+        f"候选主线：{item.business}（{item.rule}）{item.chain}"
+        for item in result.mainlines[:3]
+    ]
+    lines.extend(
+        f"台账要点：{record.item}={record.value}{record.unit}（{record.tier}）"
+        for record in ledger.records[:8]
+    )
+    return "\n".join(lines) if lines else "（无前序章节）"
+
+
+def _skipped_chapter(number: int) -> ChapterResult:
+    spec = spec_of(number)
+    return ChapterResult(
+        number=number, title=spec.title, question=spec.question,
+        method="、".join(spec.methods), status="skipped",
+    )
 
 
 def _checklist(result: DeepAnalysisResult, *, use_llm: bool) -> list[ChecklistItem]:
@@ -510,6 +550,12 @@ def run_deep_analysis(
     ]
     if sample_note:
         notes.insert(0, sample_note)
+    if ledger.unit_conversions:
+        notes.append(
+            f"单位换算白名单：{len(ledger.unit_conversions)} 条台账金额已放行万元/亿元"
+            "等价写法（按固定倍率从 L1 原文确定性换算，非模型心算；"
+            "同比、差值、占比等计算派生值仍一律遮蔽）"
+        )
     if use_llm:
         notes.append(
             f"模型路由：{plan.route}；章节/评审={plan.chapter_label or '—'}，"
@@ -521,35 +567,71 @@ def run_deep_analysis(
     chapters: list[ChapterResult] = []
     budget_hit = False
     # 第 2-8 章：逐章验证 + 评审（第 1/9/10 章单独处理）
-    for number in [n for n in chapter_numbers if 2 <= n <= 8]:
-        spec = spec_of(number)
-        if call is None or budget_hit:
-            chapters.append(
-                ChapterResult(number=number, title=spec.title, question=spec.question,
-                              method="、".join(spec.methods), status="skipped")
-            )
-            continue
-        try:
-            chapter = analyze_chapter(
-                spec, ledger, target=display_target, period=period, mode=mode,
-                prior=_prior_text(chapters), complete=call,
-                max_claims=cfg.max_claims_per_chapter,
-            )
-            chapter.review = review_chapter(
-                chapter, ledger, experts=cfg.active_experts(), rounds=cfg.review_rounds,
-                prior=_prior_text(chapters), complete=call,
-                max_opinions=cfg.max_review_opinions,
-            )
-            if chapter.review and chapter.status != "fallback":
-                chapter.status = "reviewed"
-            chapters.append(chapter)
-        except BudgetExceeded as exc:
-            budget_hit = True
-            notes.append(f"预算闸触发：{exc}；后续章节标 skipped")
-            chapters.append(
-                ChapterResult(number=number, title=spec.title, question=spec.question,
-                              method="、".join(spec.methods), status="skipped")
-            )
+    chapter_2_8 = [n for n in chapter_numbers if 2 <= n <= 8]
+    workers = max(1, min(int(cfg.chapter_concurrency or 1), len(chapter_2_8) or 1))
+    parallel = workers > 1 and call is not None
+    if parallel:
+        # 章节之间本来是独立验证；并行时不能引用尚未产出的前序结论，否则
+        # prompt 会随线程完成顺序变化。统一换成确定性基线快照。
+        baseline = _baseline_prior(result, ledger)
+        notes.append(
+            f"章节并行：第 2-8 章 {workers} 并发，前序上下文改用基线快照"
+            "（候选主线+台账要点），结果按章节号确定性汇总；模型事件按完成顺序记录"
+        )
+
+        def run_one(number: int) -> tuple[ChapterResult, str]:
+            spec = spec_of(number)
+            try:
+                chapter = analyze_chapter(
+                    spec, ledger, target=display_target, period=period, mode=mode,
+                    prior=baseline, complete=call,
+                    max_claims=cfg.max_claims_per_chapter,
+                )
+                chapter.review = review_chapter(
+                    chapter, ledger, experts=cfg.active_experts(), rounds=cfg.review_rounds,
+                    prior=baseline, complete=call,
+                    max_opinions=cfg.max_review_opinions,
+                )
+                if chapter.review and chapter.status != "fallback":
+                    chapter.status = "reviewed"
+                return chapter, ""
+            except BudgetExceeded as exc:
+                return _skipped_chapter(number), str(exc)
+
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="deep-chapter"
+        ) as pool:
+            futures = {n: pool.submit(run_one, n) for n in chapter_2_8}
+            for number in chapter_2_8:
+                chapter, reason = futures[number].result()
+                if reason and not budget_hit:
+                    budget_hit = True
+                    notes.append(f"预算闸触发：{reason}；后续章节标 skipped")
+                chapters.append(_skipped_chapter(number) if budget_hit else chapter)
+    else:
+        for number in chapter_2_8:
+            spec = spec_of(number)
+            if call is None or budget_hit:
+                chapters.append(_skipped_chapter(number))
+                continue
+            try:
+                chapter = analyze_chapter(
+                    spec, ledger, target=display_target, period=period, mode=mode,
+                    prior=_prior_text(chapters), complete=call,
+                    max_claims=cfg.max_claims_per_chapter,
+                )
+                chapter.review = review_chapter(
+                    chapter, ledger, experts=cfg.active_experts(), rounds=cfg.review_rounds,
+                    prior=_prior_text(chapters), complete=call,
+                    max_opinions=cfg.max_review_opinions,
+                )
+                if chapter.review and chapter.status != "fallback":
+                    chapter.status = "reviewed"
+                chapters.append(chapter)
+            except BudgetExceeded as exc:
+                budget_hit = True
+                notes.append(f"预算闸触发：{exc}；后续章节标 skipped")
+                chapters.append(_skipped_chapter(number))
 
     # 第 9 章：收敛（候选主线裁决 + 护城河 + 证伪 + 三情景）
     convergence: Convergence | None = None

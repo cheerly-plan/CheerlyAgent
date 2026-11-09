@@ -49,6 +49,48 @@ def numbers_in(text: str) -> set[str]:
     }
 
 
+# 金额单位换算白名单：只把「台账里真实存在的金额」按固定倍率换成另一种单位写法。
+# 事实层原文以「元」为主，模型却习惯写「亿元」；此前这些等价写法全被
+# numbers_allowed 判成台账外数字遮蔽掉，评审意见也指出结论出现成片的数据空白。
+# 这里不做任何计算派生（同比、差值、占比一律不放行），只做单位换算。
+_AMOUNT_UNITS = {"元": 1.0, "万元": 1e4, "亿元": 1e8}
+_DERIVED_PRECISIONS = (0, 1, 2, 3, 4, 6)
+_VALUE_WITH_UNIT = re.compile(r"^\s*(-?\d[\d,，]*(?:\.\d+)?)\s*(亿元|万元|元|%)?\s*$")
+
+
+def derived_number_forms(value: str, unit: str) -> set[str]:
+    """台账金额数值的等价单位写法（元 / 万元 / 亿元），按常见书写精度归一。
+
+    只有 ``value`` 是单个数字、且单位属于金额单位时才派生；百分比、比率、
+    「倍」「人」等一律跳过。负金额同时派生绝对值写法（「亏损 2.05 亿元」）。
+    返回值是归一化后的数字键，可直接并入白名单。非台账来源的数字、模型
+    心算出来的同比/差值都不会因为本函数被放行。
+    """
+    match = _VALUE_WITH_UNIT.match(str(value or ""))
+    if not match:
+        return set()
+    unit_text = (str(unit or "").strip() or match.group(2) or "").strip()
+    scale = _AMOUNT_UNITS.get(unit_text)
+    if scale is None:
+        return set()
+    try:
+        base_yuan = float(match.group(1).replace(",", "").replace("，", "")) * scale
+    except ValueError:
+        return set()
+    forms: set[str] = set()
+    for target_scale in _AMOUNT_UNITS.values():
+        converted = base_yuan / target_scale
+        # 负金额常被写成「亏损 2.05 亿元」「净流出 3.46 亿元」：方向由语义词
+        # 承担，数值取绝对值。这也是台账数值的等价写法，不应被当成编造数字。
+        magnitudes = (converted, abs(converted)) if converted < 0 else (converted,)
+        for magnitude in magnitudes:
+            for precision in _DERIVED_PRECISIONS:
+                key = normalize_number(f"{magnitude:.{precision}f}")
+                if key:
+                    forms.add(key)
+    return forms
+
+
 @dataclass
 class SourceRecord:
     """一条可溯源事实。``e0`` 这类短 id 只在本层内使用，不覆盖事实层的引用锚点。"""
@@ -199,12 +241,26 @@ class SourceLedger:
 
     @property
     def allowed_numbers(self) -> set[str]:
-        """正文数字白名单：只允许事实台账里出现过的数字（含原文片段里的数）。"""
+        """正文数字白名单：台账出现过的值 + 台账金额的确定性单位换算写法。
+
+        派生只来自 ``record.value`` 与金额单位，不从原文片段（页码、报告期、
+        表格里的其它数）派生，也不含任何由模型计算出来的比率或差额。
+        """
         allowed: set[str] = set()
         for record in self.records:
             allowed |= numbers_in(record.value)
             allowed |= numbers_in(record.quote)
+            allowed |= derived_number_forms(record.value, record.unit)
         return allowed
+
+    @property
+    def unit_conversions(self) -> list[str]:
+        """可审计的换算条目：哪些台账金额被允许写成万元 / 亿元。"""
+        return [
+            f"{record.source_id} {record.item}：{record.value}{record.unit}"
+            for record in self.records
+            if derived_number_forms(record.value, record.unit)
+        ]
 
     def source_rows(self, source_ids: list[str] | None = None) -> list[DataSourceRow]:
         wanted = set(source_ids) if source_ids is not None else None

@@ -1,6 +1,9 @@
 """研报接口：一次提交确定性跑完六步，返回正文 + 溯源 + 校验 + 审核队列。
 
-  POST   /v1/report                              生成研报（登录用户）
+  POST   /v1/report                              生成研报（同步，登录用户）
+  POST   /v1/report/jobs                         提交后台研报任务（202 + job_id）
+  GET    /v1/report/jobs/{id}                    轮询任务状态 / 阶段 / 进度
+  GET    /v1/report/jobs/{id}/result             取已完成任务的完整 payload
   GET    /v1/report/skills                       可用报告类型（skill 注册表）
   GET    /v1/report/files/{name}                 附件下载；PDF 需已定稿（M2 门禁）
   GET    /v1/report/reviews                      审核队列（可按 status 过滤）
@@ -20,9 +23,10 @@ M2 门禁：校验有 error 的报告在生成阶段就不渲染 PDF；审核项
 双 PDF 档的 ``<stem>.deep.pdf`` 映射到 ``<report_id>-deep`` 这条独立审核记录，
 须人工批准**并**定稿后才放行；事实层底稿仍按主记录自动定稿，互不影响。
 
-流水线本身不调用 LLM（见 report/pipeline.py 的说明），所以这里没有
-流式输出、没有超时/限流配置，也没有 token 成本；耗时主要是知识库检索
-与 PDF 渲染，同步路由由 FastAPI 丢进线程池，不阻塞事件循环。
+事实层流水线本身不调用 LLM，但开启深度旁路后会走模型通道，``full`` 档耗时
+可达数分钟。同步路由由 FastAPI 丢进线程池，不阻塞事件循环；网关超时较短的
+客户端应改用 ``POST /v1/report/jobs`` 后台任务 + 轮询，两条入口共用
+``_run_request`` / ``_payload``，产物与门禁完全一致。
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from ai_agent.api.schemas import ReportDecisionRequest, ReportRequest
 from ai_agent.core.config import settings
 from ai_agent.storage.db import UserRecord
 from ai_agent.report.pipeline import ReportResult, run_report
+from ai_agent.report.jobs import job_manager
 from ai_agent.report import review as review_store
 from ai_agent.report.review import FINALIZED, ReviewError, ReviewForbidden, ReviewNotFound
 from ai_agent.report.skills import SKILLS
@@ -220,6 +225,29 @@ def list_report_skills(
     }
 
 
+def _run_request(req: ReportRequest) -> ReportResult:
+    """同步端点与后台任务共用的生成链路，保证两者 payload 逐字一致。"""
+    # 默认 full+separate：底稿与深度两份 PDF；off 时连模块都不 import。
+    deep_options = None
+    if req.deep != "off":
+        from ai_agent.report.deep import ENTRY_CHAPTER_CONCURRENCY
+        from ai_agent.report.deep.bridge import DeepOptions
+
+        deep_options = DeepOptions(
+            enabled=req.deep == "full",
+            pdf_mode=req.deep_pdf,
+            # 对外入口显式开启章节并行；库级 run_report 默认仍是串行。
+            chapter_concurrency=ENTRY_CHAPTER_CONCURRENCY,
+        )
+    return run_report(
+        req.request,
+        skill_id=req.report_type or "",
+        deliverable=req.deliverable,
+        write_pdf=req.write_pdf,
+        deep=deep_options,
+    )
+
+
 @router.post("")
 def create_report(
     req: ReportRequest, user: UserRecord = Depends(get_current_user)
@@ -227,21 +255,7 @@ def create_report(
     """生成一份研报。校验未通过不是 4xx：草稿照常返回，但 PDF 会被门禁挡住。"""
     from ai_agent.core.logging import get_logger
 
-    # 默认 full+separate：底稿与深度两份 PDF；off 时连模块都不 import。
-    deep_options = None
-    if req.deep != "off":
-        from ai_agent.report.deep.bridge import DeepOptions
-
-        deep_options = DeepOptions(
-            enabled=req.deep == "full", pdf_mode=req.deep_pdf
-        )
-    result = run_report(
-        req.request,
-        skill_id=req.report_type or "",
-        deliverable=req.deliverable,
-        write_pdf=req.write_pdf,
-        deep=deep_options,
-    )
+    result = _run_request(req)
     get_logger(__name__).info(
         "研报生成 user=%s report_id=%s status=%s facts=%d passed=%s pdf=%s review=%s",
         user.username,
@@ -253,6 +267,54 @@ def create_report(
         result.review_status,
     )
     return _payload(result)
+
+
+# ---------------------------------------------------------------------------
+# 可选异步入口：同步 POST /v1/report 的响应契约一行不动，长任务改用轮询
+# ---------------------------------------------------------------------------
+
+
+@router.post("/jobs", status_code=202)
+def submit_report_job(
+    req: ReportRequest, user: UserRecord = Depends(get_current_user)
+) -> dict:
+    """提交后台研报任务，立刻返回 job_id；用 poll_url 轮询阶段与进度。
+
+    ``full`` 档会跑数分钟，网关超时短的场景应走这里。任务表只在进程内存里，
+    进程重启后未完成任务会丢失，但已落盘的报告仍可从审核队列/文件端点取回。
+    """
+    job = job_manager.submit(
+        owner=user.username,
+        request_text=req.request,
+        runner=lambda: _payload(_run_request(req)),
+    )
+    return job.to_dict()
+
+
+@router.get("/jobs/{job_id}/result")
+def get_report_job_result(
+    job_id: str, _user: UserRecord = Depends(get_current_user)
+) -> dict:
+    """只取已完成任务的完整 payload；未完成返回 409。"""
+    job = job_manager.get(job_id, _user.username)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"没有 job_id={job_id} 的任务")
+    if job.status != "succeeded":
+        raise HTTPException(
+            status_code=409, detail=f"任务尚未完成：{job.stage}（{job.status}）"
+        )
+    return job.result or {}
+
+
+@router.get("/jobs/{job_id}")
+def get_report_job(
+    job_id: str, _user: UserRecord = Depends(get_current_user)
+) -> dict:
+    """轮询任务状态。完成时顺带返回 payload，省一次请求。"""
+    job = job_manager.get(job_id, _user.username)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"没有 job_id={job_id} 的任务")
+    return job.to_dict(include_result=job.status == "succeeded")
 
 
 @router.get("/files/{name}")

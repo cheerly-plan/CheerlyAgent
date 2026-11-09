@@ -63,6 +63,9 @@ class DeepOptions:
     collect_external: bool = True
     facts_dir: Path | str | None = None
     config: DeepConfig | None = None
+    # 第 2-8 章并行度，只在未显式传 config 时生效。1（库级默认）= 原有逐章
+    # 串行与前序结论链；对外入口会显式设为 ENTRY_CHAPTER_CONCURRENCY 提速。
+    chapter_concurrency: int = 1
     complete: Complete | None = None  # 注入 stub 便于零成本跑通 / A/B
     list_files: ListFiles | None = None  # 注入知识库行，避免测试连库
     stat_fetcher: StatFetcher | None = None  # 行业统计注入点
@@ -120,7 +123,10 @@ def attach_deep(result: "ReportResult", options: DeepOptions) -> DeepAnalysisRes
             providers=options.providers,
         )
 
-    cfg = options.config or DeepConfig(enabled=options.enabled)
+    cfg = options.config or DeepConfig(
+        enabled=options.enabled,
+        chapter_concurrency=options.chapter_concurrency,
+    )
     deep = run_deep_analysis(
         target,
         period,

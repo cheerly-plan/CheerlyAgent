@@ -76,6 +76,7 @@ from ai_agent.report.deep.pdf_appendix import (
 )
 from ai_agent.report.deep.analyzer import assess_convergence, normalize_moat_rating
 from ai_agent.report.deep.pipeline import (
+    ENTRY_CHAPTER_CONCURRENCY,
     DeepConfig,
     ModelPlan,
     pick_industry_sample,
@@ -97,6 +98,7 @@ from ai_agent.report.deep.sources import (
 __all__ = [
     "APPENDIX_REVIEW_REASON",
     "CHAPTERS",
+    "ENTRY_CHAPTER_CONCURRENCY",
     "ChapterResult",
     "DeepAnalysisResult",
     "DeepConfig",

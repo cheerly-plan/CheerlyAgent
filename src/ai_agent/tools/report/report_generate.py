@@ -65,6 +65,7 @@ class GenerateReportArgs(BaseModel):
 
 
 def _generate_report(request: str, report_type: str = "", write_pdf: bool = True) -> str:
+    from ai_agent.report.deep import ENTRY_CHAPTER_CONCURRENCY
     from ai_agent.report.deep.bridge import DeepOptions
     from ai_agent.tools.progress import emit_progress
 
@@ -74,7 +75,10 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
         request,
         skill_id=report_type or "",
         write_pdf=write_pdf,
-        deep=DeepOptions(enabled=True, pdf_mode="separate"),
+        deep=DeepOptions(
+            enabled=True, pdf_mode="separate",
+            chapter_concurrency=ENTRY_CHAPTER_CONCURRENCY,
+        ),
     )
     gaps = len(getattr(result, "gaps", []) or [])
     if gaps:
