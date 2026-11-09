@@ -52,10 +52,30 @@ class BudgetExceeded(RuntimeError):
     """LLM 调用预算耗尽。由编排层捕获，剩余章节标 skipped 而不是悄悄缩水。"""
 
 
-def default_complete(max_tokens: int, temperature: float, timeout: float, model: str) -> Complete:
-    """构造默认补全函数：JSON mode 不被网关支持时去掉该参数重试一次。"""
-    def call(system: str, user: str) -> str:
-        name, client = lightweight_llm(model)
+def default_complete(
+    max_tokens: int,
+    temperature: float,
+    timeout: float,
+    model: str,
+    *,
+    escalation_model: str = "",
+    events: list[str] | None = None,
+    circuit_break_after: int = 2,
+) -> Complete:
+    """构造默认补全函数：JSON mode 不被网关支持时去掉该参数重试一次。
+
+    思考型小模型会把 ``max_tokens`` 全部消耗在 reasoning 上并返回空 content
+    （本地 Ollama qwen3 实测：completion_tokens=1600 / finish_reason=length /
+    content=""）。检测到空响应时，用 ``escalation_model``（通常是主模型）重试一次，
+    并把事件写进 ``events`` 供 ExecutionReport 与 PDF 附录 A 审计。小模型优先的
+    路由意图不变，成本只在失败时上升。
+
+    连续 ``circuit_break_after`` 次空响应即熔断：后续调用直接走升级模型，
+    避免「每次都先空跑一轮必空的小模型」把整份报告的耗时拖到十几分钟。
+    """
+
+    def once(use_model: str, system: str, user: str) -> tuple[str, str, dict]:
+        name, client = lightweight_llm(use_model)
         messages: list[dict[str, str]] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -67,30 +87,115 @@ def default_complete(max_tokens: int, temperature: float, timeout: float, model:
             "max_tokens": max_tokens,
             "timeout": timeout,
         }
+        diag: dict[str, Any] = {}
         try:
-            return complete_chat(
-                messages, response_format={"type": "json_object"}, **kwargs
+            raw = complete_chat(
+                messages, response_format={"type": "json_object"},
+                diagnostics=diag, **kwargs
             )
         except LLMError:
             logger.warning("深度分析 JSON mode 不被支持，去掉 response_format 重试")
-            return complete_chat(messages, **kwargs)
+            raw = complete_chat(messages, diagnostics=diag, **kwargs)
+        return raw or "", name, diag
+
+    def record(event: str) -> None:
+        if events is not None:
+            events.append(event)
+        logger.warning("深度分析模型事件：%s", event)
+
+    empty_streak = 0
+    fused = False
+
+    def call(system: str, user: str) -> str:
+        nonlocal empty_streak, fused
+        if fused and escalation_model:
+            raw, _, _ = once(escalation_model, system, user)
+            return raw
+        raw, name, diag = once(model, system, user)
+        if raw.strip():
+            empty_streak = 0
+            return raw
+        empty_streak += 1
+        detail = (
+            f"finish_reason={diag.get('finish_reason') or '未知'}、"
+            f"completion_tokens={diag.get('completion_tokens') or '未知'}、"
+            f"reasoning_chars={diag.get('reasoning_chars', 0)}"
+        )
+        if not escalation_model or escalation_model == name:
+            record(f"[{name}] 返回空 content（{detail}）；无可升级模型，本次调用作废")
+            return ""
+        upgraded, upgraded_name, _ = once(escalation_model, system, user)
+        outcome = (
+            f"成功返回 {len(upgraded)} 字符" if upgraded.strip() else "仍为空，章节将降级"
+        )
+        record(
+            f"[{name}] 返回空 content（{detail}，多为思考型模型 reasoning 耗尽 token）；"
+            f"已自动升级 [{upgraded_name}] 重试：{outcome}"
+        )
+        if empty_streak >= max(1, circuit_break_after):
+            fused = True
+            record(
+                f"[{name}] 连续 {empty_streak} 次空 content，后续调用直接走 "
+                f"[{upgraded_name}]（熔断，免每章空跑小模型）"
+            )
+        return upgraded
+
     return call
+
+
+def _number_violation(key: str, allowed: set[str]) -> bool:
+    """台账外数字判定：章号/小比例/年份豁免规则只在这里维护一份。"""
+    if not key:
+        return False
+    raw = key.lstrip("-")
+    if re.fullmatch(r"\d{1,2}", raw) or re.fullmatch(r"(?:19|20)\d{2}", raw):
+        return False
+    return key not in allowed
 
 
 def numbers_allowed(text: str, allowed: set[str]) -> bool:
     """正文中出现的数字必须在事实台账里。豁免章号/小比例与年份。"""
-    for match in NUMBER_RE.finditer(text or ""):
-        key = normalize_number(match.group(0))
-        if not key:
-            continue
-        raw = key.lstrip("-")
-        if re.fullmatch(r"\d{1,2}", raw):
-            continue
-        if re.fullmatch(r"(?:19|20)\d{2}", raw):
-            continue
-        if key not in allowed:
-            return False
-    return True
+    return not any(
+        _number_violation(normalize_number(match.group(0)), allowed)
+        for match in NUMBER_RE.finditer(text or "")
+    )
+
+
+_UNTRACEABLE = "〔未溯源〕"
+
+
+def guard_numbers(text: str, allowed: set[str]) -> tuple[str, list[str]]:
+    """把台账外数字遮蔽成占位符，返回 (安全文本, 被拦数字原文列表)。
+
+    与 ``numbers_allowed`` 共用判定规则：不是另立一套门禁，而是把「丢弃整条」
+    用于 claims、「遮蔽数字保留结论骨架」用于 verdict / final_chain。
+    """
+    blocked: list[str] = []
+
+    def replace(match: re.Match) -> str:
+        token = match.group(0)
+        if not _number_violation(normalize_number(token), allowed):
+            return token
+        blocked.append(token)
+        return _UNTRACEABLE
+
+    return NUMBER_RE.sub(replace, text or ""), blocked
+
+
+def guard_conclusion(
+    text: str, ledger: SourceLedger, chapter_no: int
+) -> tuple[str, DataGap | None]:
+    """章节结论 / 收敛链条统一过数字台账门禁；拦到的数字遮蔽并记缺口。"""
+    guarded, blocked = guard_numbers(text, ledger.allowed_numbers)
+    if not blocked:
+        return text, None
+    # 缺口清单本身也要进 PDF，不能把被拦下的未溯源数字原样写进去。
+    return guarded, DataGap(
+        item=f"第{chapter_no}章结论含台账外数字（{len(blocked)} 处）",
+        chapters=[chapter_no],
+        impact="推断层禁止台账外数字，已遮蔽为占位符，不得外发未溯源数值",
+        handling="需补 L1-L3 原文溯源或从结论中删除该数值；不得由模型心算补齐",
+    )
 
 
 def _clamp_confidence(value: Any, default: float) -> float:
@@ -193,23 +298,53 @@ def analyze_chapter(
         GAPS="\n".join(f"- {gap.item}：{gap.impact}" for gap in ledger.gaps) or "（无）",
     )
     try:
-        payload = load_llm_json(complete(CHAPTER_SYSTEM, user), repair=True)
+        raw = complete(CHAPTER_SYSTEM, user)
     except BudgetExceeded:
         raise  # 预算闸必须冒泡到编排层，不能被降级逻辑吞掉后继续空转
     except Exception as exc:
         logger.warning("第 %s 章 LLM 失败，降级 fallback：%s", spec.number, exc)
         result.status = "fallback"
         result.verdict = "本章模型调用失败，结论从略"
+        result.fallback_reason = guard_numbers(
+            f"LLM 调用异常：{type(exc).__name__}: {str(exc)[:160]}",
+            ledger.allowed_numbers,
+        )[0]
         result.gaps.append(DataGap(item=f"第{spec.number}章分析", chapters=[spec.number],
                                    impact="本章未验证", handling="稍后重试，不得补写推断"))
         return result
+    try:
+        payload = load_llm_json(raw, repair=True)
+        parse_error = ""
+    except Exception as exc:
+        payload = None
+        parse_error = f"{type(exc).__name__}: {exc}"
     if not isinstance(payload, dict):
         result.status = "fallback"
         result.verdict = "本章输出无法解析，结论从略"
+        if not (raw or "").strip():
+            result.fallback_reason = (
+                "模型返回空 content：思考型模型的 reasoning 可能耗尽 max_tokens；"
+                "自动升级主模型仍为空（详见执行报告模型事件）"
+            )
+        else:
+            excerpt = guard_numbers(
+                (raw or "").strip()[:120], ledger.allowed_numbers
+            )[0]
+            result.fallback_reason = guard_numbers(
+                f"输出未解析成 JSON 对象（得到 {type(payload).__name__}；"
+                f"{parse_error or '结构不符'}）；原始 {len(raw or '')} 字符，"
+                f"摘要：{excerpt!r}",
+                ledger.allowed_numbers,
+            )[0]
         return result
 
-    result.verdict = _text(payload.get("verdict"), 300)
+    result.verdict, number_gap = guard_conclusion(
+        _text(payload.get("verdict"), 300), ledger, spec.number
+    )
     result.claims, result.gaps = _claims_from(payload, ledger, max_claims, spec.number)
+    # _claims_from 会整体重赋 gaps，门禁缺口必须在它之后追加，否则被覆盖。
+    if number_gap:
+        result.gaps.append(number_gap)
     used_ids: set[str] = set()
     for claim in result.claims:
         used_ids.update(claim.evidence_ids)

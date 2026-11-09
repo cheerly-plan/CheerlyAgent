@@ -25,6 +25,8 @@ from ai_agent.report.deep.analyzer import (
     assess_convergence,
     converge,
     default_complete,
+    guard_conclusion,
+    guard_numbers,
     review_chapter,
 )
 from ai_agent.report.deep.chapters import (
@@ -307,6 +309,60 @@ def _checklist(result: DeepAnalysisResult, *, use_llm: bool) -> list[ChecklistIt
     return items
 
 
+def _guard_result_numbers(result: DeepAnalysisResult, ledger: SourceLedger) -> None:
+    """推断层数字台账兜底门禁：所有模型给出的自由文本都不许带台账外数字。
+
+    章节 verdict / 收敛 final_chain 已有 ``guard_conclusion`` 第一道门禁；这里覆盖
+    评审意见、护城河分项、跟踪与证伪、三情景说明等同样会被印进 PDF 的模型文本。
+    遮蔽而非删除，保留结论骨架，并在章节 gaps 里留可追溯的缺口记录。
+    事实层的 sources 表、执行报告里的工程计量与诊断数字不属于模型结论，不在此列。
+    """
+    allowed = ledger.allowed_numbers
+
+    def safe(text: str) -> str:
+        return guard_numbers(text or "", allowed)[0]
+
+    for chapter in result.chapters:
+        chapter.verdict = safe(chapter.verdict)
+        chapter.fallback_reason = safe(chapter.fallback_reason)
+        for claim in chapter.claims:
+            claim.text = safe(claim.text)
+        for gap in chapter.gaps:
+            gap.item = safe(gap.item)
+            gap.impact = safe(gap.impact)
+            gap.handling = safe(gap.handling)
+        for opinion in chapter.review:
+            opinion.issue = safe(opinion.issue)
+            opinion.reason = safe(opinion.reason)
+            opinion.revision = safe(opinion.revision)
+    if result.convergence is not None:
+        conv = result.convergence
+        conv.final_chain = safe(conv.final_chain)
+        conv.delta = safe(conv.delta)
+        conv.falsifiers = [safe(item) for item in conv.falsifiers]
+        conv.moat_sources = {key: safe(value) for key, value in conv.moat_sources.items()}
+        conv.decisions = [
+            {
+                **row,
+                "mainline": safe(str(row.get("mainline", ""))),
+                "reason": safe(str(row.get("reason", ""))),
+            }
+            for row in conv.decisions
+        ]
+    for item in result.tracking:
+        item.judgment = safe(item.judgment)
+        item.indicator = safe(item.indicator)
+        item.direction = safe(item.direction)
+        item.source = safe(item.source)
+    for item in result.falsifiers:
+        item.judgment = safe(item.judgment)
+        item.signal = safe(item.signal)
+    for item in result.scenarios:
+        item.assumption = safe(item.assumption)
+        item.trigger = safe(item.trigger)
+        item.impact = safe(item.impact)
+
+
 def _cross_checks(result: DeepAnalysisResult) -> list[str]:
     """Gate 5：跨章交叉验证 + 候选主线 vs 最终链条差异审查。"""
     notes: list[str] = []
@@ -417,6 +473,7 @@ def run_deep_analysis(
     uses_stub = complete is not None or convergence_complete is not None
     use_llm = cfg.enabled or uses_stub
     budget = _Budget(cfg.max_llm_calls)
+    model_events: list[str] = []
     if not use_llm:
         plan = ModelPlan()  # route="none"：零 token 骨架，不读取任何模型配置
         call = converge_call = None
@@ -431,11 +488,15 @@ def run_deep_analysis(
         plan = resolve_model_plan(
             cfg, small_model=settings.small_model, primary_model=settings.model
         )
+        # 思考型小模型会把 token 全耗在 reasoning 上返回空 content；此时用收敛通道
+        # 的主模型重试一次，事件写进 ExecutionReport 与 PDF 附录 A，便于成本归因。
         call = budget.wrap(default_complete(
-            cfg.max_tokens, cfg.temperature, cfg.timeout, plan.chapter_model
+            cfg.max_tokens, cfg.temperature, cfg.timeout, plan.chapter_model,
+            escalation_model=plan.convergence_model, events=model_events,
         ))
         converge_call = budget.wrap(default_complete(
-            cfg.max_tokens, cfg.temperature, cfg.timeout, plan.convergence_model
+            cfg.max_tokens, cfg.temperature, cfg.timeout, plan.convergence_model,
+            events=model_events,
         ))
     for warning in plan.warnings:
         logger.warning("深度分析模型路由告警：%s", warning)
@@ -445,7 +506,7 @@ def run_deep_analysis(
         "第 10 章 checklist 由确定性规则生成（零 LLM 调用）",
         f"评审协议：{len(cfg.active_experts())} 视角 × {cfg.review_rounds} 轮 + 1 次一致性/终审合并轮"
         + ("（全量 12 视角）" if cfg.full_panel else "（非 12专家×5轮全量，成本折中）"),
-        "token 为字符 /1.5 粗估，项目当前未接 LLM usage 统计",
+        "token 为按字符数粗估，项目当前未接 LLM usage 统计",
     ]
     if sample_note:
         notes.insert(0, sample_note)
@@ -453,7 +514,7 @@ def run_deep_analysis(
         notes.append(
             f"模型路由：{plan.route}；章节/评审={plan.chapter_label or '—'}，"
             f"第 9 章收敛与终审={plan.convergence_label or '—'}"
-            "（决策 ④：仅收敛用主模型）"
+            "（决策 ④：小模型优先；空 content 自动升级主模型重试一次）"
         )
         notes.extend(plan.warnings)
 
@@ -511,13 +572,21 @@ def run_deep_analysis(
             for row in falsifier_rows:
                 falsifiers.append(Falsifier(**row))
             if convergence is not None:
+                # 收敛结论与章节 verdict 同样过数字台账门禁：此前 final_chain 直接
+                # 赋值绕过 numbers_allowed，导致推断层 PDF 出现台账外数字。
+                safe_chain, chain_gap = guard_conclusion(convergence.final_chain, ledger, 9)
+                safe_delta, delta_gap = guard_conclusion(convergence.delta, ledger, 9)
+                convergence.final_chain = safe_chain
+                convergence.delta = safe_delta
+                ch9_gaps = [DataGap(item="不可复制性实证", chapters=[9],
+                                    impact="护城河属性存疑",
+                                    handling="需 L2-L3 多源验证，未找到即标注存疑")]
+                ch9_gaps.extend(gap for gap in (chain_gap, delta_gap) if gap)
                 ch9 = ChapterResult(
                     number=9, title=spec.title, question=spec.question,
-                    method="、".join(spec.methods), verdict=convergence.final_chain,
+                    method="、".join(spec.methods), verdict=safe_chain,
                     sources=ledger.source_rows()[:5],
-                    gaps=[DataGap(item="不可复制性实证", chapters=[9],
-                                  impact="护城河属性存疑",
-                                  handling="需 L2-L3 多源验证，未找到即标注存疑")],
+                    gaps=ch9_gaps,
                     status="draft",
                 )
                 ch9.review = review_chapter(
@@ -551,6 +620,7 @@ def run_deep_analysis(
     result.tracking = tracking[:12]
     result.falsifiers = falsifiers
     result.scenarios = scenarios
+    _guard_result_numbers(result, ledger)
 
     # 收敛质量门禁在 execution 之后被 cross_checks / checklist 读取，故先落 execution。
     quality, quality_checks = assess_convergence(
@@ -558,6 +628,8 @@ def run_deep_analysis(
     )
     if not use_llm:
         notes.append("未启用 LLM：本次仅产出结构化骨架，所有验证章节为 skipped（零 token）")
+    if model_events:
+        notes.extend(f"模型事件 {i}：{event}" for i, event in enumerate(model_events, 1))
     result.execution = ExecutionReport(
         target=target, period=period, mode=mode,
         enabled_chapters=chapter_numbers,
@@ -571,6 +643,7 @@ def run_deep_analysis(
         model_route=plan.route,
         convergence_quality=quality,
         convergence_checks=quality_checks,
+        model_events=model_events,
         notes=notes,
     )
     result.cross_checks = _cross_checks(result)

@@ -204,7 +204,7 @@ def test_real_route_is_recorded_in_execution_report(monkeypatch):
     seen: list[str] = []
     log: list = []
 
-    def fake_default(max_tokens, temperature, timeout, model):
+    def fake_default(max_tokens, temperature, timeout, model, **kwargs):
         seen.append(model)
         return stub(log, "fake")
 
@@ -230,7 +230,7 @@ def test_missing_small_model_warning_reaches_execution_notes(monkeypatch):
     )
     monkeypatch.setattr(
         deep_pipeline, "default_complete",
-        lambda *args: stub([], "fake"),
+        lambda *args, **kwargs: stub([], "fake"),
     )
     result = run_deep_analysis(
         "甲公司", "2026Q3", facts(),

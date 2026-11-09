@@ -88,6 +88,9 @@ class ChapterResult:
     gaps: list[DataGap] = field(default_factory=list)
     review: list[ReviewOpinion] = field(default_factory=list)
     status: str = "draft"  # draft / reviewed / skipped / fallback
+    # 降级原因（空响应 / reasoning-only / JSON 解析失败 / 调用异常）；成功章节为空串。
+    # 与 status 一起进 .deep.json / .deep.md / 深度 PDF，便于事后定位而不必重跑。
+    fallback_reason: str = ""
 
     @property
     def reviewed(self) -> bool:
@@ -172,6 +175,8 @@ class ExecutionReport:
     # 第 9 章收敛质量门禁：代码级检查，不依赖模型自觉遵守 system prompt。
     convergence_quality: str = ""  # solid / shallow / incomplete / ""（未执行收敛）
     convergence_checks: list[str] = field(default_factory=list)
+    # 模型通道事件：空 content 自动升级主模型等，按发生顺序记录，供成本归因与排障。
+    model_events: list[str] = field(default_factory=list)
 
 
 # 质量判定的人话标签，Markdown 与 PDF 附录共用，避免两处文案漂移。
@@ -323,6 +328,8 @@ class DeepAnalysisResult:
                       o.revision or o.reason] for o in chapter.review],
                 ))
             lines.append(f"章节状态：`{chapter.status}`")
+            if chapter.fallback_reason:
+                lines.append(f"> 降级原因：{chapter.fallback_reason}")
             lines.append("")
 
         if self.convergence is not None:

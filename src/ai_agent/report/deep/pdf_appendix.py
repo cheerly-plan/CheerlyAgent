@@ -242,6 +242,11 @@ def render_deep_appendix_html(
                 ]
             )
         parts.append(f'<p class="deep-status">章节状态：{_esc(chapter.status)}</p>')
+        if chapter.fallback_reason:
+            parts.append(
+                '<p class="deep-status">降级原因：'
+                f'{_esc(chapter.fallback_reason)}</p>'
+            )
 
     if result.convergence is not None:
         convergence = result.convergence

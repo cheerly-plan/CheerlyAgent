@@ -242,6 +242,7 @@ def complete_chat(
     temperature: float | None = None,
     client: OpenAI | None = None,
     response_format: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """非流式补全。温度默认不传 → 服务端默认（OpenAI 系为 1.0）。
 
@@ -252,6 +253,11 @@ def complete_chat(
     `response_format` 传 None 时不下发该字段，行为与加参数前完全一致。
     网关不支持（本地小模型、Ollama 之类）会直接 400，因此**降级逻辑放在
     调用侧**：那里才知道该回退成什么（prompt 约束 + load_llm_json 兜底）。
+
+    `diagnostics` 可选传入一个 dict，回填 finish_reason / content_chars /
+    reasoning_chars / completion_tokens。思考型模型（如 Ollama 的 qwen3）会把
+    max_tokens 全耗在 reasoning 上并返回空 content，调用侧据此判断是否需要
+    升级模型。传 None 时零额外开销，返回值与加参数前逐字一致。
     """
     options: dict[str, float | int] = {}
     if timeout is not None:
@@ -277,6 +283,28 @@ def complete_chat(
         response = client.chat.completions.create(**payload)
     except Exception as e:
         raise LLMError(str(e), status_code=_status_of(e)) from e
+    if diagnostics is not None:
+        diagnostics.clear()
     if not response.choices:
+        if diagnostics is not None:
+            diagnostics.update({
+                "finish_reason": "no_choices",
+                "content_chars": 0,
+                "reasoning_chars": 0,
+                "completion_tokens": None,
+            })
         return ""
-    return (response.choices[0].message.content or "").strip()
+    choice = response.choices[0]
+    content = (choice.message.content or "").strip()
+    if diagnostics is not None:
+        # OpenAI SDK 把网关扩展字段放进 model_extra；Ollama 的思考文本叫 reasoning。
+        extras = getattr(choice.message, "model_extra", None) or {}
+        reasoning = extras.get("reasoning") or getattr(choice.message, "reasoning", "") or ""
+        usage = getattr(response, "usage", None)
+        diagnostics.update({
+            "finish_reason": getattr(choice, "finish_reason", "") or "",
+            "content_chars": len(content),
+            "reasoning_chars": len(str(reasoning)),
+            "completion_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+        })
+    return content

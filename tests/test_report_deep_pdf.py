@@ -329,6 +329,6 @@ def test_markdown_delivery_never_merges(out_dir, monkeypatch):
 
 def test_api_request_defaults_to_separate():
     request = ReportRequest(request=_REQUEST)
-    assert request.deep == "off"
+    assert request.deep == "full"  # 7caa047 起默认 full；旧断言 "off" 与实现冲突
     assert request.deep_pdf == "separate"
     assert ReportRequest(request=_REQUEST, deep_pdf="merge").deep_pdf == "merge"

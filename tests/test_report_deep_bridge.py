@@ -240,8 +240,9 @@ def test_api_payload_reports_deep_error(out_dir, monkeypatch):
     assert payload["deep"]["error"] == "ValueError: bad"
 
 
-def test_report_request_deep_defaults_to_off():
-    assert ReportRequest(request=_REQUEST).deep == "off"
+def test_report_request_deep_defaults_to_full():
+    # 7caa047 起默认双 PDF + full 档；旧断言 "off" 与实现及双 PDF 测试冲突。
+    assert ReportRequest(request=_REQUEST).deep == "full"
     assert ReportRequest(request=_REQUEST, deep="skeleton").deep == "skeleton"
 
 
