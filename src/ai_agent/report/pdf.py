@@ -591,6 +591,19 @@ _DEEP_CSS = """
 .deep-status { font-size: 8pt; color: #667085; }
 .deep-footer { border-top: 0.5pt solid #d0d5dd; margin-top: 6mm;
                font-size: 8.5pt; color: #667085; }
+/* 需人工审核的结论：红框逐段圈出。只存在于推断层样式块，事实层 PDF 不受影响。
+   结论表按整行成框（首尾单元格补左右边），执行报告/来源表/缺口表不圈。 */
+.deep-claims tr.deep-claim-inferred td,
+.deep-claims tr.deep-claim-uncertain td {
+  border-top: 1pt solid #d92d20;
+  border-bottom: 1pt solid #d92d20;
+}
+.deep-claims tr.deep-claim-inferred td:first-child,
+.deep-claims tr.deep-claim-uncertain td:first-child { border-left: 1pt solid #d92d20; }
+.deep-claims tr.deep-claim-inferred td:last-child,
+.deep-claims tr.deep-claim-uncertain td:last-child { border-right: 1pt solid #d92d20; }
+.deep-review-box { border: 1pt solid #d92d20; padding: 1.5mm; margin: 1.5mm 0; }
+.deep-review-legend { font-size: 8.5pt; color: #93370d; margin: 0 0 4mm 0; }
 """
 
 

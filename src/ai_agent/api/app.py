@@ -97,6 +97,8 @@ def create_app() -> FastAPI:
             ],
         allow_methods=["*"],
         allow_headers=["*"],
+        # 研报预览面板要读 M2 门禁状态头；跨域下自定义响应头默认对 JS 不可见。
+        expose_headers=["X-Report-Download-Allowed", "X-Report-Review-Status"],
     )
     app.include_router(health_router)
     app.include_router(auth_router)

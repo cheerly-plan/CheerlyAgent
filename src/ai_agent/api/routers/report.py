@@ -337,17 +337,47 @@ def get_report_job(
 
 @router.get("/files/{name}")
 def download_report(
-    name: str, _user: UserRecord = Depends(get_current_user)
+    name: str,
+    _user: UserRecord = Depends(get_current_user),
+    preview: int = 0,
 ) -> FileResponse:
+    """附件下载；``preview=1`` 只做在线预览，不触发下载门禁。
+
+    ``preview=0``（默认）的整条路径逐字保持原样：PDF 仍须过
+    ``pdf_download_gate``，Markdown / 溯源附件仍可下载。预览通道只对
+    **已登录用户 + 有审核记录的产物**开放，返回 inline 且不带
+    ``Content-Disposition: attachment``；前端据 ``X-Report-Download-Allowed``
+    决定是否显示下载按钮。它不是绕过门禁的后门：未定稿的深度层 PDF
+    仍不可作为附件外发，只是允许审核员在页面内查看红框标注的推断内容。
+
+    ``preview`` 故意用裸 ``int`` 默认值而非 ``Query(...)``：路由函数会被引擎
+    外部直接调用（测试/聊天入口），默认值必须真的是 0，不能是 Query 对象。
+    """
+    if preview not in (0, 1):
+        raise HTTPException(status_code=422, detail="preview 只接受 0 或 1")
     path = artifact_path(name)
     if path is None:
         raise HTTPException(status_code=404, detail="文件不存在或不允许下载")
     record = review_store.record_for_artifact(name)
+    headers = {"X-Report-Review-Status": record.status if record else "unknown"}
+    if preview:
+        # 没有审核记录的产物一律不许在线预览，避免端点变成任意 PDF 的读取口。
+        if record is None:
+            raise HTTPException(status_code=409, detail="这份文件没有审核记录，不能在线预览")
+        download_allowed = True
+        if path.suffix.lower() == ".pdf":
+            download_allowed, _reason = review_store.pdf_download_gate(name)
+        headers["X-Report-Download-Allowed"] = "1" if download_allowed else "0"
+        headers["Content-Disposition"] = "inline"
+        return FileResponse(
+            path,
+            media_type=_MEDIA[path.suffix.lower()],
+            headers=headers,
+        )
     if path.suffix.lower() == ".pdf":
         allowed, reason = review_store.pdf_download_gate(name)
         if not allowed:
             raise HTTPException(status_code=409, detail=f"PDF 未放行：{reason}")
-    headers = {"X-Report-Review-Status": record.status if record else "unknown"}
     return FileResponse(
         path,
         media_type=_MEDIA[path.suffix.lower()],

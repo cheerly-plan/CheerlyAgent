@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 import ai_agent.api.routers.report as report_router
 import ai_agent.report.pipeline as pipeline
@@ -392,3 +393,97 @@ def test_deep_report_title_appends_report_for_company():
         deep_analysis=None,
     )
     assert pipeline.deep_report_title(result) == f"{_SUBJECT} 2026Q3 财报深度分析报告"
+
+
+# ---------------------------------------------------------------------------
+# 在线预览通道 / 下载门禁 / 推断结论红框（2026-11-10）
+# 零 LLM、零 WeasyPrint：只打桩文件定位与审核门禁，不跑流水线。
+# ---------------------------------------------------------------------------
+
+_PREVIEW_USER = SimpleNamespace(user_id="u-1", username="tester")
+
+
+@pytest.fixture
+def preview_env(monkeypatch):
+    with tempfile.TemporaryDirectory() as directory:
+        out = Path(directory)
+        names = ("研报_981c41ca5a.deep.pdf", "研报_981c41ca5a.pdf", "legacy_abcdef1234.pdf")
+        for name in names:
+            (out / name).write_bytes(b"%PDF-1.4 stub")
+
+        def artifact(name):
+            candidate = out / name
+            return candidate if candidate.is_file() else None
+
+        def gate(name, output_dir=None):
+            if name.endswith(".deep.pdf"):
+                return False, "独立深度分析 PDF 需人工批准并定稿后才可下载"
+            return True, "审核通过"
+
+        def record(name, output_dir=None):
+            if name.startswith("legacy_"):
+                return None
+            return SimpleNamespace(status="pending")
+
+        monkeypatch.setattr(report_router, "artifact_path", artifact)
+        monkeypatch.setattr(report_router.review_store, "pdf_download_gate", gate)
+        monkeypatch.setattr(report_router.review_store, "record_for_artifact", record)
+        yield out
+
+
+def test_preview_allows_unfinalized_deep_pdf_but_download_still_blocked(preview_env):
+    response = report_router.download_report("研报_981c41ca5a.deep.pdf", _PREVIEW_USER, 1)
+    assert response.status_code == 200
+    assert response.headers["X-Report-Download-Allowed"] == "0"
+    assert response.headers["Content-Disposition"] == "inline"
+    # 默认下载分支逐字不变：同一份文件仍然 409
+    with pytest.raises(HTTPException) as exc:
+        report_router.download_report("研报_981c41ca5a.deep.pdf", _PREVIEW_USER)
+    assert exc.value.status_code == 409
+
+
+def test_preview_marks_draft_pdf_as_downloadable(preview_env):
+    response = report_router.download_report("研报_981c41ca5a.pdf", _PREVIEW_USER, 1)
+    assert response.headers["X-Report-Download-Allowed"] == "1"
+    assert report_router.download_report("研报_981c41ca5a.pdf", _PREVIEW_USER).status_code == 200
+
+
+def test_preview_requires_review_record_and_valid_flag(preview_env):
+    with pytest.raises(HTTPException) as exc:
+        report_router.download_report("legacy_abcdef1234.pdf", _PREVIEW_USER, 1)
+    assert exc.value.status_code == 409
+    with pytest.raises(HTTPException) as exc:
+        report_router.download_report("研报_981c41ca5a.pdf", _PREVIEW_USER, 2)
+    assert exc.value.status_code == 422
+
+
+def test_review_red_boxes_live_only_in_deep_pdf():
+    source = "<html><head></head><body><p>事实层</p></body></html>"
+    font = Path("/tmp/fake-report-font.ttf")
+    plain = apply_print_template(source, title="研报", font=font)
+    deep = apply_print_template(source, title="研报", font=font, deep_css=True)
+    assert "#d92d20" not in plain
+    assert "#d92d20" in deep
+    assert ".deep-review-box" in deep
+    assert ".deep-claim-inferred td" in deep
+
+
+def test_appendix_circles_inferred_claims_and_chapter_verdict():
+    text = render_deep_appendix_html(_deep_result(), standalone=True)
+    assert "deep-review-legend" in text
+    assert "需人工审核确认后方可定稿外发" in text
+    assert 'class="deep-verdict deep-review-box"' in text
+    assert 'class="deep-claim-inferred"' in text
+    assert '<table class="deep-claims">' in text
+
+
+def test_cors_exposes_preview_gate_headers():
+    """跨域下自定义响应头默认对 JS 不可见，前端会误判成可下载。"""
+    from ai_agent.api.app import create_app
+
+    app = create_app()
+    cors = [m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware"]
+    assert cors
+    exposed = cors[0].kwargs.get("expose_headers", [])
+    assert "X-Report-Download-Allowed" in exposed
+    assert "X-Report-Review-Status" in exposed

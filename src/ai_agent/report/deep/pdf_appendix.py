@@ -132,6 +132,8 @@ def render_deep_appendix_html(
         *notice,
         "</div>",
         heading,
+        '<p class="deep-review-legend">红框标注的【推断】/【不确定】结论、'
+        "章节结论与核心链条终稿，需人工审核确认后方可定稿外发。</p>",
         "<h2>附录 A · 执行报告</h2>",
         _table(
             ["项", "值"],
@@ -185,7 +187,7 @@ def render_deep_appendix_html(
                 '<span class="deep-badge">推断层</span></h3>',
                 f"<p><strong>核心问题</strong>：{_esc(chapter.question)}</p>",
                 f"<p><strong>方法</strong>：{_esc(chapter.method)}</p>",
-                "<p class=\"deep-verdict\"><strong>章节结论</strong>："
+                "<p class=\"deep-verdict deep-review-box\"><strong>章节结论</strong>："
                 f"{_esc(chapter.verdict or '未形成结论（数据不足）')}</p>",
             ]
         )
@@ -259,9 +261,9 @@ def render_deep_appendix_html(
                     list(execution.convergence_checks),
                     empty="本次未执行收敛质量检查。",
                 ),
-                "<p><strong>核心链条终稿</strong>："
+                '<p class="deep-review-box"><strong>核心链条终稿</strong>：'
                 f"{_esc(convergence.final_chain or '未收敛')}</p>",
-                "<p><strong>与候选主线的差异</strong>："
+                '<p class="deep-review-box"><strong>与候选主线的差异</strong>：'
                 f"{_esc(convergence.delta or '未记录')}</p>",
                 _list(
                     [
