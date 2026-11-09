@@ -120,8 +120,12 @@ def fetch_missing_reports(
     *,
     user_id: str = "",
     max_files: int = 1,
+    max_full_bytes: int | None = None,
 ) -> FetchResult:
-    """查公告 → 下载校验 → create_kb_file → submit。默认只取 1 份正文。"""
+    """查公告 → 下载校验 → create_kb_file → submit。默认只取 1 份正文。
+
+    ``max_full_bytes`` 透传给公告全文/摘要选择；深度年报补齐可抬高阈值。
+    """
     if not settings.enable_cninfo_fetch:
         raise RuntimeError(
             "巨潮补齐已关闭。在 .env 设置 ENABLE_CNINFO_FETCH=true 后重试。"
@@ -132,7 +136,9 @@ def fetch_missing_reports(
     stock = cninfo.lookup_stock(code)
     result = FetchResult(code=code, period=period, company=stock.name)
     try:
-        announcements = cninfo.search_announcements(code, period)
+        announcements = cninfo.search_announcements(
+            code, period, max_full_bytes=max_full_bytes
+        )
     except Exception as exc:
         logger.exception("巨潮公告查询失败 code=%s period=%s", code, period)
         result.errors.append(f"查询失败：{exc}")

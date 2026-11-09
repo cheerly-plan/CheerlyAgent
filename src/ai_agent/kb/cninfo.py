@@ -231,10 +231,12 @@ def search_announcements(
     period: str,
     *,
     max_pages: int = 5,
+    max_full_bytes: int | None = None,
 ) -> list[Announcement]:
     """查某代码某报告期的定期报告公告，并按体积策略选出要下载的一份。
 
     英文版 / H 股 / 更正公告排除；全文与摘要都参与候选，最终只返回 0～1 条。
+    ``max_full_bytes`` 传给全文/摘要二选一；深度年报路径可抬高阈值优先全文。
     """
     code = normalize_code(code)
     period = normalize_period(period)
@@ -265,7 +267,7 @@ def search_announcements(
             break
         if len(batch) < 30:
             break
-    chosen = choose_report_announcement(rows)
+    chosen = choose_report_announcement(rows, max_full_bytes=max_full_bytes)
     return [chosen] if chosen is not None else []
 
 

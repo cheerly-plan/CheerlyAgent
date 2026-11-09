@@ -62,6 +62,9 @@ class DeepOptions:
     write_deep_pdf: bool = True
     collect_external: bool = True
     facts_dir: Path | str | None = None
+    # True（默认）= 深度前自动补齐近 N 年年报并抽主指标写入 facts_dir；
+    # 单测 / 骨架验证可关，避免碰巨潮与抽数。
+    ensure_annuals: bool = True
     config: DeepConfig | None = None
     # 第 2-8 章并行度，只在未显式传 config 时生效。1（库级默认）= 原有逐章
     # 串行与前序结论链；对外入口会显式设为 ENTRY_CHAPTER_CONCURRENCY 提速。
@@ -107,11 +110,34 @@ def attach_deep(result: "ReportResult", options: DeepOptions) -> DeepAnalysisRes
     """在主报告结果上跑一次深度分析，返回结构化结论对象。
 
     外部数据源的缺口与盘点说明会并入 ``ledger_gaps`` / ``execution.notes``，
-    这样深度报告里能看到「第 2 章缺近 5 年审计报告」这种可执行清单。
+    这样深度报告里能看到「第 2 章缺近 3 年审计报告」这种可执行清单。
     """
     plan = result.plan
     target, mode = resolve_target_mode(plan, options)
     period = str(getattr(plan, "period", "") or "未标注报告期")
+    annual_notes: list[str] = []
+
+    # 深度台账纵向数据：先补近 N 年年报并抽主指标进 facts_dir，再盘点/注入。
+    if (
+        options.collect_external
+        and options.ensure_annuals
+        and options.facts_dir is not None
+        and mode != "industry"  # 行业横比主体多，年报批量拉取另开；本轮只做公司模式
+    ):
+        try:
+            from ai_agent.report.ensure_deep_filings import ensure_deep_annuals
+
+            ensured = ensure_deep_annuals(
+                plan,
+                years=options.years,
+                facts_dir=options.facts_dir,
+                request_text=str(getattr(result, "request", "") or ""),
+            )
+            annual_notes = list(ensured.notes)
+        except Exception as exc:
+            annual_notes = [
+                f"深度年报自动补齐失败，已跳过：{type(exc).__name__}: {exc}"
+            ]
 
     bundle = SourceBundle()
     if options.collect_external:
@@ -145,6 +171,7 @@ def attach_deep(result: "ReportResult", options: DeepOptions) -> DeepAnalysisRes
         f"外部数据源：{len(bundle.facts)} 条结构化事实候选、"
         f"{len(bundle.documents)} 份源文件、{len(bundle.gaps)} 项缺口",
         f"近 {options.years} 年窗口（{period} 为基准）",
+        *annual_notes,
         *bundle.notes,
         *options.notes,
     ]

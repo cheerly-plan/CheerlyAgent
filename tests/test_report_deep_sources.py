@@ -1,4 +1,4 @@
-"""外部数据源层：文档分类、近 5 年窗口、缺口声明、事实注入与 L4 回溯门禁。"""
+"""外部数据源层：文档分类、近 3 年窗口、缺口声明、事实注入与 L4 回溯门禁。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 from ai_agent.report.deep.ledger import SourceLedger
 from ai_agent.report.deep.sources import (
     COMPANY_REQUIRED,
+    DEFAULT_YEARS,
     ExternalFact,
     IndustryStatProvider,
     KnowledgeBaseProvider,
@@ -67,7 +68,9 @@ def test_year_and_window():
     assert year_of("2026Q3") == 2026
     assert year_of("甲公司2024年年度报告.pdf") == 2024
     assert year_of("无年份") == 0
-    assert window_years("2026Q3", 5) == (2022, 2026, False)
+    assert DEFAULT_YEARS == 3
+    assert window_years("2026Q3", DEFAULT_YEARS) == (2024, 2026, False)
+    assert window_years("2026Q3", 5) == (2022, 2026, False)  # 显式加长窗口仍可用
     assert window_years("", 5)[2] is True
 
 

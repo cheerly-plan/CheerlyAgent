@@ -1,6 +1,6 @@
 """外部数据源适配层（Phase 3）。
 
-**这一层解决什么问题**：10 章里第 2/3/4/6/7/9 章需要近 5 年年报附注、
+**这一层解决什么问题**：10 章里第 2/3/4/6/7/9 章需要近 3 年年报附注、
 审计报告与关键审计事项、交易所问询函及回复、行业原始统计。现有
 ``report/ensure_filings.py`` + ``kb/cninfo.py`` 只拉本期/基期的季报与半年报，
 所以这些章节在当前数据条件下只能诚实地输出缺口。
@@ -9,7 +9,7 @@
 不内置任何外部 API 端点。它提供的是：
 
 1. ``SourceProvider`` 协议 —— 可插拔、可注入、可单测；
-2. ``KnowledgeBaseProvider`` —— 盘点知识库里已入库的近 5 年源文件，
+2. ``KnowledgeBaseProvider`` —— 盘点知识库里已入库的近 3 年源文件，
    把「缺哪类文件」从笼统断言变成**具体到章节与文档类型的缺口清单**；
 3. ``LocalFactsProvider`` —— 已抽取好的结构化事实（JSON/JSONL）注入通道，
    这是真正能把数字喂进 ``SourceLedger`` 的路径；
@@ -21,7 +21,7 @@ L1-L3 源头一律拒绝入表并记缺口。本层不做二次放行。
 
 典型用法::
 
-    bundle = collect_sources("兆易创新", "2026Q3", years=5,
+    bundle = collect_sources("兆易创新", "2026Q3", years=3,
                              facts_dir=Path("data/deep_facts"))
     deep = run_deep_analysis("兆易创新", "2026Q3", facts,
                              external_sources=bundle.ledger_kwargs())
@@ -54,7 +54,7 @@ COMPANY_REQUIRED = ("annual", "audit", "inquiry")
 INDUSTRY_REQUIRED = ("industry_stat",)
 # 用户决策（2026-11-08 ②③）的外部数据源优先级，覆盖度报告按此顺序逐类列示。
 # 「定期报告」拆成 periodic（季报/半年报，通常已入库）与 annual（年报，常缺）：
-# 拆开才不会用一堆季报冒充「近 5 年纵向数据齐备」。
+# 拆开才不会用一堆季报冒充「近 N 年纵向数据齐备」。
 SOURCE_PRIORITY = ("periodic", "annual", "audit", "inquiry", "industry_stat")
 SOURCE_LABELS = {
     "periodic": "定期报告（季报/半年报）",
@@ -63,7 +63,8 @@ SOURCE_LABELS = {
     "inquiry": "问询函及回复",
     "industry_stat": "行业原始统计",
 }
-DEFAULT_YEARS = 5
+# 纵向窗口默认近 3 年：再往前的年报对当期判断边际价值低，入库与解析成本却高。
+DEFAULT_YEARS = 3
 DEFAULT_FACTS_DIR_NAME = "deep_facts"
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_FACTS = 500
@@ -77,20 +78,21 @@ _DOC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("audit", re.compile(r"审计报告|关键审计事项|审计意见|KAM|会计师", re.I)),
     ("industry_stat", re.compile(r"行业协会|统计局|产能统计|价格指数|行业统计|协会发布")),
     # periodic 必须先于 annual：「半年度报告」里含「年度报告」子串，若 annual
-    # 先判会把半年报误登记成年报，凭空消掉「近 5 年年报未入库」这条真缺口。
+    # 先判会把半年报误登记成年报，凭空消掉「近年年报未入库」这条真缺口。
     ("periodic", re.compile(r"季度报告|季报|半年度|半年报|中期报告|临时公告")),
     ("annual", re.compile(r"年度报告|年报|年度审计")),
 )
+# impact / handling 用 {years} 占位，随窗口参数改写缺口文案。
 _REQUIRED_GAP: dict[str, tuple[list[int], str, str]] = {
     "annual": (
         [3, 4, 6, 7, 9],
-        "杜邦拆解、分部收入、上下游与护城河缺少近 5 年纵向数据",
-        "入库近 5 年年度报告全文，并把附注数字抽成结构化事实清单",
+        "杜邦拆解、分部收入、上下游与护城河缺少近 {years} 年纵向数据",
+        "入库近 {years} 年年度报告全文，并把附注数字抽成结构化事实清单",
     ),
     "audit": (
         [2, 3],
         "第 2 章财报可信度无法评级（缺审计意见、KAM、审计机构变更）",
-        "入库近 5 年审计报告与关键审计事项原文",
+        "入库近 {years} 年审计报告与关键审计事项原文",
     ),
     "inquiry": (
         [2, 5, 9],
@@ -387,20 +389,23 @@ class SourceBundle:
                     item=f"已入库源文件 {len(unextracted)} 份未抽出结构化事实"
                          f"（如 {sample}）",
                     chapters=[3, 4, 6, 7, 9],
-                    impact="近 5 年纵向对比只能停留在定性描述",
+                    impact="近窗纵向对比只能停留在定性描述",
                     handling="先补齐结构化事实清单再重跑深度分析",
                 )
             )
         return gaps
 
-    def requirement_gaps(self, mode: str = "company") -> list[DataGap]:
+    def requirement_gaps(
+        self, mode: str = "company", *, years: int = DEFAULT_YEARS
+    ) -> list[DataGap]:
         """把「缺哪类文件」变成带章节归属和处理办法的具体缺口。"""
+        span = max(int(years), 1)
         return [
             DataGap(
-                item=f"近 5 年{kind}原文未入库",
+                item=f"近 {span} 年{kind}原文未入库",
                 chapters=list(_REQUIRED_GAP[kind][0]),
-                impact=_REQUIRED_GAP[kind][1],
-                handling=_REQUIRED_GAP[kind][2],
+                impact=_REQUIRED_GAP[kind][1].format(years=span),
+                handling=_REQUIRED_GAP[kind][2].format(years=span),
             )
             for kind in self.missing_doc_types(mode)
             if kind in _REQUIRED_GAP
@@ -453,7 +458,7 @@ class KnowledgeBaseProvider:
             bundle.notes.append(f"知识库文件列表读取失败，覆盖度盘点跳过：{type(exc).__name__}")
             bundle.gaps.append(
                 DataGap(
-                    item="近 5 年源头文件盘点",
+                    item=f"近 {years} 年源头文件盘点",
                     chapters=[2, 3, 4, 6, 7, 9],
                     impact="无法判断哪些章节有 L1 原始文件支撑",
                     handling="确认知识库可读后重新运行；本轮不假设任何源文件存在",
@@ -496,7 +501,7 @@ class KnowledgeBaseProvider:
             f"知识库盘点：近 {years} 年（{start}-{end}）命中 {len(bundle.documents)} 份源文件；"
             "源文件仅代表可回溯出处，未抽取的结构化事实不计入台账"
         )
-        bundle.gaps.extend(bundle.requirement_gaps("company"))
+        bundle.gaps.extend(bundle.requirement_gaps("company", years=years))
         if not bundle.documents:
             bundle.gaps.append(
                 DataGap(
@@ -802,7 +807,7 @@ def collect_sources(
         merged.gaps.extend(
             gap for gap in bundle.gaps if not str(gap.item).endswith("原文未入库")
         )
-    merged.gaps.extend(merged.requirement_gaps(mode))
+    merged.gaps.extend(merged.requirement_gaps(mode, years=years))
     coverage = merged.coverage()
     if coverage:
         merged.notes.append(
