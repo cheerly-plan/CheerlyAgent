@@ -54,7 +54,9 @@ _CAPTION_SENTENCE = re.compile(r"[。：；，、]$")
 # 表题的长度上限：再长就是正文句子了
 _CAPTION_MAX_CHARS = 40
 # 上一页最后一张表的底边离页底不足这么远，说明它是被页面切断的、不是自己结束的
-_PAGE_BOTTOM_SLACK = 90.0
+# 表格底边离页底多近才算「被分页截断」。实测季报/年报的页脚只有一行页码，
+# 表体常停在距页底 100–105pt（Y=738~746，页高 842），90 会漏判一半续表。
+_PAGE_BOTTOM_SLACK = 110.0
 # 同页被识别器拆成两截时，两框之间允许的最大空隙。再大更像上下两张独立表
 _SAME_PAGE_GAP = 72.0
 
@@ -519,7 +521,7 @@ def _carry_page_headers(
 
     补的条件同时成立才动手，宁可漏补也不误补：
     - 表格在页面顶部（续表只会从顶部开始）；
-    - 首行是科目行（有数字，或金额格是空的）；
+    - 首行不是表头行（有数字、或是科目/股东名一类的数据行）；
     - 上一页最后一张表排到了页底（说明它是被切断的，不是自己结束的）；
     - 列数一致，或仅差可选空列（附注等，width drift ≤ 2）。
     """
@@ -533,7 +535,9 @@ def _carry_page_headers(
         width = max(len(row) for row in rows)
         if (
             y <= _HEAD_CARRY_Y
-            and _is_item_row(rows[0])
+            # 「不是表头行」而非「必须是科目行」：股东名册这类表的金额列旁边
+            # 还有「股东性质=其他」的文本列，按科目行判会漏掉续表
+            and not _is_header_row(rows[0])
             and last_header is not None
             and _reached_page_bottom(
                 prev_bottom.get(pno - 1), page_heights.get(pno - 1)
@@ -769,31 +773,62 @@ _CURRENCY_FIELD = re.compile(
 _AUDIT_FIELD = re.compile(r"(?:审计类型[:：]\s*)?(未经审计|已审计|经审计)")
 
 
+def _meta_fields_above(
+    lines: list[sections.Line], page: int, y0: float
+) -> tuple[str | None, str | None, str | None, list[sections.Line]]:
+    """表上方的单位 / 币种 / 审计状态，以及取自哪几行。
+
+    返回取用到的行：解析层要据此把这些行从正文里剔掉，否则「单位：股」
+    会同时出现在表段前缀和正文切片里，各存一份。
+    """
+    unit = currency = audit = None
+    used: list[sections.Line] = []
+    for ln in _lines_above(lines, page, y0):
+        text = ln.text.strip()
+        if not text:
+            continue
+        hit = False
+        if unit is None:
+            m = _UNIT_FIELD.search(text)
+            if m:
+                unit = m.group(1).strip(" 。；;，,")
+                hit = True
+        if currency is None:
+            m = _CURRENCY_FIELD.search(text)
+            if m:
+                currency = m.group(1).strip(" 。；;，,")
+                hit = True
+        if audit is None:
+            m = _AUDIT_FIELD.search(text)
+            if m:
+                audit = m.group(1)
+                hit = True
+        if hit:
+            used.append(ln)
+        if unit and currency and audit:
+            break
+    return unit, currency, audit, used
+
+
+def _table_meta_line_ids(
+    lines: list[sections.Line],
+    tables: list[tuple[int, float, tuple, list[list[str]]]],
+) -> set[int]:
+    """被任意一张表用作前缀（单位/币种/审计）的正文行 id 集合。"""
+    ids: set[int] = set()
+    for page, y0, _bbox, _rows in tables:
+        _unit, _cur, _audit, used = _meta_fields_above(lines, page, y0)
+        ids.update(id(ln) for ln in used)
+    return ids
+
+
 def _table_meta_above(lines: list[sections.Line], page: int, y0: float) -> str | None:
     """从表上方捡单位 / 币种 / 审计状态，拼成跟在表题后面的一行。
 
     这些字不进切片的话，后半张表被切开后只剩数字，模型会把百万元当成元。
     近的行优先：两张表叠在一起时，要的是紧挨着这张表的那行。
     """
-    unit = currency = audit = None
-    for ln in _lines_above(lines, page, y0):
-        text = ln.text.strip()
-        if not text:
-            continue
-        if unit is None:
-            m = _UNIT_FIELD.search(text)
-            if m:
-                unit = m.group(1).strip(" 。；;，,")
-        if currency is None:
-            m = _CURRENCY_FIELD.search(text)
-            if m:
-                currency = m.group(1).strip(" 。；;，,")
-        if audit is None:
-            m = _AUDIT_FIELD.search(text)
-            if m:
-                audit = m.group(1)
-        if unit and currency and audit:
-            break
+    unit, currency, audit, _used = _meta_fields_above(lines, page, y0)
     parts: list[str] = []
     if unit:
         parts.append(unit if unit.startswith("单位") else f"单位：{unit}")

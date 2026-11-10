@@ -976,3 +976,43 @@ def test_attach_captions_does_not_borrow_for_midpage_table():
     out = _attach_captions(tables, lines)
     assert out[0][4] == "合并资产负债表"
     assert out[1][4] is None
+
+
+def _mk_table(page, y, bottom, rows):
+    """构造 (页码, 顶部 y, bbox, 行) 的表格元组（只要能算 bbox 底边）。"""
+    return (page, float(y), (66.0, float(y), 528.0, float(bottom)), rows)
+
+
+def test_headers_carried_when_table_stops_just_above_page_bottom():
+    """季报页脚只有一行页码，表体常停在距页底 ~100pt：仍是被分页截断的续表。
+
+    实测江苏长电 2026Q3：p1 表底 742.9 / 页高 841.9，旧阈值(90)判成「正常结束」，
+    续页列名变成「列2/列3」，净利润那一堆数字不知道属于哪一期。
+    """
+    heights = {1: 841.9, 2: 841.9}
+    first = _mk_table(1, 568.8, 742.9, [["项目", "本期", "上期"], ["营业收入", "100", "90"]])
+    cont = _mk_table(2, 76.4, 267.3, [["净利润", "20", "18"]])
+    out = _carry_page_headers([first, cont], heights)
+    assert out[1][3][0] == ["项目", "本期", "上期"]
+    assert out[1][3][1] == ["净利润", "20", "18"]
+
+
+def test_header_not_carried_when_previous_table_ended_mid_page():
+    heights = {1: 841.9, 2: 841.9}
+    first = _mk_table(1, 300.0, 500.0, [["项目", "本期", "上期"], ["营业收入", "100", "90"]])
+    cont = _mk_table(2, 76.4, 267.3, [["净利润", "20", "18"]])
+    out = _carry_page_headers([first, cont], heights)
+    assert out[1][3][0] == ["净利润", "20", "18"]
+
+
+def test_header_carried_for_table_with_text_columns():
+    """股东名册这类表金额列旁边有「股东性质=其他」文本列，不能按纯科目行判。"""
+    heights = {1: 841.9, 2: 841.9}
+    first = _mk_table(
+        1, 468.8, 739.2,
+        [["股东名称", "股东性质", "持股数量", "持股比例"],
+         ["甲公司", "国有法人", "100", "10"]],
+    )
+    cont = _mk_table(2, 76.4, 600.0, [["乙公司", "其他", "50", "5"]])
+    out = _carry_page_headers([first, cont], heights)
+    assert out[1][3][0] == ["股东名称", "股东性质", "持股数量", "持股比例"]

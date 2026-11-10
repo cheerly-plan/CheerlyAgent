@@ -141,12 +141,20 @@ def _is_data_row(row: list[str]) -> bool:
     return any(cell and _NUM_ONLY.match(cell) for cell in row)
 
 
+# 金额列里的占位值：财报里「不适用 / — / -」填在金额格里是常态，
+# 不能因为一格占位就把整行判成非科目行（否则续表补不上表头，列名变成「列2」）
+_NON_VALUE = re.compile(r"^(?:不适用|N/?A|[/／]|[-–—－.]+)$", re.IGNORECASE)
+
+
 def _is_item_row(row: list[str]) -> bool:
-    """科目行：第一列是名称，其余列是空的或数字。金额整格为空也算科目行。"""
+    """科目行：第一列是名称，其余列是空的、数字、或「不适用/—」占位。"""
     cells = [cell or "" for cell in row]
     if not cells or not cells[0] or _is_header_row(row):
         return False
-    return all(not cell or _NUM_ONLY.match(cell) for cell in cells[1:])
+    return all(
+        not cell or _NUM_ONLY.match(cell) or _NON_VALUE.match(cell.strip())
+        for cell in cells[1:]
+    )
 
 
 def _is_header_row(row: list[str]) -> bool:

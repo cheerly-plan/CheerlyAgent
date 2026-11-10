@@ -480,6 +480,7 @@ def _pdf_text(
         _pdf_glossary_tables,
         _pdf_tables_isolated,
         _table_meta_above,
+        _table_meta_line_ids,
         _table_prefix,
         _table_scope,
     )
@@ -535,6 +536,14 @@ def _pdf_text(
     if stats:
         logger.info("PDF 噪声剔除与表格 %s", stats)
 
+    # 表上方的「单位：元 · 币种：人民币」会被拼进表段前缀；这些行若继续留在
+    # 正文里，同一句话会各存一份（正文切片一次、表段前缀一次）。
+    # 注意 kept_meta 要留原样：表段前缀仍要按它去捡单位行（只是不再进正文）
+    kept_meta = kept
+    meta_ids = _table_meta_line_ids(kept, tables) if tables else set()
+    if meta_ids:
+        kept = [ln for ln in kept if id(ln) not in meta_ids]
+
     if not settings.kb_section_chunking:
         groups = [sections.Section("", "", start_page=kept[0].page if kept else 1, lines=list(kept))]
     else:
@@ -551,14 +560,14 @@ def _pdf_text(
     # 表题接在表格正文前面（一行）：切成多片时每片都会带上它，
     # 「母公司利润表 + 营业收入 + 数值」因此能落在同一个切片里
     for page, y0, _bbox, rows, caption, page_end in _merge_continued_tables(
-        _attach_captions(tables, kept), page_heights
+        _attach_captions(tables, kept_meta), page_heights
     ):
         markdown = _rows_to_markdown(rows)
         if not markdown:
             continue
         # 单位/审计状态跟表题一起写进正文：长表切开后每一片都还知道
         # 「数字是百万元、这张表未经审计」，否则后半段只剩格子
-        prefix = _table_prefix(caption, _table_meta_above(kept, page, y0))
+        prefix = _table_prefix(caption, _table_meta_above(kept_meta, page, y0))
         text = f"{prefix}\n{markdown}" if prefix else markdown
         items.append(
             (
