@@ -329,9 +329,13 @@ def _cell_text_from_words(words: list, rect) -> str:
             lines.append([word])
     texts = [_join_word_line(line) for line in lines]
     if len(texts) == 2 and all(_NUM_FRAGMENT.match(text) for text in texts):
+        # 同列数字要么右对齐（机器人 p83），要么左对齐（中微公司 Q1 p4），
+        # 任一边对齐即可；再要求拼起来仍是合法数字，避免把两行独立数值硬拼
         right = [round(line[-1][2], 1) for line in lines]
+        left = [round(line[0][0], 1) for line in lines]
         joined = texts[0] + texts[1]
-        if abs(right[0] - right[1]) <= 3 and _NUMBER_WHOLE.match(joined):
+        aligned = abs(right[0] - right[1]) <= 3 or abs(left[0] - left[1]) <= 3
+        if aligned and _NUMBER_WHOLE.match(joined):
             return joined
     return _join_cell_lines(texts)
 

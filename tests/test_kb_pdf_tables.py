@@ -1187,3 +1187,14 @@ def test_cell_text_keeps_percent_and_asin_word_spacing():
 
     words = [_word(170.0, 147.0, 190.0, 156.9, "14.56"), _word(190.0, 147.0, 196.0, 156.9, "%")]
     assert _cell_text_from_words(words, (168.0, 145.0, 200.0, 170.0)) == "14.56%"
+
+
+def test_cell_text_joins_left_aligned_number_wrap():
+    """中微公司 2025Q1 p4 实录：93,483,533 折成「93,483,53」「3」，左对齐。"""
+    from ai_agent.kb.ingest.tables import _cell_text_from_words
+
+    words = [
+        _word(242.3, 668.7, 284.1, 682.4, "93,483,53"),
+        _word(242.3, 684.3, 247.5, 698.0, "3"),
+    ]
+    assert _cell_text_from_words(words, (240.0, 666.0, 290.0, 700.0)) == "93,483,533"
