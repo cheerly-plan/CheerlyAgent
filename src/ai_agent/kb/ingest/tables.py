@@ -453,8 +453,13 @@ def _pdf_tables_worker_main(path: str, start: int, out_path: str) -> None:
 
 def _pdf_tables_isolated(
     path: Path,
+    crashed: list[int] | None = None,
 ) -> tuple[list[tuple[int, float, tuple, list[list[str]]]], dict[int, float]]:
-    """在短命子进程里跑 find_tables；SIGSEGV 只丢崩溃页，正文解析继续。"""
+    """在短命子进程里跑 find_tables；SIGSEGV 只丢崩溃页，正文解析继续。
+
+    ``crashed`` 传入一个列表时，崩溃页（1-based）会追加进去——这些页的表格
+    整块丢失，调用方可以据此走 OCR 兜底（见 ``table_rescue``）。
+    """
     import pickle
     import subprocess
     import sys
@@ -546,6 +551,8 @@ def _pdf_tables_isolated(
             proc.returncode,
             pdf.name,
         )
+        if crashed is not None:
+            crashed.append(crash_page + 1)
         start = crash_page + 1
     return _carry_page_headers(out, heights), heights
 

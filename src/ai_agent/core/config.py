@@ -196,6 +196,14 @@ class Settings(BaseSettings):
     # 位图占页面面积的比例下限：页眉 logo、装饰线、水印都远小于该值
     kb_vision_min_image_ratio: float = 0.06
 
+    # 表格页 OCR 兜底：文字层把表头搞丢（列名变「列2」）或 find_tables 原生
+    # 崩溃的页，整页渲染后交给 OCR 重出一份带 rowspan/colspan 的 HTML 表。
+    # 只对这两类页生效，且必须通过「OCR 数字能在文字层找到」的校验，
+    # 校验不过就保留文字层——宁可少补一页，也不能塞进错数。
+    kb_table_rescue_enabled: bool = True
+    # 单次兜底最多处理多少页（防止一份文档把 OCR 预算吃光）
+    kb_table_rescue_max_pages: int = 400
+
     # 整页 OCR（Xiaomi-OCR-0 的 page 模式）：PDF 逐页渲染成图，用官方
     # 文档抽取提示词交给视觉模型。模型名为空则关闭，PDF 仍走文字层。
     # 官方 MCP 只接受 127.0.0.1，这里直接打 BASE_URL，局域网 Ollama 也能用。

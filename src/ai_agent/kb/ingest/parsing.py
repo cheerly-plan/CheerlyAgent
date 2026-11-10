@@ -47,7 +47,7 @@ class Segment:
 # 待重解析清单——2026-11-10 那次「页码切片 / 续表丢表头」就是靠人工才发现
 # 42 份文件仍是旧规则切出来的。
 # 改动解析、切分、表头/表题处理时**必须**一起改这里。
-PARSER_VERSION = "2026-11-10.4"
+PARSER_VERSION = "2026-11-10.5"
 
 _SUPPORTED = {".pdf", ".docx", ".xlsx", ".xlsm", ".md", ".markdown", ".txt", ".csv"}
 
@@ -105,6 +105,11 @@ _OCR_PAGE_MARK = re.compile(
 )
 
 
+# find_tables 原生崩溃的页（1-based）：这些页的表格整块丢失，_parse_pdf 据此
+# 走 OCR 兜底（见 kb/ingest/table_rescue.py）。一次解析内有效。
+_CRASHED_TABLE_PAGES: list[int] = []
+
+
 def _parse_pdf(path: Path) -> list[Segment]:
     """按页混合：密页用文字层，只有稀字页（图片/扫描页）才送整页 OCR。
 
@@ -160,7 +165,7 @@ def _parse_pdf(path: Path) -> list[Segment]:
                     len(covered),
                     len(merged),
                 )
-                return merged
+                return _rescue_broken_table_pages(path, merged)
         else:
             segments = _segments_from_ocr(
                 ocr_pages, _section_by_page(text_segments), text_segments
@@ -181,10 +186,32 @@ def _parse_pdf(path: Path) -> list[Segment]:
     figures = _pdf_figures(path, text_lens, skip_pages=covered or None)
     if any((s.text or "").strip() for s in text_segments):
         text_segments.extend(figures)
+        text_segments = _rescue_broken_table_pages(path, text_segments)
         return text_segments
     if not figures:
         raise ParseError("PDF 中没有可提取的文本（可能是扫描件/图片版）")
     return figures
+
+
+def _rescue_broken_table_pages(
+    path: Path, segments: list[Segment]
+) -> list[Segment]:
+    """表头被搞丢 / find_tables 崩溃的页，交给 OCR 重出一份（见 table_rescue）。"""
+    from ai_agent.kb.ingest import table_rescue
+
+    if not table_rescue.enabled():
+        return segments
+    try:
+        rescued, _stats = table_rescue.rescue_table_pages(
+            path,
+            segments,
+            set(_CRASHED_TABLE_PAGES),
+            max_pages=int(getattr(settings, "kb_table_rescue_max_pages", 400)),
+        )
+    except Exception:
+        logger.warning("表格页 OCR 兜底失败，保留文字层", exc_info=True)
+        return segments
+    return rescued
 
 
 def _sparse_pages(
@@ -515,9 +542,13 @@ def _pdf_text(
     # find_tables 的 SIGSEGV 拦不住，放到短命子进程里按页推进。
     tables: list[tuple[int, float, tuple, list[list[str]]]] = []
     page_heights: dict[int, float] = {}
+    global _CRASHED_TABLE_PAGES
+    _CRASHED_TABLE_PAGES = []
     if include_tables and settings.kb_pdf_table_extraction:
         try:
-            tables, page_heights = _pdf_tables_isolated(path)
+            tables, page_heights = _pdf_tables_isolated(
+                path, crashed=_CRASHED_TABLE_PAGES
+            )
         except Exception:
             logger.warning("PDF 表格识别失败，本次只出正文切片", exc_info=True)
         try:
