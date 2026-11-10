@@ -771,6 +771,10 @@ _CURRENCY_FIELD = re.compile(
     r"币种[:：]\s*(.+?)(?=审计类型|金额单位|(?<![编准])单位|编制单位|$)"
 )
 _AUDIT_FIELD = re.compile(r"(?:审计类型[:：]\s*)?(未经审计|已审计|经审计)")
+# 报表抬头里的编制单位与日期：不并进前缀的话，它们会单独切成一片只有
+# 「合并资产负债表 / 2026 年9 月30 日 / 编制单位：…」的碎片，且与表段前缀重复。
+_ORG_FIELD = re.compile(r"编制单位[:：]\s*(\S{2,40})")
+_DATE_LINE = re.compile(r"^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日$")
 
 
 def _meta_fields_above(
@@ -781,7 +785,7 @@ def _meta_fields_above(
     返回取用到的行：解析层要据此把这些行从正文里剔掉，否则「单位：股」
     会同时出现在表段前缀和正文切片里，各存一份。
     """
-    unit = currency = audit = None
+    unit = currency = audit = org = date = None
     used: list[sections.Line] = []
     for ln in _lines_above(lines, page, y0):
         text = ln.text.strip()
@@ -803,11 +807,42 @@ def _meta_fields_above(
             if m:
                 audit = m.group(1)
                 hit = True
+        if org is None:
+            m = _ORG_FIELD.search(text)
+            if m:
+                org = m.group(1).strip(" 。；;，,")
+                hit = True
+        if date is None:
+            m = _DATE_LINE.match(text)
+            if m:
+                date = f"{m.group(1)} 年{int(m.group(2))} 月{int(m.group(3))} 日"
+                hit = True
         if hit:
             used.append(ln)
-        if unit and currency and audit:
+        if unit and currency and audit and org and date:
             break
-    return unit, currency, audit, used
+    return (unit, currency, audit, org, date), used
+
+
+def _caption_line_ids(
+    captioned: list[tuple[int, float, tuple, list[list[str]], str | None]],
+    lines: list[sections.Line],
+) -> set[int]:
+    """被某张表当作表题的正文行 id 集合。
+
+    表题会写进表段前缀（`合并资产负债表\n单位：…`），正文里那一行若留着，
+    就成了「只有一行表名」的碎片切片，和表段前缀重复。
+    只在表体上方窗口内、文本与表题完全一致的行里挑最近的一条。
+    """
+    ids: set[int] = set()
+    for page, y0, _bbox, _rows, caption in captioned:
+        if not caption:
+            continue
+        for ln in _lines_above(lines, page, y0):
+            if ln.text.strip() == caption.strip():
+                ids.add(id(ln))
+                break
+    return ids
 
 
 def _table_meta_line_ids(
@@ -817,7 +852,7 @@ def _table_meta_line_ids(
     """被任意一张表用作前缀（单位/币种/审计）的正文行 id 集合。"""
     ids: set[int] = set()
     for page, y0, _bbox, _rows in tables:
-        _unit, _cur, _audit, used = _meta_fields_above(lines, page, y0)
+        _fields, used = _meta_fields_above(lines, page, y0)
         ids.update(id(ln) for ln in used)
     return ids
 
@@ -828,7 +863,7 @@ def _table_meta_above(lines: list[sections.Line], page: int, y0: float) -> str |
     这些字不进切片的话，后半张表被切开后只剩数字，模型会把百万元当成元。
     近的行优先：两张表叠在一起时，要的是紧挨着这张表的那行。
     """
-    unit, currency, audit, _used = _meta_fields_above(lines, page, y0)
+    unit, currency, audit, org, date = _meta_fields_above(lines, page, y0)[0]
     parts: list[str] = []
     if unit:
         parts.append(unit if unit.startswith("单位") else f"单位：{unit}")
@@ -836,6 +871,10 @@ def _table_meta_above(lines: list[sections.Line], page: int, y0: float) -> str |
         parts.append(currency if "币种" in currency else f"币种：{currency}")
     if audit:
         parts.append(audit)
+    if date:
+        parts.append(date)
+    if org:
+        parts.append(f"编制单位：{org}")
     return " · ".join(parts) if parts else None
 
 

@@ -51,8 +51,8 @@ _ORDINAL_GLUE = re.compile(
 )
 # 附注表「1期初余额」缺分隔符
 _NOTE_INDEX = re.compile(
-    rf"^(\d{{1,2}})(期初余额|期末余额|本期增加金额|本期减少金额|"
-    rf"购置|处置|在建工程转入|企业合并增加)$"
+    r"^(\d{1,2})(期初余额|期末余额|本期增加金额|本期减少金额|"
+    r"购置|处置|在建工程转入|企业合并增加)$"
 )
 # 末行孤儿标点：只含正负号/千分位/小数点，是数字甩尾不是正文句号
 _NUM_TAIL_PUNCT = re.compile(r"^[\s\-－,，.]+$")
@@ -132,7 +132,12 @@ def _ensure_row_header(rows: list[list[str]]) -> list[list[str]]:
     if _is_header_row(first) or not (_is_item_row(first) or _is_data_row(first)):
         return rows
     width = max(len(row) for row in rows)
-    header = ["项目"] + [f"列{i}" for i in range(2, width + 1)]
+    # 两列表（附注里的「年内召开董事会会议次数 | 9」）有确定的语义，直接叫
+    # 项目/内容；三列以上仍用列号占位——那些多半是丢了表头的宽表，
+    # 编一个假列名比「列2」更容易误导下游。
+    header = ["项目", "内容"] if width == 2 else ["项目"] + [
+        f"列{i}" for i in range(2, width + 1)
+    ]
     return [header, *rows]
 
 
@@ -228,23 +233,54 @@ def _add_kv_header(rows: list[list[str]]) -> list[list[str]]:
     被顶成了列名。判据：每行都是「短标签 + 内容」，且没有一行的内容列
     长得像表头（短而无中文标点、或纯数字）——后者说明首行本来就是列名。
     """
-    if len(rows) < 2 or any(len(r) != 2 for r in rows):
+    if len(rows) < 2:
         return rows
-    if not all(r[0] and r[1] and len(r[0]) <= 10 for r in rows):
+    if all(len(r) == 2 for r in rows):
+        if not all(r[0] and r[1] and len(r[0]) <= 10 for r in rows):
+            return rows
+        if any(_kv_headerish(r[1]) for r in rows):
+            return rows
+        return [["项目", "内容"], *rows]
+    # 多列键值表（季报「普通股股东总数 | 703418 | 表决权恢复的… | 0」这种
+    # 一行两对键值）。宁可只认小表：大表补错列名比「列2」更有害。
+    width = max(len(r) for r in rows)
+    if width < 4 or width % 2 or len(rows) > 3:
         return rows
-    if any(_kv_headerish(r[1]) for r in rows):
+    if not _is_kv_pairs(rows, width):
         return rows
-    return [["项目", "内容"], *rows]
+    return [["项目", "数值"] * (width // 2), *rows]
+
+
+def _is_kv_pairs(rows: list[list[str]], width: int) -> bool:
+    """偶数宽的小表是否是「标签 | 值」交替：偶数列是短标签，奇数列是数字。"""
+    useful = 0
+    for row in rows:
+        cells = [cell or "" for cell in row] + [""] * (width - len(row))
+        filled = [i for i, cell in enumerate(cells) if cell]
+        if len(filled) < 2:
+            continue
+        useful += 1
+        for index, cell in enumerate(cells):
+            if not cell:
+                continue
+            if index % 2:  # 值列
+                if not _NUM_ONLY.match(cell):
+                    return False
+            else:  # 标签列
+                if _NUM_ONLY.match(cell) or len(cell) > 60:
+                    return False
+    return useful >= 1
 
 
 def _kv_headerish(cell: str) -> bool:
-    """内容列是否长得像表头：「数值」「含义」这类一两个字，或纯数字。
+    """内容列是否长得像表头：「数值」「含义」这类一两个字。
 
     刻意只认 ≤2 字——「余额包销」这种 4 字短内容是真数据；代价是
     「解释说明」这类 4 字表头认不出来，但那比把数据行当表头少见得多。
+
     """
     return _NUM_ONLY.match(cell) is not None or (
-        len(cell) <= 2 and not _KV_PUNCT.search(cell)
+        len(cell.strip()) <= 2 and not _KV_PUNCT.search(cell)
     )
 
 

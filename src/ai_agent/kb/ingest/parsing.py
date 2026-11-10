@@ -475,6 +475,7 @@ def _pdf_text(
     # 表格函数已拆到 tables.py，延迟 import 避免循环依赖
     from ai_agent.kb.ingest.tables import (
         _attach_captions,
+        _caption_line_ids,
         _drop_table_lines,
         _merge_continued_tables,
         _pdf_glossary_tables,
@@ -553,6 +554,16 @@ def _pdf_text(
     # 表题/表头之下、下一个标题之上的表，才算这一节的
     markers = _section_markers(groups)
 
+    # 表题行已经写进表段前缀，别再单独切成「合并资产负债表」这种一行碎片。
+    # 只对非标题行动手：真标题在 group_by_section 阶段就离开正文了。
+    captioned = _attach_captions(tables, kept_meta)
+    caption_ids = _caption_line_ids(captioned, kept_meta)
+    if caption_ids:
+        groups = [
+            replace(sec, lines=[ln for ln in sec.lines if id(ln) not in caption_ids])
+            for sec in groups
+        ]
+
     # (页, 纵向位置, 段)：文本段与表格段按原版面顺序归并
     items: list[tuple[int, float, Segment]] = []
     for y, seg in _page_segments(groups):
@@ -560,7 +571,7 @@ def _pdf_text(
     # 表题接在表格正文前面（一行）：切成多片时每片都会带上它，
     # 「母公司利润表 + 营业收入 + 数值」因此能落在同一个切片里
     for page, y0, _bbox, rows, caption, page_end in _merge_continued_tables(
-        _attach_captions(tables, kept_meta), page_heights
+        captioned, page_heights
     ):
         markdown = _rows_to_markdown(rows)
         if not markdown:

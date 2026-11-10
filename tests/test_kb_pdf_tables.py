@@ -7,6 +7,7 @@ PDF 里没有「表格」对象，pymupdf 反推出来的单元格带着一堆�
 
 from ai_agent.kb.ingest.parsing import _rows_to_markdown
 from ai_agent.kb.ingest.table_cells import (
+    _add_kv_header,
     _align_header,
     _clean_cell,
     _clean_table,
@@ -20,6 +21,7 @@ from ai_agent.kb.ingest.table_cells import (
 from ai_agent.kb.ingest.tables import (
     _attach_captions,
     _caption_above,
+    _caption_line_ids,
     _carry_page_headers,
     _fit_header_to_width,
     _merge_continued_tables,
@@ -921,11 +923,14 @@ def test_table_meta_above_picks_unit_currency_audit():
         line("编制单位：中国能源建设股份有限公司", 16, 0.13, (60.0, 110.0, 400.0, 122.0)),
         line("单位：千元币种：人民币审计类型：未经审计", 16, 0.15, (60.0, 124.0, 500.0, 136.0)),
     ]
-    assert _table_meta_above(lines, 16, 137.0) == "单位：千元 · 币种：人民币 · 未经审计"
-    # 编制单位不能当成计量单位
-    assert "中国能源建设" not in (_table_meta_above(lines, 16, 137.0) or "")
-    assert _table_prefix("母公司利润表", _table_meta_above(lines, 16, 137.0)) == (
-        "母公司利润表\n单位：千元 · 币种：人民币 · 未经审计"
+    meta = _table_meta_above(lines, 16, 137.0)
+    assert meta == (
+        "单位：千元 · 币种：人民币 · 未经审计 · 编制单位：中国能源建设股份有限公司"
+    )
+    # 编制单位只能以「编制单位：」出现，不能顶替计量单位
+    assert not meta.startswith("编制单位")
+    assert _table_prefix("母公司利润表", meta) == (
+        f"母公司利润表\n{meta}"
     )
 
 
@@ -1016,3 +1021,67 @@ def test_header_carried_for_table_with_text_columns():
     cont = _mk_table(2, 76.4, 600.0, [["乙公司", "其他", "50", "5"]])
     out = _carry_page_headers([first, cont], heights)
     assert out[1][3][0] == ["股东名称", "股东性质", "持股数量", "持股比例"]
+
+
+def test_multi_column_key_value_header():
+    """季报「股东总数 | 703418 | 表决权恢复… | 0」一行两对键值：补项目/数值。"""
+    rows = [
+        ["报告期末普通股股东总数", "703418", "报告期末表决权恢复的优先股股东总数（如有）", "0"],
+        ["前10名股东持股情况（不含通过转融通出借股份）", "", "", ""],
+    ]
+    out = _add_kv_header(rows)
+    assert out[0] == ["项目", "数值", "项目", "数值"]
+    assert out[1] == rows[0]
+
+
+def test_multi_column_kv_header_skips_real_data_tables():
+    """大表不猜列名：股东名册 12 行，宁可留「列2」也不要补错标签。"""
+    rows = [["磐石润企（深圳）信息管理有限公司", "403122922", "人民币普通股", "403122922"]] * 12
+    assert _add_kv_header(rows)[0] == rows[0]
+
+
+def test_multi_column_kv_header_skips_when_values_not_numeric():
+    rows = [
+        ["项目", "2026年9月30日", "项目", "2025年12月31日"],
+        ["货币资金", "100", "应收账款", "50"],
+    ]
+    # 首行是表头（值列不是数字）→ 不补
+    assert _add_kv_header(rows)[0] == rows[0]
+
+
+def test_caption_line_ids_find_the_title_line_only():
+    lines = [
+        line("合并资产负债表", 6, 0.5, (60.0, 400.0, 300.0, 412.0)),
+        line("单位：元币种：人民币", 6, 0.52, (60.0, 414.0, 300.0, 426.0)),
+    ]
+    captioned = [(6, 430.0, (60.0, 430.0, 500.0, 700.0), [["项目"]], "合并资产负债表")]
+    ids = _caption_line_ids(captioned, lines)
+    assert id(lines[0]) in ids
+    assert id(lines[1]) not in ids
+
+
+def test_kv_table_with_numeric_values_gets_project_content():
+    """附注「年内召开董事会会议次数 | 9」：值列是数字，仍要补出可读列名。
+
+    走的是 `_ensure_row_header` 的兜底（`_add_kv_header` 刻意不认纯数字
+    内容列，否则会把「项目 | 费用金额（万元）」这种真表头当数据行）。
+    """
+    # 补头发生在渲染层（_rows_to_markdown → _ensure_row_header），_clean_table 不管
+    md = _rows_to_markdown(
+        _clean_table([["年内召开董事会会议次数", "9"], ["董事会会议次数", "10"]])[0]
+    )
+    assert md.splitlines()[0] == "| 项目 | 内容 |"
+    assert md.splitlines()[2] == "| 年内召开董事会会议次数 | 9 |"
+
+
+def test_two_column_table_without_header_gets_project_content():
+    """两列表丢表头时补「项目 | 内容」，不要「项目 | 列2」。"""
+    rows = _ensure_row_header([["年内召开董事会会议次数", "9"], ["董事会会议次数", "10"]])
+    assert rows[0] == ["项目", "内容"]
+    assert rows[1] == ["年内召开董事会会议次数", "9"]
+
+
+def test_wide_table_without_header_keeps_column_numbers():
+    """三列以上的宽表不编假列名，仍用列号占位。"""
+    rows = _ensure_row_header([["甲公司", "100", "2025"]])
+    assert rows[0] == ["项目", "列2", "列3"]
