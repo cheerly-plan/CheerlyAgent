@@ -5,7 +5,7 @@ FastAPI + PostgreSQL(pgvector) 的多用户 AI Agent 后端：带工具自主循
 
 ```
 Python 3.13 · uv · FastAPI · psycopg3 + pgvector · OpenAI 兼容 LLM 接口
-源码 ~2.33 万行 · 测试 ~1.48 万行 · 885 个用例
+源码 ~4.55 万行 · 测试 ~2.86 万行 · 1490 个用例
 ```
 
 ---
@@ -64,32 +64,31 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
    api/middleware   │ request_id · auth  │  单 IP 滑动窗口限流
                     │ · 限流 · CORS      │  默认不信任 X-Forwarded-For
                     └─────────┬──────────┘
-   api/routers      ┌─────────▼──────────────────────────────────┐
-                    │ /v1/auth · /user · /v1/session · /v1/chat  │
-                    │ /v1/kb（上传·切片·标签） · /v1/kg（图谱）  │
-                    └─────────┬──────────────────────────────────┘
+   api/routers      ┌─────────▼──────────────────────────────────────────┐
+                    │ /v1/auth · /user · /v1/session · /v1/chat          │
+                    │ /v1/kb · /v1/kg · /v1/report · /v1/inspect         │
+                    └─────────┬──────────────────────────────────────────┘
                     ┌─────────▼──────────┐
    agents/          │ loop.py 工具循环   │  max_turns 上限 · 并发信号量
                     │ budget.py 上下文   │  超预算从最旧整轮丢弃
                     └───┬────────────┬───┘
                         │            │
-        ┌───────────────▼──┐   ┌─────▼─────────────────────────┐
- llm/   │ client.py 流式   │   │ tools/  工具（模型自主调用）  │
-        │ OpenAI 兼容      │   │ kb_search · kb_list_files     │
-        └──────────────────┘   │ kg_search                     │
-                               │ search_memory · write_memory  │
-                               │ web_search · get_weather      │
-                               └─────┬─────────────────────────┘
+        ┌───────────────▼──┐   ┌─────▼─────────────────────────────┐
+ llm/   │ client.py 流式   │   │ tools/  工具（模型自主调用）      │
+        │ OpenAI 兼容      │   │ kb_search · kb_list_files · kg_search│
+        └──────────────────┘   │ search_memory · write_memory      │
+                               │ web_search · get_weather           │
+                               │ generate_report · report_job_status│
+                               │ report_extract / compare / validate│
+                               └─────┬─────────────────────────────┘
                                      │
-        ┌────────────────────────────▼─────────────────────────┐
-  kb/   │ 解析 parsing → tables / table_cells / figures / office│
-        │ 章节 sections → 切片 chunking → 嵌入                 │
-        │ 检索 router → scope → retrieval（混合·重排 → rerank）│
-        │ 图谱 graph / graph_store / align / community          │
-        └────────────────────────────┬─────────────────────────┘
-  memory/                            │
-        短期(会话窗口) · 长期(向量) · 情景(episode) · 画像(profile)
-        写入门控 gate · 断点续跑 checkpoint_store · 认证 auth_store
+        ┌────────────────────────────▼─────────────────────────────┐
+  kb/   │ ingest/ 解析·切片·OCR   retrieval/ 路由·作用域·混合检索  │
+        │ graph/ 抽取·对齐·社区   pipeline · ingest_worker · cninfo │
+        └────────────────────────────┬─────────────────────────────┘
+  report/                            │ 事实层底稿 + 可选深度层 deep.pdf
+  memory/                            │ 短/长/情景/画像 · 门控 · 断点
+  storage/                           │ 连接池 · 认证 · embeddings · store
                                      │
                           ┌──────────▼───────────┐
                           │ PostgreSQL + pgvector │
@@ -105,10 +104,11 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `api/` | FastAPI 应用、中间件（request_id / 鉴权 / 限流）、路由、请求响应模型 |
 | `agents/` | Agent 主循环与周边：`loop.py` 主流程、`messages.py` 上下文裁剪与断点缝合、`turn.py` 持久化与收尾、`budget.py` |
 | `llm/` | OpenAI 兼容客户端，流式输出与超时控制 |
-| `tools/` | 工具定义与注册（见下方「工具一览」） |
-| `kb/` | 知识库：解析、切片、嵌入、检索、图谱、引用溯源、视觉识别 |
-| `report/` | 财报研报流水线：skill 大纲、抽数、同比、撰写、校验、PDF（见下方「研报流水线」） |
-| `memory/` | 存储层：连接池与迁移（`db.py`）、短/长期记忆、情景记忆、画像、会话、断点 |
+| `tools/` | 工具定义与注册，按 `kb/` · `memory/` · `misc/` · `report/` 分包（见下方「工具一览」） |
+| `kb/` | 知识库：`ingest/` 解析切片、`retrieval/` 检索、`graph/` 图谱、`pipeline` 入库编排、巨潮补数 |
+| `report/` | 财报研报流水线：事实层底稿 + 可选深度层、异步任务、审核门禁（见下方「研报流水线」） |
+| `memory/` | 短/长期记忆、情景记忆、画像、会话、断点续跑、写入门控 |
+| `storage/` | 连接池与迁移入口（`db.py`）、认证、embeddings、组合式 `MemoryStore` |
 | `prompts/` | 提示词：系统提示与工具描述（`chat.py` / `tools.py`）、知识库提示（`kb.py`）、记忆抽取（`memory.py`）、后台任务（`tasks.py`）、装配器（`builder.py`） |
 | `migrations/` | Alembic 迁移脚本（见下方「数据库与迁移」） |
 | `core/` | 配置（`config.py`）、异常、HTTP 客户端、日志 |
@@ -127,12 +127,15 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 
 赛道底稿已含：组内对比表、结构梯队、利润—现金流—合同负债交叉、同比／不可比说明、有出处原文引述、下期外部数据源清单。不含估值／买卖建议；景气宏观未接数据源前不推断。
 
-聊天入口的 `generate_report` 是**异步**的：只提交后台任务并返回 `job_id`（深度层约 5–8 分钟），结果用 `report_job_status(job_id)` 查，也可用同一 `job_id` 轮询 `GET /v1/report/jobs/{id}`；聊天断线不会中断生成。同步入口 `POST /v1/report` 契约不变。
+默认可交付**双 PDF**：事实层底稿（纯数字／原文，可自动定稿）+ 深度层 `<stem>.deep.pdf`（推断结论，独立审核记录，下载走门禁）。深度层设计说明见 [`docs/financial-deep-analysis-upgrade.md`](docs/financial-deep-analysis-upgrade.md)，事实契约见 [`docs/deep-facts-schema.md`](docs/deep-facts-schema.md)。
+
+聊天入口的 `generate_report` 是**异步**的：只提交后台任务并返回 `job_id`（深度层约 5–8 分钟），结果用 `report_job_status(job_id)` 查，也可用同一 `job_id` 轮询 `GET /v1/report/jobs/{id}`；聊天断线不会中断生成。同步入口 `POST /v1/report` 契约不变。审核队列读接口限管理员；批准／驳回／定稿对**生成者本人 + 管理员**开放。
 
 | 改什么 | 去哪 |
 |---|---|
 | 代表公司、赛道、大纲 | `report/skills/<id>/SKILL.md` |
 | 指标集、组内列、下期数据源文案 | `report/config/industries.yaml` |
+| 深度层章节／评审／PDF 附录 | `report/deep/` |
 | 新增行业脚手架 | `scripts/scaffold_industry.py` |
 
 ### 工具一览
@@ -141,18 +144,25 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 
 | 工具名 | 模块 | 作用 |
 |---|---|---|
-| `kb_search` | `kb_search.py` | 知识库检索，返回带文件名/页码/章节的引用片段 |
-| `kg_search` | `kg_search.py` | 知识图谱检索，返回实体邻域（三元组与关系描述） |
-| `kb_list_files` | `kb_list.py` | 列出库内文件清单（替代「目录注入」，模型需要时才主动查） |
-| `search_memory` / `write_memory` | `memory.py` | 长期/情景记忆的检索与写入 |
-| `web_search` | `web_search.py` | 联网搜索（`ddgs`） |
-| `get_weather` | `weather.py` | 天气查询 |
+| `kb_search` | `tools/kb/kb_search.py` | 知识库检索，返回带文件名/页码/章节的引用片段 |
+| `kg_search` | `tools/kb/kg_search.py` | 知识图谱检索，返回实体邻域（三元组与关系描述） |
+| `kb_list_files` | `tools/kb/kb_list.py` | 列出库内文件清单（替代「目录注入」，模型需要时才主动查） |
+| `search_memory` / `write_memory` | `tools/memory/memory.py` | 长期/情景记忆的检索与写入 |
+| `web_search` | `tools/misc/web_search.py` | 联网搜索（`ddgs`） |
+| `get_weather` | `tools/misc/weather.py` | 天气查询 |
+| `generate_report` | `tools/report/report_generate.py` | 提交研报后台任务，返回 `job_id`（不阻塞 SSE） |
+| `report_job_status` | `tools/report/report_status.py` | 按 `job_id` 查进度与交付链接 |
+| `report_extract_indicators` | `tools/report/report_extract.py` | 积木：从已入库财报抽指标 |
+| `report_compare` | `tools/report/report_compare.py` | 积木：同比／环比等确定性对比 |
+| `report_validate` | `tools/report/report_validate.py` | 积木：正文数字白名单校验 |
 
-### kb/ 解析链（本项目的核心能力）
+> `report_pdf` 仍在仓库里，但不注册进 `TOOLS`——渲染含落盘与审核门禁，只能由服务端流水线触发。
+
+### kb/ 解析链（`kb/ingest/`，本项目的核心能力）
 
 | 模块 | 职责 |
 |---|---|
-| `parsing.py` | 公共入口与 PDF 文本主流程：选项归一化、断行合并、章节识别 |
+| `parsing.py` | 公共入口与 PDF 文本主流程：选项归一化、断行合并、章节识别；密页走文字层、稀字页才送 OCR |
 | `sections.py` | 标题与页眉甄别：页眉与真标题文本可能一字不差，靠字号 + 纵向位置 + 编号正则三者组合判定 |
 | `tables.py` | PDF 表格识别与页面组织：找表、跨页/同页续表合并、补表题与元信息、剔签字栏 |
 | `table_cells.py` | 单元格清洗与表头对齐：数字断行还原、千分位/小数点归位、分组表头压平 |
@@ -161,19 +171,22 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `vision.py` / `ocr.py` | 视觉模型与 OCR 兜底 |
 | `office.py` | DOCX / XLSX 解析，含内嵌图片与内嵌表格 |
 | `chunking.py` | 按章节/页切块，表格整表成片；跨页续片重复携带表题与表头以保持自解释 |
+| `meta.py` | 检索元数据：从文件名规则抽取主体 / 报告期，并给多主体文档的切片做主体归属 |
+| `summary.py` | 文档级摘要：把一份文件压成一段「它讲的是什么」，单独 embedding 供路由使用 |
+| `doc_profiles.py` + `kb/skills/*/SKILL.md` | 文档类型 skill：实体范围与关系谓词注入抽取 prompt；JSON 可运行时覆盖 |
+| `lexicon.py` | 词表（科目词、短词表等） |
+
+### kb/ 检索链（`kb/retrieval/`）
+
+| 模块 | 职责 |
+|---|---|
 | `retrieval.py` | 混合检索（关键词 + 向量 RRF，按主体保底配额）→ 重排 |
 | `rerank.py` | 重排后端：默认 `local_ce`（`BAAI/bge-reranker-v2-m3`），未装则退回 LLM 重排 |
 | `router.py` | 文档路由：问句点名即收口，一句都没点名时才用摘要向量补 |
 | `scope.py` | 检索作用域：文件集合 / 报告期 / 主体的收窄与可达性兜底 |
-| `meta.py` | 检索元数据：从文件名规则抽取主体 / 报告期，并给多主体文档的切片做主体归属 |
-| `summary.py` | 文档级摘要：把一份文件压成一段「它讲的是什么」，单独 embedding 供路由使用 |
-| `doc_profiles.py` + `kb/skills/*/SKILL.md` | 文档类型 skill：实体范围与关系谓词注入抽取 prompt；JSON 可运行时覆盖 |
 | `citations.py` | 引用溯源 |
-| `lexicon.py` | 词表（科目词、短词表等） |
-| `pipeline.py` | 入库编排：解析 → 切片 → 嵌入 → 图谱，含卡住文件的恢复 |
-| `store.py` | `KbStore` mixin：切片与关键词的存取、邻接、词频统计 |
 
-### kb/ 图谱链
+### kb/ 图谱链（`kb/graph/`）
 
 | 模块 | 职责 |
 |---|---|
@@ -185,7 +198,8 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `align.py` / `community.py` | 实体对齐、社区发现 |
 | `graph_metrics.py` | 图谱构建质量指标（供 `scripts/eval_graph.py` 用） |
 
-> `memory/store.py` 的 `MemoryStore` 由多个 mixin 组合而成（`KbStore` /
+> 入库编排在 `kb/pipeline.py`；重解析可走独立 `kb/ingest_worker.py`，避免 OCR 拖死 API。
+> `storage/store.py` 的 `MemoryStore` 由多个 mixin 组合而成（`KbStore` /
 > `KgStore` / `KgWriteStore` / `AuthStore` / …），共享同一个连接池。所以
 > 知识库、图谱、认证的存取方法都通过全局单例 `store` 调用；新增存储能力时
 > 加一个 mixin 并挂进继承列表即可。
@@ -251,6 +265,12 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 |  | `/v1/session`、`/v1/auth`、`/user` | 会话、登录注册、用户信息 |
 |  | `/v1/kb/**` | 知识库上传、切片、标签、维护 |
 |  | `/v1/kg/**` | 图谱查询与维护 |
+| POST | `/v1/report` | 同步生成研报 |
+| POST | `/v1/report/jobs` | 异步提交研报任务（202） |
+| GET | `/v1/report/jobs/{id}` | 轮询任务进度 |
+| GET | `/v1/report/files/{name}` | 研报附件下载／`?preview=1` 在线预览 |
+|  | `/v1/report/reviews/**` | 审核队列、批准／驳回、定稿 |
+|  | `/v1/inspect/**` | 管理员回看用户会话与每轮工具调用 |
 
 > 长期记忆目前**没有对外的查看/删除接口**，只有 `search_memory` / `write_memory`
 > 两个工具。做隐私合规前需要先补一个管理端点。
@@ -268,7 +288,7 @@ uv run alembic history               # 历史
 uv run alembic revision -m "说明"    # 新增迁移
 ```
 
-**规范**：新增/修改表结构必须写新的迁移脚本，不要往 `memory/db.py` 的
+**规范**：新增/修改表结构必须写新的迁移脚本，不要往 `storage/db.py` 的
 `ensure_schema()` 里加 `ALTER TABLE`——它仅作为回滚锚点保留，被运维脚本与
 部分测试使用。迁移脚本用 `op.execute` 透传 SQL 并保留 `IF NOT EXISTS` 幂等性；
 `downgrade` 涉及删列删表，执行前先 `pg_dump` 备份。
@@ -365,14 +385,17 @@ uv run python scripts/eval_graph.py              # 图谱构建质量评测
 
 ## 测试与质量
 
-- 885 个用例，覆盖解析、检索、图谱、记忆、鉴权、并发与 SSE 流程
+- 1490 个用例，覆盖解析、检索、图谱、记忆、研报流水线／深度层、鉴权、并发与 SSE 流程
 - CI/本地门槛：`pytest` 全绿 + `ruff` 零告警
 - 解析相关用例取自真实文档（如招股书 PDF），改动抽取规则会立刻在
   `tests/test_kb_pdf_tables.py`、`tests/test_kb.py` 上暴露
 
-**当前 lint 未清零**（4 项，均为存量问题，修掉即可回到零告警）：
+**当前 lint 未清零**（11 项，多为存量问题；其中 6 项可用 `--fix` 自动修）：
 
 | 位置 | 规则 | 说明 |
 |---|---|---|
-| `scripts/eval_retrieval.py:245` ×3 | E702 | 一行多条语句（分号），拆行即可 |
-| `src/ai_agent/kb/graph.py:47` | F401 | `_subject_from_filename` 导入未使用，`--fix` 可自动删 |
+| `agents/loop.py` ×2 | E402 | 模块级 import 不在文件顶部 |
+| `kb/ingest/table_cells.py` ×2 | F541 | f-string 无占位符 |
+| `kb/ingest_worker.py` | F401 | `time` 未使用 |
+| `report/analyze_evidence.py` | F401 | 未使用导入 |
+| `report/compose_segment.py` ×5 | F401 / F811 | 未使用导入与同名符号重定义 |
