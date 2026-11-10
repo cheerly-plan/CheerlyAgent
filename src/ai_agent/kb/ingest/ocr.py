@@ -78,6 +78,12 @@ def _error_detail(err: Exception) -> str:
     return str(err)[:120]
 
 
+def _page_timeout() -> float:
+    """单页识别超时：优先用细粒度配置，回退到旧的整页超时。"""
+    value = float(getattr(settings, "kb_ocr_page_timeout_seconds", 0) or 0)
+    return value if value > 0 else settings.kb_ocr_timeout_seconds
+
+
 def _render_page(page, dpi: int, max_edge: int) -> bytes:
     """按 DPI 渲染，长边超过上限就等比缩小。对齐官方 fit_image 的 2048。"""
     import pymupdf
@@ -116,7 +122,7 @@ def _recognize(png: bytes) -> str | None:
             temperature=0,
             top_p=0.8,
             presence_penalty=0,
-            timeout=settings.kb_ocr_timeout_seconds,
+            timeout=_page_timeout(),
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         text = finalize_document((resp.choices[0].message.content or "").strip())
@@ -128,17 +134,15 @@ def _recognize(png: bytes) -> str | None:
         )
         return None
     except APITimeoutError:
+        # 超时只跳过这一页，**不熔断**：一页卡住是这一页的事（图太大、模型
+        # 正忙），没理由让后面几十页陪着一起放弃——实测 30 页里卡 1 页就把
+        # 剩下 29 页全废掉。
         _consecutive_failures += 1
         logger.warning(
-            "kb 整页 OCR 超时（%.0fs，连续第 %d 次）",
-            settings.kb_ocr_timeout_seconds,
+            "kb 整页 OCR 超时（%.0fs），跳过该页，连续第 %d 次",
+            _page_timeout(),
             _consecutive_failures,
         )
-        if _consecutive_failures >= max(1, settings.kb_ocr_max_failures):
-            _disable(
-                f"连续 {_consecutive_failures} 次超时（{settings.kb_ocr_timeout_seconds:.0f}s），"
-                f"当前模型 {settings.kb_ocr_model!r} 在本机跑不动"
-            )
         return None
     except Exception:
         logger.warning("kb 整页 OCR 失败，跳过该页", exc_info=True)

@@ -221,6 +221,9 @@ class Settings(BaseSettings):
     kb_ocr_concurrency: int = 2
     kb_ocr_max_tokens: int = 4096
     kb_ocr_timeout_seconds: float = 180.0
+    # 单页识别的硬超时：整页图送视觉模型，慢页在 180s 上会白等三分钟。
+    # 60s 足够正常页（实测 5–15s），超时就跳过这一页继续下一张。
+    kb_ocr_page_timeout_seconds: float = 60.0
     kb_ocr_max_failures: int = 2
 
     # 知识图谱（P2）：切片入库后异步抽取实体关系（每批 = 一次 LLM 调用）。
