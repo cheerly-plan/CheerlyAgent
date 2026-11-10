@@ -266,19 +266,112 @@ def _find_page_tables(page) -> list:
     return _replace_clipped_tables(found, alt)
 
 
+# 单元格里「数字被列宽折成两行」的两段：都要是数字片段，拼起来还得是合法数字
+_NUM_FRAGMENT = re.compile(r"^[-\d,.%]+$")
+_NUMBER_WHOLE = re.compile(r"^-?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?$|^-?\d+(?:\.\d+)?%?$")
+
+
+def _ascii_word(ch: str) -> bool:
+    return bool(ch) and ch.isascii() and ch.isalnum()
+
+
+def _join_word_line(words: list) -> str:
+    """同一视觉行里的词拼成一段：汉字之间不留空格，拉丁词之间留一个。
+
+    只认「两边都是 ASCII 字母数字」才补空格——中文不补（「商业承兑票」+
+    「据」），百分号/逗号前也不补（「14.56」+「%」）。
+    """
+    text = ""
+    for word in words:
+        piece = word[4]
+        if not text:
+            text = piece
+        elif _ascii_word(text[-1]) and _ascii_word(piece[0]):
+            text += " " + piece
+        else:
+            text += piece
+    return text
+
+
+def _join_cell_lines(texts: list[str]) -> str:
+    out = texts[0] if texts else ""
+    for text in texts[1:]:
+        if out and text and _ascii_word(out[-1]) and _ascii_word(text[0]):
+            out += " " + text
+        else:
+            out += text
+    return out
+
+
+def _cell_text_from_words(words: list, rect) -> str:
+    """按坐标重建一个单元格的文本。
+
+    `table.extract()` 在这一类表上是**错的**：数字被列宽折成两行时，它按字符
+    坐标拼出「850075 / , , / 1434 / .」这种乱序串。这里改用 word 坐标自己排：
+    先按 y 分行、行内按 x，再把「数字折行」拼回去（两段都是数字、右边缘对齐、
+    拼起来是合法数字才合并，例如 12,380,4 + 18.39 → 12,380,418.39）。
+    """
+    inside = [
+        w
+        for w in words
+        if rect[0] <= (w[0] + w[2]) / 2 <= rect[2]
+        and rect[1] <= (w[1] + w[3]) / 2 <= rect[3]
+    ]
+    if not inside:
+        return ""
+    inside.sort(key=lambda w: ((w[1] + w[3]) / 2, w[0]))
+    lines: list[list] = []
+    for word in inside:
+        yc = (word[1] + word[3]) / 2
+        if lines and abs((lines[-1][0][1] + lines[-1][0][3]) / 2 - yc) <= 4:
+            lines[-1].append(word)
+        else:
+            lines.append([word])
+    texts = [_join_word_line(line) for line in lines]
+    if len(texts) == 2 and all(_NUM_FRAGMENT.match(text) for text in texts):
+        right = [round(line[-1][2], 1) for line in lines]
+        joined = texts[0] + texts[1]
+        if abs(right[0] - right[1]) <= 3 and _NUMBER_WHOLE.match(joined):
+            return joined
+    return _join_cell_lines(texts)
+
+
+def _table_rows_from_words(page, table, words: list) -> list[list[str]]:
+    """用 word 坐标重建整张表；任何一行都取不到词就返回空（调用方回退 extract）。"""
+    rows: list[list[str]] = []
+    for row in table.rows:
+        cells = []
+        for cell in row.cells:
+            cells.append("" if cell is None else _cell_text_from_words(words, cell))
+        rows.append(cells)
+    return rows
+
+
 def _page_table_payload(page, pno: int) -> list[tuple[int, float, tuple, list[list[str]]]]:
     """单页 find_tables → 可跨进程传递的清洗后表格。"""
     out: list[tuple[int, float, tuple, list[list[str]]]] = []
+    words = page.get_text("words")
     for table in _find_page_tables(page):
         # 一张图里可能拆出多张表（见 _split_repeated_header）：共用同一
         # 个 bbox 即可，正文行照样整块剔掉。外框常比最后一行格子大一截，
         # 会把表下的签字栏（法定代表人）也当成表格内文本删掉。
         bbox = _table_content_bbox(table)
-        for rows in _clean_table(table.extract()):
+        rebuilt = _table_rows_from_words(page, table, words)
+        # 重建结果若与 extract 的非空格数差太多（合并单元格的矩形取错等），
+        # 宁可回退到 pymupdf 自己的结果，也不要凭空造空表
+        raw = table.extract()
+        source = raw
+        if rebuilt and _filled(rebuilt) >= _filled(raw) * 0.8:
+            source = rebuilt
+        for rows in _clean_table(source):
             if len(rows) < 2 or max(len(r) for r in rows) < 2:
                 continue
             out.append((pno + 1, float(bbox[1]), bbox, rows))
     return out
+
+
+def _filled(rows: list[list[str]]) -> int:
+    return sum(1 for row in rows for cell in row if (cell or "").strip())
 
 
 def _pdf_tables(

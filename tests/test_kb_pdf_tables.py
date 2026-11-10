@@ -1141,3 +1141,49 @@ def test_bridge_row_needs_project_label_and_period():
         _body_line("项目", 1, 100.0, 60.0),
         _body_line("金额", 1, 100.0, 200.0),
     ]) is None
+
+
+# --- 单元格文本按 word 坐标重建（数字被列宽折行）---------------------------
+
+
+def _word(x0, y0, x1, y1, text):
+    return (x0, y0, x1, y1, text, 0, 0, 0)
+
+
+def test_cell_text_joins_number_wrapped_by_column_width():
+    """机器人 2026H1 p83 实录：12,380,418.39 被折成「12,380,4」「18.39」两行。"""
+    from ai_agent.kb.ingest.tables import _cell_text_from_words
+
+    words = [
+        _word(132.5, 147.0, 164.0, 156.9, "12,380,4"),
+        _word(143.8, 159.0, 164.0, 168.9, "18.39"),
+    ]
+    assert _cell_text_from_words(words, (126.0, 145.0, 169.4, 170.0)) == "12,380,418.39"
+
+
+def test_cell_text_keeps_two_unrelated_numbers_apart():
+    """右边缘不对齐 / 拼起来不是合法数字时不能硬拼。"""
+    from ai_agent.kb.ingest.tables import _cell_text_from_words
+
+    misaligned = [
+        _word(100.0, 147.0, 130.0, 156.9, "1,000"),
+        _word(120.0, 159.0, 164.0, 168.9, "234.56"),
+    ]
+    assert _cell_text_from_words(misaligned, (90.0, 145.0, 170.0, 170.0)) != "1,000234.56"
+
+
+def test_cell_text_joins_cjk_labels_without_space():
+    from ai_agent.kb.ingest.tables import _cell_text_from_words
+
+    words = [
+        _word(60.0, 145.0, 110.0, 156.9, "商业承兑票"),
+        _word(60.0, 157.0, 80.0, 168.9, "据"),
+    ]
+    assert _cell_text_from_words(words, (58.0, 143.0, 115.0, 170.0)) == "商业承兑票据"
+
+
+def test_cell_text_keeps_percent_and_asin_word_spacing():
+    from ai_agent.kb.ingest.tables import _cell_text_from_words
+
+    words = [_word(170.0, 147.0, 190.0, 156.9, "14.56"), _word(190.0, 147.0, 196.0, 156.9, "%")]
+    assert _cell_text_from_words(words, (168.0, 145.0, 200.0, 170.0)) == "14.56%"
