@@ -5,8 +5,8 @@ from ai_agent.api.routers.chat import chat_memory
 from ai_agent.api.routers.user import user_info
 from ai_agent.api.schemas import ChatRequest
 from ai_agent.core.exceptions import AgentError
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.store import ChatHistoryPage
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.store import ChatHistoryPage
 
 _USER = UserRecord(
     user_id="user_001", username="user_001", display_name="ppl"

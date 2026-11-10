@@ -18,8 +18,8 @@ from ai_agent.api.schemas import (
     SessionRenameRequest,
 )
 from ai_agent.core.exceptions import AgentError
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.store import DEFAULT_SESSION_TITLE, SessionRecord
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.store import DEFAULT_SESSION_TITLE, SessionRecord
 from ai_agent.tasks.title import (
     generate_session_title,
     normalize_title,

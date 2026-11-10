@@ -5,21 +5,23 @@ PDF 里没有「表格」对象，pymupdf 反推出来的单元格带着一堆�
 全部取自招股书实录（南岭民爆第 4/14 页），改坏了要能立刻发现。
 """
 
-from ai_agent.kb.parsing import _rows_to_markdown
-from ai_agent.kb.table_cells import (
+from ai_agent.kb.ingest.parsing import _rows_to_markdown
+from ai_agent.kb.ingest.table_cells import (
     _align_header,
     _clean_cell,
     _clean_table,
     _drop_empty_cols,
+    _ensure_row_header,
     _fill_header_corner,
     _merge_header,
     _split_repeated_header,
     _tidy_header,
 )
-from ai_agent.kb.tables import (
+from ai_agent.kb.ingest.tables import (
     _attach_captions,
     _caption_above,
     _carry_page_headers,
+    _fit_header_to_width,
     _merge_continued_tables,
     _drop_table_lines,
     _find_page_tables,
@@ -31,7 +33,7 @@ from ai_agent.kb.tables import (
     _table_prefix,
     _word_lines,
 )
-from ai_agent.kb.sections import Line
+from ai_agent.kb.ingest.sections import Line
 
 BODY = 12.0
 
@@ -50,6 +52,42 @@ def test_clean_cell_rebuilds_thousands_separator():
     # 千分位逗号和小数点都被甩到末尾
     assert _clean_cell("114 376 427 06\n,\n,\n.") == "114,376,427.06"
     assert _clean_cell("3 672 71\n,\n.") == "3,672.71"
+
+
+def test_clean_cell_rebuilds_negative_spaced_amount():
+    # 长电年报：负数符号和千分位一起甩到下一行
+    assert _clean_cell("47 987 216 45\n- , , .") == "-47,987,216.45"
+    assert _clean_cell("25 498 054 15 -，.") == "-25,498,054.15"
+    assert _clean_cell("3 649 056 40\n- , , .") == "-3,649,056.40"
+
+
+def test_clean_cell_merges_split_decimal_digits():
+    assert _clean_cell("665 661 530 3 8") == "665,661,530.38"
+    assert _clean_cell("187 433 454 1 1") == "187,433,454.11"
+
+
+def test_clean_cell_rebuilds_integer_spaced_thousands():
+    assert _clean_cell("1 788 827 976") == "1,788,827,976"
+    assert _clean_cell("+586 594") == "+586,594"
+    assert _clean_cell("3 550") == "3,550"
+    assert _clean_cell("1 500 000 000 KRW") == "1,500,000,000 KRW"
+    assert _clean_cell("133 111 740 000 KRW") == "133,111,740,000 KRW"
+    # 文内嵌套：抵押说明里的空格千分位
+    assert "127,744,995" in _clean_cell(
+        "于2023年12月31日账面价值为人民币127 744 995 33元存货用于抵押"
+    )
+    # 不误伤日期 / 月区间
+    assert _clean_cell("2016 12 31 - -") == "2016-12-31"
+    assert _clean_cell("2006年\n1 6月\n-") == "2006年1-6月"
+
+
+def test_clean_cell_untangles_ordinal_section_label():
+    assert _clean_cell("账面原值\n一、") == "一、账面原值："
+    assert _clean_cell("账面原值\n一、 ：") == "一、账面原值："
+    assert _clean_cell("经营活动产生的现金流量一、：") == "一、经营活动产生的现金流量："
+    assert _clean_cell("项目账面原值一、") == "一、账面原值："
+    assert _clean_cell("1期初余额") == "1.期初余额"
+    assert _clean_cell("2本期增加金额") == "2.本期增加金额"
 
 
 def test_clean_cell_restores_month_range():
@@ -371,11 +409,54 @@ def test_carry_page_headers_skips_when_previous_table_ended_midpage():
 
 
 def test_carry_page_headers_skips_width_mismatch():
+    # 多出一列且不是可选空列（附注等）——差得太离谱，不硬凑
     header = ["项目", "本报告期", "年初至报告期末"]
     prev = (1, 577.0, (0.0, 577.0, 500.0, 800.0), [header, ["a", "1", "2"]])
     cont = (2, 72.0, (0.0, 72.0, 500.0, 300.0), [["b", "3", "4", "5"]])
     out = _carry_page_headers([prev, cont], {1: 842.0, 2: 842.0})
     assert len(out[1][3]) == 1
+
+
+def test_carry_page_headers_tolerates_optional_note_column():
+    # 上页有空「附注」列，下页清洗后丢掉 → 列数 4→3，仍应补头
+    header = ["项目", "期末余额", "期初余额", "附注"]
+    prev = (
+        1,
+        577.0,
+        (0.0, 577.0, 500.0, 800.0),
+        [header, ["货币资金", "1", "2", ""]],
+    )
+    cont = (
+        2,
+        72.0,
+        (0.0, 72.0, 500.0, 300.0),
+        [["长期股权投资", "10", "9"]],
+    )
+    out = _carry_page_headers([prev, cont], {1: 842.0, 2: 842.0})
+    assert out[1][3][0] == ["项目", "期末余额", "期初余额"]
+    assert out[1][3][1] == ["长期股权投资", "10", "9"]
+
+
+def test_fit_header_to_width_drops_optional_cols():
+    assert _fit_header_to_width(["项目", "期末", "期初", "附注"], 3) == [
+        "项目",
+        "期末",
+        "期初",
+    ]
+    assert _fit_header_to_width(["项目", "期末", "期初"], 5) is None
+
+
+def test_ensure_row_header_prepends_when_first_row_is_item():
+    rows = _ensure_row_header([["长期股权投资", "10", "9"], ["其他权益工具", "1", "2"]])
+    assert rows[0] == ["项目", "列2", "列3"]
+    assert rows[1][0] == "长期股权投资"
+
+
+def test_rows_to_markdown_does_not_promote_item_row():
+    md = _rows_to_markdown([["长期股权投资", "10", "9"], ["交易性金融资产", "1", "2"]])
+    lines = md.splitlines()
+    assert lines[0] == "| 项目 | 列2 | 列3 |"
+    assert "| 长期股权投资 | 10 | 9 |" in lines
 
 
 def test_carry_page_headers_skips_table_starting_midpage():

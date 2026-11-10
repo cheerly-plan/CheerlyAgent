@@ -20,6 +20,18 @@ from ai_agent.prompts import chat, kb, memory, tasks, tools
 from ai_agent.prompts.builder import PromptBuilder, assert_rendered
 
 
+def _rendered_prompts():
+    """按真实组装路径渲染三处提示词：prompts 层只出模板，catalog 由组装方注入。"""
+    from ai_agent.report.skills import skill_catalog
+
+    catalog = skill_catalog()
+    return [
+        tools.render_report_generate_desc(catalog),
+        tools.render_report_type_desc(catalog),
+        chat.build_report_discipline(catalog),
+    ]
+
+
 # ——— 1. 字面值冻结 ———
 
 
@@ -75,6 +87,17 @@ def test_system_prompt_keeps_core_constraints():
     assert "Markdown" in prompt
     assert "不要寒暄" not in prompt  # 实际措辞是「不寒暄、不复读」
     assert "不寒暄、不复读" in prompt
+
+
+def test_report_discipline_is_injected_only_when_kb_is_on():
+    """报告工具和它的提示词必须同开同关，否则模型会追一个不存在的工具。"""
+    catalog = _rendered_prompts()[2]  # 研报纪律节
+    with_kb = chat.build_system_prompt(use_kb=True, report_catalog=catalog)
+    without_kb = chat.build_system_prompt(use_kb=False)
+    assert "generate_report" in with_kb
+    assert "不要说「无法生成 PDF」" in with_kb
+    assert "generate_report" not in without_kb
+    assert catalog in with_kb
 
 
 def test_system_prompt_has_no_document_specific_words():
@@ -166,6 +189,10 @@ def test_facet_rules_are_injected_once():
         ("memory_write", tools.MEMORY_WRITE_DESC),
         ("kb_search", tools.KB_SEARCH_DESC),
         ("kg_search", tools.KG_SEARCH_DESC),
+        ("generate_report", _rendered_prompts()[0]),
+        ("report_extract_indicators", tools.REPORT_EXTRACT_DESC),
+        ("report_compare", tools.REPORT_COMPARE_DESC),
+        ("report_validate", tools.REPORT_VALIDATE_DESC),
     ],
 )
 def test_tool_descriptions_are_non_empty(name, text):
@@ -175,7 +202,15 @@ def test_tool_descriptions_are_non_empty(name, text):
 
 @pytest.mark.parametrize(
     "text",
-    [tools.MEMORY_SEARCH_DESC, tools.MEMORY_WRITE_DESC, tools.KB_SEARCH_DESC],
+    [
+        tools.MEMORY_SEARCH_DESC,
+        tools.MEMORY_WRITE_DESC,
+        tools.KB_SEARCH_DESC,
+        _rendered_prompts()[0],
+        tools.REPORT_EXTRACT_DESC,
+        tools.REPORT_COMPARE_DESC,
+        tools.REPORT_VALIDATE_DESC,
+    ],
 )
 def test_trigger_conditions_are_declared(text):
     """这几个最容易误触发，必须显式写清何时用、何时不用。"""
@@ -186,6 +221,73 @@ def test_kb_and_kg_files_desc_share_one_source():
     """两个工具的 files 参数说明必须一致，否则模型会按两套规则填。"""
     assert tools.KB_FILES_DESC
     assert "文件名" in tools.KB_FILES_DESC
+
+
+# ——— 4b. 研报 skill 目录与提示词同源 ———
+
+
+@pytest.mark.parametrize(
+    "index,label",
+    [(0, "generate_report 工具描述"), (1, "report_type 字段描述"), (2, "系统提示词研报纪律节")],
+)
+def test_report_prompts_carry_full_skill_catalog(index, label):
+    """三处提示词里的 skill 清单必须逐条来自注册表。
+
+    漂移的两个方向都守：注册新 skill 忘了进提示词（模型永远点不了名）、
+    改名/删 skill 后提示词还留着旧 id（模型会传一个流水线不认识的类型）。
+    """
+    from ai_agent.report.skills import SKILLS
+
+    text = _rendered_prompts()[index]
+    for skill in SKILLS:
+        assert skill.skill_id in text, f"{label} 缺 skill_id：{skill.skill_id}"
+        assert skill.name in text, f"{label} 缺 skill 名称：{skill.name}"
+
+
+def test_report_prompts_have_no_stale_skill_ids():
+    """提示词里不许残留注册表已不存在的 report_type id。"""
+    import re
+
+    from ai_agent.report.skills import skill_ids
+
+    valid = set(skill_ids())
+    pattern = re.compile(r"[a-z]+(?:_[a-z]+)+")
+    for text in _rendered_prompts():
+        # 只盯 snake_case 且带 report 字样的词，避开 generate_report 这类工具名
+        candidates = {
+            token
+            for token in pattern.findall(text)
+            if token.endswith("_report") and token != "generate_report"
+        }
+        stale = candidates - valid
+        assert not stale, f"提示词里有已失效的报告类型 id：{stale}"
+
+
+def test_report_prompts_have_no_leftover_slots():
+    """skill_catalog 渲染完成后不允许残留 {{SKILL_CATALOG}} 槽位。"""
+    for text in _rendered_prompts():
+        assert_rendered(text)
+
+
+def test_prompt_module_never_imports_business_domains():
+    """prompts 是文案层：不许 import report / kb / memory / storage / tools。
+
+    曾经 prompts.tools 反向 import report.skills 渲染目录，和 report 包根的
+    惰性导出一起差点成环。catalog 数据一律由组装方（agents / tools）注入。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import ai_agent.prompts.chat, ai_agent.prompts.tools, "
+        "ai_agent.prompts.kb, ai_agent.prompts.memory, ai_agent.prompts.tasks; "
+        "bad = [m for m in sys.modules if m.startswith('ai_agent.') "
+        "and not m.startswith('ai_agent.prompts') "
+        "and not m.startswith('ai_agent.core') "
+        "and not m.startswith('ai_agent.llm')]; "
+        "assert not bad, f'prompts 拖起了业务域模块: {bad}'"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 # ——— 5. 构造器行为 ———

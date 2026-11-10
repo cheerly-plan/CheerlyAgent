@@ -9,13 +9,13 @@ import uuid
 import pytest
 
 from ai_agent.core.config import settings
-from ai_agent.kb import graph, graph_extract
-from ai_agent.kb.chunking import Chunk
-from ai_agent.kb.graph import build_file_graph
-from ai_agent.kb.graph_names import normalize_name
-from ai_agent.kb.graph_schema import _Entity, _Extraction, _parse_extraction
-from ai_agent.kb.graph_store import KgStore
-from ai_agent.memory import parse
+from ai_agent.kb.graph import graph, graph_extract
+from ai_agent.kb.ingest.chunking import Chunk
+from ai_agent.kb.graph.graph import build_file_graph
+from ai_agent.kb.graph.graph_names import normalize_name
+from ai_agent.kb.graph.graph_schema import _Entity, _Extraction, _parse_extraction
+from ai_agent.kb.graph.graph_store import KgStore
+from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.tools.registry import TOOLS_MAP
 
 
@@ -213,7 +213,7 @@ def _cand(name, vector, *, score=None, literal=False, norm=None, mentions=1, mat
 
 
 def test_query_tokens_split_latin_and_cjk_bigram():
-    from ai_agent.kb.kg_match import _query_tokens
+    from ai_agent.kb.graph.kg_match import _query_tokens
 
     assert _query_tokens("HBM 涨价")[:2] == ["hbm", "涨价"]
     # 中文按二元组切，不保留整串（整串太严），也不会只剩单字（单字太泛）
@@ -222,7 +222,7 @@ def test_query_tokens_split_latin_and_cjk_bigram():
 
 def test_score_candidate_alias_is_literal_when_canonical_misses():
     """对齐删掉的「发行人」对不上全称，必须靠别名才能成为强命中。"""
-    from ai_agent.kb.kg_match import _query_tokens, _score_candidate
+    from ai_agent.kb.graph.kg_match import _query_tokens, _score_candidate
 
     row = {
         "id": "e1",
@@ -242,7 +242,7 @@ def test_score_candidate_alias_is_literal_when_canonical_misses():
 
 
 def test_score_candidate_keeps_canonical_name_over_alias():
-    from ai_agent.kb.kg_match import _query_tokens, _score_candidate
+    from ai_agent.kb.graph.kg_match import _query_tokens, _score_candidate
 
     row = {"id": "e1", "name": "HBM", "description": "", "score": 0.7}
     scored = _score_candidate("hbm", _query_tokens("HBM"), row, alias_name="HBM3E")
@@ -251,7 +251,7 @@ def test_score_candidate_keeps_canonical_name_over_alias():
 
 
 def test_literal_match_boosts_name_hits():
-    from ai_agent.kb.kg_match import _literal_match, _query_tokens
+    from ai_agent.kb.graph.kg_match import _literal_match, _query_tokens
 
     boost, basis, _ = _literal_match("hbm", _query_tokens("HBM"), "HBM", "")
     assert basis == "name" and boost > 0.2
@@ -264,7 +264,7 @@ def test_literal_match_boosts_name_hits():
 
 
 def test_rank_candidates_drops_noise_when_nothing_matches():
-    from ai_agent.kb.kg_match import _rank_candidates
+    from ai_agent.kb.graph.kg_match import _rank_candidates
 
     # 「天气预报」那类查询：全都只是话题沾边，没有任何字面依据
     scored = [_cand("界面新闻", 0.47), _cand("出口管制", 0.46), _cand("Gartner", 0.45)]
@@ -272,7 +272,7 @@ def test_rank_candidates_drops_noise_when_nothing_matches():
 
 
 def test_rank_candidates_keeps_related_when_one_strong_hit():
-    from ai_agent.kb.kg_match import _rank_candidates
+    from ai_agent.kb.graph.kg_match import _rank_candidates
 
     scored = [
         # 名称命中会把展示分顶到 1.0，但「相对带宽」看的是原始向量分
@@ -286,7 +286,7 @@ def test_rank_candidates_keeps_related_when_one_strong_hit():
 
 
 def test_rank_candidates_trims_far_tail_by_relative_band():
-    from ai_agent.kb.kg_match import _rank_candidates
+    from ai_agent.kb.graph.kg_match import _rank_candidates
 
     scored = [
         _cand("三星", 0.9, score=1.0, literal=True, matched="name"),
@@ -296,7 +296,7 @@ def test_rank_candidates_trims_far_tail_by_relative_band():
 
 
 def test_rank_candidates_merges_same_norm_and_picks_top_score():
-    from ai_agent.kb.kg_match import _rank_candidates
+    from ai_agent.kb.graph.kg_match import _rank_candidates
 
     scored = [
         _cand("HBM", 0.72, norm="hbm", mentions=2),
@@ -329,7 +329,7 @@ def test_rank_candidates_isolates_cross_file_metric_when_org_anchor():
     这里验证：有 org 主体锚时，跨文件的 metric 候选不享受 WEAK_SCORE_DROP 放宽，
     必须向量分 ≥ min_score 原值才保留。
     """
-    from ai_agent.kb.kg_match import _rank_candidates
+    from ai_agent.kb.graph.kg_match import _rank_candidates
 
     ank, sf = "file-ank", "file-sf"
     scored = [
@@ -354,7 +354,7 @@ def test_rank_candidates_isolates_cross_file_metric_when_org_anchor():
 
 def test_rank_candidates_keeps_cross_file_metric_when_above_min_score():
     """同名 metric 跨文件但分数都够高：分 file 独立保留，交 LLM 消歧，不合并。"""
-    from ai_agent.kb.kg_match import _rank_candidates
+    from ai_agent.kb.graph.kg_match import _rank_candidates
 
     ank, sf = "file-ank", "file-sf"
     scored = [
@@ -373,7 +373,7 @@ def test_rank_candidates_keeps_cross_file_metric_when_above_min_score():
 
 def test_rank_candidates_no_anchor_keeps_original_behavior():
     """无主体锚（只问「毛利率」没提公司）：不触发收敛，保持原合并行为。"""
-    from ai_agent.kb.kg_match import _rank_candidates
+    from ai_agent.kb.graph.kg_match import _rank_candidates
 
     ank, sf = "file-ank", "file-sf"
     scored = [
@@ -402,7 +402,7 @@ def _long_text(seed: str) -> str:
 
 def test_parse_extraction_accepts_compact_arrays():
     """紧凑格式（e/r 数组）是主线：省掉逐项重复的键，输出 token 少一半。"""
-    from ai_agent.kb.graph_schema import _parse_extraction
+    from ai_agent.kb.graph.graph_schema import _parse_extraction
 
     parsed = _parse_extraction(
         {
@@ -417,7 +417,7 @@ def test_parse_extraction_accepts_compact_arrays():
 
 
 def test_parse_extraction_still_accepts_verbose_objects():
-    from ai_agent.kb.graph_schema import _parse_extraction
+    from ai_agent.kb.graph.graph_schema import _parse_extraction
 
     parsed = _parse_extraction(
         {"entities": [{"name": "HBM", "type": "product"}], "relations": []}
@@ -426,7 +426,7 @@ def test_parse_extraction_still_accepts_verbose_objects():
 
 
 def test_parse_extraction_rejects_unknown_shape():
-    from ai_agent.kb.graph_schema import _parse_extraction
+    from ai_agent.kb.graph.graph_schema import _parse_extraction
 
     assert _parse_extraction({"公司": ["发行人"]}) is None
     assert _parse_extraction("不是 dict") is None
@@ -464,7 +464,7 @@ def test_low_value_chunks_are_filtered_before_llm(monkeypatch):
 
     def fake_extract(batch, start_seq, _depth=0, **_kw):
         seen.extend(c.text for c in batch)
-        from ai_agent.kb.graph_schema import _Entity
+        from ai_agent.kb.graph.graph_schema import _Entity
 
         return _Extraction()
 
@@ -488,13 +488,9 @@ def test_graph_flushes_progressively(monkeypatch):
     monkeypatch.setattr(
         graph_extract,
         "_extract_batch",
-        lambda batch, start_seq, _depth=0, **_kw: __import__(
-            "ai_agent.kb.graph", fromlist=["_Extraction"]
-        )._Extraction(
+        lambda batch, start_seq, _depth=0, **_kw: _Extraction(
             entities=[
-                __import__("ai_agent.kb.graph_schema", fromlist=["_Entity"])._Entity(
-                    name=f"实体{start_seq}", type="org", chunk=0
-                )
+                _Entity(name=f"实体{start_seq}", type="org", chunk=0)
             ]
         ),
     )
@@ -528,8 +524,8 @@ def test_relation_links_across_batches(monkeypatch):
     找端点的话，这类关系整条丢掉，最后全是孤立点（实测 407 个实体 225 个
     一条关系都没挂上）。
     """
-    from ai_agent.kb.graph import _GraphAccumulator
-    from ai_agent.kb.graph_schema import _Entity
+    from ai_agent.kb.graph.graph import _GraphAccumulator
+    from ai_agent.kb.graph.graph_schema import _Entity
 
     monkeypatch.setattr(
         graph, "embed_texts_parallel", lambda texts, **k: [[0.01] for _ in texts]
@@ -616,8 +612,8 @@ def test_unknown_doc_type_falls_back_to_general(monkeypatch):
 def test_repair_json_quotes_bare_tokens():
     """本地模型偶发把中文名裸着写，一行坏掉会让整批实体丢失。"""
     raw = '{"e":[["甲公司","org","",0]],"r":[["甲公司","由",乙公司,1,0]]}'
-    assert parse.load_llm_json(raw) is None  # 严格模式：确实是坏 JSON
-    data = parse.load_llm_json(raw, repair=True)
+    assert load_llm_json(raw) is None  # 严格模式：确实是坏 JSON
+    data = load_llm_json(raw, repair=True)
     assert [r[1] for r in data["r"]] == ["由"]
     assert data["r"][0][2] == "乙公司"
 
@@ -628,28 +624,28 @@ def test_repair_json_closes_truncated_output():
         '{"e":[["甲公司","org","",0],["乙公司","org","",1]],'
         '"r":[["甲公司","控股",""'
     )
-    assert parse.load_llm_json(raw) is None
-    data = parse.load_llm_json(raw, repair=True)
+    assert load_llm_json(raw) is None
+    data = load_llm_json(raw, repair=True)
     assert [e[0] for e in data["e"]] == ["甲公司", "乙公司"]
 
 
 def test_repair_json_keeps_outer_object_when_truncated():
     """截断时不能退化成「取内层数组」——那样 e 留下了、r 整段丢掉。"""
     raw = '{"e":[["甲公司","org","",0]],"r":[["甲公司","持股",1214365'
-    data = parse.load_llm_json(raw, repair=True)
+    data = load_llm_json(raw, repair=True)
     assert isinstance(data, dict) and "r" in data
 
 
 def test_repair_json_leaves_wellformed_output_alone():
     raw = '{"e":[["甲 公司","org","说明：注意 空格",0]],"r":[]}'
-    assert parse.load_llm_json(raw, repair=True) == parse.load_llm_json(raw)
+    assert load_llm_json(raw, repair=True) == load_llm_json(raw)
     # 代码块包裹照常剥掉
     fenced = '```json\n{"e":[],"r":[]}\n```'
-    assert parse.load_llm_json(fenced, repair=True) == {"e": [], "r": []}
+    assert load_llm_json(fenced, repair=True) == {"e": [], "r": []}
 
 
 def test_repair_json_returns_none_for_prose():
-    assert parse.load_llm_json("抱歉，我无法处理", repair=True) is None
+    assert load_llm_json("抱歉，我无法处理", repair=True) is None
 
 
 # ---------- 抽取重试：先原样重问，再拆半 ----------
@@ -741,7 +737,7 @@ def test_compact_relation_five_items_unchanged():
 
 
 def test_system_prompt_requires_five_item_relations():
-    from ai_agent.kb.doc_profiles import build_system_prompt
+    from ai_agent.kb.ingest.doc_profiles import build_system_prompt
 
     prompt = build_system_prompt(None)
     assert "r 必须是 5 项" in prompt

@@ -12,11 +12,13 @@ import json
 
 from ai_agent.agents.turn import _checkpoint_update
 from ai_agent.core.logging import get_logger
+from ai_agent.core.text import clip_text
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.short_term import (
     assemble,
+    fit_turns,
     flatten,
-    iter_turns,
+    messages_chars,
     take_summary,
     take_system,
 )
@@ -108,44 +110,75 @@ def _pop_incomplete_assistant(messages: list[ChatMessage]) -> list[ChatMessage]:
     return messages
 
 
-def _messages_chars(messages: list[ChatMessage]) -> int:
-    """上下文长度的粗估（字符数）。中文场景 1 字符 ≈ 0.6~1 token，
-    用字符数做预算天然偏保守，不会把上下文撑爆。"""
-    total = 0
-    for msg in messages:
-        total += len(str(msg.get("content") or ""))
-        for call in msg.get("tool_calls") or []:
-            total += len(str(call.get("arguments") or ""))
-    return total
+_SYSTEM_CLIP_MARK = "\n[系统提示词动态部分已省略，请按需用工具查询]\n"
+
+
+def _enforce_budget(fitted: list[ChatMessage], max_chars: int) -> list[ChatMessage]:
+    """整轮丢完仍超预算时的兜底，绝不把超限请求直接发给模型。
+
+    system 的动态块（画像 / 知识库能力清单 / 日期）拼在尾部，原先完全不受
+    预算约束；单轮里多次工具调用也可能把最后一个 turn 撑到超预算。按顺序
+    降级：裁 system 尾部 → 压缩当前回合的 tool 结果（保留 tool_call_id，
+    不产生孤儿消息）。fitted 是 assemble 产出的副本，改动不碰原始 messages。
+    """
+    if messages_chars(fitted) <= max_chars:
+        return fitted
+    for idx, msg in enumerate(fitted):
+        if messages_chars(fitted) <= max_chars:
+            break
+        if msg.get("role") != "system":
+            continue
+        content = str(msg.get("content") or "")
+        # 短 system 换成省略标记反而更长，直接跳过，让 tool 结果去吸收超额
+        if len(content) <= len(_SYSTEM_CLIP_MARK):
+            continue
+        excess = messages_chars(fitted) - max_chars
+        keep = max(0, len(content) - excess - len(_SYSTEM_CLIP_MARK))
+        fitted[idx] = {**msg, "content": content[:keep] + _SYSTEM_CLIP_MARK}
+    for idx, msg in enumerate(fitted):
+        if messages_chars(fitted) <= max_chars:
+            break
+        if msg.get("role") != "tool":
+            continue
+        content = str(msg.get("content") or "")
+        excess = messages_chars(fitted) - max_chars
+        fitted[idx] = {
+            **msg,
+            "content": clip_text(content, max(0, len(content) - excess)),
+        }
+    if messages_chars(fitted) > max_chars:
+        logger.error(
+            "上下文裁剪后仍超预算 chars=%d budget=%d",
+            messages_chars(fitted),
+            max_chars,
+        )
+    return fitted
 
 
 def _fit_context(messages: list[ChatMessage], max_chars: int) -> list[ChatMessage]:
     """超预算时对送模型的副本做裁剪：从最旧的完整轮次开始整轮丢弃。
 
-    只动副本，原列表原封不动——落库、checkpoint 快照都依赖原始 messages，
-    裁剪绝不能影响它们。整轮（user + 其后的 assistant/tool）一起丢，
-    保证 assistant(tool_calls) 和它的 tool 结果永远成对，不会因裁剪
-    出现孤儿 tool 消息（会被 API 400）。摘要对保留，丢了早期轮次的
-    信息至少还有摘要兜底；最后一个 turn 是当前进行中的回合，永不丢。
+    只动副本，原列表原封不动——落库、checkpoint 快照都依赖原始 messages。
+    整轮（user + 其后的 assistant/tool）一起丢，保证 assistant(tool_calls)
+    和它的 tool 结果永远成对，不会因裁剪出现孤儿 tool 消息（会被 API 400）。
+    被丢的轮次由收尾的 compress() 用同一个预算并入会话摘要，不再静默蒸发。
     """
-    if max_chars <= 0 or _messages_chars(messages) <= max_chars:
+    if max_chars <= 0 or messages_chars(messages) <= max_chars:
         return messages
     system, rest = take_system(messages)
-    summary, rest = take_summary(rest)
-    turns = iter_turns(rest)
-    while len(turns) > 1:
-        turns.pop(0)
-        if _messages_chars([*system, *flatten(turns)]) <= max_chars:
-            break
+    summary, _ = take_summary(rest)
+    turns, dropped = fit_turns(messages, max_chars)
     sys_text = str(system[0].get("content") or "") if system else ""
     fitted = assemble(sys_text, summary, flatten(turns))
     if not sys_text and fitted and fitted[0].get("role") == "system":
         fitted = fitted[1:]
+    fitted = _enforce_budget(fitted, max_chars)
     logger.info(
-        "上下文超预算已裁剪 chars=%d budget=%d kept_turns=%d",
-        _messages_chars(messages),
+        "上下文超预算已裁剪 chars=%d budget=%d kept_turns=%d dropped_msgs=%d",
+        messages_chars(messages),
         max_chars,
         len(turns),
+        len(dropped),
     )
     return fitted
 

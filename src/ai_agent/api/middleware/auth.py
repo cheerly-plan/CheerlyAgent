@@ -48,7 +48,7 @@ class AuthTokenMiddleware:
             provided.encode("utf-8"), settings.auth_token.encode("utf-8")
         ):
             # 静态令牌不匹配时，回退尝试登录会话令牌（Bearer 位置），二者任一有效即放行
-            from ai_agent.memory.store import store
+            from ai_agent.storage.store import store
 
             if provided and store.resolve_token(provided) is not None:
                 await self.app(scope, receive, send)

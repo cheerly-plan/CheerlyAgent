@@ -11,8 +11,8 @@ from ai_agent.api.schemas import (
     SessionTitleResponse,
 )
 from ai_agent.core.exceptions import AgentError
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.store import DEFAULT_SESSION_TITLE, SessionRecord, store
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.store import DEFAULT_SESSION_TITLE, SessionRecord, store
 
 router = APIRouter(prefix="/v1/session", tags=["session"])
 

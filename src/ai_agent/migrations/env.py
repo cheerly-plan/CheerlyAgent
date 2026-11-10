@@ -16,8 +16,15 @@ from ai_agent.core.config import settings
 
 config = context.config
 
+# uvicorn --reload 在 macOS 上用 fork 拉起 worker；父进程若已持有 logging 锁，
+# fileConfig 再配一遍 handler 容易把子进程卡死在启动期（日志停在
+# "Will assume transactional DDL"，/docs 与登录一直超时）。应用内调用迁移时
+# logging 已由 setup_logging 配好，跳过 fileConfig；命令行 `alembic` 仍走配置。
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    import logging
+
+    if not logging.getLogger().handlers:
+        fileConfig(config.config_file_name)
 
 # 无 ORM 模型，纯手写 SQL 迁移；target_metadata 留空禁用 autogenerate
 target_metadata = None

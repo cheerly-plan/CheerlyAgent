@@ -5,7 +5,7 @@ import pytest
 
 from ai_agent.core.config import settings
 from ai_agent.memory.episode_merge import merge_episode_text, merge_episode_texts
-from ai_agent.memory.store import MemoryStore
+from ai_agent.storage.store import MemoryStore
 
 
 def fake_embed(texts: list[str]) -> list[list[float]]:

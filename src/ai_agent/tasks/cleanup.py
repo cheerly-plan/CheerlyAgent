@@ -2,7 +2,7 @@ from threading import Event, Thread
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.store import store
+from ai_agent.storage.store import store
 
 logger = get_logger(__name__)
 
@@ -63,6 +63,18 @@ class MaintenanceCleaner:
                     logger.info("清理过期情景记忆 %s 条", forgotten)
             except Exception:
                 logger.exception("清理过期情景记忆失败")
+            try:
+                from ai_agent.report.cleanup import cleanup_reports
+
+                reports = cleanup_reports()
+                if reports.deleted_report_ids:
+                    logger.info(
+                        "清理研报 %s 版 / %s 个文件",
+                        len(reports.deleted_report_ids),
+                        len(reports.deleted_files),
+                    )
+            except Exception:
+                logger.exception("清理研报失败")
 
 
 maintenance_cleaner = MaintenanceCleaner()

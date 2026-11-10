@@ -6,7 +6,7 @@
 
 import uuid
 
-from ai_agent.kb.citations import (
+from ai_agent.kb.retrieval.citations import (
     MAX_SOURCES,
     Citation,
     add_citations,
@@ -14,7 +14,7 @@ from ai_agent.kb.citations import (
     collect_citations,
     merge_sources,
 )
-from ai_agent.kb.retrieval import Hit
+from ai_agent.kb.retrieval.retrieval import Hit
 
 FILE_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
@@ -45,7 +45,7 @@ def _citation(seq: int = 0) -> Citation:
 
 def test_kb_search_names_the_periods_it_actually_hit(monkeypatch):
     """命中抬头先写报告期，避免模型把表里的对比年份当成库的覆盖范围。"""
-    from ai_agent.tools import kb_search as kb_tool
+    from ai_agent.tools.kb import kb_search as kb_tool
 
     hit = _hit()
     hit.period = "2025Q3"
@@ -57,7 +57,7 @@ def test_kb_search_names_the_periods_it_actually_hit(monkeypatch):
 
 
 def test_kb_search_records_citations_with_position(monkeypatch):
-    from ai_agent.tools import kb_search as kb_tool
+    from ai_agent.tools.kb import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [_hit()])
@@ -128,7 +128,7 @@ def test_table_citation_clips_on_complete_rows():
 
 def test_citations_without_collector_are_silently_dropped(monkeypatch):
     """单测/脚本直接调工具时没有收集器，不能因为没人接就抛异常。"""
-    from ai_agent.tools import kb_search as kb_tool
+    from ai_agent.tools.kb import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [_hit()])
@@ -191,7 +191,7 @@ def test_kb_search_returns_no_hit_when_all_hits_irrelevant(monkeypatch):
     """全部命中距离都超阈值（无关片段被顶进 top_k）时，当未命中处理，
     不下发任何引用——避免「文档没提及」却挂着不相关来源。"""
     from ai_agent.prompts.tools import KB_NO_HIT_HINT
-    from ai_agent.tools import kb_search as kb_tool
+    from ai_agent.tools.kb import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(
@@ -208,7 +208,7 @@ def test_kb_search_returns_no_hit_when_all_hits_irrelevant(monkeypatch):
 def test_kb_search_keeps_only_relevant_hits(monkeypatch):
     """命中存在相关与不相关混杂时，只保留距离达标的片、剔除噪音，
     下发引用也只含相关片。"""
-    from ai_agent.tools import kb_search as kb_tool
+    from ai_agent.tools.kb import kb_search as kb_tool
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(

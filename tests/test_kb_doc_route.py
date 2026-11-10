@@ -9,11 +9,12 @@ import uuid
 from contextlib import contextmanager
 
 from ai_agent.core.config import settings
-from ai_agent.kb import scope, summary as summary_mod
-from ai_agent.kb.router import mentioned_file_ids, route_files
-from ai_agent.kb.summary import build_file_summary, first_sentences, index_file_summary
-from ai_agent.memory import store as memory_store
-from ai_agent.memory.store import store
+from ai_agent.kb.retrieval import scope
+from ai_agent.kb.ingest import summary as summary_mod
+from ai_agent.kb.retrieval.router import mentioned_file_ids, route_files
+from ai_agent.kb.ingest.summary import build_file_summary, first_sentences, index_file_summary
+from ai_agent.storage import store as memory_store
+from ai_agent.storage.store import store
 
 
 def _file(
@@ -114,7 +115,7 @@ def test_index_file_summary_skips_table_chunks_and_marks_ready(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "ai_agent.memory.embeddings.embed_texts", lambda texts: [[0.1, 0.2]]
+        "ai_agent.storage.embeddings.embed_texts", lambda texts: [[0.1, 0.2]]
     )
     out = index_file_summary(fid)
     assert out
@@ -259,7 +260,7 @@ def test_route_files_stays_inside_session_scope(monkeypatch):
             if file_ids is None or fid in file_ids
         ]
 
-    monkeypatch.setattr("ai_agent.kb.router.embed_query", lambda q: [0.1])
+    monkeypatch.setattr("ai_agent.kb.retrieval.router.embed_query", lambda q: [0.1])
     monkeypatch.setattr(store, "search_kb_files", fake_search)
     # 问句没点名，才会走到摘要；范围仍要原样传下去
     assert route_files("毛利率怎么算", file_ids=[b, a]) == [b]
@@ -294,17 +295,17 @@ def test_resolve_tool_file_ids_falls_back_to_none_without_route(monkeypatch):
 
 def test_kb_search_without_files_hits_summary_index(monkeypatch):
     """端到端：不填 files 时，kb_search 的范围来自摘要索引而不是全库。"""
-    from ai_agent.tools.kb_search import _kb_search
+    from ai_agent.tools.kb.kb_search import _kb_search
 
     fid = uuid.uuid4()
     seen: dict = {}
-    monkeypatch.setattr("ai_agent.memory.store.store.has_ready_kb_file", lambda: True)
+    monkeypatch.setattr("ai_agent.storage.store.store.has_ready_kb_file", lambda: True)
     monkeypatch.setattr(
         memory_store.store,
         "list_kb_files",
         lambda **k: [_file(fid, "甲公司2026年第三季度报告.pdf", "甲公司股份有限公司")],
     )
-    monkeypatch.setattr("ai_agent.kb.router.embed_query", lambda q: [0.1, 0.2])
+    monkeypatch.setattr("ai_agent.kb.retrieval.router.embed_query", lambda q: [0.1, 0.2])
 
     def fake_files(emb, *, file_ids=None, top_k=6, max_distance=None):
         seen["max_distance"] = max_distance
@@ -313,7 +314,7 @@ def test_kb_search_without_files_hits_summary_index(monkeypatch):
 
     monkeypatch.setattr(memory_store.store, "search_kb_files", fake_files)
     monkeypatch.setattr(
-        "ai_agent.tools.kb_search.search_knowledge_multi",
+        "ai_agent.tools.kb.kb_search.search_knowledge_multi",
         lambda query, *, file_ids=None, top_k=3, filters=None: seen.setdefault("file_ids", file_ids)
         and [],
     )

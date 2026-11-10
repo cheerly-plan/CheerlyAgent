@@ -107,12 +107,33 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `llm/` | OpenAI 兼容客户端，流式输出与超时控制 |
 | `tools/` | 工具定义与注册（见下方「工具一览」） |
 | `kb/` | 知识库：解析、切片、嵌入、检索、图谱、引用溯源、视觉识别 |
+| `report/` | 财报研报流水线：skill 大纲、抽数、同比、撰写、校验、PDF（见下方「研报流水线」） |
 | `memory/` | 存储层：连接池与迁移（`db.py`）、短/长期记忆、情景记忆、画像、会话、断点 |
 | `prompts/` | 提示词：系统提示与工具描述（`chat.py` / `tools.py`）、知识库提示（`kb.py`）、记忆抽取（`memory.py`）、后台任务（`tasks.py`）、装配器（`builder.py`） |
 | `migrations/` | Alembic 迁移脚本（见下方「数据库与迁移」） |
 | `core/` | 配置（`config.py`）、异常、HTTP 客户端、日志 |
 | `tasks/` | 后台任务：会话标题生成、定期清理 |
 | `scripts/` | 运维与评测脚本。日常维护走 `kb.py`，评测用例在 `scripts/cases/` |
+
+### 研报流水线（`report/`）
+
+数字路径（抽数／同比／校验／PDF）是确定性代码；skill 只决定「写什么」。
+更细的现状与改文件指引见仓库根目录 [`next.md`](next.md)。
+
+| 交付类型 | skill 示例 | 对外称呼 |
+|---|---|---|
+| 单公司／单银行 | `company_financial_report`、`bank_financial_report` | 财报深度分析 |
+| 赛道行业横比 | `robotics_industry_report`、`semiconductor_industry_report`、`bank_industry_report` | **财报对比底稿（赛道分组版）** |
+
+赛道底稿已含：组内对比表、结构梯队、利润—现金流—合同负债交叉、同比／不可比说明、有出处原文引述、下期外部数据源清单。不含估值／买卖建议；景气宏观未接数据源前不推断。
+
+聊天入口的 `generate_report` 是**异步**的：只提交后台任务并返回 `job_id`（深度层约 5–8 分钟），结果用 `report_job_status(job_id)` 查，也可用同一 `job_id` 轮询 `GET /v1/report/jobs/{id}`；聊天断线不会中断生成。同步入口 `POST /v1/report` 契约不变。
+
+| 改什么 | 去哪 |
+|---|---|
+| 代表公司、赛道、大纲 | `report/skills/<id>/SKILL.md` |
+| 指标集、组内列、下期数据源文案 | `report/config/industries.yaml` |
+| 新增行业脚手架 | `scripts/scaffold_industry.py` |
 
 ### 工具一览
 
@@ -146,7 +167,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `scope.py` | 检索作用域：文件集合 / 报告期 / 主体的收窄与可达性兜底 |
 | `meta.py` | 检索元数据：从文件名规则抽取主体 / 报告期，并给多主体文档的切片做主体归属 |
 | `summary.py` | 文档级摘要：把一份文件压成一段「它讲的是什么」，单独 embedding 供路由使用 |
-| `doc_profiles.py` | 文档画像：按文档类型给出实体范围与关系谓词，喂给系统提示的「知识库能力」块 |
+| `doc_profiles.py` + `kb/skills/*/SKILL.md` | 文档类型 skill：实体范围与关系谓词注入抽取 prompt；JSON 可运行时覆盖 |
 | `citations.py` | 引用溯源 |
 | `lexicon.py` | 词表（科目词、短词表等） |
 | `pipeline.py` | 入库编排：解析 → 切片 → 嵌入 → 图谱，含卡住文件的恢复 |

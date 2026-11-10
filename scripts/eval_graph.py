@@ -30,8 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import uuid  # noqa: E402
 
-from ai_agent.kb.graph_metrics import evaluate  # noqa: E402
-from ai_agent.memory.store import store  # noqa: E402
+from ai_agent.kb.graph.graph_metrics import evaluate  # noqa: E402
+from ai_agent.storage.store import store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GOLD = ROOT / "scripts" / "cases" / "gold_graph.json"

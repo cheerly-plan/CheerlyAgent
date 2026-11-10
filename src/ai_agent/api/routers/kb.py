@@ -9,6 +9,10 @@
   PUT    /v1/kb/files/{id}/parts/{index}   逐片传二进制（管理员）
   POST   /v1/kb/files/{id}/complete        合并分片并触发后台解析（管理员）；
                                            内容指纹与库内文件相同则 409 拒绝
+  POST   /v1/kb/files/fetch-cninfo         按股票代码+报告期从巨潮拉 PDF 入库
+                                           （管理员；需 ENABLE_CNINFO_FETCH）
+  POST   /v1/kb/files/from-url             粘贴巨潮 PDF 直链入库（管理员；
+                                           仅 static.cninfo.com.cn）
   GET    /v1/kb/files                      文件列表（所有登录用户；?q= 文件名
                                            模糊 / ?tag= 标签筛选）
   POST   /v1/kb/search                     检索演示（所有登录用户）：
@@ -38,22 +42,25 @@ from fastapi.responses import FileResponse
 from ai_agent.api.dependencies import get_current_user, require_admin
 from ai_agent.api.schemas import (
     KbChunkEditRequest,
+    KbCninfoFetchRequest,
     KbInitRequest,
     KbRenameRequest,
     KbSearchRequest,
     KbTagsRequest,
+    KbUrlIngestRequest,
 )
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.chunking import embedding_input
-from ai_agent.kb.otsl import render_otsl
-from ai_agent.kb.parsing import supported, supported_label
+from ai_agent.kb.fetch_reports import fetch_missing_reports, ingest_pdf_url
+from ai_agent.kb.ingest.chunking import embedding_input
+from ai_agent.kb.ingest.otsl import render_otsl
+from ai_agent.kb.ingest.parsing import supported, supported_label
 from ai_agent.kb.pipeline import kb_pipeline
-from ai_agent.kb.citations import clip_visible
-from ai_agent.kb.retrieval import preview_search
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.embeddings import embed_texts
-from ai_agent.memory.store import store
+from ai_agent.kb.retrieval.citations import clip_visible
+from ai_agent.kb.retrieval.retrieval import preview_search
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.embeddings import embed_texts
+from ai_agent.storage.store import store
 
 router = APIRouter(prefix="/v1/kb", tags=["kb"])
 
@@ -226,7 +233,76 @@ def complete_upload(
     store.update_kb_file_hash(record["id"], digest)
 
     kb_pipeline.submit(_parse_file_id(file_id), user.user_id, final_path)
-    return {"status": "parsing"}
+    # 默认只入队 uploaded，由 ingest-worker 领取后才变 parsing
+    return {"status": "uploaded"}
+
+
+@router.post("/files/fetch-cninfo")
+def fetch_cninfo(req: KbCninfoFetchRequest, user: UserRecord = Depends(require_admin)):
+    """按代码+报告期从巨潮拉定期报告，异步入库。不自动重跑研报。"""
+    if not settings.enable_cninfo_fetch:
+        raise HTTPException(
+            status_code=403,
+            detail="巨潮补齐未开启：请设置 ENABLE_CNINFO_FETCH=true 后重启",
+        )
+    try:
+        result = fetch_missing_reports(
+            req.code,
+            req.period,
+            user_id=user.user_id,
+            max_files=req.max_files,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("巨潮补齐失败 admin=%s", user.username)
+        raise HTTPException(status_code=502, detail=f"巨潮补齐失败：{exc}") from exc
+    return {
+        "code": result.code,
+        "period": result.period,
+        "company": result.company,
+        "files": [
+            {
+                "file_id": item.file_id,
+                "filename": item.filename,
+                "status": item.status,
+                "announcement_id": item.announcement_id,
+                "title": item.title,
+            }
+            for item in result.files
+        ],
+        "skipped": result.skipped,
+        "errors": result.errors,
+        "summary": result.summary(),
+    }
+
+
+@router.post("/files/from-url")
+def ingest_from_url(req: KbUrlIngestRequest, user: UserRecord = Depends(require_admin)):
+    """粘贴巨潮 PDF 直链入库（域名白名单）。"""
+    if not settings.enable_cninfo_fetch:
+        raise HTTPException(
+            status_code=403,
+            detail="巨潮补齐未开启：请设置 ENABLE_CNINFO_FETCH=true 后重启",
+        )
+    try:
+        fetched = ingest_pdf_url(
+            req.url.strip(),
+            filename_stem=req.filename,
+            user_id=user.user_id,
+            tags=_clean_tags(req.tags) or ["source:url"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("URL 入库失败 admin=%s", user.username)
+        raise HTTPException(status_code=502, detail=f"URL 入库失败：{exc}") from exc
+    return {
+        "file_id": fetched.file_id,
+        "filename": fetched.filename,
+        "status": fetched.status,
+        "duplicate_of": fetched.duplicate_of,
+    }
 
 
 def _check_duplicate(

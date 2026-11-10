@@ -5,9 +5,9 @@ import uuid
 import pytest
 
 from ai_agent.core.config import settings
-from ai_agent.kb import retrieval
-from ai_agent.kb.chunking import context_prefix, embedding_input, html_tables_to_markdown
-from ai_agent.tools.kb_search import _format_hit, _format_hit_with_context
+from ai_agent.kb.retrieval import retrieval
+from ai_agent.kb.ingest.chunking import context_prefix, embedding_input, html_tables_to_markdown
+from ai_agent.tools.kb.kb_search import _format_hit, _format_hit_with_context
 
 FILE_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
@@ -124,7 +124,7 @@ def test_format_hit_sends_markdown_table_to_the_model():
 
 def test_citations_keep_html_so_the_preview_can_merge_cells():
     """前端预览靠 colspan 画合并格，引用正文不能跟模型上下文一起改成 Markdown。"""
-    from ai_agent.tools.kb_search import _citations_of
+    from ai_agent.tools.kb.kb_search import _citations_of
 
     html = "<table><tr><td colspan=\"2\">流动资产：</td></tr></table>"
     hit = retrieval.Hit(
@@ -402,8 +402,8 @@ def test_format_hit_with_context_labels_figure_evidence():
 
 def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
     """输入框里选了「只查这几份文件」，工具默认就只查这些，模型不传也一样。"""
-    from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
-    from ai_agent.tools import kb_search as kb_tool
+    from ai_agent.kb.retrieval.scope import reset_kb_scope, set_kb_scope
+    from ai_agent.tools.kb import kb_search as kb_tool
 
     seen: dict = {}
 
@@ -413,10 +413,10 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(kb_tool, "search_knowledge_multi", fake_search)
-    monkeypatch.setattr("ai_agent.kb.scope._route", lambda q: [])
+    monkeypatch.setattr("ai_agent.kb.retrieval.scope._route", lambda q: [])
     latest = uuid.uuid4()
     monkeypatch.setattr(
-        "ai_agent.memory.store.store.list_kb_files",
+        "ai_agent.storage.store.store.list_kb_files",
         lambda **k: [
             {
                 "file_id": uuid.uuid4(),
@@ -464,17 +464,17 @@ def test_kb_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
 
 def test_kg_search_follows_session_scope_when_model_omits_file_ids(monkeypatch):
     """图谱检索也要跟输入框的文件范围，否则圈定文件后仍会搜到库里别的实体。"""
-    from ai_agent.kb.scope import reset_kb_scope, set_kb_scope
-    from ai_agent.tools import kg_search as kg_tool
+    from ai_agent.kb.retrieval.scope import reset_kb_scope, set_kb_scope
+    from ai_agent.tools.kb import kg_search as kg_tool
 
     seen: dict = {}
 
     monkeypatch.setattr(kg_tool.store, "graph_stats", lambda **k: {"entities": 3})
     monkeypatch.setattr(kg_tool, "embed_query", lambda q: [0.1])
-    monkeypatch.setattr("ai_agent.kb.scope._route", lambda q: [])
+    monkeypatch.setattr("ai_agent.kb.retrieval.scope._route", lambda q: [])
     latest = uuid.uuid4()
     monkeypatch.setattr(
-        "ai_agent.memory.store.store.list_kb_files",
+        "ai_agent.storage.store.store.list_kb_files",
         lambda **k: [
             {
                 "file_id": uuid.uuid4(),
@@ -529,7 +529,7 @@ def test_kb_search_schema_exposes_files_not_ids():
 
 
 def test_kb_scope_is_isolated_and_resettable():
-    from ai_agent.kb.scope import kb_scope, reset_kb_scope, set_kb_scope
+    from ai_agent.kb.retrieval.scope import kb_scope, reset_kb_scope, set_kb_scope
 
     assert kb_scope() == ()
     token = set_kb_scope([" a ", "", "b"])
@@ -544,7 +544,7 @@ def test_run_loop_applies_kb_scope_around_tool_execution(monkeypatch):
     """范围必须落到「工具执行那一刻」：run_stream 的生成器会被不同线程
     轮流 next()，外层设置的 contextvar 传不进去，只能在执行点同栈设置。"""
     from ai_agent.agents import loop as loop_mod
-    from ai_agent.kb.scope import kb_scope
+    from ai_agent.kb.retrieval.scope import kb_scope
 
     seen: list[tuple[str, ...]] = []
 

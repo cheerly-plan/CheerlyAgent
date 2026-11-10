@@ -42,16 +42,24 @@ def _chat(message: str | None) -> None:
 
 
 def _serve(host: str, port: int, reload: bool) -> None:
+    import os
+
     # 安全要点：uvicorn 默认 proxy_headers=True 且默认信任来自 127.0.0.1 的连接，
     # 会用请求头里的 X-Forwarded-For 直接改写 request.client——等于把限流的
     # IP 判断权交给客户端。只有显式声明部署在可信反代之后
     # （TRUST_FORWARDED_FOR=true）才开启，且仅信任 FORWARDER_ALLOW_IPS 列出的地址。
+    if reload:
+        # lifespan 据此在关闭后 os._exit，跳过 ThreadPoolExecutor 的 atexit join；
+        # 否则研报/巨潮工具线程会把旧 worker 钉死，8000 假死。
+        os.environ["ALMOST_AGENT_RELOAD"] = "1"
     uvicorn.run(
         "ai_agent.api.app:app",
         host=host,
         port=port,
         reload=reload,
         reload_dirs=[str(Path(__file__).resolve().parents[1])],
+        # 研报/巨潮工具会挂很长的 SSE；热重载若无限等优雅退出，8000 会半死不活。
+        timeout_graceful_shutdown=10,
         proxy_headers=settings.trust_forwarded_for,
         forwarded_allow_ips=settings.forwarded_allow_ips,
     )
@@ -79,9 +87,25 @@ def main() -> None:
     dev_parser.add_argument("--host", default=settings.host)
     dev_parser.add_argument("--port", type=int, default=settings.port)
 
+    worker_parser = sub.add_parser(
+        "ingest-worker",
+        help="知识库入库常驻进程：抢 uploaded 任务并解析（与 API 隔离）",
+    )
+    worker_parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=None,
+        help="空闲轮询间隔，默认读 KB_INGEST_POLL_SECONDS",
+    )
+
     args = parser.parse_args()
     if args.command == "chat":
         _chat(" ".join(args.message).strip() or None)
+        return
+    if args.command == "ingest-worker":
+        from ai_agent.kb.ingest_worker import run_ingest_worker
+
+        run_ingest_worker(poll_seconds=args.poll_seconds)
         return
     if args.command == "dev":
         _serve(args.host, args.port, reload=True)

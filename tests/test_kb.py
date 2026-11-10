@@ -24,12 +24,12 @@ from ai_agent.api.routers.kb import (
 from ai_agent.api.routers.kg import build_graphs, entity_chunks, file_graph, global_graph, rebuild_graph, search_graph
 from ai_agent.api.routers.user import user_info
 from ai_agent.core.config import settings
-from ai_agent.kb import vision
-from ai_agent.kb.chunking import chunk_segments, chunk_text
-from ai_agent.kb.parsing import Segment, parse_segments, supported
+from ai_agent.kb.ingest import vision
+from ai_agent.kb.ingest.chunking import chunk_segments, chunk_text
+from ai_agent.kb.ingest.parsing import Segment, parse_segments, supported
 from ai_agent.kb.pipeline import KbPipeline
-from ai_agent.memory.db import UserRecord
-from ai_agent.tools.kb_search import _format_hit
+from ai_agent.storage.db import UserRecord
+from ai_agent.tools.kb.kb_search import _format_hit
 from ai_agent.tools.registry import TOOLS, tool_schemas
 
 
@@ -508,7 +508,7 @@ def test_captioned_html_table_does_not_count_caption_as_table():
 
 
 def test_long_html_table_splits_by_row_and_repeats_header():
-    from ai_agent.kb.chunking import TABLE_GROUP_CHARS, html_table_plain
+    from ai_agent.kb.ingest.chunking import TABLE_GROUP_CHARS, html_table_plain
 
     header = "<tr><td>项目</td><td>本期</td><td>上期</td></tr>"
     rows = "".join(
@@ -613,6 +613,23 @@ def test_chunk_long_table_repeats_header():
     assert all(c.kind == "table" for c in chunks)
 
 
+def test_chunk_table_demotes_item_row_fake_header():
+    """漏补头时科目行顶成了 Markdown 表头，切片不能把它复制到每一片。"""
+    rows = "\n".join(
+        f"| 科目{i} | {i}00 | {i}11 |" for i in range(40)
+    )
+    text = "| 长期股权投资 | 100 | 90 |\n|---|---|---|\n" + rows
+    chunks = chunk_segments([Segment(text, 92, "table")], max_chars=180)
+    assert len(chunks) > 1
+    assert all(c.text.startswith("| 项目 | 列2 | 列3 |") for c in chunks)
+    # 原假表头降回数据行，至少出现在某一片里，而不是消失
+    assert any("长期股权投资" in c.text for c in chunks)
+    # 不能再让每一片都以科目名当表头
+    assert not any(
+        c.text.splitlines()[0].startswith("| 长期股权投资 |") for c in chunks
+    )
+
+
 def test_chunk_long_table_repeats_caption_too():
     """表题（「母公司利润表」）要跟着每一片走。
 
@@ -705,6 +722,49 @@ def test_chunk_merged_table_keeps_page_span():
     assert len(chunks) == 1
     assert chunks[0].page == 7
     assert chunks[0].page_end == 8
+
+
+def test_md_table_group_mode_section_packs_rows():
+    """文字层 Markdown 表也要吃 section：片数应明显少于默认 row。"""
+    rows = "\n".join(
+        f"| 科目{i:02d}名称较长一些 | {i},234,567.89 | {i},876,543.21 |"
+        for i in range(40)
+    )
+    text = "合并资产负债表\n| 项目 | 期末 | 期初 |\n|---|---|---|\n" + rows
+    row_chunks = chunk_segments(
+        [Segment(text, 92, "table")], max_chars=500, overlap=0
+    )
+    sec_chunks = chunk_segments(
+        [Segment(text, 92, "table")],
+        max_chars=500,
+        overlap=0,
+        table_group_mode="section",
+    )
+    assert len(sec_chunks) > 1
+    assert len(sec_chunks) < len(row_chunks)
+    assert all(c.text.startswith("合并资产负债表\n| 项目 | 期末 | 期初 |") for c in sec_chunks)
+
+
+def test_md_table_group_mode_section_breaks_on_section_label():
+    """「流动资产：」分组标题强制起新片，不与上一组混在一起。"""
+    flow = "\n".join(f"| 流动项{i:02d} | {i}00 | {i}11 |" for i in range(6))
+    nonflow = "\n".join(f"| 非流动项{i:02d} | {i}00 | {i}11 |" for i in range(6))
+    text = (
+        "合并资产负债表\n| 项目 | 期末 | 期初 |\n|---|---|---|\n"
+        f"| 流动资产： |  |  |\n{flow}\n"
+        f"| 非流动资产： |  |  |\n{nonflow}"
+    )
+    chunks = chunk_segments(
+        [Segment(text, 91, "table")],
+        max_chars=500,
+        overlap=0,
+        table_group_mode="section",
+    )
+    hosts = [c for c in chunks if "非流动资产：" in c.text]
+    assert hosts
+    # 用 "| 流动项" 锚，避开「非流动项」子串误匹配
+    assert all("| 流动项" not in c.text for c in hosts)
+    assert all(c.text.startswith("合并资产负债表\n| 项目 | 期末 | 期初 |") for c in chunks)
 
 
 def test_table_group_mode_section_aggregates_by_section():
@@ -837,15 +897,17 @@ def test_clean_tags_strips_dedupes_and_caps():
 def _kb_workdir(request):
     """项目内临时目录。系统 tmp 在沙箱里写不进去。
 
-    根目录 .tmp-kb-test 可能已经残留，用 exist_ok 创建。每个用例只占一个
-    子目录，收尾只删这个子目录：整棵删掉会和并发用例抢同一路径，mkdir 抛
-    FileExistsError。
+    每个用例只占一个子目录，收尾只删这个子目录：整棵删掉会和并发用例抢同
+    一路径。根目录已存在时不再调 mkdir(exist_ok=True)：当前沙箱的 shim
+    直接替换了 Path.mkdir，exist_ok 会被无视、照样抛 EEXIST；先 exists()
+    再建同样安全（用例串行跑，无并发竞争）。
     """
     import shutil
     import uuid as _uuid
 
     base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    base.mkdir(exist_ok=True)
+    if not base.exists():
+        base.mkdir()
     path = base / _uuid.uuid4().hex
     path.mkdir()
     request.addfinalizer(lambda: shutil.rmtree(path, ignore_errors=True))
@@ -1027,7 +1089,7 @@ def _admin():
 
 def test_embed_texts_parallel_keeps_order(monkeypatch):
     """多批并发执行，但结果顺序与输入严格一致（写错位会毁掉全部检索）。"""
-    from ai_agent.memory import embeddings
+    from ai_agent.storage import embeddings
 
     def fake_embed(texts):
         return [[len(t), 0] for t in texts]
@@ -1040,7 +1102,7 @@ def test_embed_texts_parallel_keeps_order(monkeypatch):
 
 def test_embed_texts_parallel_single_batch_passthrough(monkeypatch):
     """不足两批直接走串行路径，不开线程池。"""
-    from ai_agent.memory import embeddings
+    from ai_agent.storage import embeddings
 
     called = []
     monkeypatch.setattr(
@@ -1056,7 +1118,7 @@ def test_embed_texts_parallel_failure_propagates(monkeypatch):
     import pytest as _pytest
 
     from ai_agent.core.exceptions import LLMError
-    from ai_agent.memory import embeddings
+    from ai_agent.storage import embeddings
 
     def flaky(texts):
         if texts and texts[0] == "t10":
@@ -1070,7 +1132,7 @@ def test_embed_texts_parallel_failure_propagates(monkeypatch):
 
 def test_describe_parallel_keeps_order(monkeypatch):
     """视觉并行：结果顺序与输入一致（页码归属不能乱）。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     def fake_describe(blob, mime):
         return f"desc-{blob.decode()}"
@@ -1112,14 +1174,14 @@ def test_chart_page_skips_dense_text_page():
     实测 331 页招股书按「路径数 ≥ 150」误判 124 页，20 页预算全烧在
     目录和财务报表上，每页还要等一次视觉调用。
     """
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(drawings=215, images=[(80, 60)])
     assert figures._page_has_chart(page, text_len=1085) is False
 
 
 def test_chart_page_accepts_large_image_with_little_text():
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(images=[(500, 600)])  # 占页面大半
     assert figures._page_has_chart(page, text_len=180) is True
@@ -1127,7 +1189,7 @@ def test_chart_page_accepts_large_image_with_little_text():
 
 def test_chart_page_ignores_logo_sized_image():
     """页眉 logo / 装饰线不算图表：面积占比够不上阈值。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(images=[(60, 40)], drawings=3)
     assert figures._page_has_chart(page, text_len=200) is False
@@ -1135,7 +1197,7 @@ def test_chart_page_ignores_logo_sized_image():
 
 def test_chart_page_accepts_vector_only_chart():
     """ECharts 走 SVG 导出时没有位图，靠路径数识别（但要求文字少）。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(drawings=200)
     assert figures._page_has_chart(page, text_len=120) is True
@@ -1143,7 +1205,7 @@ def test_chart_page_accepts_vector_only_chart():
 
 def test_chart_page_survives_broken_page():
     """单页取图信息报错不能把整份解析带崩。"""
-    from ai_agent.kb import figures
+    from ai_agent.kb.ingest import figures
 
     page = _FakePage(drawings="boom")
     assert figures._page_has_chart(page, text_len=100) is False
@@ -1198,7 +1260,7 @@ def test_rebuild_graph_reads_chunks_from_db(monkeypatch):
 
 def test_format_hit_renders_page_range_and_section():
     """跨页切片按「第134–135页 · 第十节 …」展示：只写起始页会误导溯源。"""
-    from ai_agent.tools.kb_search import _format_hit
+    from ai_agent.tools.kb.kb_search import _format_hit
 
     assert _format_hit(
         {

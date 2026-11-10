@@ -1,3 +1,5 @@
+import queue
+import re
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -10,15 +12,21 @@ from ai_agent.prompts.chat import (
     RUNTIME_EMPTY_ANSWER,
     build_system_prompt,
 )
+# 报告类型清单是业务数据，由编排层注入系统提示词（prompts 层不反向依赖
+# report 域）。skills 注册表是轻叶子（只读 SKILL.md），模块级 import 无碍。
+from ai_agent.report.skills import skill_catalog
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.kb.citations import collect_citations, merge_sources
-from ai_agent.kb.doc_profiles import resolve_profile
-from ai_agent.kb.scope import (
+from ai_agent.core.text import clip_text
+from ai_agent.kb.retrieval.citations import collect_citations, merge_sources
+from ai_agent.kb.ingest.doc_profiles import resolve_profile
+from ai_agent.kb.retrieval.scope import (
     extract_prev_turn,
+    reset_kb_question,
     reset_kb_scope,
     reset_rewrite_context,
+    set_kb_question,
     set_kb_scope,
     set_rewrite_context,
 )
@@ -29,8 +37,25 @@ from ai_agent.memory.short_term import (
     assemble,
     short_term_memory,
 )
-from ai_agent.memory.store import store, user_scope
+from ai_agent.storage.store import store, user_scope
+from ai_agent.tools.progress import (
+    reset_event_emitter,
+    reset_progress,
+    set_event_emitter,
+    set_progress,
+)
 from ai_agent.tools.registry import execute_tool, tool_schemas
+
+# 会长时间阻塞的工具：丢到工作线程，边跑边推 tool_progress。generate_report
+# 现在只提交后台任务（秒回），留在集合里是为了统一 user_scope / 引用收集的调用路径。
+_PROGRESS_TOOLS = frozenset({"generate_report"})
+# 知识库能力清单按 doc_type 分组，库里类型多了会线性撑大 system；只列文档数
+# 最多的几类，其余让模型用 kb_list_files 现查。整体还有 system_dynamic_max_chars 兜底。
+_KB_CAP_MAX_DOC_TYPES = 8
+_DYNAMIC_CLIP_MARK = "\n[系统动态信息已省略 {n} 字符，完整清单请用 kb_list_files 查询]\n"
+_tool_progress_pool = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="tool-progress"
+)
 
 from ai_agent.agents.messages import (
     _canonical_args,
@@ -59,20 +84,115 @@ logger = get_logger(__name__)
 # 天气、记忆、联网留在后面的轮次，避免模型用它们应付「必须调一个工具」。
 _KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
 
+# 「生成一份研报」走独立流水线：工具自己会检索、抽取、计算、校验。
+# 这类请求不必先被强制查一轮 kb_search，否则既多烧一次调用，又把原文片段
+# 塞进上下文、诱导模型自己撰写正文而不去调 generate_report。
+# 必须同时有「生成类动词」和「研报类名词」，避免误伤「研报里说了什么」这种检索题。
+_REPORT_VERB = re.compile(r"生成|出一份|做一份|写一份|制作|导出|来一份|给我一份")
+_REPORT_NOUN = re.compile(r"研报|财报深度分析|分析报告|PDF", re.IGNORECASE)
+
 # 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
 # 不再阻塞 SSE 尾部延迟；进程退出时由 lifespan 调 shutdown_turn_finalizer 等待。
 _turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-finalize")
 
 
 def shutdown_turn_finalizer(wait: bool = True) -> None:
-    """等待在途的记忆抽取/摘要任务完成后再关停，避免重启丢长期记忆。"""
-    _turn_finalizer.shutdown(wait=wait, cancel_futures=False)
+    """关闭 turn-finalize / 工具进度线程池。
+
+    wait=True 会等在途记忆抽取跑完（生产停机）；热重载必须 wait=False，
+    且 lifespan 还需 os._exit 跳过 ThreadPoolExecutor 的 atexit join，
+    否则长工具仍会钉死旧 worker。
+    """
+    _turn_finalizer.shutdown(wait=wait, cancel_futures=not wait)
+    _tool_progress_pool.shutdown(wait=wait, cancel_futures=not wait)
 
 
-def _attach_sources(messages: list[ChatMessage], turn_sources: list[dict]) -> None:
-    """引用挂在最终回答上。挂在带 tool_calls 的中间消息上，历史回放会跳过。"""
-    if turn_sources and messages and messages[-1].get("role") == "assistant":
-        messages[-1]["meta"] = {"sources": turn_sources}
+def _run_tool_with_progress(
+    name: str,
+    arguments: dict,
+    *,
+    user_id: str,
+    kb_file_ids: list[str] | None,
+    messages: list[ChatMessage],
+) -> Iterator[dict]:
+    """在工作线程跑工具，主循环把进度转成 tool_progress；末尾 yield _tool_result。"""
+    # 队列里可能是进度文案（str），也可能是工具抛出的结构化事件（dict）：
+    # 后者原样下发给前端（如研报后台任务的 job_id），不塞进进度文案。
+    progress_q: queue.Queue[str | dict | None] = queue.Queue()
+    prev_turn = extract_prev_turn(messages, settings.kb_rewrite_history_turns)
+    question = _latest_user_text(messages)
+
+    def _emit(message: str) -> None:
+        progress_q.put(message)
+
+    def _emit_event(event: dict) -> None:
+        progress_q.put(dict(event))
+
+    def _worker() -> tuple[str, list[dict]]:
+        scope_token = set_kb_scope(kb_file_ids)
+        rewrite_token = set_rewrite_context(prev_turn)
+        question_token = set_kb_question(question)
+        progress_token = set_progress(_emit)
+        event_token = set_event_emitter(_emit_event)
+        try:
+            with collect_citations() as cited:
+                with user_scope(user_id):
+                    output = execute_tool(name, arguments)
+            return output, list(cited)
+        finally:
+            reset_event_emitter(event_token)
+            reset_progress(progress_token)
+            reset_kb_scope(scope_token)
+            reset_rewrite_context(rewrite_token)
+            reset_kb_question(question_token)
+            progress_q.put(None)
+
+    future = _tool_progress_pool.submit(_worker)
+    while True:
+        try:
+            item = progress_q.get(timeout=0.4)
+        except queue.Empty:
+            if future.done():
+                break
+            continue
+        if item is None:
+            break
+        if isinstance(item, dict):
+            yield item  # 结构化事件：type 由工具给出，缺 type 的在 emit_event 已挡掉
+            continue
+        yield {"type": "tool_progress", "name": name, "message": item}
+    while True:
+        try:
+            item = progress_q.get_nowait()
+        except queue.Empty:
+            break
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            yield item
+            continue
+        yield {"type": "tool_progress", "name": name, "message": item}
+    output, cited = future.result()
+    yield {"type": "_tool_result", "content": output, "sources": cited}
+
+
+def _attach_sources(
+    messages: list[ChatMessage], turn_sources: list[dict], report_job_id: str = ""
+) -> None:
+    """引用与研报任务 id 挂在最终回答上。
+
+    挂在带 tool_calls 的中间消息上，历史回放会跳过。``report_job_id`` 随消息
+    落库，刷新页面后前端还能凭它继续轮询任务、把下载链接长回来。
+    """
+    if not messages or messages[-1].get("role") != "assistant":
+        return
+    meta = dict(messages[-1].get("meta") or {})
+    if turn_sources:
+        meta["sources"] = turn_sources
+    if report_job_id:
+        meta["report_job_id"] = report_job_id
+    if meta:
+        messages[-1]["meta"] = meta
 
 
 def _llm_error_message(error: LLMError) -> str:
@@ -103,7 +223,7 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
 
     静态提示词只讲「怎么选工具」（关系→kg_search、数字→kb_search），具体
     图谱覆盖哪些实体/关系由本块按库内实际文档类型动态生成——加公告、年报
-    等新类型时无需改提示词，只要 doc_profiles 里配好即可，提示词不再只针对季报。
+    等新类型时无需改提示词，只要 kb/skills 或 doc_profiles 覆盖里配好即可，提示词不再只针对季报。
     这样模型按问题选对应类型的关系，而不是被硬编码的季报语义带偏。
     """
     try:
@@ -128,7 +248,14 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
         "【知识库能力】知识库图谱存的是实体之间的关系（「谁和谁有什么关系」）。"
         "各文档类型在图谱中覆盖的实体与关系如下，不在其中的关系请走 kb_search 读原文：",
     ]
-    for dt, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+    ranked = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    if len(ranked) > _KB_CAP_MAX_DOC_TYPES:
+        lines.append(
+            f"（文档类型共 {len(ranked)} 类，此处只列文档数最多的 "
+            f"{_KB_CAP_MAX_DOC_TYPES} 类；完整清单用 kb_list_files 查）"
+        )
+        ranked = ranked[:_KB_CAP_MAX_DOC_TYPES]
+    for dt, members in ranked:
         profile = resolve_profile(dt)
         scope = "、".join(profile.entity_scope) if profile.entity_scope else "（通用抽取，无限定范围）"
         preds = "、".join(profile.predicates) if profile.predicates else "（通用抽取，无限定谓词）"
@@ -148,7 +275,7 @@ def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
 
 def _period_inventory(ready: list[dict]) -> str:
     """库里实际有哪些报告期。模型容易按训练截止日判断某年财报还没披露。"""
-    from ai_agent.kb.meta import period_rank
+    from ai_agent.kb.ingest.meta import period_rank
 
     counts: dict[str, int] = {}
     for row in ready:
@@ -173,7 +300,7 @@ def _system_prompt(
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
-    core = build_system_prompt(use_kb=use_kb)
+    core = build_system_prompt(use_kb=use_kb, report_catalog=skill_catalog())
     # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
     # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。
     block = _profile_prompt(user_id)
@@ -181,6 +308,10 @@ def _system_prompt(
     tail = "\n\n".join(p for p in (_today_line(), block, cap_block) if p)
     if not tail:
         return core
+    # 动态块原先完全不受上下文预算约束：画像条数、库内文档类型数、报告类型
+    # 数都会让它线性增长。这里按行保头保尾裁到硬上限，并留一句显式提示，
+    # 让模型知道清单不完整、需要时自己查，而不是拿着半截清单硬答。
+    tail = clip_text(tail, settings.system_dynamic_max_chars, marker=_DYNAMIC_CLIP_MARK)
     return f"{core}\n\n{tail}"
 
 
@@ -401,7 +532,7 @@ def _attach_kg_prefetch(
     text = _latest_user_text(messages).strip()
     if not text:
         return
-    from ai_agent.tools.kg_search import prefetch_neighborhood
+    from ai_agent.tools.kb.kg_search import prefetch_neighborhood
 
     scope_token = set_kb_scope(kb_file_ids)
     try:
@@ -433,6 +564,8 @@ def _must_call_kb_tool(
         return False
     text = _latest_user_text(messages).strip()
     if not text:
+        return False
+    if _REPORT_VERB.search(text) and _REPORT_NOUN.search(text):
         return False
     from ai_agent.kb.retrieval import mentioned_entities, mentioned_subjects
 
@@ -481,7 +614,9 @@ def run_loop(
     if not use_web_search:
         excluded.add("web_search")
     if not use_kb:
-        excluded.update({"kb_search", "kg_search"})
+        # 研报积木与入口都依赖知识库表格抽取，知识库关掉时一起下线。
+        # report_compare / report_validate 是纯计算与校验，不触知识库，保留。
+        excluded.update({"kb_search", "kg_search", "generate_report", "report_extract_indicators"})
     tools = [s for s in tool_schemas() if s["function"]["name"] not in excluded]
     if use_kb:
         _attach_kg_prefetch(messages, kb_file_ids)
@@ -489,6 +624,8 @@ def run_loop(
     # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
     # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库
     turn_sources: list[dict] = []
+    # 本轮提交的研报后台任务：挂在回答消息的 meta 上，刷新后卡片能续上
+    report_job_id = ""
     # 本轮已执行过的 (工具, 参数)：完全相同的调用结果不会变，短路掉。
     # 本地模型会陷入「再查一次试试」的循环——实测同一 kg_search 原样
     # 调了 6 次，每次都返回同样的实体列表，把预算轮数烧光后没有轮次
@@ -613,7 +750,7 @@ def run_loop(
                 budget.max_steps,
                 len(str((messages[-1].get("content") if messages else "") or "")),
             )
-            _attach_sources(messages, turn_sources)
+            _attach_sources(messages, turn_sources, report_job_id)
             done_event: ChatEvent = {"type": "done"}
             if turn_sources:
                 done_event["sources"] = turn_sources
@@ -643,17 +780,37 @@ def run_loop(
             yield {"type": "tool_start", "name": call["name"]}
             # 范围与查询改写上下文必须在工具执行这一层同栈设置：run_stream 的
             # 生成器会被不同线程轮流 next() 推进，外层设的 contextvar 传不进来
-            scope_token = set_kb_scope(kb_file_ids)
-            rewrite_token = set_rewrite_context(
-                extract_prev_turn(messages, settings.kb_rewrite_history_turns)
-            )
-            try:
-                with collect_citations() as cited:
-                    with user_scope(user_id):
-                        output = execute_tool(call["name"], call["arguments"])
-            finally:
-                reset_kb_scope(scope_token)
-                reset_rewrite_context(rewrite_token)
+            if call["name"] in _PROGRESS_TOOLS:
+                output = ""
+                cited = []
+                for event in _run_tool_with_progress(
+                    call["name"],
+                    call["arguments"],
+                    user_id=user_id,
+                    kb_file_ids=kb_file_ids,
+                    messages=messages,
+                ):
+                    if event.get("type") == "_tool_result":
+                        output = str(event.get("content") or "")
+                        cited = list(event.get("sources") or [])
+                        continue
+                    if event.get("type") == "report_job":
+                        report_job_id = str(event.get("job_id") or "")
+                    yield event  # type: ignore[misc]
+            else:
+                scope_token = set_kb_scope(kb_file_ids)
+                rewrite_token = set_rewrite_context(
+                    extract_prev_turn(messages, settings.kb_rewrite_history_turns)
+                )
+                question_token = set_kb_question(_latest_user_text(messages))
+                try:
+                    with collect_citations() as cited:
+                        with user_scope(user_id):
+                            output = execute_tool(call["name"], call["arguments"])
+                finally:
+                    reset_kb_scope(scope_token)
+                    reset_rewrite_context(rewrite_token)
+                    reset_kb_question(question_token)
             turn_sources = merge_sources(turn_sources, cited)
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
             # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾
@@ -714,7 +871,7 @@ def run_loop(
         if run_id:
             step += 1
             _checkpoint_update(run_id, messages, step)
-        _attach_sources(messages, turn_sources)
+        _attach_sources(messages, turn_sources, report_job_id)
         done_event: ChatEvent = {"type": "done"}
         if turn_sources:
             done_event["sources"] = turn_sources

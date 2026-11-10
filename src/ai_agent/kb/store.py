@@ -16,8 +16,8 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from ai_agent.core.config import settings
-from ai_agent.kb.chunking import Chunk, extract_table_indicators
-from ai_agent.kb.meta import COMPANY_SUFFIX, extract_aliases, extract_file_meta
+from ai_agent.kb.ingest.chunking import Chunk, extract_table_indicators
+from ai_agent.kb.ingest.meta import COMPANY_SUFFIX, extract_aliases, extract_file_meta
 from pgvector import Vector
 
 # 检索分桶键：按主体（公司）分桶，每个主体的头名在相关性带宽内保底一个
@@ -506,21 +506,112 @@ class KbStore:
             conn.commit()
         return row is not None
 
-    def recover_stuck_kb_files(self) -> int:
-        """启动时不存在本进程的在途任务：卡在中间态的都是上次异常
-        退出留下的，直接标 failed（与 checkpoint 僵尸 run 同套路）。"""
+    def list_interrupted_kb_files(self) -> list[dict]:
+        """上次进程退出时卡在解析／向量化，或可自动重试的失败文件。
+
+        供启动恢复：磁盘上还有 PDF 的退回 uploaded 队列，不必删了重传。
+        含「服务重启中断」与「解析子进程异常退出」（SIGSEGV 等），重启 worker
+        应再试；真正业务失败（空文档等）不匹配这些前缀，不会死循环重投。
+        """
         with self._get_pool().connection() as conn:
-            cur = conn.execute(
+            return conn.execute(
                 """
-                UPDATE agent_kb_file
-                SET status = 'failed',
-                    error = '服务重启导致处理中断，请删除后重新上传',
-                    updated_at = now()
+                SELECT id AS file_id, user_id, filename, status, error
+                FROM agent_kb_file
                 WHERE status IN ('parsing', 'embedding')
+                   OR (
+                        status = 'failed'
+                        AND (
+                            error LIKE '服务重启导致处理中断%'
+                            OR error LIKE '解析子进程异常退出%'
+                        )
+                   )
                 """
-            )
+            ).fetchall()
+
+    def list_false_missing_source_kb_files(self) -> list[dict]:
+        """误标「源文件已不在」但磁盘目录仍在的失败档（供启动自愈）。"""
+        with self._get_pool().connection() as conn:
+            return conn.execute(
+                """
+                SELECT id AS file_id, user_id, filename, status, error
+                FROM agent_kb_file
+                WHERE status = 'failed'
+                  AND error LIKE '服务重启导致处理中断，源文件已不在%'
+                """
+            ).fetchall()
+
+    def claim_next_uploaded_kb_file(self) -> dict | None:
+        """原子领取一份 uploaded 文件并标为 parsing。
+
+        ``FOR UPDATE SKIP LOCKED``：多 ingest-worker 并发时不会抢同一行。
+        """
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                WITH next AS (
+                    SELECT id
+                    FROM agent_kb_file
+                    -- 兼容误写成 upload（少 ed）的脏数据
+                    WHERE status IN ('uploaded', 'upload')
+                    ORDER BY updated_at ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE agent_kb_file AS f
+                SET status = 'parsing',
+                    error = '',
+                    updated_at = now()
+                FROM next
+                WHERE f.id = next.id
+                RETURNING f.id AS file_id, f.user_id, f.filename
+                """
+            ).fetchone()
+            conn.commit()
+        return dict(row) if row else None
+
+    def recover_stuck_kb_files(self, *, exclude_ids: list[uuid.UUID] | None = None) -> int:
+        """把仍卡在中间态、且未能重投的文件标 failed。
+
+        能重投的（磁盘 PDF 还在）由 pipeline 先拿走；这里只处理
+        无源文件可恢复的残留，避免永远停在 parsing／embedding。
+        """
+        excluded = list(exclude_ids or [])
+        with self._get_pool().connection() as conn:
+            if excluded:
+                cur = conn.execute(
+                    """
+                    UPDATE agent_kb_file
+                    SET status = 'failed',
+                        error = '服务重启导致处理中断，源文件已不在，请重新上传',
+                        updated_at = now()
+                    WHERE status IN ('parsing', 'embedding')
+                      AND NOT (id = ANY(%s))
+                    """,
+                    (excluded,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE agent_kb_file
+                    SET status = 'failed',
+                        error = '服务重启导致处理中断，源文件已不在，请重新上传',
+                        updated_at = now()
+                    WHERE status IN ('parsing', 'embedding')
+                    """
+                )
             conn.commit()
         return cur.rowcount
+
+    def clear_kb_chunks(self, file_id: uuid.UUID) -> int:
+        """删掉某文件已有切片，供重新解析前腾出 (file_id, seq) 主键。"""
+        with self._get_pool().connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM agent_kb_chunk WHERE file_id = %s",
+                (file_id,),
+            )
+            conn.commit()
+        return int(cur.rowcount or 0)
 
     def insert_kb_chunks(
         self,

@@ -10,7 +10,7 @@ from ai_agent.memory.profile import (
     resolve_profile_write,
     sanitize_profile_action,
 )
-from ai_agent.memory.store import MemoryItem
+from ai_agent.storage.store import MemoryItem
 
 
 def _item(text: str, facet: str) -> MemoryItem:

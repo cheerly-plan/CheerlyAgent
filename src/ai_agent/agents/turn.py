@@ -7,11 +7,12 @@ SSE 尾部延迟。
 
 from __future__ import annotations
 
+from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.long_term import capture_long_term
 from ai_agent.memory.short_term import compress, short_term_memory
-from ai_agent.memory.store import store
+from ai_agent.storage.store import store
 from ai_agent.memory.summarize import summarize_session
 
 logger = get_logger(__name__)
@@ -114,6 +115,9 @@ def _compress_and_cache(
             keep=short_term_memory.max_turns,
             old_summary=summary,
             summarize=summarize_session,
+            # 与 _fit_context 同一个预算：被字符预算挤掉的轮次也要进摘要，
+            # 否则它们只存在于「送模型副本」的裁剪里，下一轮就彻底找不回。
+            max_chars=settings.llm_context_char_budget,
         )
     except Exception:
         logger.exception("短期记忆压缩失败")

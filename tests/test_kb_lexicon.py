@@ -2,7 +2,7 @@
 
 import jieba
 
-from ai_agent.kb import lexicon
+from ai_agent.kb.ingest import lexicon
 
 
 def test_core_four_strips_index_and_notes():

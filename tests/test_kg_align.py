@@ -7,7 +7,7 @@
 import uuid
 
 from ai_agent.core.config import settings
-from ai_agent.kb import align
+from ai_agent.kb.graph import align
 
 
 def ent(name, type_="org", mentions=1, description=""):

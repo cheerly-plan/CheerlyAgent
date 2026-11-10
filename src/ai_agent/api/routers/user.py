@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from ai_agent.api.dependencies import get_current_user
 from ai_agent.api.schemas import UserInfo
 from ai_agent.core.config import settings
-from ai_agent.memory.db import UserRecord
+from ai_agent.storage.db import UserRecord
 
 router = APIRouter(prefix="/user", tags=["user"])
 

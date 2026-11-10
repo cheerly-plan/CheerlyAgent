@@ -1,6 +1,6 @@
 """社区检测（簇视图 P4）的纯函数用例。"""
 
-from ai_agent.kb.community import detect_communities, summarize
+from ai_agent.kb.graph.community import detect_communities, summarize
 
 
 def node(i, name, mentions=1):

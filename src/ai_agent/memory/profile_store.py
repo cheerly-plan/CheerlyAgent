@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.db import Database, MemoryItem, current_user_id
+from ai_agent.storage.db import Database, MemoryItem, current_user_id
 from ai_agent.memory.facets import is_mutex_facet
 
 logger = get_logger(__name__)

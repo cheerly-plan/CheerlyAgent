@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 import time
@@ -15,8 +16,8 @@ from ai_agent.api.schemas import (
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import AgentError
 from ai_agent.core.logging import get_logger
-from ai_agent.memory.db import UserRecord
-from ai_agent.memory.store import store
+from ai_agent.storage.db import UserRecord
+from ai_agent.storage.store import store
 from ai_agent.tasks.title import start_title_job
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -44,6 +45,14 @@ def _sse_frame(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _consume_task_exception(task: asyncio.Task) -> None:
+    """客户端断开后仍在途的 next()：消费异常，避免 asyncio 未取回异常告警。"""
+    if not task.cancelled():
+        error = task.exception()
+        if error is not None:
+            logger.warning("聊天流在途事件异常：%s", error)
+
+
 def _stream_response(sync_events: Iterator[str]) -> StreamingResponse:
     """把同步 SSE 生成器包成 async 生成器。
 
@@ -57,21 +66,48 @@ def _stream_response(sync_events: Iterator[str]) -> StreamingResponse:
     Starlette 根本不会启动 async 生成器；若同步生成器也从未启动，
     其 finally（并发槽释放）将永远不会执行，槽泄漏累积后聊天接口
     会被永久打满 429。预拉一次保证生成器必然启动过，其 finally
-    由 close 线程 / GC 兜底执行。"""
+    由 close 线程 / GC 兜底执行。
+
+    心跳：研报深度层单次工具调用可跑十几分钟，期间既没有 text 也没有
+    tool_progress，反代/网关的 idle 计时器会把 SSE 掐断。这里不是靠业务
+    层定时发进度（会污染进度文案），而是在传输层用标准 SSE 注释帧
+    ``: keepalive`` 保活：EventSource 自动忽略注释行，前端 data 事件
+    契约逐字不变，字节流却能让网关把 idle timer 归零。
+    """
 
     # 生成器异常退出时自身 finally 已释放并发槽，异常直接上抛
     first = next(sync_events, _CLOSED)
+    heartbeat = max(0.0, float(settings.sse_heartbeat_seconds))
 
     async def stream() -> AsyncIterator[str]:
+        next_task: asyncio.Task | None = None
         try:
             if first is not _CLOSED:
                 yield first
             while True:
-                chunk = await run_in_threadpool(next, sync_events, _CLOSED)
+                if next_task is None:
+                    next_task = asyncio.create_task(
+                        run_in_threadpool(next, sync_events, _CLOSED)
+                    )
+                if heartbeat > 0:
+                    # 超时不取消 next_task：底层线程可能正阻塞在 LLM/工具里，
+                    # 取消只会留下孤儿线程。发完注释帧继续等同一个 task。
+                    done, _ = await asyncio.wait({next_task}, timeout=heartbeat)
+                    if not done:
+                        yield ": keepalive\n\n"
+                        continue
+                    chunk = next_task.result()
+                else:
+                    # 关闭心跳时逐字恢复旧行为：不能对刚创建的 task 直接
+                    # 调 .result()（还没跑完会抛 InvalidStateError）。
+                    chunk = await next_task
+                next_task = None
                 if chunk is _CLOSED:
                     return
                 yield chunk
         finally:
+            if next_task is not None and not next_task.done():
+                next_task.add_done_callback(_consume_task_exception)
             # 不能在这里 await：取消作用域内任何 await 都会立刻再抛
             # CancelledError。放到独立线程里等在途的 LLM 调用返回后关闭
             threading.Thread(

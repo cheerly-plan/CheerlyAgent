@@ -5,6 +5,7 @@ ChatEventType = Literal[
     "run_started",
     "text",
     "tool_start",
+    "tool_progress",
     "tool_end",
     "done",
     "error",

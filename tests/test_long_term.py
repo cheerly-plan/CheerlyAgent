@@ -28,7 +28,7 @@ def test_extract_turn_memories_falls_back_to_small_model(monkeypatch):
         captured.update(kwargs)
         return '{"memories":[]}'
 
-    with patch("ai_agent.memory.parse.complete_chat", side_effect=fake_complete):
+    with patch("ai_agent.memory.llm_calls.complete_chat", side_effect=fake_complete):
         extract_turn_memories(TURN)
     assert captured["model"] == "qwen-small"
 
@@ -41,7 +41,7 @@ def test_extract_turn_memories_uses_memory_model(monkeypatch):
         captured.update(kwargs)
         return '{"memories":[]}'
 
-    with patch("ai_agent.memory.parse.complete_chat", side_effect=fake_complete):
+    with patch("ai_agent.memory.llm_calls.complete_chat", side_effect=fake_complete):
         extract_turn_memories(TURN)
     assert captured["model"] == "qwen-memory"
 

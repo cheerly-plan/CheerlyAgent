@@ -1,0 +1,381 @@
+# 行业档案：新增一个行业只需在这里加一段 profile（可选 aliases / notes / segments）。
+# 本文件是「公司类型白名单、行业名别名、指标集、行业定性文案、赛道语义」的单一数据源；
+# classification_defaults.py 由 scripts/sync_indicators_snapshot.py 自动导出，
+# 是主配置读不到时的只读降级快照，请勿手工编辑。
+# 铁律：notes 里只能写定性句，不得含阿拉伯数字或百分比；数字一律由 facts 提供。
+#
+# segments 是「该行业赛道名 → 公司类型（本文件 profile key）」的映射：
+# 声明了 segments 的行业只用自己这份，不再回退 indicators.yaml 的全局
+# classification.segment_to_type。这样不同行业的同名赛道（如都叫「设备」）
+# 可以指向不同指标模板，不会串味；全局字典只服务没有行业上下文的调用。
+# 值可以是 profile 字符串，或 {profile, columns?}：columns 覆写组内宽表列，
+# 未声明时仍按 profile.include 截前几列。项目型赛道可借此去掉「产能利用率」。
+#
+# lead / lead_hint 是该行业的「本期结论」口径：
+#   lead      本行业结论的指标出句顺序；不写则走 indicators.yaml 的 lead_generic。
+#   lead_hint 出现这些指标就说明是本品类公司；报告类型被误路由时用它兜底。
+# structure 是赛道经营解读／全行业梯队表用的比率清单：
+#   有赛道 ≠ 一律写毛利率；银行可写净息差／不良，半导体写毛利率／研发费用率。
+#   带花名册的行业必须声明；未声明则经营解读不写结构梯队（从略），不默认制造业口径。
+# notes.structure_gloss 按指标名给赛道均值句的定性 gloss（可选）。
+# 以上名单只能写已登记的指标名，不得借此往正文塞数字（数字一律来自 facts）。
+# sets 可被 profiles.exclude_refs 引用，避免重复粘贴银行专属指标。
+
+# 行业名 / 公司简称 → profile key。新增行业在这里补一行中文别名即可，
+# 不用再往 industry.py 的 Python 字典里加常量。
+aliases:
+  bank: bank
+  银行: bank
+  generic: generic
+  manufacturing: manufacturing
+  一般制造: manufacturing
+  制造业: manufacturing
+  semiconductor: semiconductor
+  半导体: semiconductor
+  robotics: robotics
+  机器人: robotics
+  fabless: fabless
+  设计: fabless
+  foundry: foundry
+  制造: foundry
+  equipment: equipment
+  设备: equipment
+  packaging: packaging
+  封测: packaging
+  software: software
+  软件: software
+  real_estate: real_estate
+  地产: real_estate
+  cyclical: cyclical
+  周期: cyclical
+  industry_shared: industry_shared
+
+sets:
+  bank_only: &bank_only
+    - 净息差
+    - 拨备前利润
+    - PPOP
+    - 不良贷款率
+    - 不良贷款拨备覆盖率
+    - 资本充足率
+    - 核心一级资本充足率
+    - 成本收入比
+    - 利息净收入
+    - 非利息收入
+    - 非利息收入占比
+    - 发放贷款和垫款总额
+    - 吸收存款总额
+  bank_exclude:
+    - 毛利率
+    - 存货周转率
+    - 研发费用率
+    - 产能利用率
+    - 合同负债
+
+profiles:
+  # 银行指标集：单公司 bank_financial_report 与行业 bank_industry_report 共用。
+  # segments 只做横比分组（国有大行／股份制／城商行），全部仍指向本 profile，不改指标。
+  bank:
+    include:
+      - 营业收入
+      - 净利润
+      - 利润总额
+      - 归属于母公司所有者的净利润
+      - 利息净收入
+      - 非利息收入
+      - 非利息收入占比
+      - 手续费及佣金净收入
+      - 业务及管理费
+      - 成本收入比
+      - 资产减值损失
+      - 净息差
+      - 平均总资产回报率
+      - 不良贷款率
+      - 不良贷款拨备覆盖率
+      - 加权平均净资产收益率
+      - 发放贷款和垫款总额
+      - 吸收存款总额
+      - 资产总计
+      - 核心一级资本充足率
+      - 资本充足率
+    exclude_refs: [bank_exclude]
+    # 三类机构共用银行指标；组内宽表显式列息差／资产质量，避免截到利润总额等次要列。
+    segments:
+      国有大行:
+        profile: bank
+        columns: &bank_peer_columns
+          - 营业收入
+          - 归属于母公司所有者的净利润
+          - 净息差
+          - 不良贷款率
+          - 不良贷款拨备覆盖率
+          - 资本充足率
+      股份制:
+        profile: bank
+        columns: *bank_peer_columns
+      城商行:
+        profile: bank
+        columns: *bank_peer_columns
+    # 银行结论口径：息差／资产质量在前，不再靠 compose 里的 skill_id 判断。
+    lead:
+      - 营业收入
+      - 归属于母公司所有者的净利润
+      - 净利润
+      - 净息差
+      - 不良贷款率
+      - 不良贷款拨备覆盖率
+    # 出现这些指标即判定银行口径（报告类型被误路由时的兜底）。
+    lead_hint:
+      - 净息差
+      - 不良贷款率
+      - 不良贷款拨备覆盖率
+      - 资本充足率
+    # 分组横比解读：息差／资产质量，不用制造业毛利率叙事。
+    structure:
+      - 净息差
+      - 不良贷款率
+      - 不良贷款拨备覆盖率
+    notes:
+      next_period:
+        - "景气周期（信贷增速、净息差走势、资产质量迁徙等）依赖外部宏观与监管数据，本期流水线未接入，不推断周期位置。"
+        - "建议接入数据源：人民银行信贷收支与利率；国家金融监督管理总局资产质量与资本充足披露；各行季报原文；行业协会银行景气调查。"
+        - "接入前需明确入库表结构与更新频率；本报告定位为代表银行财报分组对比底稿，不构成行业深度研究。"
+      structure_gloss:
+        净息差: "国有大行／股份制／城商行息差高低只陈述本期已抽取数字关系，不构成外部归因。"
+        不良贷款率: "资产质量分组均值只陈述本期数字结构，不引入无出处的宏观推断。"
+      observation: "以上只并列原文披露的数字关系，不构成因果归因。季报未披露单季净息差拆分所需的平均生息资产，也未披露拨备前利润（PPOP）的统一口径，两项均不推算。"
+
+  fabless:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 研发费用率
+      - 存货周转率
+      - 大客户集中度
+      - 经营活动产生的现金流量净额
+    exclude_refs: [bank_only]
+    exclude: [产能利用率]
+
+  foundry:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 产能利用率
+      - 折旧
+      - 资本开支
+      - 存货
+      - 经营活动产生的现金流量净额
+    exclude_refs: [bank_only]
+    exclude: [大客户集中度]
+
+  equipment:
+    # 订单先行：合同负债／存货／在手订单占组内前六列；经营现金流超出预算仍补列。
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 合同负债
+      - 存货
+      - 在手订单
+      - 研发费用率
+      - 经营活动产生的现金流量净额
+    exclude_refs: [bank_only]
+    exclude: [产能利用率, 存货周转率, 资产负债率]
+
+  packaging:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 产能利用率
+      - 资本开支
+      - 经营活动产生的现金流量净额
+    exclude_refs: [bank_only]
+    exclude: [大客户集中度]
+
+  manufacturing:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 存货周转率
+      - 经营活动产生的现金流量净额
+      - 产能利用率
+      - 资产负债率
+    exclude_refs: [bank_only]
+
+  software:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 研发费用率
+      - 经营活动产生的现金流量净额
+      - 合同负债
+    exclude_refs: [bank_only]
+    exclude: [存货周转率, 产能利用率, 资本开支]
+
+  real_estate:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 合同负债
+      - 经营活动产生的现金流量净额
+      - 资产负债率
+    exclude_refs: [bank_only]
+    exclude: [研发费用率, 产能利用率]
+
+  cyclical:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 产能利用率
+      - 资本开支
+      - 存货
+      - 经营活动产生的现金流量净额
+    exclude_refs: [bank_only]
+    exclude: [研发费用率, 大客户集中度]
+
+  # 行业横比共用集：各赛道都能对上的少数指标；组内细项由 segment 模板补。
+  # 显式命名，不再借 semiconductor profile 当共用集（改半导体指标不会连带改所有行业）。
+  industry_shared:
+    include: &shared_include
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 研发费用率
+      - 经营活动产生的现金流量净额
+    exclude: *bank_only
+
+  # notes 是可选定性文案：不写就用 Python 里的通用兜底句，新增行业无需改代码。
+  # segments 是行业级赛道语义（权威）；声明后不再读全局 segment_to_type。
+  semiconductor:
+    include: *shared_include
+    exclude: *bank_only
+    # 组内列按赛道固化：设计看客户／周转，制造／封测看稼动与开支，设备看订单。
+    segments:
+      设计:
+        profile: fabless
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 存货周转率
+          - 大客户集中度
+          - 经营活动产生的现金流量净额
+      制造:
+        profile: foundry
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 产能利用率
+          - 折旧
+          - 资本开支
+          - 经营活动产生的现金流量净额
+      设备:
+        profile: equipment
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 合同负债
+          - 存货
+          - 在手订单
+          - 经营活动产生的现金流量净额
+      封测:
+        profile: packaging
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 产能利用率
+          - 资本开支
+          - 经营活动产生的现金流量净额
+    structure:
+      - 毛利率
+      - 研发费用率
+    notes:
+      next_period:
+        - "景气周期（全球半导体销售额增速、晶圆厂稼动率、存储／模拟价格等）依赖外部数据源，本期流水线未接入，不推断周期位置。"
+        - "建议接入数据源：WSTS 全球半导体销售额；SEMI 设备账单与晶圆厂稼动；协会或咨询机构存储／模拟价格指数；海关进出口与龙头厂商出货指引。"
+        - "接入前需明确入库表结构与更新频率；本报告定位为公司财报赛道分组对比底稿，不构成行业深度研究。"
+      structure_gloss:
+        毛利率: "设计／设备链路高于制造／封测；越靠产业链上游毛利率越高，越靠下游重资产环节毛利率越低——此为已抽取数字的横向关系，不构成外部归因。"
+        研发费用率: "上游设计／设备研发强度整体高于下游封测——同样只陈述本期数字结构。"
+
+  robotics:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 研发费用率
+      - 经营活动产生的现金流量净额
+      - 合同负债
+    exclude: *bank_only
+    # 组内宽表列按赛道覆写：制造类保留产能利用率，系统集成（项目型）不要该列。
+    segments:
+      伺服控制:
+        profile: equipment
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 合同负债
+          - 在手订单
+          - 经营活动产生的现金流量净额
+      本体:
+        profile: manufacturing
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 合同负债
+          - 存货周转率
+          - 产能利用率
+          - 经营活动产生的现金流量净额
+      减速器:
+        profile: manufacturing
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 合同负债
+          - 存货周转率
+          - 产能利用率
+          - 经营活动产生的现金流量净额
+      系统集成:
+        profile: software
+        columns:
+          - 营业收入
+          - 扣非净利润
+          - 毛利率
+          - 研发费用率
+          - 合同负债
+          - 经营活动产生的现金流量净额
+    structure:
+      - 毛利率
+      - 研发费用率
+    notes:
+      next_period:
+        - "景气周期（工业机器人产量、人形／协作出货、减速器／伺服价格等）依赖外部数据源，本期流水线未接入，不推断周期位置。"
+        - "建议接入数据源：国家统计局工业机器人产量；中国机器人产业联盟出货与渗透率；减速器／伺服厂商公开报价或协会价格指数；人形／协作整机厂出货与招标公告。"
+        - "接入前需明确入库表结构与更新频率；本报告定位为公司财报赛道分组对比底稿，不构成行业深度研究。"
+
+  generic:
+    include:
+      - 营业收入
+      - 扣非净利润
+      - 毛利率
+      - 存货周转率
+      - 经营活动产生的现金流量净额
+      - 资产负债率
+    exclude: *bank_only

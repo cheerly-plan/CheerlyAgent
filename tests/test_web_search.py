@@ -1,7 +1,7 @@
 import pytest
 
 from ai_agent.tools.registry import execute_tool, tool_schemas
-from ai_agent.tools import web_search as ws
+from ai_agent.tools.misc import web_search as ws
 
 
 @pytest.fixture(autouse=True)

@@ -34,12 +34,32 @@ class Settings(BaseSettings):
     # 模型上下文窗口导致整轮报错。中文 1 字符 ≈ 0.6~1 token，40000 字符
     # 对 32k 窗口的模型是安全值；部署更大窗口的模型可调高。
     llm_context_char_budget: int = 40000
+    # system 提示词里动态拼接部分（画像 / 知识库能力清单 / 日期 / 报告类型）
+    # 的硬上限。这些块原先完全不受上下文预算约束，随画像条数与库内文件数
+    # 线性增长，极端情况下 system 自身就能把请求撑超限。超限时按行保头保尾
+    # 裁剪并留显式省略提示，模型改用 kb_list_files 现查。
+    system_dynamic_max_chars: int = 4000
     host: str = "127.0.0.1"
     port: int = 8000
     # 服务端访问令牌：非空时 /v1/** 要求携带 X-API-Key 或 Bearer Token
     auth_token: str = ""
     # 聊天流并发上限，超出返回 429
     max_concurrent_chats: int = 20
+    # SSE 保活间隔（秒）：生成器静默超过此时长就发一个标准注释帧
+    # ``: keepalive``，让反代/网关的 idle 计时器归零。研报深度层单次工具
+    # 调用可跑十几分钟，期间没有进度事件时网关会直接掐断连接。
+    # 0 或负数 = 关闭心跳（旧行为）。
+    sse_heartbeat_seconds: float = 15.0
+    # 深度分析（研报）第 2-8 章并行度，只作用于对外入口（HTTP / 聊天工具），
+    # 库级 DeepConfig 仍是 1。7 章在 3 路下是 3+3+1 三波，4 路是 4+3 两波；
+    # 网关并发额度宽裕时可调到 4–7，超出额度会 429。
+    report_deep_chapter_concurrency: int = 3
+    # 单章评审轮次并行度：0 = 该章所有轮次一起发（默认 3 路）；1 = 逐轮串行
+    # （网关并发额度紧张时回退）；其它正整数 = 线程池上限。
+    report_deep_review_round_concurrency: int = 0
+    # 对外入口章节/评审通道：primary=直接主模型（默认）；small=小模型优先、
+    # 空 content 自动升级主模型。
+    report_deep_chapter_channel: str = "primary"
     # 数据库连接池上限，需 ≥ 聊天并发 + 标题线程池 + 收尾线程池之和
     db_pool_max_size: int = 28
     # 允许的跨域来源，逗号分隔，如 "http://localhost:5173,https://chat.example.com"
@@ -69,6 +89,38 @@ class Settings(BaseSettings):
     # 管理员用户名白名单（逗号分隔）：只有这些账号能上传/删除知识库文件。
     # 空 = 没有任何管理员，所有写操作 403（只读浏览不受影响）
     admin_usernames: str = ""
+
+    # 研报（report pipeline）：正文/溯源附件/人工审核队列/PDF 的落盘目录。
+    # 与知识库上传目录分开，下载端点只认这个目录，避免把 uploads 也暴露出去。
+    # 研报不会自动入库；重复生成只堆在本目录，由下面两条策略清理。
+    report_output_dir: Path = _PROJECT_ROOT / "data" / "reports"
+    # 同一标题（去掉 _report_id）只留最新 N 版；生成成功后也会立刻裁掉旧版。0=关闭
+    report_keep_latest_per_title: int = 1
+    # 超过 N 天的研报产物（含审核索引条目）定时删除。0=关闭年龄清理
+    report_retention_days: int = 30
+    # 经营解读节：受约束 LLM，只许用已抽取事实 + 季报原文；关闭后写从略句
+    report_analysis_enabled: bool = True
+    # 启动时研报配置 lint 的严格模式：true = 配置有错直接拒绝启动（预发布/CI 用），
+    # false = 只记 ERROR 日志并走既有降级路径，避免一份 YAML 拼错让全站不可用。
+    report_config_strict: bool = False
+
+    # 巨潮定期报告补齐：默认开启。generate_report 发现缺原文会自动拉取；单测/离线可关
+    enable_cninfo_fetch: bool = True
+    cninfo_request_interval_seconds: float = 1.0
+    cninfo_stock_cache_ttl_seconds: int = 86400
+    # 全文 PDF 超过该体积（MB）改抓「报告摘要」；摘要没有则仍下全文。
+    # 本地 OCR / 入库对大文件很敏感，1MB 起就优先摘要。
+    cninfo_full_max_mb: float = 1.0
+    # 深度分析补齐近 N 年年报时优先全文：阈值更高，尽量不掉摘要。
+    cninfo_deep_full_max_mb: float = 25.0
+    # 自动入库后等待解析完成的秒数基线；超时仍继续抽数（可能 gaps）。
+    # 行业研报一次可补十几份 PDF，本地 OCR 很慢，180s 往往只等到前几份。
+    cninfo_ingest_wait_seconds: int = 600
+    # 按本次新补文件数叠加等待：实际等待 = min(cap, max(基线, 每份×份数))
+    cninfo_ingest_wait_per_file_seconds: int = 90
+    cninfo_ingest_wait_cap_seconds: int = 1800
+    # 单次研报最多自动补几份（公司×报告期）；行业代表股+同比基期会超过 4
+    cninfo_auto_fetch_max: int = 16
 
     # 知识库（P1）：文件上传、切片向量化与检索
     kb_upload_dir: Path = _PROJECT_ROOT / "data" / "uploads"
@@ -110,6 +162,14 @@ class Settings(BaseSettings):
     # 是 40 分钟级的长任务，跟解析/向量化挤同一个池子时，后上传的文件只能
     # 排队等它跑完——表现为「切片生成也变慢了」
     kb_graph_workers: int = 1
+    # False（默认）：API 只把文件标成 uploaded，由 `almost-agent ingest-worker`
+    # 抢任务解析，HTTP 与 OCR/嵌入进程隔离。True：兼容单进程，API 内 spawn
+    # 子进程解析（测试或未起 worker 时用）。
+    kb_ingest_inline: bool = False
+    # ingest-worker 空闲轮询间隔（秒）
+    kb_ingest_poll_seconds: float = 1.0
+    # 单份文件解析子进程硬超时（秒）；超时杀进程并标 failed，释放 worker 槽
+    kb_ingest_job_timeout_seconds: float = 1800.0
     # 表格：单个工作表最多取多少行，防止超大表撑爆切片与向量库
     kb_sheet_max_rows: int = 2000
 
@@ -142,6 +202,11 @@ class Settings(BaseSettings):
     kb_ocr_model: str = ""
     # 0 = 不截断页数。整页识别按页计时，长文档先设一个上限再放开。
     kb_ocr_max_pages: int = 0
+    # 按页混合：文字层字符数 ≥ 此值视为密页，跳过 OCR；更少才送 OCR。
+    # 0 = 关闭混合，退回「整页 OCR 有产出就整本采用」的旧行为。
+    # 对齐 OCRmyPDF skip-text / PyMuPDF4LLM 的「有字用字」策略，避免半截 OCR
+    # 盖掉整本电子年报（飞测年报实测：OCR 熔断后只剩前 30 页）。
+    kb_ocr_min_text_chars: int = 80
     kb_ocr_dpi: int = 150
     # 长边像素上限，对齐官方 fit_image（超过会降采样，避免视觉 token 爆上下文）
     kb_ocr_max_edge: int = 2048
@@ -185,9 +250,9 @@ class Settings(BaseSettings):
     # 名称命中或关键词命中到一半以上的候选不受此限制。
     kb_graph_min_score: float = 0.55
 
-    # 抽取 prompt 的文档配置（通用底座 + 可插拔配置块，见 kb/doc_profiles.py）。
-    # 路径不存在就只用内置配置；业务方加新文档类型改这个 JSON 即可，不用改代码。
-    # 格式见 kb/doc_profiles.example.json（复制成该路径即生效）
+    # 抽取 prompt 的文档配置（通用底座 + 可插拔配置块，见 kb/ingest/doc_profiles.py）。
+    # 内置在 kb/skills/*/SKILL.md；本 JSON 同 key 覆盖、新 key 追加（可不发版临时改）。
+    # 格式见 kb/ingest/doc_profiles.example.json（复制成该路径即生效）
     kb_doc_profiles_path: Path = _PROJECT_ROOT / "data" / "kb_doc_profiles.json"
     # 没指定文档类型时的兜底：通用配置（不限白名单、不锁谓词）
     kb_default_doc_type: str = "general"

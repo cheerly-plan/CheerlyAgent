@@ -4,9 +4,9 @@ from unittest.mock import patch
 import pytest
 
 from ai_agent.tools.registry import execute_tool, tool_schemas
-from ai_agent.tools import weather as wt
-from ai_agent.tools.kb_search import KbSearchArgs
-from ai_agent.tools.kg_search import KgSearchArgs
+from ai_agent.tools.misc import weather as wt
+from ai_agent.tools.kb.kb_search import KbSearchArgs
+from ai_agent.tools.kb.kg_search import KgSearchArgs
 
 
 def _fake_geocode(name="北京"):
@@ -101,10 +101,10 @@ def test_execute_missing_city():
 def test_write_memory_profile_kind():
     with (
         patch(
-            "ai_agent.tools.memory.apply_profile_text",
+            "ai_agent.tools.memory.memory.apply_profile_text",
             return_value="已写入用户画像: 喜欢 pytest",
         ) as apply_profile,
-        patch("ai_agent.tools.memory.store.write_episode") as write_episode,
+        patch("ai_agent.tools.memory.memory.store.write_episode") as write_episode,
     ):
         result = execute_tool("write_memory", {"content": "喜欢 pytest", "kind": "profile"})
     assert "用户画像" in result
@@ -115,10 +115,10 @@ def test_write_memory_profile_kind():
 def test_write_memory_defaults_to_profile():
     with (
         patch(
-            "ai_agent.tools.memory.apply_profile_text",
+            "ai_agent.tools.memory.memory.apply_profile_text",
             return_value="已写入用户画像: 喜欢 pytest",
         ) as apply_profile,
-        patch("ai_agent.tools.memory.store.write_episode") as write_episode,
+        patch("ai_agent.tools.memory.memory.store.write_episode") as write_episode,
     ):
         result = execute_tool("write_memory", {"content": "喜欢 pytest"})
     assert "用户画像" in result
@@ -129,8 +129,8 @@ def test_write_memory_defaults_to_profile():
 def test_write_memory_episode_kind():
     item = SimpleNamespace(text="上周修过登录")
     with (
-        patch("ai_agent.tools.memory.store.write_profile") as write_profile,
-        patch("ai_agent.tools.memory.store.write_episode", return_value=item) as write_episode,
+        patch("ai_agent.tools.memory.memory.store.write_profile") as write_profile,
+        patch("ai_agent.tools.memory.memory.store.write_episode", return_value=item) as write_episode,
     ):
         result = execute_tool("write_memory", {"content": "上周修过登录", "kind": "episode"})
     assert "情景记忆" in result
@@ -140,7 +140,7 @@ def test_write_memory_episode_kind():
 
 def test_search_memory_uses_episode_store():
     item = SimpleNamespace(text="上周修过登录")
-    with patch("ai_agent.tools.memory.store.search_episode", return_value=[item]) as search:
+    with patch("ai_agent.tools.memory.memory.store.search_episode", return_value=[item]) as search:
         result = execute_tool("search_memory", {"query": "登录"})
     assert "上周修过登录" in result
     search.assert_called_once_with("登录")
@@ -221,18 +221,18 @@ def test_kb_search_without_files_uses_doc_route(monkeypatch):
     """files 没填时，检索范围来自文档路由而不是模型猜文件名。"""
     import uuid
 
-    from ai_agent.tools.kb_search import _kb_search
+    from ai_agent.tools.kb.kb_search import _kb_search
 
     fid = uuid.uuid4()
     seen: dict = {}
     monkeypatch.setattr(
-        "ai_agent.memory.store.store.has_ready_kb_file", lambda: True
+        "ai_agent.storage.store.store.has_ready_kb_file", lambda: True
     )
     monkeypatch.setattr(
-        "ai_agent.kb.router.route_files", lambda query, **kwargs: [fid]
+        "ai_agent.kb.retrieval.router.route_files", lambda query, **kwargs: [fid]
     )
     monkeypatch.setattr(
-        "ai_agent.tools.kb_search.search_knowledge_multi",
+        "ai_agent.tools.kb.kb_search.search_knowledge_multi",
         lambda query, *, file_ids=None, top_k=3, filters=None: seen.setdefault("file_ids", file_ids)
         and [],
     )

@@ -5,15 +5,23 @@ from typing import Union, get_args, get_origin
 from pydantic import ValidationError
 
 from ai_agent.core.logging import get_logger
-from ai_agent.tools.kb_list import kb_list_files_tool
-from ai_agent.tools.kb_search import kb_search_tool
-from ai_agent.tools.kg_search import kg_search_tool
+from ai_agent.core.text import clip_text
+from ai_agent.tools.kb import kb_list_files_tool, kb_search_tool, kg_search_tool
 from ai_agent.tools.memory import memory_search_tool, memory_write_tool
-from ai_agent.tools.weather import weather_tool
-from ai_agent.tools.web_search import web_search_tool
+from ai_agent.tools.misc import weather_tool, web_search_tool
+from ai_agent.tools.report import (
+    generate_report_tool,
+    report_compare_tool,
+    report_extract_tool,
+    report_job_status_tool,
+    report_validate_tool,
+)
 
 logger = get_logger(__name__)
 
+# 研报积木（extract / compare / validate）与 generate_report 一起注册：
+# 积木无路径参数、不写盘，分别承担「抂数、算增减、校验」三个确定性环节。
+# report_pdf 仍不注册——渲染含落盘与 M2 审核门禁，只能由服务端流水线触发。
 TOOLS = [
     weather_tool,
     web_search_tool,
@@ -22,9 +30,36 @@ TOOLS = [
     kb_list_files_tool,
     kb_search_tool,
     kg_search_tool,
+    generate_report_tool,
+    report_job_status_tool,
+    report_extract_tool,
+    report_compare_tool,
+    report_validate_tool,
 ]
 TOOLS_MAP = {t.name: t for t in TOOLS}
 _TOOL_SCHEMAS = [t.schema() for t in TOOLS]
+
+# 输出上限按工具语义分级。原先所有工具统一 [:3000] 前缀硬截断：研报的多个
+# 下载链接、检索结果靠后的表格行、长 JSON 都可能被从中间切断，且没有任何
+# 标记，模型会拿残片当完整结果。返回结构化/链接类结果的工具放宽上限，
+# 其余沿用 Tool 声明的默认值；裁剪统一走 clip_text（保头保尾 + 显式标记）。
+TOOL_OUTPUT_LIMITS: dict[str, int] = {
+    "generate_report": 4000,
+    # 任务完成后返回的是一整段带链接的摘要，截断会把深度链接从中间切掉
+    "report_job_status": 4000,
+    "kb_search": 4000,
+    "report_extract_indicators": 4000,
+}
+
+
+def _tool_output(tool, raw: str) -> str:
+    limit = TOOL_OUTPUT_LIMITS.get(tool.name, tool.max_output_chars)
+    if limit <= 0 or len(raw) <= limit:
+        return raw
+    logger.info(
+        "工具输出已裁剪 name=%s chars=%d limit=%d", tool.name, len(raw), limit
+    )
+    return clip_text(raw, limit)
 
 
 def tool_schemas() -> list[dict]:
@@ -111,12 +146,12 @@ def execute_tool(name: str, arguments: dict) -> str:
         return f"ERROR: 未知工具 {name}"
     arguments = _coerce_stringified_lists(tool.args_model, arguments)
     try:
-        return tool.run(**arguments)[:3000]
+        return _tool_output(tool, tool.run(**arguments))
     except ValidationError:
         # 模型传的参数越界（depth=3 超过 le=2 之类）：夹回边界重试一次，别白费一轮
         try:
             clamped = _clamp_out_of_range_args(tool.args_model, arguments)
-            return tool.run(**clamped)[:3000]
+            return _tool_output(tool, tool.run(**clamped))
         except Exception as e:
             logger.warning("工具参数越界后夹取仍失败 name=%s: %s", name, e)
             return f"ERROR: 工具执行失败（{type(e).__name__}）"

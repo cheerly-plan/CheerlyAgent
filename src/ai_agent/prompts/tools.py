@@ -4,12 +4,17 @@
 模型什么时候调、参数怎么填。以前它们散在 6 个工具的源码里，改一处措辞要
 翻 6 个文件，且没有任何测试守着。这里集中后由 test_prompts 统一断言。
 
-文案一字未改（含【触发条件】/【禁止条件】这些实测有效的结构化约束）。
+静态文案迁移时一字未改（含【触发条件】/【禁止条件】这些实测有效的结构化
+约束）。例外是研报类型清单：report_type 的可选值不手抄，模板留
+``{{SKILL_CATALOG}}`` 槽位，由**调用方**（tools / agents 组装层）注入
+`report.skills.skill_catalog()` 渲染——注册新 skill 即自动出现在工具描述
+和系统提示词里。本模块刻意不 import 业务域：prompts 是文案层，方向只能
+被上层依赖，不能反向依赖 report / kb / memory。
 """
 
 from __future__ import annotations
 
-from ai_agent.prompts.builder import render
+from ai_agent.prompts.builder import assert_rendered, render
 
 # ——— 天气 ———
 
@@ -73,17 +78,16 @@ MEMORY_WRITE_KIND_DESC = (
 KB_SEARCH_DESC = (
     "检索知识库里的共享文档。涉及公司、产品、财报、数字、日期、"
     "条款等具体事实时必须调用，不要用自己的知识直接回答。"
-    "files 一般不填：问句里点到的公司或文档，系统会收进这些文件里查 query"
-    "（问两家公司的营业收入，就是在这两家的文件里查「营业收入」）。"
-    "只有用户明确给出文件名或公司名、需要收窄范围时才填 files（可多份）。"
+    "query 保留问句里的公司名和要查的事（如「中国黄金 营收增长」），"
+    "不要收成单个科目，也不要自己限定章节或只要表格。"
+    "files 一般不填：问句里点到的公司由系统收进这些文件。"
+    "只有用户明确给出文件名时才填 files（可多份）。"
     "不要编造文件名，也不要填文件 id。库里有哪些文件先调 kb_list_files。"
 )
 KB_SEARCH_QUERY_DESC = (
-    "检索问题或关键词，用自然语言描述要找的内容。"
-    "当 files 已指定公司或文档时，query 只写要查的字段，不要重复 files 里的"
-    "公司名/文件名（如 files 填了「中化装备…报告」，query 写「营业收入」即可）。"
-    "问题明确指向表格数据时，用 kinds=[\"table\"] 只检索表格切片、跳过正文；"
-    "想限定章节时用 sections 传章节关键词（如 [\"管理层讨论\"]），配合 files 进一步缩小范围。"
+    "检索词。保留公司名和用户要问的事，用自然语言，例如「中国黄金 营收增长」。"
+    "不要改写成单个科目名。用户点名了某一章，或只要表格、不要正文时，"
+    "才另填 sections、kinds。"
 )
 # kb_search 与 kg_search 的 files 参数说明完全一致，共用一份避免漂移
 KB_FILES_DESC = (
@@ -101,6 +105,7 @@ KB_LIST_DESC = (
     "需要收窄检索范围时，把这里确认的文件名或主体名传给 kb_search / kg_search 的 files；"
     "范围不确定就不要填 files。"
 )
+
 KB_SEARCH_TOPK_DESC = "返回的片段数"
 
 KB_EMPTY_HINT = "知识库为空或还没有处理完成的文件，请提示用户联系管理员上传资料。"
@@ -141,6 +146,91 @@ KG_SEARCH_QUERY_DESC = (
 KG_SEARCH_DEPTH_DESC = "从命中实体向外扩展的跳数"
 KG_SEARCH_TOPK_DESC = "参与扩展的种子实体数"
 KG_NO_ENTITY_HINT = "图谱里没有找到相关实体，可以换个说法，或用 kb_search 直接检索原文。"
+
+
+# ——— 研报生成（聊天侧唯一入口，落盘路径由服务端固定） ———
+
+# 报告类型清单不在文案里手抄：模板留 {{SKILL_CATALOG}} 槽位，由 tools 组装层
+# 注入 report.skills.skill_catalog() 渲染。注册表加新 skill 后工具描述自动
+# 带上，模型才知道它的存在（否则流水线路由了、模型也点不了名）。
+REPORT_GENERATE_DESC_TEMPLATE = (
+    "生成财报研报：默认同时交付事实层底稿与独立深度解析两套产物"
+    "（底稿 PDF / Markdown / 溯源，以及深度 PDF .deep.pdf / .deep.md / .deep.json）。"
+    "【触发条件】用户要求「生成研报」「财报深度分析」「出 PDF 报告」时必须调用，"
+    "把需求原话原样填进 request，不要拆分、改写或自己补指标。"
+    "报告类型默认按公司行业自动路由（银行 / 通用公司）；用户明确点名其他类型时"
+    "才填 report_type（可选：{{SKILL_CATALOG}}），不确定就留空。"
+    "【异步】本工具只**提交后台任务**并立刻返回 job_id，不会等报告生成完，"
+    "也不再直接返回下载链接。拿到 job_id 后必须告诉用户「任务已提交、"
+    "约 5–8 分钟，生成完成后结果会直接显示在这条回答下方，不用再问」，"
+    "不要说报告已生成、不要凭空给链接。"
+    "用户问进度或结果时调用 report_job_status(job_id) 取状态与下载链接；"
+    "succeeded 后把里面的链接**逐字原样**发给用户（保持 /v1/report/files/ 相对路径，"
+    "禁止改成 example.com、http(s) 或其它外链），不要复述或换算报告里的数字。"
+    "报告由服务端确定性流水线生成：正文数字只从知识库表格抽取并过校验门禁，"
+    "抽不到的写进缺口，不补估计值；深度层为带警示标注的推断结论，不并入底稿正文。"
+    "【耗时】深度解析约 5–8 分钟（主模型多章并行撰写＋评审），任务在服务端后台跑，"
+    "聊天连接断开也不会中断；不要中途改去自己写报告或另开检索凑正文。"
+    "【禁止条件】不要自己撰写研报正文、不要用检索片段口算同比增减，"
+    "也不要说「我无法生成 PDF」——本工具默认就出 PDF。"
+    "除非用户明确只要 Markdown / 不要 PDF，否则不要把 write_pdf 设为 false。"
+    "不要填任何文件路径，落盘位置由服务端决定。"
+    "同一用户同一需求重复提交会复用正在跑的任务，不要把 job_id 弄丢或改成别的值。"
+)
+
+
+# generate_report 工具 report_type 字段的描述模板（tools/report_generate.py
+# 引用）。与工具描述共用同一个 catalog 注入，两处不会各说各话。
+REPORT_TYPE_DESC_TEMPLATE = (
+    "报告类型，留空按公司行业自动路由。"
+    "可选：{{SKILL_CATALOG}}。用户没明确点名就不要填"
+)
+
+# report_job_status 工具描述：查 generate_report 提交的后台任务
+REPORT_JOB_STATUS_DESC = (
+    "查询已提交研报任务的进度与结果（job_id 来自 generate_report 的返回）。"
+    "【触发条件】用户问「好了吗／进度／结果」，或你刚提交任务要确认状态时调用；"
+    "job_id 原样传入，不要自己编造或改写。"
+    "返回 running 时如实说还在生成、请稍候；succeeded 时把文本里的下载链接"
+    "**逐字原样**发给用户；failed 时如实说明原因。"
+    "【禁止条件】不要用它提交新任务（那是 generate_report）；"
+    "未 succeeded 前不要给下载链接，也不要自己撰写报告正文或换算数字。"
+)
+
+
+def render_report_generate_desc(catalog: str) -> str:
+    """工具描述：catalog 由调用方传 report.skills.skill_catalog()。"""
+    return assert_rendered(render(REPORT_GENERATE_DESC_TEMPLATE, SKILL_CATALOG=catalog))
+
+
+def render_report_type_desc(catalog: str) -> str:
+    """report_type 字段描述：catalog 由调用方传 report.skills.skill_catalog()。"""
+    return assert_rendered(render(REPORT_TYPE_DESC_TEMPLATE, SKILL_CATALOG=catalog))
+
+# ——— 研报积木：单独抽数 / 算增减 / 校验正文（都不写盘、无路径参数） ———
+
+REPORT_EXTRACT_DESC = (
+    "从知识库财报里抽取指定公司、指定报告期的财务指标，返回原值、单位、口径和出处。"
+    "【触发条件】用户问某个财务指标的具体数字（如「中行 2026Q3 净息差是多少」）、"
+    "或需要为计算准备原始数据时调用；indicators 留空则返回该公司行业的默认指标集。"
+    "【禁止条件】不要用它代替 generate_report 生成整份报告；"
+    "返回的数字必须原样转述或传给 report_compare，禁止换算、四舍五入或口算。"
+)
+
+REPORT_COMPARE_DESC = (
+    "计算已抽取指标的多期同比、环比、增减额与幅度，口径不可比时如实说明不算。"
+    "【触发条件】拿到 report_extract_indicators 返回的多期原值后需要算增减时调用，"
+    "把原值原样传入 points。"
+    "【禁止条件】禁止自己心算后再传入；禁止把不同口径（单季/累计/期末余额）"
+    "或不同覆盖期数的值混在一条序列里。"
+)
+
+REPORT_VALIDATE_DESC = (
+    "校验一段研报正文的数字与引用是否与抽取事实一致，返回校验结论与审核队列。"
+    "【触发条件】在向用户展示自写的财务分析文字之前必须调用，"
+    "正文里每个数字都要能在 facts 里找到出处。"
+    "【禁止条件】校验未通过时不得照发正文；不得自行宣布校验通过。"
+)
 
 
 def build_web_search_max_results_desc(default: int) -> str:

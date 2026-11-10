@@ -8,9 +8,9 @@
 import uuid
 from contextlib import contextmanager
 
-from ai_agent.kb import meta
-from ai_agent.kb.kg_match import take_by_subject
-from ai_agent.memory.store import store
+from ai_agent.kb.ingest import meta
+from ai_agent.kb.graph.kg_match import take_by_subject
+from ai_agent.storage.store import store
 
 
 # ---------- 元数据抽取 ----------
@@ -287,6 +287,27 @@ def test_resolve_file_identity_fills_company_and_period_from_cover():
     assert out["meta"] == {}
 
 
+def test_resolve_file_identity_keeps_short_filename_over_cover_boilerplate():
+    """短名文件名不能被封面「公开发行证券」套话覆盖。"""
+    cover = "本公司及全体董事保证信息披露真实准确完整。公开发行证券的公司信息披露编报规则"
+    out = meta.resolve_file_identity("北方华创2025年第三季度报告.pdf", cover)
+    assert out["subject"] == "北方华创"
+    assert out["period"] == "2025Q3"
+
+
+def test_resolve_file_identity_upgrades_short_name_when_cover_has_full_legal():
+    cover = "北方华创科技集团股份有限公司\n2025年第三季度报告"
+    out = meta.resolve_file_identity("北方华创2025年第三季度报告.pdf", cover)
+    assert out["subject"] == "北方华创科技集团股份有限公司"
+
+
+def test_is_plausible_subject_rejects_boilerplate():
+    assert not meta.is_plausible_subject("公开发行证券")
+    assert not meta.is_plausible_subject("股份有限公司")
+    assert meta.is_plausible_subject("北方华创")
+    assert meta.is_plausible_subject("中芯国际集成电路制造有限公司")
+
+
 def test_name_in_text_is_whole_string_not_shared_prefix():
     full = "中国能源建设股份有限公司"
     assert meta.name_in_text("中国能源建设的营业收入", full)
@@ -367,7 +388,7 @@ def test_assign_chunk_subjects_splits_only_when_two_companies_appear():
 
 
 def test_extract_table_indicators_keeps_line_items_only():
-    from ai_agent.kb.chunking import extract_table_indicators
+    from ai_agent.kb.ingest.chunking import extract_table_indicators
 
     text = """母公司利润表
 单位：万元
@@ -383,7 +404,7 @@ def test_extract_table_indicators_keeps_line_items_only():
 
 
 def test_extract_table_indicators_reads_html_first_column():
-    from ai_agent.kb.chunking import extract_table_indicators
+    from ai_agent.kb.ingest.chunking import extract_table_indicators
 
     text = (
         "<table><tr><td>项目</td><td>本期</td></tr>"
@@ -407,7 +428,7 @@ def test_keyword_search_also_matches_indicator_names(monkeypatch):
 
 
 def test_rerank_boosts_chunk_whose_indicator_is_named():
-    from ai_agent.kb.retrieval import _boost_indicator_hits
+    from ai_agent.kb.retrieval.retrieval import _boost_indicator_hits
 
     rows = [
         {"indicators": ["营业成本"]},

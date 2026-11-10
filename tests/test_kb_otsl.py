@@ -1,6 +1,6 @@
 """OTSL 收成带合并单元格的 HTML 表，正文不含标记时保持原样。"""
 
-from ai_agent.kb.otsl import finalize_document, render_otsl
+from ai_agent.kb.ingest.otsl import finalize_document, render_otsl
 
 _PAGE = (
     "用<fcel>不适用<fcel>→1,170,945,414.69<fcel>不适用<nl>"

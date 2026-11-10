@@ -60,6 +60,42 @@ def flatten(turns: list[list[ChatMessage]]) -> list[ChatMessage]:
     return [msg for turn in turns for msg in turn]
 
 
+def messages_chars(messages: list[ChatMessage]) -> int:
+    """上下文长度的粗估（字符数）：正文 + tool_calls 参数。
+
+    送模型前的裁剪与收尾时的摘要共用这一个口径，避免「一边按字符裁、
+    一边按轮数摘要」导致被裁掉的历史既不进窗口也不进摘要。
+    """
+    total = 0
+    for msg in messages:
+        total += len(str(msg.get("content") or ""))
+        for call in msg.get("tool_calls") or []:
+            total += len(str(call.get("arguments") or ""))
+    return total
+
+
+def fit_turns(
+    messages: list[ChatMessage], max_chars: int
+) -> tuple[list[list[ChatMessage]], list[ChatMessage]]:
+    """按字符预算从最旧整轮丢弃，返回 (保留轮次, 被丢的消息)。
+
+    system 与摘要对不参与丢弃；最后一个 turn 是当前回合，永不丢。
+    被丢的消息由调用方决定是否并入摘要——它们不该静默蒸发。
+    """
+    system, rest = take_system(messages)
+    summary, rest = take_summary(rest)
+    turns = iter_turns(rest)
+    if max_chars <= 0 or messages_chars(messages) <= max_chars:
+        return turns, []
+    sys_text = str(system[0].get("content") or "") if system else ""
+    overflow: list[ChatMessage] = []
+    while len(turns) > 1:
+        overflow.extend(turns.pop(0))
+        if messages_chars(assemble(sys_text, summary, flatten(turns))) <= max_chars:
+            break
+    return turns, overflow
+
+
 def compact(messages: list[ChatMessage], keep: int) -> list[ChatMessage]:
     system, rest = take_system(messages)
     _, rest = take_summary(rest)
@@ -99,14 +135,32 @@ def compress(
     keep: int,
     old_summary: str = "",
     summarize: Callable[[str, list[ChatMessage]], str] | None = None,
+    max_chars: int = 0,
 ) -> tuple[list[ChatMessage], str]:
+    """压缩出「送下一轮模型的窗口 + 覆盖全部被丢历史的摘要」。
+
+    ``keep`` 是轮数窗口，``max_chars`` 是与 ``_fit_context`` 同一个字符预算。
+    两者都要走：只按轮数压缩时，窗口内几轮大工具输出仍会超预算，送模型前
+    被整轮丢掉的历史既没进摘要也没进长期记忆——用户视角就是模型突然忘事。
+    现在预算挤掉的轮次和轮数窗口外的轮次一起进 ``overflow`` 交摘要。
+    """
     found, rest = take_summary(messages)
     summary = old_summary.strip() or found
     turns = iter_turns(rest)
-    if keep < 0 or len(turns) <= keep:
-        return flatten(turns), summary
-    overflow = flatten(turns[:-keep])
-    recent = flatten(turns[-keep:])
+    overflow: list[ChatMessage] = []
+    if keep >= 0 and len(turns) > keep:
+        overflow = flatten(turns[:-keep])
+        turns = turns[-keep:]
+    if max_chars > 0:
+        system, _ = take_system(messages)
+        sys_text = str(system[0].get("content") or "") if system else ""
+        turns, dropped = fit_turns(
+            assemble(sys_text, summary, flatten(turns)), max_chars
+        )
+        overflow = [*overflow, *dropped]
+    recent = flatten(turns)
+    if not overflow:
+        return recent, summary
     if summarize is None:
         return recent, crude_summary(summary, overflow)
     try:
@@ -136,6 +190,7 @@ class ShortTermMemory:
         max_sessions: int = settings.short_term_memory_max_sessions,
         ttl_seconds: int = settings.short_term_memory_ttl_seconds,
         cleanup_interval_seconds: int = settings.short_term_memory_cleanup_interval_seconds,
+        max_chars: int = settings.llm_context_char_budget,
         clock: Callable[[], float] = monotonic,
     ):
         self._sessions: OrderedDict[tuple[str, str], _Entry] = OrderedDict()
@@ -144,6 +199,7 @@ class ShortTermMemory:
         self._cleaner: Thread | None = None
         self._clock = clock
         self.max_turns = max_turns
+        self.max_chars = max_chars
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
         self.cleanup_interval_seconds = cleanup_interval_seconds
@@ -167,11 +223,28 @@ class ShortTermMemory:
         summary: str = "",
     ) -> None:
         key = (user_id, chat_session_id)
-        _, recent = take_summary(compact(messages, self.max_turns))
+        # 与送模型前的裁剪同口径：轮数窗口之后再按字符预算裁一次，
+        # 保证热缓存里的窗口不会比模型实际看到的更宽（超预算照样被丢）。
+        turns, _ = fit_turns(compact(messages, self.max_turns), self.max_chars)
+        recent = flatten(turns)
         with self._lock:
             self._sessions[key] = _Entry(recent, summary.strip(), self._clock())
             self._sessions.move_to_end(key)
             self._evict()
+
+    def invalidate(self, user_id: str, chat_session_id: str | None = None) -> None:
+        """会话历史被删除/清空时同步失效热缓存。
+
+        不失效的话，DB 已清空但进程内 TTL 内的旧窗口还能被 load 命中，
+        用户会看到「删掉的会话自己回来了」。传 session_id 只清一个会话；
+        不传则清该用户全部会话（对应 clear_chat 的全局清空）。
+        """
+        with self._lock:
+            if chat_session_id is not None:
+                self._sessions.pop((user_id, chat_session_id), None)
+                return
+            for key in [k for k in self._sessions if k[0] == user_id]:
+                del self._sessions[key]
 
     def clear(self) -> None:
         with self._lock:

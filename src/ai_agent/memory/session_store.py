@@ -3,7 +3,8 @@ from __future__ import annotations
 import uuid
 
 from ai_agent.llm.types import ChatMessage
-from ai_agent.memory.db import (
+from ai_agent.memory.short_term import short_term_memory
+from ai_agent.storage.db import (
     DEFAULT_SESSION_TITLE,
     ChatHistoryPage,
     Database,
@@ -115,6 +116,32 @@ class SessionStore(Database):
                 (user_id, chat_session_id),
             )
             conn.commit()
+
+    def attach_report_delivery(self, job_id: str, text: str) -> int:
+        """把已完成研报任务的交付文本写回发起它的那条回答。
+
+        任务表是内存的，进程重启就没了；交付文本落到 ``meta.report_delivery``
+        之后，前端刷新或服务重启都能直接从历史消息里把下载链接渲染出来，
+        不必再依赖 ``GET /v1/report/jobs/{id}``。返回命中的消息条数。
+        """
+        if not job_id or not text:
+            return 0
+        with self._get_pool().connection() as conn:
+            cur = conn.execute(
+                """
+                UPDATE agent_chat_history
+                SET meta = jsonb_set(
+                        coalesce(meta, '{}'::jsonb),
+                        '{report_delivery}',
+                        to_jsonb(%s::text),
+                        true
+                    )
+                WHERE meta->>'report_job_id' = %s
+                """,
+                (text, job_id),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
 
     def replace_chat_after_last_user(
         self, user_id: str, chat_session_id: str, messages: list[ChatMessage]
@@ -401,6 +428,9 @@ class SessionStore(Database):
                     (user_id,),
                 )
             conn.commit()
+        # DB 已清空，进程内热缓存必须一起失效，否则 TTL 内 load 仍会命中旧窗口，
+        # 用户删掉的会话会「自己回来」。事务提交成功后再失效，避免清了缓存但库没清。
+        short_term_memory.invalidate(user_id, chat_session_id)
 
     def create_session(self, user_id: str, idempotency_key: str) -> SessionRecord:
         session_id = str(uuid.uuid4())
@@ -545,6 +575,7 @@ class SessionStore(Database):
                 (user_id, session_id),
             )
             conn.commit()
+        short_term_memory.invalidate(user_id, session_id)
         return True
 
     def cleanup_empty_unnamed_sessions(self, max_age_seconds: int = 3600) -> int:

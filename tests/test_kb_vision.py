@@ -9,7 +9,7 @@ import pytest
 from openai import APIConnectionError, APITimeoutError, NotFoundError
 
 from ai_agent.core.config import settings
-from ai_agent.kb import vision
+from ai_agent.kb.ingest import vision
 
 
 @pytest.fixture(autouse=True)

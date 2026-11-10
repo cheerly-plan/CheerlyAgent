@@ -2,7 +2,7 @@
 
 import pytest
 
-from ai_agent.kb import retrieval
+from ai_agent.kb.retrieval import retrieval
 
 
 @pytest.fixture(autouse=True)

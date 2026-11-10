@@ -10,8 +10,8 @@ import pytest
 from openai import APITimeoutError, NotFoundError
 
 from ai_agent.core.config import settings
-from ai_agent.kb import ocr
-from ai_agent.kb.parsing import parse_segments
+from ai_agent.kb.ingest import ocr
+from ai_agent.kb.ingest.parsing import parse_segments
 from ai_agent.prompts.kb import OCR_DOCUMENT_PROMPT
 
 
@@ -31,10 +31,13 @@ def kb_tmp():
 
     不用 pytest 的 tmp_path：沙箱里它和这个固定根目录抢同一路径，
     目录残留或并发 mkdir 会抛 FileExistsError，用例在进断言前就 ERROR。
-    根目录用 exist_ok 接住残留；收尾只删自己的子目录。
+    根目录已存在时不再调 mkdir(exist_ok=True)：当前沙箱的 shim 直接替换了
+    Path.mkdir，exist_ok 会被无视、照样抛 EEXIST；先 exists() 再建同样
+    安全（用例串行跑，无并发竞争）。
     """
     base = Path(__file__).resolve().parent.parent / ".tmp-kb-test"
-    base.mkdir(exist_ok=True)
+    if not base.exists():
+        base.mkdir()
     path = Path(tempfile.mkdtemp(dir=base))
     try:
         yield path
@@ -138,15 +141,15 @@ def test_timeouts_trip_breaker(kb_tmp, monkeypatch):
 
 
 def test_parse_pdf_uses_ocr_body_and_text_layer_section(kb_tmp, monkeypatch):
-    from ai_agent.kb.parsing import TABLE, TEXT, Segment
+    from ai_agent.kb.ingest.parsing import TABLE, TEXT, Segment
 
     path = _pdf(kb_tmp)
     monkeypatch.setattr(
-        "ai_agent.kb.parsing._pdf_text",
-        lambda _path: ([Segment("文本层旧正文", 2, TEXT, "第十节 财务报告")], []),
+        "ai_agent.kb.ingest.parsing._pdf_text",
+        lambda _path, **_k: ([Segment("文本层旧正文", 2, TEXT, "第十节 财务报告")], []),
     )
     monkeypatch.setattr(
-        "ai_agent.kb.ocr.ocr_pdf",
+        "ai_agent.kb.ingest.ocr.ocr_pdf",
         lambda _path: [
             Segment(
                 "说明\n\n母公司利润表\n<table><tr><td>2,721,444</td></tr></table>\n附注",
@@ -165,11 +168,11 @@ def test_parse_pdf_uses_ocr_body_and_text_layer_section(kb_tmp, monkeypatch):
 
 
 def test_cover_fields_dropped_by_ocr_are_restored_from_text_layer(kb_tmp, monkeypatch):
-    from ai_agent.kb.parsing import TEXT, Segment
+    from ai_agent.kb.ingest.parsing import TEXT, Segment
 
     monkeypatch.setattr(
-        "ai_agent.kb.parsing._pdf_text",
-        lambda _path: (
+        "ai_agent.kb.ingest.parsing._pdf_text",
+        lambda _path, **_k: (
             [
                 Segment(
                     "证券代码：601988\n证券简称：中国银行\n中国银行股份有限公司",
@@ -181,7 +184,7 @@ def test_cover_fields_dropped_by_ocr_are_restored_from_text_layer(kb_tmp, monkey
         ),
     )
     monkeypatch.setattr(
-        "ai_agent.kb.ocr.ocr_pdf",
+        "ai_agent.kb.ingest.ocr.ocr_pdf",
         lambda _path: [Segment("# 中国银行股份有限公司\n2026年第三季度报告", 1, TEXT)],
     )
     segments = parse_segments(_pdf(kb_tmp))
@@ -190,11 +193,11 @@ def test_cover_fields_dropped_by_ocr_are_restored_from_text_layer(kb_tmp, monkey
 
 
 def test_cover_fields_already_in_ocr_are_not_duplicated(kb_tmp, monkeypatch):
-    from ai_agent.kb.parsing import TEXT, Segment
+    from ai_agent.kb.ingest.parsing import TEXT, Segment
 
     monkeypatch.setattr(
-        "ai_agent.kb.parsing._pdf_text",
-        lambda _path: (
+        "ai_agent.kb.ingest.parsing._pdf_text",
+        lambda _path, **_k: (
             [
                 Segment(
                     "证券代码：000625（200625）    证券简称：长安汽车    公告编号：2026-92",
@@ -206,7 +209,7 @@ def test_cover_fields_already_in_ocr_are_not_duplicated(kb_tmp, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "ai_agent.kb.ocr.ocr_pdf",
+        "ai_agent.kb.ingest.ocr.ocr_pdf",
         lambda _path: [
             Segment(
                 "证券代码：000625（200625） 证券简称：长安汽车 公告编号：2026-92\n# 重庆长安汽车",
@@ -221,7 +224,7 @@ def test_cover_fields_already_in_ocr_are_not_duplicated(kb_tmp, monkeypatch):
 
 
 def test_intro_sentence_before_unit_joins_the_table():
-    from ai_agent.kb.parsing import TABLE, TEXT, _split_ocr_markdown
+    from ai_agent.kb.ingest.parsing import TABLE, TEXT, _split_ocr_markdown
 
     text = (
         "主营业务：从事与可再生能源相关的产品和服务分销。\n"
@@ -246,7 +249,7 @@ def test_intro_sentence_before_unit_joins_the_table():
 
 
 def test_title_not_flush_against_table_still_joins_it():
-    from ai_agent.kb.parsing import TABLE, TEXT, _split_ocr_markdown
+    from ai_agent.kb.ingest.parsing import TABLE, TEXT, _split_ocr_markdown
 
     text = (
         "##一、主要财务数据\n\n"
@@ -264,7 +267,7 @@ def test_title_not_flush_against_table_still_joins_it():
 
 
 def test_title_at_end_of_previous_page_joins_next_table():
-    from ai_agent.kb.parsing import TABLE, _split_ocr_markdown
+    from ai_agent.kb.ingest.parsing import TABLE, _split_ocr_markdown
 
     page1 = (
         "<table><tr><td>总资产</td><td>1</td></tr></table>\n"
@@ -286,7 +289,7 @@ def test_title_at_end_of_previous_page_joins_next_table():
 
 
 def test_headings_above_table_stay_on_the_table():
-    from ai_agent.kb.parsing import TABLE, TEXT, _split_ocr_markdown
+    from ai_agent.kb.ingest.parsing import TABLE, TEXT, _split_ocr_markdown
 
     text = (
         "前文说明了口径变化，这段要留在正文。\n\n"
@@ -304,7 +307,7 @@ def test_headings_above_table_stay_on_the_table():
 
 
 def test_statement_scope_skips_unit_line_and_carries_to_next_page():
-    from ai_agent.kb.parsing import TEXT, _split_ocr_markdown
+    from ai_agent.kb.ingest.parsing import TEXT, _split_ocr_markdown
 
     page1 = (
         "## （二）财务报表\n## 合并资产负债表\n2026年9月30日\n"
@@ -330,7 +333,7 @@ def test_statement_scope_skips_unit_line_and_carries_to_next_page():
 
 
 def test_sentence_mentioning_merger_does_not_set_scope():
-    from ai_agent.kb.parsing import _split_ocr_markdown
+    from ai_agent.kb.ingest.parsing import _split_ocr_markdown
 
     text = (
         "本次重组构成同一控制下企业合并，合并报表范围发生变化。\n"
@@ -342,7 +345,7 @@ def test_sentence_mentioning_merger_does_not_set_scope():
 
 
 def test_ocr_page_mark_is_dropped_and_not_used_as_caption():
-    from ai_agent.kb.parsing import TABLE, TEXT, _split_ocr_markdown
+    from ai_agent.kb.ingest.parsing import TABLE, TEXT, _split_ocr_markdown
 
     segments, _carried, _pending = _split_ocr_markdown(
         "1 / 16\n证券代码：600916\n\n合并利润表\n<table><tr><td>1</td></tr></table>\n第 2 页 / 共 16 页",
@@ -358,20 +361,20 @@ def test_ocr_page_mark_is_dropped_and_not_used_as_caption():
 
 
 def test_parse_pdf_falls_back_to_text_layer_when_ocr_missing(kb_tmp, monkeypatch):
-    from ai_agent.kb.parsing import TEXT, Segment
+    from ai_agent.kb.ingest.parsing import TEXT, Segment
 
-    monkeypatch.setattr("ai_agent.kb.ocr.ocr_pdf", lambda _path: None)
+    monkeypatch.setattr("ai_agent.kb.ingest.ocr.ocr_pdf", lambda _path: None)
     monkeypatch.setattr(
-        "ai_agent.kb.parsing._pdf_text",
-        lambda _path: ([Segment("文本层正文", 1, TEXT, "第一节")], [4]),
+        "ai_agent.kb.ingest.parsing._pdf_text",
+        lambda _path, **_k: ([Segment("文本层正文", 1, TEXT, "第一节")], [4]),
     )
-    monkeypatch.setattr("ai_agent.kb.figures._pdf_figures", lambda *_a, **_k: [])
+    monkeypatch.setattr("ai_agent.kb.ingest.figures._pdf_figures", lambda *_a, **_k: [])
     segments = parse_segments(_pdf(kb_tmp))
     assert [(s.text, s.section) for s in segments] == [("文本层正文", "第一节")]
 
 
 def test_section_by_page_carries_forward():
-    from ai_agent.kb.parsing import TEXT, Segment, _section_by_page
+    from ai_agent.kb.ingest.parsing import TEXT, Segment, _section_by_page
 
     pages = _section_by_page(
         [

@@ -14,7 +14,7 @@ from ai_agent.agents.loop import (
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.short_term import SUMMARY_USER_PREFIX, short_term_memory
-from ai_agent.memory.store import MemoryItem
+from ai_agent.storage.store import MemoryItem
 
 
 def _fake_summarize(previous, overflow):
@@ -81,7 +81,7 @@ def test_loop_runs_weather_tool():
         yield ("text", tool_msg["content"])
         yield ("result", {"content": tool_msg["content"], "tool_calls": []})
 
-    from ai_agent.tools import weather as wt
+    from ai_agent.tools.misc import weather as wt
 
     with (
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
@@ -1247,6 +1247,30 @@ def test_must_call_kb_tool_records_entities_when_subject_also_matches(caplog):
     assert "entities=诺安成长混合型证券投资基金" in caplog.text
 
 
+def test_report_generation_skips_forced_kb_retrieval():
+    """生成研报直接走 generate_report，不必先被强制查一轮 kb_search。"""
+    tools = [{"function": {"name": "kb_search"}}, {"function": {"name": "kg_search"}}]
+    messages = [
+        {"role": "user", "content": "生成中国银行2026Q3财报深度分析PDF研报"}
+    ]
+    with (
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value={"中国银行"}),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
+    ):
+        assert _must_call_kb_tool(messages, tools) is False
+
+
+def test_question_about_a_report_still_forces_retrieval():
+    """「研报里说了什么」是检索题，不能被生成类例外误放行。"""
+    tools = [{"function": {"name": "kb_search"}}]
+    messages = [{"role": "user", "content": "中国银行的研报里营收是多少"}]
+    with (
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value={"中国银行"}),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
+    ):
+        assert _must_call_kb_tool(messages, tools) is True
+
+
 def test_run_loop_requires_kb_tool_when_question_names_entity():
     """问句点名图谱实体（不是文件主体）时，同样强制调用知识库工具。"""
     fake_schemas = [
@@ -1282,7 +1306,7 @@ def test_run_loop_requires_kb_tool_when_question_names_entity():
         patch("ai_agent.agents.loop.execute_tool", return_value="命中实体：金仙"),
         patch("ai_agent.kb.retrieval.mentioned_subjects", return_value=set()),
         patch("ai_agent.kb.retrieval.mentioned_entities", return_value=["金仙"]),
-        patch("ai_agent.tools.kg_search.prefetch_neighborhood", return_value=""),
+        patch("ai_agent.tools.kb.kg_search.prefetch_neighborhood", return_value=""),
     ):
         events = list(run_loop([{"role": "user", "content": "金仙的任职"}]))
 
@@ -1305,7 +1329,7 @@ def test_run_loop_injects_graph_neighborhood_before_tools():
         patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
         patch("ai_agent.agents.loop.tool_schemas", return_value=[]),
         patch(
-            "ai_agent.tools.kg_search.prefetch_neighborhood",
+            "ai_agent.tools.kb.kg_search.prefetch_neighborhood",
             return_value=block,
         ) as prefetch,
     ):
@@ -1319,7 +1343,7 @@ def test_run_loop_injects_graph_neighborhood_before_tools():
         patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
         patch("ai_agent.agents.loop.tool_schemas", return_value=[]),
         patch(
-            "ai_agent.tools.kg_search.prefetch_neighborhood",
+            "ai_agent.tools.kb.kg_search.prefetch_neighborhood",
             return_value="",
         ),
     ):
@@ -1887,7 +1911,7 @@ def test_mid_stream_error_is_reported_instead_of_killing_the_stream():
 def test_execute_tool_clamps_out_of_range_args():
     """模型传 depth=3（schema 上限 2）时，夹回边界重试，而不是整次失败。"""
     from ai_agent.tools.registry import _clamp_out_of_range_args
-    from ai_agent.tools.kg_search import KgSearchArgs
+    from ai_agent.tools.kb.kg_search import KgSearchArgs
 
     clamped = _clamp_out_of_range_args(
         KgSearchArgs, {"query": "安克创新", "depth": 3, "top_k": 10}
@@ -1898,7 +1922,7 @@ def test_execute_tool_clamps_out_of_range_args():
 
 def test_clamp_only_touches_out_of_range_numeric_fields():
     from ai_agent.tools.registry import _clamp_out_of_range_args
-    from ai_agent.tools.kg_search import KgSearchArgs
+    from ai_agent.tools.kb.kg_search import KgSearchArgs
 
     clamped = _clamp_out_of_range_args(
         KgSearchArgs, {"query": "安克创新", "depth": 0, "top_k": 99}
@@ -1907,3 +1931,51 @@ def test_clamp_only_touches_out_of_range_numeric_fields():
     assert clamped["top_k"] == 10
     assert clamped["query"] == "安克创新"  # 非数值字段不动
 
+
+
+def test_report_job_id_lands_on_final_assistant_message():
+    """研报任务 id 要随回答落库：刷新后前端凭它续上卡片、把下载链接长回来。"""
+    from ai_agent.tools.progress import emit_event
+
+    calls = {"n": 0}
+
+    def fake_stream(messages, tools, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_job",
+                            "name": "generate_report",
+                            "arguments": {"request": "生成中国银行 2026Q3 研报"},
+                        }
+                    ],
+                },
+            )
+            return
+        yield ("text", "已提交，稍后回来看结果")
+        yield ("result", {"content": "已提交，稍后回来看结果", "tool_calls": []})
+
+    def fake_execute(_name, _arguments):
+        emit_event(
+            {
+                "type": "report_job",
+                "job_id": "job-xyz",
+                "poll_url": "/v1/report/jobs/job-xyz",
+            }
+        )
+        return "已提交研报生成任务：job_id=job-xyz"
+
+    with (
+        patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=fake_execute),
+        patch("ai_agent.agents.loop.store.append_chat") as append,
+    ):
+        run("生成中国银行 2026Q3 研报", chat_session_id="s-job")
+
+    turn = append.call_args.args[2]
+    assert turn[-1]["role"] == "assistant"
+    assert turn[-1]["meta"]["report_job_id"] == "job-xyz"

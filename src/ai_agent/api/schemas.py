@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,6 +48,30 @@ class KbSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=8)
 
 
+class KbCninfoFetchRequest(BaseModel):
+    """从巨潮按股票代码 + 报告期拉取定期报告 PDF 并入库。"""
+
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+    period: str = Field(
+        min_length=4,
+        max_length=7,
+        description="YYYY / YYYYQn / YYYYH1，如 2025Q3",
+    )
+    max_files: int = Field(default=1, ge=1, le=10)
+
+
+class KbUrlIngestRequest(BaseModel):
+    """管理员粘贴巨潮 PDF 直链入库（仅 static.cninfo.com.cn）。"""
+
+    url: str = Field(min_length=12, max_length=500)
+    filename: str = Field(
+        min_length=1,
+        max_length=120,
+        description="规范名（可不带 .pdf），如 中国银行股份有限公司2025年第三季度报告",
+    )
+    tags: list[str] = Field(default_factory=list, max_length=8)
+
+
 class KgBuildRequest(BaseModel):
     """管理员选文件批量生成图谱。"""
 
@@ -61,9 +85,9 @@ class KgBuildRequest(BaseModel):
 class KgRebuildRequest(BaseModel):
     """重建单文件图谱时可选携带抽取配置（文档类型 + 粒度）。
 
-    doc_type 是配置 key（prospectus / annual_report / legal_opinion /
-    due_diligence / announcement / general，或 data/kb_doc_profiles.json
-    里自定义的），不是中文名——后端按 key 找配置块。
+    doc_type 是配置 key（kb/skills 内置：prospectus / annual_report /
+    quarterly_report / legal_opinion / due_diligence / announcement / general，
+    或 data/kb_doc_profiles.json 覆盖/追加），不是中文名——后端按 key 找配置块。
     空串 = 清成全局默认的通用配置。
     """
 
@@ -164,6 +188,128 @@ class AuthResponse(BaseModel):
     expires_at: str
     user: AuthUser
 
+class InspectUser(BaseModel):
+    user_id: str
+    user_name: str
+    username: str
+    is_admin: bool = False
+
+
+class InspectUserList(BaseModel):
+    users: list[InspectUser]
+
+
+class InspectSession(BaseModel):
+    session_id: str
+    title: str
+    updated_at: str
+
+
+class InspectSessionList(BaseModel):
+    user_id: str
+    sessions: list[InspectSession]
+
+
+class InspectStep(BaseModel):
+    """一轮提问之后的单步过程。
+
+    tool 是模型发出的一次工具调用，name 是工具名，例如 kb_search。
+    tool_result 是这次调用的返回，arguments 带回同一次调用的参数。
+    llm 是模型当步写下的正文。
+    """
+
+    kind: str
+    name: str = ""
+    tool_call_id: str = ""
+    content: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class InspectTurn(BaseModel):
+    index: int
+    question: str
+    steps: list[InspectStep]
+
+
+class InspectTurns(BaseModel):
+    user_id: str
+    session_id: str
+    title: str
+    turns: list[InspectTurn]
+
+
 class ResumeRequest(BaseModel):
     run_id: str = Field(min_length=8, max_length=64)
     chat_session_id: SafeId = "default"
+
+
+class ReportRequest(BaseModel):
+    """生成一份研报。
+
+    服务端按确定性流水线跑：解析需求 → 检索抽取 → 计算增减 → 撰写 →
+    校验 → 渲染。正文里的数字只来自知识库表格切片，抽不到的写进 gaps，
+    不补估计值。返回 Markdown 正文、溯源附件、校验结论和人工审核队列；
+    PDF 另落盘，可通过返回的 download_url 下载。
+    """
+
+    request: str = Field(
+        min_length=1,
+        max_length=500,
+        description="一句需求，例如「生成中国能源建设2026Q3财报深度分析PDF研报」",
+    )
+    # 不传时默认 pdf；需求写明只要 Markdown / 不要 PDF 才降为 markdown
+    deliverable: Literal["pdf", "markdown"] | None = Field(
+        default=None, description="交付形态，留空默认 pdf"
+    )
+    # 报告类型（skill 层路由）：留空自动路由（银行/通用公司/行业）
+    report_type: str | None = Field(
+        default=None,
+        max_length=40,
+        description=(
+            "报告类型，留空按需求自动路由。"
+            "可选：bank_financial_report / company_financial_report / industry_report"
+        ),
+    )
+    write_pdf: bool = Field(
+        default=True, description="False 时跳过渲染，只出 Markdown（省渲染开销）"
+    )
+    deep: Literal["off", "skeleton", "full"] = Field(
+        default="full",
+        description=(
+            "深度投资分析旁路，默认 full：与事实层底稿一起交付两份报告。"
+            "full=10 章闭环，约 31 次模型调用、1.5-4 分钟，需确保网关超时大于该时长；"
+            "skeleton=零 LLM 调用的结构化骨架（台账+缺口+checklist）；"
+            "off=只出事实层底稿。"
+            "结论单独落 .deep.json / .deep.md / .deep.pdf，永不并入财报正文；"
+            "PDF 行为见 deep_pdf。"
+        ),
+    )
+    deep_pdf: Literal["separate", "merge"] = Field(
+        default="separate",
+        description=(
+            "深度结论与 PDF 的关系。separate（默认）= 生成两份 PDF：事实层底稿"
+            "保持纯数字事实、沿用现有门禁可自动定稿外发；推断层单独出 "
+            "<stem>.deep.pdf，带警示标注并走独立审核记录，须人工批准后才可下载。"
+            "merge（兼容档）= 把推断层附录追加进同一份 PDF，整份报告追加一条"
+            "人工审核项、禁止自动定稿。deep=off 时本字段忽略；事实层未生成 PDF 时"
+            "两种模式都只落 .deep.json / .deep.md。"
+        ),
+    )
+
+
+class ReportDecisionRequest(BaseModel):
+    """处置一份研报的人工审核队列（M2）。
+
+    item_ids 留空 = 整批处置；approve 全部完成后才可调用 finalize。
+    reset 把已处置的条目退回 pending，用于审错后的重新核对。
+    """
+
+    action: Literal["approve", "reject", "reset"] = Field(
+        description="approve 批准 / reject 驳回 / reset 退回待审"
+    )
+    item_ids: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="要处置的审核项 id；留空表示整批",
+    )
+    note: str = Field(default="", max_length=500, description="审核备注，写进审计记录")

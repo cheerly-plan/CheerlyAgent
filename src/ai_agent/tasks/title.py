@@ -9,7 +9,7 @@ from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import complete_chat, lightweight_llm
 from ai_agent.llm.types import ChatEvent
-from ai_agent.memory.store import DEFAULT_SESSION_TITLE, store
+from ai_agent.storage.store import DEFAULT_SESSION_TITLE, store
 from ai_agent.prompts.tasks import TITLE_SYSTEM
 
 logger = get_logger(__name__)
