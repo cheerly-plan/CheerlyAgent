@@ -47,7 +47,7 @@ class Segment:
 # 待重解析清单——2026-11-10 那次「页码切片 / 续表丢表头」就是靠人工才发现
 # 42 份文件仍是旧规则切出来的。
 # 改动解析、切分、表头/表题处理时**必须**一起改这里。
-PARSER_VERSION = "2026-11-10.1"
+PARSER_VERSION = "2026-11-10.2"
 
 _SUPPORTED = {".pdf", ".docx", ".xlsx", ".xlsm", ".md", ".markdown", ".txt", ".csv"}
 
@@ -561,6 +561,15 @@ def _pdf_text(
     # 表题/表头之下、下一个标题之上的表，才算这一节的
     markers = _section_markers(groups)
 
+    # 表头印在上一页页底的跨页表：把表头接回来（见 _bridge_page_top_headers）
+    tables, bridge_ids = _bridge_page_top_headers(kept_meta, tables, page_heights)
+    if bridge_ids:
+        kept = [ln for ln in kept if id(ln) not in bridge_ids]
+        groups = [
+            replace(sec, lines=[ln for ln in sec.lines if id(ln) not in bridge_ids])
+            for sec in groups
+        ]
+
     # 表题行已经写进表段前缀，别再单独切成「合并资产负债表」这种一行碎片。
     # 只对非标题行动手：真标题在 group_by_section 阶段就离开正文了。
     captioned = _attach_captions(tables, kept_meta)
@@ -603,6 +612,103 @@ def _pdf_text(
         )
     items.sort(key=lambda it: (it[0], it[1]))
     return [seg for _page, _y, seg in items], text_lens
+
+
+_BRIDGE_LABEL = re.compile(r"^(?:项\s*目|科\s*目|项目名称|项\s*目\s*名\s*称)$")
+_BRIDGE_PERIOD = re.compile(r"(年|期|月|度|末|年初)")
+
+
+def _bridge_row(lines: list[sections.Line]) -> list[str] | None:
+    """把「同一水平线上的几行」拼成一行表头（按 x 排序）。
+
+    要求：至少两行、最左一列是「项目/科目」、其余列含年/期这类期间词。
+    不满足就返回 None——接错表头比没有表头更有害。
+    """
+    if len(lines) < 2:
+        return None
+    ordered = sorted(lines, key=lambda ln: ln.bbox[0] if ln.bbox else 0.0)
+    if not _BRIDGE_LABEL.match(ordered[0].text.strip()):
+        return None
+    rest = [ln.text.strip() for ln in ordered[1:] if ln.text.strip()]
+    if not rest or not any(_BRIDGE_PERIOD.search(text) for text in rest):
+        return None
+    return [ordered[0].text.strip(), *rest]
+
+
+def _bridge_page_top_headers(
+    lines: list[sections.Line],
+    tables: list[tuple[int, float, tuple, list[list[str]]]],
+    page_heights: dict[int, float],
+) -> tuple[list[tuple[int, float, tuple, list[list[str]]]], set[int]]:
+    """表头印在**上一页页底**、表体从新页顶部开始的跨页表：把表头接回来。
+
+    这类版式在年报里很常见：分页前最后几行只印了「项目 / 2025 年半年度 /
+    2024 年半年度」，表格框却从下一页顶部才开始，`find_tables` 只认框，
+    于是新页那张表的首行就是「一、营业总收入」，列名退化成「列2/列3」。
+
+    判据全部来自版面事实：表格在页顶、首行不是表头、上一页该表之下有
+    同一水平线的 2+ 行且形状像表头。返回补过头后的表格与「被用掉的行 id」。
+    """
+    from ai_agent.kb.ingest.table_cells import _is_header_row
+    from ai_agent.kb.ingest.tables import _HEAD_CARRY_Y
+
+    if not tables:
+        return tables, set()
+    by_page: dict[int, list[int]] = {}
+    for index, (page, _y, _bbox, _rows) in enumerate(tables):
+        by_page.setdefault(page, []).append(index)
+
+    out = list(tables)
+    used: set[int] = set()
+    for page in sorted(by_page):
+        if page <= 1:
+            continue
+        previous = by_page.get(page - 1)
+        if not previous:
+            continue
+        prev_bottom = max(float(tables[i][2][3]) for i in previous)
+        below = [
+            ln
+            for ln in lines
+            if ln.page == page - 1 and ln.bbox and ln.bbox[1] >= prev_bottom - 2
+        ]
+        if not below:
+            continue
+        # 同一水平线聚簇：y 相差 6pt 以内算一行；取最靠下的那一簇
+        below.sort(key=lambda ln: (ln.bbox[1], ln.bbox[0]))
+        clusters: list[list[sections.Line]] = []
+        for ln in below:
+            if clusters and abs(clusters[-1][0].bbox[1] - ln.bbox[1]) <= 6:
+                clusters[-1].append(ln)
+            else:
+                clusters.append([ln])
+        header: list[str] | None = None
+        header_lines: list[sections.Line] = []
+        for cluster in reversed(clusters):
+            candidate = _bridge_row(cluster)
+            if candidate is not None:
+                header, header_lines = candidate, cluster
+                break
+        if header is None:
+            continue
+
+        for index in by_page[page]:
+            page_no, y0, bbox, rows = tables[index]
+            if y0 > _HEAD_CARRY_Y or not rows or _is_header_row(rows[0]):
+                continue
+            width = max(len(row) for row in rows)
+            if len(header) == width:
+                fitted = header
+            elif len(header) < width:
+                fitted = header + [""] * (width - len(header))
+            else:
+                trimmed = [cell for cell in header if cell]
+                if len(trimmed) != width:
+                    continue
+                fitted = trimmed
+            out[index] = (page_no, y0, bbox, [fitted, *rows])
+            used.update(id(ln) for ln in header_lines)
+    return out, used
 
 
 def _section_markers(

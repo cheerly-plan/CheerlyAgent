@@ -62,13 +62,26 @@ _FOOTER_NO = re.compile(
 _PAGE_NO_ONLY = re.compile(r"^[\s\-–—]*(\d+)\s*[/／]\s*(\d+)[\s\-–—]*$")
 
 
-def _is_running_page_no(ln: Line) -> bool:
-    """``6 / 12`` 且 6 正好是本页页号 → 页脚页码，不管它落在页面什么高度。"""
+def _is_running_page_no(ln: Line, page_total: int = 0) -> bool:
+    """``6 / 12`` 这类页码，不管它落在页面什么高度都删。
+
+    两种判据任一成立即认定是页码：
+    * 前缀正好是本页 PDF 页号（绝大多数模板印刷页 == PDF 页）；
+    * 总数 ≈ 文档总页数（±2）——有的模板封面/TOC 不计号，印刷页 = PDF 页 - 1
+      （实测中微公司 2025H1：第 58 页印「57/188」）。
+
+    只对「N / M」这种形状生效，正文里的比例写成同样形状的概率极低，
+    且还要求 M 与文档总页数对得上。
+    """
     match = _PAGE_NO_ONLY.match(ln.text)
     if match is None:
         return False
     current, total = int(match.group(1)), int(match.group(2))
-    return current == ln.page and 0 < current <= total
+    if not 0 < current <= total:
+        return False
+    if current == ln.page:
+        return True
+    return page_total > 0 and abs(total - page_total) <= 2
 
 TOP_RATIO = 0.07  # 页眉区：页面上部 7%（实测页眉 y=0.052，真标题 y≥0.086）
 REPEAT_TOP_RATIO = 0.09  # 跨页重复文本只在贴顶时才当页眉
@@ -205,6 +218,8 @@ def strip_noise(lines: list[Line], body: float) -> tuple[list[Line], dict[str, i
     pages_by_text: dict[str, set[int]] = defaultdict(set)
     for ln in lines:
         pages_by_text[ln.norm].add(ln.page)
+    # 「N / 总页数」式的页码：总数与文档末页对得上就认（允许 ±2 的封面前置页）
+    page_total = max((ln.page for ln in lines), default=0)
     repeated = {
         t for t, pages in pages_by_text.items() if len(pages) >= 3 and len(t) > 2
     }
@@ -238,7 +253,7 @@ def strip_noise(lines: list[Line], body: float) -> tuple[list[Line], dict[str, i
         if ln.y_ratio >= BOTTOM_RATIO and _FOOTER_NO.match(ln.text):
             stats["页脚(贴底/页码)"] += 1
             continue
-        if _is_running_page_no(ln):
+        if _is_running_page_no(ln, page_total):
             stats["页脚(本页页码)"] += 1
             continue
         if ln.norm in repeated and size_small and ln.y_ratio <= REPEAT_TOP_RATIO:

@@ -1085,3 +1085,59 @@ def test_wide_table_without_header_keeps_column_numbers():
     """三列以上的宽表不编假列名，仍用列号占位。"""
     rows = _ensure_row_header([["甲公司", "100", "2025"]])
     assert rows[0] == ["项目", "列2", "列3"]
+
+
+# --- 表头印在上一页页底 ---------------------------------------------------
+
+
+def _body_line(text: str, page: int, y: float, x: float) -> Line:
+    return line(text, page, 0.6, (x, y, x + 40.0, y + 10.0))
+
+
+def test_bridge_header_from_previous_page_bottom():
+    """北方华创实录：表头印在第 53 页 y≈762，表体从第 54 页顶部开始。"""
+    from ai_agent.kb.ingest.parsing import _bridge_page_top_headers
+
+    lines = [
+        _body_line("项目", 53, 762.0, 60.0),
+        _body_line("2025 年半年度", 53, 763.0, 200.0),
+        _body_line("2024 年半年度", 53, 763.0, 360.0),
+        _body_line("单位：元", 53, 745.0, 60.0),  # 不属于表头簇
+    ]
+    tables = [
+        (53, 72.0, (60.0, 72.0, 500.0, 690.0), [["项目", "期末余额", "期初余额"]]),
+        (54, 72.0, (60.0, 72.0, 500.0, 759.0), [["一、营业总收入", "16,141,546,184.74", "12,463,584,943.88"]]),
+    ]
+    out, used = _bridge_page_top_headers(lines, tables, {53: 842.0, 54: 842.0})
+    assert out[1][3][0] == ["项目", "2025 年半年度", "2024 年半年度"]
+    assert out[1][3][1][0] == "一、营业总收入"
+    # 表头三行被消费掉，不会再多出一片「项目 2025年半年度 2024年半年度」碎片
+    assert len(used) == 3
+
+
+def test_bridge_skips_when_table_already_has_header():
+    from ai_agent.kb.ingest.parsing import _bridge_page_top_headers
+
+    lines = [
+        _body_line("项目", 53, 762.0, 60.0),
+        _body_line("2025 年半年度", 53, 763.0, 200.0),
+    ]
+    tables = [
+        (53, 72.0, (60.0, 72.0, 500.0, 690.0), [["项目", "期末余额"]]),
+        (54, 72.0, (60.0, 72.0, 500.0, 759.0), [["项目", "本期", "上期"], ["营业收入", "1", "2"]]),
+    ]
+    out, used = _bridge_page_top_headers(lines, tables, {53: 842.0, 54: 842.0})
+    assert out[1][3][0] == ["项目", "本期", "上期"]
+    assert used == set()
+
+
+def test_bridge_row_needs_project_label_and_period():
+    from ai_agent.kb.ingest.parsing import _bridge_row
+
+    assert _bridge_row([]) is None
+    assert _bridge_row([_body_line("2025 年半年度", 1, 100.0, 60.0)]) is None
+    # 有「项目」但没有期间词：可能是别的表头，不接
+    assert _bridge_row([
+        _body_line("项目", 1, 100.0, 60.0),
+        _body_line("金额", 1, 100.0, 200.0),
+    ]) is None

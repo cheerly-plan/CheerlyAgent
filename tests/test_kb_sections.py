@@ -523,3 +523,23 @@ def test_ratio_like_body_text_is_not_dropped():
     """不是本页页码、也不贴底：同样的写法可能真是正文/表格内容，不能删。"""
     kept, _ = strip_noise([line("6 / 12", page=3, size=BODY, y=0.5)], BODY)
     assert [ln.text for ln in kept] == ["6 / 12"]
+
+
+def test_running_page_no_tolerates_printed_offset():
+    """中微公司实录：第 58 页印「57/188」——封面前置页让印刷页 = PDF 页 - 1。"""
+    lines = [
+        line("合并资产负债表", page=58, y=0.2),
+        line("57/188", page=58, size=9.0, y=0.5),
+        line("58/188", page=59, size=9.0, y=0.5),
+        line("正文", page=188, y=0.3),  # 文档共 188 页
+    ]
+    kept, stats = strip_noise(lines, BODY)
+    assert [ln.text for ln in kept] == ["合并资产负债表", "正文"]
+    assert stats.get("页脚(本页页码)") == 2
+
+
+def test_ratio_not_matching_document_length_is_kept():
+    """「57/188」若文档只有 20 页、也不是本页号，就不是页码，不能删。"""
+    lines = [line("57/188", page=3, size=BODY, y=0.5), line("正文", page=20, y=0.3)]
+    kept, _ = strip_noise(lines, BODY)
+    assert "57/188" in [ln.text for ln in kept]
