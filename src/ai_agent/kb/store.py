@@ -132,7 +132,7 @@ class KbStore:
                        graph_status, graph_entity_count,
                        graph_batch_done, graph_batch_total, align_status, tags,
                        doc_type, extract_level, description, created_at,
-                       subject, period, subject_aliases
+                       subject, period, subject_aliases, parser_version
                 FROM agent_kb_file
                 WHERE (%(q)s::text = '' OR filename ILIKE %(q_like)s)
                   AND (%(tag)s::text = '' OR %(tag)s = ANY(tags))
@@ -479,6 +479,7 @@ class KbStore:
         chunk_count: int | None = None,
         text_count: int | None = None,
         table_count: int | None = None,
+        parser_version: str = "",
     ) -> None:
         with self._get_pool().connection() as conn:
             conn.execute(
@@ -489,10 +490,19 @@ class KbStore:
                     chunk_count = COALESCE(%s, chunk_count),
                     text_count = COALESCE(%s, text_count),
                     table_count = COALESCE(%s, table_count),
+                    parser_version = COALESCE(NULLIF(%s, ''), parser_version),
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (status, error, chunk_count, text_count, table_count, file_id),
+                (
+                    status,
+                    error,
+                    chunk_count,
+                    text_count,
+                    table_count,
+                    parser_version,
+                    file_id,
+                ),
             )
             conn.commit()
 

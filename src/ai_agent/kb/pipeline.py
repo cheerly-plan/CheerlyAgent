@@ -383,12 +383,15 @@ class KbPipeline:
                 )
             text_n = sum(1 for c in chunks if c.kind == "text")
             table_n = sum(1 for c in chunks if c.kind == "table")
+            from ai_agent.kb.ingest.parsing import PARSER_VERSION
+
             store.update_kb_status(
                 file_id,
                 "ready",
                 chunk_count=done,
                 text_count=text_n,
                 table_count=table_n,
+                parser_version=PARSER_VERSION,
             )
             # 文档摘要 + 摘要向量：切片入库后才有素材。它在检索前回答
             # 「该查哪几份文件」（见 kb/router.py），失败只让这份文件走

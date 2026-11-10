@@ -13,6 +13,7 @@
     uv run python scripts/kb.py meta --name 中行 --subject "中国银行" --period 2026Q3
     uv run python scripts/kb.py summary --all --dry-run --show  # 看文档摘要长什么样
     uv run python scripts/kb.py summary --all                   # 补文档级摘要索引（路由用）
+    uv run python scripts/kb.py doctor                      # 体检：哪些文件该重解析
     uv run python scripts/kb.py coverage --name 中行        # 哪些页没有切片
     uv run python scripts/kb.py lexicon                     # 按当前库重写四字短词表
 
@@ -130,6 +131,13 @@ def _parser() -> argparse.ArgumentParser:
     _add_select(p_summary)
     p_summary.add_argument("--show", action="store_true", help="打印摘要全文")
     p_summary.set_defaults(handler=_cmd_summary)
+
+    p_doctor = sub.add_parser(
+        "doctor", help="体检：解析版本过期 / 数字被劈开 / 占位列头 / 勾稽不平"
+    )
+    p_doctor.add_argument("--name", help="只看匹配的文件")
+    p_doctor.add_argument("--all", action="store_true", help="连正常的文件也列出来")
+    p_doctor.set_defaults(handler=_cmd_doctor)
 
     p_cov = sub.add_parser("coverage", help="看哪些页没有切片")
     p_cov.add_argument("--file", help="文件 id（可只给前缀）")
@@ -571,6 +579,71 @@ def _cmd_summary(args: argparse.Namespace) -> int:
             + (f"\n----\n{text}\n----" if args.show else "")
         )
     print(f"完成 {done} 份" + ("（dry-run，未写库）" if args.dry_run else ""))
+    return 0
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """体检知识库：哪些文件还是旧解析器切的、切出来有没有静默错数。
+
+    只读，不改任何数据。判定三档：
+    * 过期：``parser_version`` 与当前 ``PARSER_VERSION`` 不一致（含空串的旧文件）；
+    * 可疑：切片里出现「数字被劈开」「占位列头」「页码垃圾片」或勾稽不平；
+    * 正常。
+    """
+    from ai_agent.kb.ingest.parsing import PARSER_VERSION
+    from ai_agent.kb.ingest.selfcheck import check_chunks
+    from ai_agent.storage.store import store
+
+    rows = store.list_kb_files()
+    if not rows:
+        print("知识库里还没有文件")
+        return 0
+    if args.name:
+        needle = args.name.lower()
+        rows = [r for r in rows if needle in str(r.get("filename") or "").lower()]
+
+    stale, suspect, healthy = [], [], []
+    for rec in rows:
+        if str(rec.get("status") or "") not in {"ready", "embedding", "parsing"}:
+            continue
+        version = str(rec.get("parser_version") or "")
+        with store._get_pool().connection() as conn:
+            texts = [
+                item["text"]
+                for item in conn.execute(
+                    "SELECT text FROM agent_kb_chunk WHERE file_id = %s",
+                    (rec["file_id"],),
+                ).fetchall()
+            ]
+        issues = check_chunks(texts)
+        expired = version != PARSER_VERSION
+        entry = (rec, version, issues)
+        if expired:
+            stale.append(entry)
+        elif not issues.ok:
+            suspect.append(entry)
+        else:
+            healthy.append(entry)
+
+    print(f"当前解析器版本：{PARSER_VERSION}")
+    print(f"扫描 {len(rows)} 份文件：过期 {len(stale)} / 可疑 {len(suspect)} / 正常 {len(healthy)}\n")
+
+    def show(title: str, items: list) -> None:
+        if not items:
+            return
+        print(title)
+        for rec, version, issues in items:
+            name = str(rec.get("filename") or "")[:38]
+            mark = version or "未记录"
+            print(f"  {name:40s} 切片={issues.chunks:4d} 版本={mark:14s} {issues.summary()}")
+        print()
+
+    show("[过期] 解析规则变了，建议 reparse：", stale)
+    show("[可疑] 切片有数值/结构问题：", suspect)
+    if args.all:
+        show("[正常]", healthy)
+    if stale or suspect:
+        print("重解析：uv run python scripts/kb.py reparse --file <id>（或 --all --yes）")
     return 0
 
 
