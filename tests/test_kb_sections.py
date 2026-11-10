@@ -500,3 +500,26 @@ def test_attach_choice_keeps_punctuation():
         "出借股份情况：☑（已勾选）适用"
     )
     assert _attach_choice("", "☑（已勾选）适用") == "☑（已勾选）适用"
+
+
+def test_page_footer_numbers_are_stripped():
+    """「6 / 12」这类页脚页码不能进切片（季报每页一行，会变成一堆 6 字垃圾切片）。"""
+    lines = [
+        line("合并资产负债表", y=0.2),
+        line("6 / 12", page=6, size=9.0, y=0.915),
+        line("第 7 页 共 12 页", page=7, size=9.0, y=0.92),
+        line("Page 8 of 12", page=8, size=9.0, y=0.93),
+        line("- 9 -", page=9, size=9.0, y=0.94),
+        # 被排版挤到页中：只要 N 等于本页页号，仍然按页码删
+        line("12 / 12", page=12, size=9.0, y=0.5),
+    ]
+    kept, stats = strip_noise(lines, BODY)
+    assert [ln.text for ln in kept] == ["合并资产负债表"]
+    assert stats.get("页脚(贴底/页码)") == 4
+    assert stats.get("页脚(本页页码)") == 1
+
+
+def test_ratio_like_body_text_is_not_dropped():
+    """不是本页页码、也不贴底：同样的写法可能真是正文/表格内容，不能删。"""
+    kept, _ = strip_noise([line("6 / 12", page=3, size=BODY, y=0.5)], BODY)
+    assert [ln.text for ln in kept] == ["6 / 12"]

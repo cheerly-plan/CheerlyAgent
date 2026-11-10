@@ -45,8 +45,30 @@ _CN_TOP = re.compile(r"^([一二三四五六七八九十]+、)\s*(.*)$")
 _CN_SUB = re.compile(r"^（([一二三四五六七八九十]+)）\s*(.*)$")
 # 目录行的点线引导符：………… 或 …… 或 .....
 _TOC_DOTS = re.compile(r"[.．·…]{3,}")
-# 纯页码 / 页脚编号：1-1-141、- 12 -
-_FOOTER_NO = re.compile(r"^[\s\-–—]*\d+([-–—]\d+)*[\s\-–—]*$")
+# 纯页码 / 页脚编号：1-1-141、- 12 -、6 / 12、第 6 页 共 12 页、Page 6 of 12
+_FOOTER_NO = re.compile(
+    r"^[\s\-–—]*"
+    r"(?:"
+    r"\d+\s*[/／]\s*\d+"  # 6 / 12
+    r"|第\s*\d+\s*页(?:\s*[,，]?\s*共\s*\d+\s*页)?"  # 第 6 页 [共 12 页]
+    r"|共\s*\d+\s*页\s*[,，]?\s*第\s*\d+\s*页"  # 共 12 页 第 6 页
+    r"|page\s*\d+\s*(?:of\s*\d+)?"  # Page 6 of 12
+    r"|\d+(?:\s*[-–—]\s*\d+)*"  # 12 / 1-1-141
+    r")"
+    r"[\s\-–—]*$",
+    re.IGNORECASE,
+)
+# 「当前页号 / 总页数」：偶发被排版挤到页中或页顶，单靠贴底位置会漏
+_PAGE_NO_ONLY = re.compile(r"^[\s\-–—]*(\d+)\s*[/／]\s*(\d+)[\s\-–—]*$")
+
+
+def _is_running_page_no(ln: Line) -> bool:
+    """``6 / 12`` 且 6 正好是本页页号 → 页脚页码，不管它落在页面什么高度。"""
+    match = _PAGE_NO_ONLY.match(ln.text)
+    if match is None:
+        return False
+    current, total = int(match.group(1)), int(match.group(2))
+    return current == ln.page and 0 < current <= total
 
 TOP_RATIO = 0.07  # 页眉区：页面上部 7%（实测页眉 y=0.052，真标题 y≥0.086）
 REPEAT_TOP_RATIO = 0.09  # 跨页重复文本只在贴顶时才当页眉
@@ -215,6 +237,9 @@ def strip_noise(lines: list[Line], body: float) -> tuple[list[Line], dict[str, i
         # 资产负债表末的「葛海蛟」正好落在那里。
         if ln.y_ratio >= BOTTOM_RATIO and _FOOTER_NO.match(ln.text):
             stats["页脚(贴底/页码)"] += 1
+            continue
+        if _is_running_page_no(ln):
+            stats["页脚(本页页码)"] += 1
             continue
         if ln.norm in repeated and size_small and ln.y_ratio <= REPEAT_TOP_RATIO:
             stats["页眉(跨页重复)"] += 1
