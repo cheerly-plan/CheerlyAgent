@@ -6,7 +6,12 @@ from pydantic import ValidationError
 
 from ai_agent.core.logging import get_logger
 from ai_agent.core.text import clip_text
-from ai_agent.tools.kb import kb_list_files_tool, kb_search_tool, kg_search_tool
+from ai_agent.tools.kb import (
+    kb_list_files_tool,
+    kb_read_tool,
+    kb_search_tool,
+    kg_search_tool,
+)
 from ai_agent.tools.memory import memory_search_tool, memory_write_tool
 from ai_agent.tools.misc import weather_tool, web_search_tool
 from ai_agent.tools.report import (
@@ -28,6 +33,7 @@ TOOLS = [
     memory_search_tool,
     memory_write_tool,
     kb_list_files_tool,
+    kb_read_tool,
     kb_search_tool,
     kg_search_tool,
     generate_report_tool,
@@ -48,6 +54,8 @@ TOOL_OUTPUT_LIMITS: dict[str, int] = {
     # 任务完成后返回的是一整段带链接的摘要，截断会把深度链接从中间切掉
     "report_job_status": 4000,
     "kb_search": 4000,
+    # 两段式里 kb_read 是模型按需取全文，读 2~3 条就 3k+，给宽一点
+    "kb_read": 6000,
     "report_extract_indicators": 4000,
 }
 

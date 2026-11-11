@@ -7,6 +7,7 @@
 
 import os
 import re
+from contextvars import ContextVar
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -32,6 +33,9 @@ from ai_agent.kb.retrieval.scope import (
 from ai_agent.storage.store import store
 from ai_agent.prompts.tools import (
     KB_EMPTY_HINT,
+    KB_READ_DESC,
+    KB_READ_IDS_DESC,
+    KB_SEARCH_LIST_NOTE,
     KB_ERROR_HINT,
     KB_FILES_DESC,
     KB_FILES_NOT_FOUND_HINT,
@@ -264,6 +268,10 @@ def _kb_search(
     # 引用走旁路交给上层（SSE 下发 + 随消息落库），文本里仍保留
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(relevant))
+    set_last_hits(relevant)
+    if settings.kb_search_list_only:
+        # 影子模式：只回清单，全文由模型用 kb_read 取
+        return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant)}"
     body = "\n\n".join(_format_hit_with_context(hit) for hit in relevant)
     periods: list[str] = []
     for hit in relevant:
@@ -278,6 +286,62 @@ def _kb_search(
         "文中更早的年份是对比列，不是文件的报告期，也不表示库里没有这些年份。"
     )
     return f"{note}\n\n{body}"
+
+
+# 上一轮 kb_search 的命中，按清单编号索引。两段式里 kb_read 靠它取全文。
+# 用 ContextVar 而不是模块级 dict：同一进程里多个会话并行时不会串号。
+_LAST_HITS: ContextVar[dict[int, Hit]] = ContextVar("kb_last_hits", default={})
+
+# 清单预览里把数字打码：模型若直接拿预览作答，至少不会编出一个"看起来对"的金额
+_PREVIEW_NUM = re.compile(r"-?\d[\d,]*\.?\d*")
+
+
+def set_last_hits(hits: list[Hit]) -> None:
+    _LAST_HITS.set({index: hit for index, hit in enumerate(hits, start=1)})
+
+
+def last_hits() -> dict[int, Hit]:
+    return _LAST_HITS.get()
+
+
+def _preview(text: str, limit: int = 60) -> str:
+    """清单预览：压平空白、数字打码、截断。"""
+    body = html_tables_to_markdown(text or "")
+    body = re.sub(r"\s+", " ", body).strip()
+    body = _PREVIEW_NUM.sub("…", body)
+    return body[:limit] + ("…" if len(body) > limit else "")
+
+
+def _format_hit_list(hits: list[Hit]) -> str:
+    """两段式第一段：只给位置 + 打码预览，正文与邻接都不下发。"""
+    lines: list[str] = []
+    for index, hit in enumerate(hits, start=1):
+        where = _format_hit(
+            {
+                "filename": hit.filename,
+                "kind": hit.kind,
+                "page": hit.page,
+                "page_end": hit.page_end,
+                "section": hit.section,
+                "seq": hit.seq,
+                "period": hit.period,
+                "text": "",
+            }
+        ).rstrip("\n")
+        lines.append(f"[{index}] {where}\n    {_preview(hit.text)}")
+    return "\n".join(lines)
+
+
+def _read_hits(ids: list[int]) -> str:
+    """两段式第二段：按编号取全文（含邻接）。"""
+    hits = last_hits()
+    if not hits:
+        return "没有可读取的检索结果，请先调用 kb_search。"
+    picked = [hits[i] for i in ids if i in hits]
+    if not picked:
+        return f"编号不在上一次检索结果里（有效范围 1~{len(hits)}），请重新 kb_search。"
+    add_citations(_citations_of(picked))
+    return "\n\n".join(_format_hit_with_context(hit) for hit in picked)
 
 
 def _user_limited_scope(files: list[str] | None, parsed_ids: list | None) -> bool:
@@ -434,6 +498,22 @@ def _clip_head(text: str) -> str:
     text = text.strip()
     return text if len(text) <= _NEIGHBOR_CLIP else f"{text[:_NEIGHBOR_CLIP]}…"
 
+
+class KbReadArgs(BaseModel):
+    ids: list[int] = Field(description=KB_READ_IDS_DESC)
+    # 与 kb_search 的 args_model 同构，便于 registry 统一校验
+
+
+def _kb_read(ids: list[int]) -> str:
+    return _read_hits(ids)
+
+
+kb_read_tool = Tool(
+    name="kb_read",
+    description=KB_READ_DESC,
+    func=_kb_read,
+    args_model=KbReadArgs,
+)
 
 kb_search_tool = Tool(
     name="kb_search",

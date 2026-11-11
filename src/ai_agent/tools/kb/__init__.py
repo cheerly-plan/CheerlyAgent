@@ -6,7 +6,7 @@
 """
 
 from ai_agent.tools.kb.kb_list import kb_list_files_tool
-from ai_agent.tools.kb.kb_search import kb_search_tool
+from ai_agent.tools.kb.kb_search import kb_read_tool, kb_search_tool
 from ai_agent.tools.kb.kg_search import kg_search_tool
 
-__all__ = ["kb_list_files_tool", "kb_search_tool", "kg_search_tool"]
+__all__ = ["kb_list_files_tool", "kb_read_tool", "kb_search_tool", "kg_search_tool"]
