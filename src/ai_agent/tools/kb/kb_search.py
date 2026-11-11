@@ -7,7 +7,9 @@
 
 import os
 import re
-from contextvars import ContextVar
+import threading
+import uuid
+from collections import OrderedDict
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -35,6 +37,7 @@ from ai_agent.prompts.tools import (
     KB_EMPTY_HINT,
     KB_READ_DESC,
     KB_READ_IDS_DESC,
+    KB_READ_SEARCH_ID_DESC,
     KB_SEARCH_LIST_NOTE,
     KB_ERROR_HINT,
     KB_FILES_DESC,
@@ -268,10 +271,10 @@ def _kb_search(
     # 引用走旁路交给上层（SSE 下发 + 随消息落库），文本里仍保留
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(relevant))
-    set_last_hits(relevant)
+    search_id = set_last_hits(relevant, search_id=uuid.uuid4().hex[:8])
     if settings.kb_search_list_only:
         # 影子模式：只回清单，全文由模型用 kb_read 取
-        return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant)}"
+        return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant, search_id)}"
     body = "\n\n".join(_format_hit_with_context(hit) for hit in relevant)
     periods: list[str] = []
     for hit in relevant:
@@ -288,20 +291,43 @@ def _kb_search(
     return f"{note}\n\n{body}"
 
 
-# 上一轮 kb_search 的命中，按清单编号索引。两段式里 kb_read 靠它取全文。
-# 用 ContextVar 而不是模块级 dict：同一进程里多个会话并行时不会串号。
-_LAST_HITS: ContextVar[dict[int, Hit]] = ContextVar("kb_last_hits", default={})
+# 上一次 kb_search 的命中，按清单编号索引，kb_read 靠它取全文。
+#
+# **不能用 ContextVar**：工具跑在线程池的工作线程里（loop._run_tool_with_progress），
+# 每次调用都是新上下文，写进去的缓存在下一个工具调用里读不到——实测表现为
+# kb_search 给了清单、kb_read 却回「没有可读取的检索结果」，模型于是反复重查
+# 直到耗尽步数预算。改成进程级缓存，按 (用户, 检索编号) 索引。
+_HIT_CACHE: "OrderedDict[tuple[str, str], dict[int, Hit]]" = OrderedDict()
+_HIT_CACHE_LOCK = threading.Lock()
+_HIT_CACHE_MAX = 64
+_LAST_SEARCH: dict[str, str] = {}  # 用户 → 最近一次检索编号（模型漏填时的兜底）
 
 # 清单预览里把数字打码：模型若直接拿预览作答，至少不会编出一个"看起来对"的金额
 _PREVIEW_NUM = re.compile(r"-?\d[\d,]*\.?\d*")
 
 
-def set_last_hits(hits: list[Hit]) -> None:
-    _LAST_HITS.set({index: hit for index, hit in enumerate(hits, start=1)})
+def set_last_hits(hits: list[Hit], *, search_id: str = "latest") -> str:
+    """缓存本次命中，返回检索编号（模型要把它抄进 kb_read）。"""
+    from ai_agent.storage.db import current_user_id
+
+    user = current_user_id() or "-"
+    payload = {index: hit for index, hit in enumerate(hits, start=1)}
+    with _HIT_CACHE_LOCK:
+        _HIT_CACHE[(user, search_id)] = payload
+        _HIT_CACHE.move_to_end((user, search_id))
+        while len(_HIT_CACHE) > _HIT_CACHE_MAX:
+            _HIT_CACHE.popitem(last=False)
+        _LAST_SEARCH[user] = search_id
+    return search_id
 
 
-def last_hits() -> dict[int, Hit]:
-    return _LAST_HITS.get()
+def last_hits(search_id: str | None = None) -> dict[int, Hit]:
+    from ai_agent.storage.db import current_user_id
+
+    user = current_user_id() or "-"
+    with _HIT_CACHE_LOCK:
+        key = (user, search_id or _LAST_SEARCH.get(user, ""))
+        return dict(_HIT_CACHE.get(key) or {})
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -312,9 +338,11 @@ def _preview(text: str, limit: int = 60) -> str:
     return body[:limit] + ("…" if len(body) > limit else "")
 
 
-def _format_hit_list(hits: list[Hit]) -> str:
+def _format_hit_list(hits: list[Hit], search_id: str = "") -> str:
     """两段式第一段：只给位置 + 打码预览，正文与邻接都不下发。"""
     lines: list[str] = []
+    if search_id:
+        lines.append(f"检索编号：{search_id}（调 kb_read 时原样带上）")
     for index, hit in enumerate(hits, start=1):
         where = _format_hit(
             {
@@ -332,9 +360,9 @@ def _format_hit_list(hits: list[Hit]) -> str:
     return "\n".join(lines)
 
 
-def _read_hits(ids: list[int]) -> str:
+def _read_hits(ids: list[int], search_id: str | None = None) -> str:
     """两段式第二段：按编号取全文（含邻接）。"""
-    hits = last_hits()
+    hits = last_hits(search_id)
     if not hits:
         return "没有可读取的检索结果，请先调用 kb_search。"
     picked = [hits[i] for i in ids if i in hits]
@@ -501,11 +529,11 @@ def _clip_head(text: str) -> str:
 
 class KbReadArgs(BaseModel):
     ids: list[int] = Field(description=KB_READ_IDS_DESC)
-    # 与 kb_search 的 args_model 同构，便于 registry 统一校验
+    search_id: str = Field(default="", description=KB_READ_SEARCH_ID_DESC)
 
 
-def _kb_read(ids: list[int]) -> str:
-    return _read_hits(ids)
+def _kb_read(ids: list[int], search_id: str = "") -> str:
+    return _read_hits(ids, search_id or None)
 
 
 kb_read_tool = Tool(

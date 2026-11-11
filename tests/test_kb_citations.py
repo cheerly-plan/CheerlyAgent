@@ -51,6 +51,8 @@ def test_kb_search_names_the_periods_it_actually_hit(monkeypatch):
     hit.period = "2025Q3"
     monkeypatch.setattr(kb_tool.store, "has_ready_kb_file", lambda: True)
     monkeypatch.setattr(kb_tool, "search_knowledge_multi", lambda *a, **kw: [hit])
+    # 这条断言针对「完整返回」模式；两段式清单里没有报告期抬头
+    monkeypatch.setattr(kb_tool.settings, "kb_search_list_only", False)
     text = kb_tool._kb_search("持股对比")
     assert text.startswith("本次命中的报告期：2025Q3。")
     assert "2025Q3 · 第3页" in text

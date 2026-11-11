@@ -54,5 +54,29 @@ def test_read_hits_out_of_range():
     assert "有效范围 1~1" in ks._read_hits([9])
 
 
-def test_list_only_flag_off_by_default():
-    assert settings.kb_search_list_only is False
+def test_list_only_flag_declared_off_by_default():
+    """声明默认关（.env 打开后不影响这条断言）。"""
+    from ai_agent.core.config import Settings
+
+    assert Settings.model_fields["kb_search_list_only"].default is False
+
+
+def test_cache_survives_thread_boundary():
+    """工具跑在线程池里：kb_search 与 kb_read 是两次独立调用。
+
+    早先用 ContextVar 存命中，工作线程之间不共享，kb_read 永远读不到——
+    线上表现为模型反复「搜索→读取失败」，直到步数预算耗尽。
+    """
+    import threading
+
+    hits = [_hit(1, 1, "| 负债合计 | 100 |")]
+    ks.set_last_hits(hits, search_id="abc123")
+    got: list[int] = []
+
+    def _other_thread() -> None:
+        got.append(len(ks._read_hits([1], "abc123")))
+
+    worker = threading.Thread(target=_other_thread)
+    worker.start()
+    worker.join()
+    assert got == [1] or got[0] > 0, "跨线程读不到缓存"
