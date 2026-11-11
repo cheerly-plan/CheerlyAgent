@@ -1,5 +1,7 @@
 """表格页 OCR 兜底的判定逻辑（不真的调模型）。"""
 
+from pathlib import Path
+
 from ai_agent.kb.ingest.parsing import TABLE, TEXT, Segment
 from ai_agent.kb.ingest.table_rescue import (
     _candidates,
@@ -42,3 +44,54 @@ def test_candidates_includes_crashed_pages():
 def test_column_count_reads_html_and_markdown():
     assert _column_count("<table><tr><td>a</td><td>b</td><td>c</td></tr></table>") == 3
     assert _column_count("| a | b |\n|---|---|\n| 1 | 2 |") == 2
+
+
+def test_table_blocks_keeps_only_html_tables():
+    """整页 OCR 会把正文也吐出来，只保留 <table> 块，否则正文重复一遍。"""
+    from ai_agent.kb.ingest.table_rescue import _table_blocks
+
+    text = (
+        "## 第二节 公司简介\n\n"
+        "<table><tr><td>股票简称</td><td>汇川技术</td></tr></table>\n\n"
+        "1、公司联系方式\n公司注册地址无变化。\n\n"
+        "<table><tr><td>姓名</td><td>宋君恩</td></tr></table>"
+    )
+    blocks = _table_blocks(text)
+    assert len(blocks) == 2
+    assert all(block.startswith("<table") for block in blocks)
+    assert "公司注册地址" not in "".join(blocks)
+
+
+def test_rescue_drops_every_table_on_the_page(monkeypatch):
+    """OCR 覆盖整页：页内「表头正常」的旧表也要让位，否则同一张表出现两次。"""
+    from ai_agent.kb.ingest import ocr
+    from ai_agent.kb.ingest import table_rescue as rescue
+
+    segments = [
+        Segment("| 项目 | 列2 |\n|---|---|\n| a | 1 |", 7, TABLE),
+        # 这张表头是好的，但它和上面那张在 OCR 里会被一起读出来
+        Segment("| 姓名 | 宋君恩 |", 7, TABLE),
+        Segment("正文段落", 8, TEXT),
+    ]
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(
+        ocr,
+        "ocr_pdf",
+        lambda *_a, **_k: [
+            Segment(
+                "正文段落\n<table><tr><td>股票简称</td><td>汇川技术</td></tr></table>",
+                7,
+                TEXT,
+            )
+        ],
+    )
+    monkeypatch.setattr(rescue, "_page_digit_stream", lambda *_a, **_k: "")
+    monkeypatch.setattr(rescue, "numbers_verified", lambda *_a, **_k: True)
+
+    out, stats = rescue.rescue_table_pages(Path("x.pdf"), segments)
+    page7 = [s for s in out if s.page == 7]
+    assert stats["OCR补回"] == 1
+    assert len(page7) == 1                     # 旧的两张表都被摘掉
+    assert "股票简称" in page7[0].text
+    assert "正文段落" not in page7[0].text       # 正文不重复
+    assert any(s.page == 8 for s in out)        # 别的页不受影响

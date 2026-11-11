@@ -79,6 +79,14 @@ def numbers_verified(ocr_text: str, stream: str) -> bool:
     return hit / len(numbers) >= _MIN_VERIFY_RATE
 
 
+_TABLE_BLOCK = re.compile(r"<table\b[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE)
+
+
+def _table_blocks(text: str) -> list[str]:
+    """OCR 结果里的 HTML 表格块（丢掉它顺手输出的正文）。"""
+    return [match.strip() for match in _TABLE_BLOCK.findall(text or "") if match.strip()]
+
+
 def _column_count(text: str) -> int:
     """表格段的最大列数（HTML 按 <td> 数，Markdown 按 | 数）。"""
     if "<td" in text or "<th" in text:
@@ -147,19 +155,22 @@ def rescue_table_pages(
         if not text:
             stats["无产出"] += 1
             continue
-        # OCR 没认出表格（把表读成了段落）时不能替换：原文至少有表结构
-        if "<table" not in text.lower() and "<table" in old_text.lower():
+        # 只取 OCR 结果里的表格：整页 OCR 同时会吐出这一页的正文，原样插进来
+        # 会和文字层已有的正文重复一遍（实测汇川 p7 的段落、联系人表各出现两次）
+        tables = _table_blocks(text)
+        if not tables:
             stats["校验未过"] += 1
             continue
-        if _column_count(text) > max(_column_count(old_text), 1) * 2:
+        payload = "\n\n".join(tables)
+        if _column_count(payload) > max(_column_count(old_text), 1) * 2:
             logger.info("表格页 OCR 切得过碎 page=%d，保留文字层", page)
             stats["校验未过"] += 1
             continue
-        if not numbers_verified(text, _page_digit_stream(path, page)):
+        if not numbers_verified(payload, _page_digit_stream(path, page)):
             logger.warning("表格页 OCR 数字对不上 page=%d，保留文字层", page)
             stats["校验未过"] += 1
             continue
-        replaced[page] = Segment(text, page, TABLE, segments[indexes[0]].section)
+        replaced[page] = Segment(payload, page, TABLE, segments[indexes[0]].section)
         stats["OCR补回"] += 1
 
     if not replaced:
@@ -167,9 +178,12 @@ def rescue_table_pages(
 
     out: list[Segment] = []
     dropped: set[int] = set()
-    for page, indexes in by_page.items():
-        if page in replaced:
-            dropped.update(indexes)
+    for page in replaced:
+        # 整页 OCR 会把页内每张表都读出来，所以该页**所有**表格段都要让位，
+        # 只摘坏掉的那几段会让没坏的表重复出现
+        for index, seg in enumerate(segments):
+            if (seg.page or 0) == page and seg.kind == TABLE:
+                dropped.add(index)
     for index, seg in enumerate(segments):
         if index in dropped:
             page = seg.page or 0
