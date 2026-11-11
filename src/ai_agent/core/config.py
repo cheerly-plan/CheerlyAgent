@@ -201,6 +201,14 @@ class Settings(BaseSettings):
     # 只对这两类页生效，且必须通过「OCR 数字能在文字层找到」的校验，
     # 校验不过就保留文字层——宁可少补一页，也不能塞进错数。
     kb_table_rescue_enabled: bool = True
+    # 本地 Ollama 的轻量调用是否串行。默认开：本地只有一个模型实例，
+    # 并发时 Ollama 会把上下文切成几份，长 prompt 容易被截断、输出退化成复读，
+    # 进而触发 `prediction aborted, token repeat limit reached`。
+    # 实测并发 12 个也都能成功（快约 25%），所以这是"保险"不是"必须"：
+    # 显存富余、且把 OLLAMA_NUM_PARALLEL / OLLAMA_CONTEXT_LENGTH 调好之后，
+    # 可以设 false 换吞吐。
+    local_llm_serialize: bool = True
+
     # 单次兜底最多处理多少页（防止一份文档把 OCR 预算吃光）
     kb_table_rescue_max_pages: int = 400
 

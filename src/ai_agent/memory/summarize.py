@@ -2,6 +2,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import complete_chat, lightweight_llm
+from ai_agent.llm import metrics
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.gate import jev_noul_batch
@@ -20,6 +21,12 @@ from ai_agent.prompts.memory import (
 )
 
 logger = get_logger(__name__)
+
+
+def _fallback_crude(previous: str, overflow: list[ChatMessage]) -> str:
+    """摘要退回"消息拼接"：计一次数，别让降级悄无声息。"""
+    metrics.incr(metrics.SUMMARY_CRUDE)
+    return crude_summary(previous, overflow)
 
 # 摘要质量校验（Jev 双 Noul 并行）。摘要会每轮注入对话开头直到会话结束，
 # 一条编造内容会持续污染后续上下文，所以生成后加一道独立第二意见。
@@ -72,7 +79,7 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
             raw = _summary_plain(client, model, user_content)
         text = _unwrap_summary(raw)
         if not text:
-            return crude_summary(previous, overflow)
+            return _fallback_crude(previous, overflow)
         verdict = _jev_check(previous, overflow, text)
         if verdict is None:
             # 校验不可用（未配 key / Jev 失败）：fail-open 直接接受
@@ -99,11 +106,11 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
             # 仅遗漏 → 两版里挑较好的接受，crude 不压缩反而更糟
             if fabrication >= _FABRICATION_THRESHOLD:
                 logger.warning("重试后仍疑似编造，回退为摘录")
-                return crude_summary(previous, overflow)
+                return _fallback_crude(previous, overflow)
             logger.warning("重试后仅遗漏，接受重试版")
             return text
         feedback = _retry_feedback(fabrication, omission)
-    return crude_summary(previous, overflow)
+    return _fallback_crude(previous, overflow)
 
 
 def _unwrap_summary(raw: str) -> str:

@@ -24,7 +24,9 @@ import urllib.error
 import urllib.request
 from functools import lru_cache
 
+from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.llm import metrics
 
 logger = get_logger(__name__)
 
@@ -151,7 +153,12 @@ def chat(
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            with _NATIVE_LOCK:
+            serialized = bool(getattr(settings, "local_llm_serialize", True))
+            if serialized:
+                with _NATIVE_LOCK:
+                    with urllib.request.urlopen(request, timeout=timeout or 60) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+            else:
                 with urllib.request.urlopen(request, timeout=timeout or 60) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
             break
@@ -163,6 +170,7 @@ def chat(
                 detail = e.read().decode("utf-8", "replace")[:300]
             except Exception:
                 detail = ""
+            metrics.incr(metrics.NATIVE_ERROR)
             last_error = RuntimeError(f"HTTP {e.code}: {detail or e.reason}")
             if e.code < 500 or attempt == 1:
                 raise last_error from e
@@ -177,6 +185,7 @@ def chat(
     content = str(message.get("content") or "").strip()
     thinking = str(message.get("thinking") or "")
     if not content and thinking:
+        metrics.incr(metrics.NATIVE_EMPTY)
         logger.warning(
             "Ollama 原生接口返回空正文（thinking=%d 字），可能未关闭思考：model=%s",
             len(thinking),

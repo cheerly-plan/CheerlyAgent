@@ -8,6 +8,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import complete_chat, lightweight_llm
+from ai_agent.llm import metrics
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.llm.types import ChatEvent
 from ai_agent.storage.store import DEFAULT_SESSION_TITLE, store
@@ -103,6 +104,7 @@ def generate_session_title(question: str, answer: str = "") -> str:
         logger.warning("标题 JSON 模式失败，退回纯文本模式: %s", e)
         raw = _title_plain(client, model, _title_source(question, answer))
     title = normalize_title(_unwrap_title(raw), question=question)
+    metrics.incr(metrics.TITLE_OK if title and title != _compress_question(question) else metrics.TITLE_FALLBACK)
     logger.info("生成会话标题 question=%s title=%s", question[:40], title)
     return title
 

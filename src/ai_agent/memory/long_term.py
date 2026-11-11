@@ -7,6 +7,7 @@ from typing import Literal
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
+from ai_agent.llm import metrics
 from ai_agent.llm.client import json_response_format
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.facets import (
@@ -115,7 +116,13 @@ def extract_turn_memories(
             return []
     items = _parse_memories(raw)
     if items:
+        metrics.incr(metrics.MEMORY_OK)
         logger.info("长期记忆已抽取 count=%s", len(items))
+    else:
+        # 抽到 0 条是最难发现的降级：可能这轮真没什么可记，也可能模型/网关坏了。
+        # 计数挂在 /health 上，持续为 0 而用户聊了很多就该查了
+        metrics.incr(metrics.MEMORY_ZERO)
+        logger.info("长期记忆本轮无抽取结果 raw_chars=%d", len(raw or ""))
     return items
 
 
