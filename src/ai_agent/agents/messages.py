@@ -155,6 +155,59 @@ def _enforce_budget(fitted: list[ChatMessage], max_chars: int) -> list[ChatMessa
     return fitted
 
 
+_AGED_MARK = "〔本结果 {chars} 字原文已省略{note}；需要细节请重新调用该工具〕"
+
+
+def age_tool_results(
+    messages: list[ChatMessage], keep_turns: int | None = None
+) -> list[ChatMessage]:
+    """把**更早轮次**的工具原文换成一行引用，只留最近 ``keep_turns`` 轮原文。
+
+    当前这轮的工具结果必须完整：模型正在读它、要直接引用里面的数字。
+    真正该精简的是历史轮次——实测 5 轮窗口里工具输出占 96%，而越早的
+    检索结果与当前问题越远，却仍以原文占着位置。
+
+    换掉的只是送模型的那份副本：落库、checkpoint、前端引用都不动。省略行里
+    带上当时的调用参数，模型需要细节时照着再查一次即可（一次检索 0.3 秒，
+    比每轮背几万字便宜）。
+    """
+    from ai_agent.core.config import settings
+
+    keep = settings.tool_result_full_turns if keep_turns is None else keep_turns
+    if keep is None or keep < 0:
+        return messages
+    # 从后往前数 user 消息，定位「轮次」边界
+    user_positions = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    if keep and len(user_positions) <= keep:
+        return messages
+    boundary = user_positions[-keep] if keep else len(messages)
+    calls: dict[str, str] = {}
+    for msg in messages:
+        for call in msg.get("tool_calls") or []:
+            args = call.get("arguments") or {}
+            brief = json.dumps(args, ensure_ascii=False)
+            calls[call.get("id", "")] = f"{call.get('name')}({clip_text(brief, 60)})"
+    out: list[ChatMessage] = []
+    changed = False
+    for index, msg in enumerate(messages):
+        if index >= boundary or msg.get("role") != "tool":
+            out.append(msg)
+            continue
+        content = str(msg.get("content") or "")
+        if len(content) <= 200:
+            out.append(msg)          # 短的没必要换，标记本身可能更长
+            continue
+        head = content.splitlines()[0].strip()
+        note = calls.get(msg.get("tool_call_id", ""), "")
+        stub = _AGED_MARK.format(
+            chars=len(content), note=f"，检索：{note}" if note else ""
+        )
+        out.append({**msg, "content": f"{clip_text(head, 80)}\n{stub}"})
+        changed = True
+    # 没有可老化的内容时返回原对象：调用方依赖「预算充裕就原样返回」的语义
+    return out if changed else messages
+
+
 def _fit_context(messages: list[ChatMessage], max_chars: int) -> list[ChatMessage]:
     """超预算时对送模型的副本做裁剪：从最旧的完整轮次开始整轮丢弃。
 
@@ -163,7 +216,12 @@ def _fit_context(messages: list[ChatMessage], max_chars: int) -> list[ChatMessag
     和它的 tool 结果永远成对，不会因裁剪出现孤儿 tool 消息（会被 API 400）。
     被丢的轮次由收尾的 compress() 用同一个预算并入会话摘要，不再静默蒸发。
     """
-    if max_chars <= 0 or messages_chars(messages) <= max_chars:
+    if max_chars <= 0:
+        return messages
+    # 先给历史轮次的工具原文"老化"成一行引用：这是常规动作，不是超预算才做。
+    # 当前轮永远保留原文（模型正在读它），省的是早就用不上的旧检索结果。
+    messages = age_tool_results(messages)
+    if messages_chars(messages) <= max_chars:
         return messages
     system, rest = take_system(messages)
     summary, _ = take_summary(rest)

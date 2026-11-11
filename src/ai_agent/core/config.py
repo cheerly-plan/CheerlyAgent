@@ -382,6 +382,12 @@ class Settings(BaseSettings):
     # 确认可行再默认打开。关掉时 kb_search 行为与原来逐字一致。
     kb_search_list_only: bool = False
 
+    # 只保留最近 N 轮的工具结果原文，更早的换成一行引用（带当时的调用参数）。
+    # 当前这轮永远完整——模型正在读它；历史轮次的原文才是上下文大头。
+    # 设 0 表示除当前轮外全部省略，设负数关闭。
+    tool_result_full_turns: int = 2
+
+
     kb_doc_route_top_k: int = 6
     # 摘要向量与查询向量的余弦距离上限：超过就认为这份文件和问题无关。
     # 文档级摘要比切片更「泛」，同主题不同公司的距离常常只差 0.05，

@@ -33,7 +33,6 @@ TOOLS = [
     memory_search_tool,
     memory_write_tool,
     kb_list_files_tool,
-    kb_read_tool,
     kb_search_tool,
     kg_search_tool,
     generate_report_tool,
@@ -42,6 +41,13 @@ TOOLS = [
     report_compare_tool,
     report_validate_tool,
 ]
+# kb_read 只服务两段式：清单模式下模型才需要「按编号取全文」。
+# 不开两段式时不注册——否则模型会对着一个永远不会更新的缓存反复调用，
+# 实测把步数预算烧光（kb_read 回「没有可读取的检索结果」→ 重查 → 再读）。
+from ai_agent.core.config import settings as _settings  # noqa: E402
+
+if _settings.kb_search_list_only:
+    TOOLS.append(kb_read_tool)
 TOOLS_MAP = {t.name: t for t in TOOLS}
 _TOOL_SCHEMAS = [t.schema() for t in TOOLS]
 
