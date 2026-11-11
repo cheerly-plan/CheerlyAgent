@@ -42,6 +42,7 @@
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -90,6 +91,16 @@ def normalize_expect(expect: dict) -> list[dict]:
     return [{"filename": expect["filename"], "texts": texts}]
 
 
+def _norm(text: str) -> str:
+    """去掉所有空白再比对。
+
+    PDF 文字层在「数字 单位」之间常有空格（``1,250 万欧元``），手写用例时
+    很容易漏掉；空格差异不该让一条 golden 用例失效，也不该让正确的命中
+    算成 miss。中文财务正文里空白没有语义，直接全去掉最稳。
+    """
+    return re.sub(r"\s+", "", text or "")
+
+
 def validate_cases(cases: list[dict], rows: list[dict]) -> list[tuple[str, str]]:
     """校验用例与当前语料是否对齐，返回 (query, 原因) 列表。
 
@@ -104,7 +115,8 @@ def validate_cases(cases: list[dict], rows: list[dict]) -> list[tuple[str, str]]
                 problems.append((case["query"], f"文件不在库里：{src['filename']}"))
                 continue
             for text in src["texts"]:
-                if not any(text in (r["text"] or "") for r in same_file):
+                needle = _norm(text)
+                if not any(needle in _norm(r["text"]) for r in same_file):
                     hint = "（拼接串？）" if "；" in text else ""
                     problems.append(
                         (
@@ -146,7 +158,7 @@ def hit_rank(hits: list, expect: dict) -> int | None:
         for i, src in enumerate(sources):
             if done[i] or src["filename"] not in (hit.filename or ""):
                 continue
-            if all(piece in text for piece in src["texts"]):
+            if all(_norm(piece) in _norm(text) for piece in src["texts"]):
                 done[i] = True
         if all(done):
             return rank
