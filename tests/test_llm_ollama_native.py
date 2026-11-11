@@ -45,6 +45,8 @@ def test_json_task_disables_thinking(monkeypatch):
     assert body["think"] is False          # 关思考只对结构化任务有效
     assert body["format"] == "json"
     assert body["options"]["num_predict"] == 384
+    # 一点点重复惩罚：小模型在长 JSON 里复读会撞上 Ollama 的 repeat limit
+    assert body["options"]["repeat_penalty"] == 1.1
 
 
 def test_freetext_keeps_thinking_and_enlarges_budget(monkeypatch):

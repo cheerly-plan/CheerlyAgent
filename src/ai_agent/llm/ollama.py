@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from functools import lru_cache
@@ -29,6 +30,11 @@ logger = get_logger(__name__)
 
 # 探测过的网关地址：True = 确认是 Ollama 且支持原生接口
 _PROBE_CACHE: dict[str, bool] = {}
+
+# 本地 Ollama 一次只服务一个请求（模型只有一个，并发会触发 KV 缓存切换）。
+# 实测标题生成与记忆抽取撞在一起时，Ollama 会抛
+# `prediction aborted, token repeat limit reached`，串行化后消失。
+_NATIVE_LOCK = threading.Lock()
 
 
 def _api_base(base_url: str) -> str:
@@ -118,6 +124,10 @@ def chat(
         options["num_predict"] = budget
     if temperature is not None:
         options["temperature"] = temperature
+    if json_mode:
+        # 只给一点点重复惩罚：实测 1.3 会把小模型压成退化输出（标题直接给空串），
+        # 真正治「token repeat limit」的是下面的串行化
+        options.setdefault("repeat_penalty", 1.1)
     payload: dict[str, object] = {
         "model": model,
         "messages": _plain_messages(messages),
@@ -141,8 +151,9 @@ def chat(
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(request, timeout=timeout or 60) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            with _NATIVE_LOCK:
+                with urllib.request.urlopen(request, timeout=timeout or 60) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
             break
         except urllib.error.HTTPError as e:
             # 把响应体带出来：只报「HTTP Error 500」无从判断是模型没加载、
