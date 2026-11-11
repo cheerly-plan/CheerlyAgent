@@ -51,13 +51,21 @@ def _probe(api_base: str) -> bool:
 
 
 def is_ollama(base_url: str) -> bool:
-    """该网关是不是本地 Ollama（带缓存，探测失败按否处理）。"""
+    """该网关是不是本地 Ollama。
+
+    只缓存**成功**的探测结果：失败可能是网关刚好在加载模型/重启，缓存成
+    False 会让整个进程后续都退回兼容口，必须等重启才恢复。
+    """
     api_base = _api_base(base_url)
     if not api_base:
         return False
-    if api_base not in _PROBE_CACHE:
-        _PROBE_CACHE[api_base] = _probe(api_base)
-    return _PROBE_CACHE[api_base]
+    if _PROBE_CACHE.get(api_base):
+        return True
+    ok = _probe(api_base)
+    if ok:
+        _PROBE_CACHE[api_base] = True
+        _probe.cache_clear()
+    return ok
 
 
 def _plain_messages(messages: list[dict]) -> list[dict]:
@@ -123,13 +131,37 @@ def chat(
     if options:
         payload["options"] = options
 
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         f"{_api_base(base_url)}/api/chat",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        data=body,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=timeout or 60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = None
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout or 60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            # 把响应体带出来：只报「HTTP Error 500」无从判断是模型没加载、
+            # 显存不够还是请求非法
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")[:300]
+            except Exception:
+                detail = ""
+            last_error = RuntimeError(f"HTTP {e.code}: {detail or e.reason}")
+            if e.code < 500 or attempt == 1:
+                raise last_error from e
+            logger.warning(
+                "Ollama 原生接口 %s，重试一次：%s", e.code, detail or e.reason
+            )
+        except Exception as e:
+            raise e
+    if data is None:
+        raise last_error or RuntimeError("Ollama 原生接口无响应")
     message = data.get("message") or {}
     content = str(message.get("content") or "").strip()
     thinking = str(message.get("thinking") or "")

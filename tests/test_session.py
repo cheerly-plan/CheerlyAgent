@@ -238,7 +238,9 @@ def test_generate_session_title_uses_question_and_answer(monkeypatch):
     assert "北京天气怎么样" in captured["content"]
     assert "今天晴，20度" in captured["content"]
     assert captured["extra_body"]["enable_thinking"] is False
-    assert captured["max_tokens"] == 48
+    # 64 而不是 48：标题走 JSON 输出（{"title": "…"}），要给包装多留几个 token
+    assert captured["max_tokens"] == 128
+    assert captured["response_format"] == {"type": "json_object"}
 
 
 def test_generate_session_title_does_not_echo_question(monkeypatch):

@@ -8,9 +8,10 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import complete_chat, lightweight_llm
+from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.llm.types import ChatEvent
 from ai_agent.storage.store import DEFAULT_SESSION_TITLE, store
-from ai_agent.prompts.tasks import TITLE_SYSTEM
+from ai_agent.prompts.tasks import TITLE_SYSTEM, TITLE_SYSTEM_JSON
 
 logger = get_logger(__name__)
 
@@ -35,19 +36,62 @@ def normalize_title(raw: str, fallback: str = "", question: str = "") -> str:
     return text or DEFAULT_SESSION_TITLE
 
 
-def generate_session_title(question: str, answer: str = "") -> str:
-    model, client = lightweight_llm(settings.title_model)
+def _title_plain(client, model: str, source: str) -> str:
+    """纯文本兜底：网关不支持 JSON 模式时用老提示词。"""
     try:
-        raw = complete_chat(
+        return complete_chat(
             [
                 {"role": "system", "content": TITLE_SYSTEM},
-                {"role": "user", "content": _title_source(question, answer)},
+                {"role": "user", "content": source},
             ],
             model=model,
             timeout=settings.title_timeout_seconds,
             max_retries=0,
             max_tokens=48,
             client=client,
+        )
+    except LLMError as e:
+        logger.warning("生成会话标题失败，回退为压缩主题: %s", e)
+        return ""
+
+
+_TITLE_IN_JSON = re.compile(r'"title"\s*:\s*"([^"]+)"')
+
+
+def _unwrap_title(raw: str) -> str:
+    """``{"title": "…"}`` → 标题正文；不是 JSON 就当纯文本（网关不支持 JSON 模式时）。
+
+    JSON 被 max_tokens 截断时整串解析不了，用正则把已经写出来的标题捞回来，
+    否则用户会看到「{ "title": "长电科技2026Q3净利润」这种半截 JSON 当标题。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    data = load_llm_json(text)
+    if isinstance(data, dict):
+        value = str(data.get("title") or "").strip()
+        if value:
+            return value
+    match = _TITLE_IN_JSON.search(text)
+    if match:
+        return match.group(1).strip()
+    return text if not text.lstrip().startswith(("{", "[")) else ""
+
+
+def generate_session_title(question: str, answer: str = "") -> str:
+    model, client = lightweight_llm(settings.title_model)
+    try:
+        raw = complete_chat(
+            [
+                {"role": "system", "content": TITLE_SYSTEM_JSON},
+                {"role": "user", "content": _title_source(question, answer)},
+            ],
+            model=model,
+            timeout=settings.title_timeout_seconds,
+            max_retries=0,
+            max_tokens=128,
+            client=client,
+            response_format={"type": "json_object"},
             extra_body={
                 "enable_thinking": False,
                 "chat_template_kwargs": {"enable_thinking": False},
@@ -55,9 +99,10 @@ def generate_session_title(question: str, answer: str = "") -> str:
             },
         )
     except LLMError as e:
-        logger.warning("生成会话标题失败，回退为压缩主题: %s", e)
-        return normalize_title(_compress_question(question), question=question)
-    title = normalize_title(raw, question=question)
+        # JSON 模式不被网关支持时退回纯文本提示词，再失败才用压缩主题
+        logger.warning("标题 JSON 模式失败，退回纯文本模式: %s", e)
+        raw = _title_plain(client, model, _title_source(question, answer))
+    title = normalize_title(_unwrap_title(raw), question=question)
     logger.info("生成会话标题 question=%s title=%s", question[:40], title)
     return title
 
