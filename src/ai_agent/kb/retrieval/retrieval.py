@@ -269,6 +269,7 @@ def search_knowledge_multi(
     ranked = _diversify(
         diversify_query or queries[0], ranked, top_k, per_file=per_file
     )
+    ranked = _merge_same_table_rows(ranked)
     hits = [_to_hit(row) for row in ranked[:top_k]]
     return _attach_neighbors(hits)
 
@@ -343,6 +344,7 @@ def _core_search(
     rows = _diversify(
         diversify_query or query, rows, top_k, per_file=per_file
     )
+    rows = _merge_same_table_rows(rows)
     hits = [_to_hit(row) for row in rows[:top_k]]
     return _attach_neighbors(hits)
 
@@ -1015,6 +1017,134 @@ def _vector_distance(row: dict) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+# 同一张长表被切成多片时，命中常常落在几片不相邻的切片上（1 和 5）。
+# 合并时把中间的空档一起补进来——模型要的数很可能正在空档里——但设上限，
+# 免得一张表把整个上下文吃光。
+_MERGE_MAX_GAP = 2        # 空档最多补 2 片
+_MERGE_MAX_CHARS = 2000   # 合并后的正文上限
+
+
+def _table_header(text: str) -> str:
+    """表格切片的表头指纹：前 3 个非空行（标题 / 表名 / 列名）。"""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return "".join(re.sub(r"\s+", "", ln) for ln in lines[:3])
+
+
+def _merge_same_table_rows(rows: list[dict]) -> list[dict]:
+    """同一文件同一页、表头相同的多片表格合并成一条。
+
+    长表每片都重印表头（刻意的，避免切片独立后失去列名），于是同表几片一起
+    进 top_k，既浪费名额（模型只拿到碎片），又重复占上下文。
+
+    命中不相邻时（seq 1 和 5）按 seq 顺序合并，**空档也补进来**：那是同一张
+    表的中间行，答案可能就在里面。空档超过 ``_MERGE_MAX_GAP`` 片或合并后超过
+    ``_MERGE_MAX_CHARS`` 字就放弃这次合并，保持原样——宁可多占名额，也不能
+    把一张长表整块塞进上下文。
+    """
+    groups: dict[tuple[str, int, str], list[int]] = {}
+    for index, row in enumerate(rows):
+        if (row.get("kind") or "") != "table":
+            continue
+        header = _table_header(row.get("text") or "")
+        if not header:
+            continue
+        key = (str(row.get("file_id")), int(row.get("page") or 0), header)
+        groups.setdefault(key, []).append(index)
+
+    drop: set[int] = set()
+    merged_rows: dict[int, dict] = {}
+    for (file_id, _page, _header), indexes in groups.items():
+        if len(indexes) < 2:
+            continue
+        members = [rows[i] for i in indexes]
+        seqs = sorted(int(m.get("seq") or 0) for m in members)
+        gaps = [
+            seq
+            for seq in range(seqs[0], seqs[-1] + 1)
+            if seq not in set(seqs)
+        ]
+        # 空档小就补进来（同表的中间行，答案可能就在里面）；
+        # 空档大就只合并命中的那几片，中间用一行标注省略——既保住完整的表名
+        # 与列名，也不至于为了一段推测的相关性把整张长表塞进上下文。
+        extra: list[dict] = []
+        if gaps and len(gaps) <= _MERGE_MAX_GAP:
+            extra = _fetch_merged_gap(file_id, seqs, gaps)
+        ordered = sorted([*members, *extra], key=lambda m: int(m.get("seq") or 0))
+        text = _join_table_texts(
+            [(m.get("text") or "", int(m.get("seq") or 0)) for m in ordered]
+        )
+        if len(text) > _MERGE_MAX_CHARS:
+            continue
+        best = min(indexes, key=lambda i: rows[i].get("distance") or 1.0)
+        merged = dict(rows[best])
+        merged["text"] = text
+        merged["seq"] = seqs[0]
+        merged["page_end"] = max(int(m.get("page") or 0) for m in members) or merged.get("page")
+        distances = [m["distance"] for m in members if m.get("distance") is not None]
+        if distances:
+            merged["distance"] = min(distances)
+        merged_rows[best] = merged
+        drop.update(i for i in indexes if i != best)
+
+    if not merged_rows and not drop:
+        return rows
+    out: list[dict] = []
+    for index, row in enumerate(rows):
+        if index in merged_rows:
+            out.append(merged_rows[index])
+        elif index in drop:
+            continue
+        else:
+            out.append(row)
+    return out
+
+
+def _fetch_merged_gap(file_id: str, seqs: list[int], gaps: list[int]) -> list[dict]:
+    """把空档里的切片取回来（同表中间行）。取不到就不补，不影响主流程。"""
+    try:
+        import uuid as _uuid
+
+        pairs = [(_uuid.UUID(file_id), seq) for seq in seqs]
+        grouped = store.kb_chunk_neighbors(pairs, radius=_MERGE_MAX_GAP + 1)
+    except Exception:
+        logger.warning("合并同表切片时读取空档失败，跳过补全", exc_info=True)
+        return []
+    found: list[dict] = []
+    for seq in gaps:
+        rows = grouped.get((file_id, seq)) or []
+        if rows:
+            found.append(dict(rows[0], file_id=file_id))
+    return found
+
+
+def _join_table_texts(segments: list[tuple[str, int]]) -> str:
+    """按 seq 顺序拼接同表切片，重复表头只留第一份；空缺处标注省略。"""
+    if not segments:
+        return ""
+    texts = [text for text, _seq in segments]
+    seqs = [seq for _text, seq in segments]
+    head_lines = [
+        ln for ln in texts[0].splitlines() if ln.strip()
+    ][:3]
+    out = list(texts[0].splitlines())
+    for index, text in enumerate(texts[1:], start=1):
+        omitted = seqs[index] - seqs[index - 1] - 1
+        if omitted > 0:
+            out.append(f"…（同表另有 {omitted} 片未展开）…")
+        lines = text.splitlines()
+        # 跳过与前一片重复的表头行（标题 / 表名 / 列名 / 分隔线）
+        start = 0
+        head_set = {re.sub(r"\s+", "", ln) for ln in head_lines}
+        while start < len(lines) and (
+            not lines[start].strip()
+            or re.sub(r"\s+", "", lines[start]) in head_set
+            or re.fullmatch(r"\|[\s\-|]+\|", lines[start].strip() or "-")
+        ):
+            start += 1
+        out.extend(lines[start:])
+    return "\n".join(out).strip()
 
 
 def _attach_neighbors(hits: list[Hit]) -> list[Hit]:
