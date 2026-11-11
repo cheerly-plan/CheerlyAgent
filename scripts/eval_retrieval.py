@@ -49,6 +49,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ai_agent.core.config import settings  # noqa: E402
+from ai_agent.kb.ingest.chunking import html_tables_to_markdown  # noqa: E402
 from ai_agent.storage.store import store  # noqa: E402
 
 CASES_PATH = Path(__file__).resolve().parent / "cases" / "retrieval_eval_cases.json"
@@ -92,13 +93,21 @@ def normalize_expect(expect: dict) -> list[dict]:
 
 
 def _norm(text: str) -> str:
-    """去掉所有空白再比对。
+    """比对前的归一化：HTML 表转 Markdown + 去掉所有空白。
 
-    PDF 文字层在「数字 单位」之间常有空格（``1,250 万欧元``），手写用例时
-    很容易漏掉；空格差异不该让一条 golden 用例失效，也不该让正确的命中
-    算成 miss。中文财务正文里空白没有语义，直接全去掉最稳。
+    两件事，都是为了让评测看到"模型实际看到的东西"：
+
+    1. **表格格式**：文字层抽出来的表是 Markdown，整页 OCR 兜底的页是 HTML
+       （``<table><tr><td>…``）。生产里 ``kb_search`` 会用
+       ``html_tables_to_markdown`` 转成 Markdown 再给模型，评测若直接拿原始
+       切片比对，凡是带表结构语法（``| 项目 | 本期 |``）的期望串都会误判成 miss。
+    2. **空白**：PDF 文字层在「数字 单位」之间常带空格（``1,250 万欧元``），
+       手写用例容易漏；中文财务正文里空白没有语义，全去掉最稳。
     """
-    return re.sub(r"\s+", "", text or "")
+    raw = text or ""
+    if "<table" in raw.lower():
+        raw = html_tables_to_markdown(raw)
+    return re.sub(r"\s+", "", raw)
 
 
 def validate_cases(cases: list[dict], rows: list[dict]) -> list[tuple[str, str]]:
@@ -141,7 +150,10 @@ def dump_chunks() -> None:
     rows = fetch_chunks()
     print(f"共 {len(rows)} 个切片")
     for row in rows:
-        head = (row["text"] or "").replace("\n", " ")
+        raw = row["text"] or ""
+        if "<table" in raw.lower():
+            raw = html_tables_to_markdown(raw)
+        head = raw.replace("\n", " ")
         print(f"{row['filename']} #{row['seq']} ({row['kind']}, p{row['page']}) | {head[:90]}")
 
 
