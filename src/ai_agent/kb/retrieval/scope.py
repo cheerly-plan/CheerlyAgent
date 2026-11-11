@@ -203,7 +203,11 @@ def _narrow_by_period(
             if period_matches(str(row.get("period") or ""), policy, token)
         ]
     if not kept:
-        narrowed: list[uuid.UUID] | None = file_ids if explicit else []
+        # 显式点名：保持调用方已解析出的范围（用户点名的文件就是范围）。
+        # 路由猜出来的：收窄成空说明**路由猜错了**，此时返回 [] 会被上层当成
+        # 「模型点了不存在的文件」直接回「未找到」，一次检索都不跑；
+        # 退回 None（全库）让向量召回还有机会命中。
+        narrowed: list[uuid.UUID] | None = file_ids if explicit else None
     else:
         narrowed = _parse_file_ids(kept) or (file_ids if explicit else [])
     if policy != "latest":

@@ -100,8 +100,13 @@ def route_files(
         picked = [fid for fid in picked if fid in allowed]
     # 点名已经圈定文件。再用摘要去补，名额会被别的公司占掉，
     # 公司名也剥不掉（范围里混进了没点名的文件）。
+    #
+    # 这里**不截断**：名字匹配是确定性的，问句点到哪家就命中哪家的全部报告。
+    # top_k 是给下面「摘要向量补位」用的上限，套到点名结果上会出事——
+    # 中科飞测有 9 份报告，截到 6 份正好把 2025Q3/2026Q3 丢掉，再按问句里的
+    # 「前三季度」收窄就变成 0 份，整条检索直接判「未找到」。
     if picked:
-        return picked[:top_k]
+        return picked
     try:
         vector = embed_query(text)
     except Exception:
