@@ -129,15 +129,19 @@ def test_model_not_found_stops_later_pages(kb_tmp, monkeypatch):
     assert "missing-ocr" in (ocr.disabled_reason() or "")
 
 
-def test_timeouts_trip_breaker(kb_tmp, monkeypatch):
+def test_timeouts_do_not_trip_breaker(kb_tmp, monkeypatch):
+    """超时只跳过该页：一页卡住不该让后面几十页陪着一起放弃。"""
     monkeypatch.setattr(settings, "kb_ocr_model", "slow-ocr")
     monkeypatch.setattr(settings, "kb_ocr_max_failures", 2)
     fake = _FakeClient(error=APITimeoutError(request=httpx2.Request("POST", "https://x")))
     monkeypatch.setattr(ocr, "_client", fake)
+    monkeypatch.setattr(ocr, "_disabled_reason", None)
 
     assert ocr.ocr_pdf(_pdf(kb_tmp, pages=4)) is None
-    assert fake.calls == 2
-    assert ocr.available() is False
+    # 4 页都试过了，而不是第 2 次超时就熔断停下
+    assert fake.calls == 4
+    assert ocr.available() is True
+    ocr._disabled_reason = None
 
 
 def test_parse_pdf_uses_ocr_body_and_text_layer_section(kb_tmp, monkeypatch):

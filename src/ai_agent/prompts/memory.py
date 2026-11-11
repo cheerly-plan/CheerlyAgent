@@ -133,6 +133,14 @@ SUMMARY_SYSTEM = """
 6. 使用简洁中文陈述句，控制在 400 字以内。
 """
 
+# 本地小模型（qwen3 这类思考型）走原生接口时，自由文本会被思考过程污染，
+# 而 JSON 语法约束能让它 1 秒内直接产出干净内容。摘要本身是一段文字，
+# 包一层 {"summary": "..."} 就能吃到这条快路径，解析失败仍回退纯文本版。
+SUMMARY_SYSTEM_JSON = (
+    SUMMARY_SYSTEM.strip()
+    + '\n\n输出格式：只输出 JSON，形如 {"summary": "摘要正文"}，不要任何其他字段或解释。'
+)
+
 SUMMARY_USER_TEMPLATE = "已有摘要：\n{{PREVIOUS}}\n\n新增对话：\n{{SOURCE}}"
 SUMMARY_USER_FIRST_TEMPLATE = "对话内容：\n{{SOURCE}}"
 

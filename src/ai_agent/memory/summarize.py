@@ -2,6 +2,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import complete_chat, lightweight_llm
+from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.gate import jev_noul_batch
 from ai_agent.memory.short_term import crude_summary, flatten, iter_turns
@@ -12,6 +13,7 @@ from ai_agent.prompts.memory import (
     LABEL_SUMMARY_TO_CHECK,
     OMISSION_INSTRUCTIONS,
     SUMMARY_SYSTEM,
+    SUMMARY_SYSTEM_JSON,
     TURN_KEEP_INSTRUCTIONS,
     build_retry_feedback,
     build_summary_user,
@@ -50,7 +52,7 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
         try:
             raw = complete_chat(
                 [
-                    {"role": "system", "content": SUMMARY_SYSTEM},
+                    {"role": "system", "content": SUMMARY_SYSTEM_JSON},
                     {"role": "user", "content": user_content},
                 ],
                 model=model,
@@ -58,6 +60,7 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
                 max_retries=0,
                 max_tokens=512,
                 client=client,
+                response_format={"type": "json_object"},
                 extra_body={
                     "enable_thinking": False,
                     "chat_template_kwargs": {"enable_thinking": False},
@@ -65,9 +68,9 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
                 },
             )
         except LLMError as e:
-            logger.warning("生成会话摘要失败，回退为摘录: %s", e)
-            return crude_summary(previous, overflow)
-        text = " ".join((raw or "").split()).strip()
+            logger.warning("生成摘要失败，退回纯文本模式: %s", e)
+            raw = _summary_plain(client, model, user_content)
+        text = _unwrap_summary(raw)
         if not text:
             return crude_summary(previous, overflow)
         verdict = _jev_check(previous, overflow, text)
@@ -101,6 +104,41 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
             return text
         feedback = _retry_feedback(fabrication, omission)
     return crude_summary(previous, overflow)
+
+
+def _unwrap_summary(raw: str) -> str:
+    """``{"summary": "..."}`` → 摘要正文；不是 JSON 就原样当正文。
+
+    小概率模型会直接写一段话，这时按纯文本处理，比丢摘要好。
+    """
+    text = " ".join((raw or "").split()).strip()
+    if not text:
+        return ""
+    data = load_llm_json(text)
+    if isinstance(data, dict):
+        value = str(data.get("summary") or "").strip()
+        if value:
+            return " ".join(value.split())
+    return text
+
+
+def _summary_plain(client, model: str, user_content: str) -> str:
+    """JSON 模式不可用时的兜底：老办法，纯文本摘要。"""
+    try:
+        return complete_chat(
+            [
+                {"role": "system", "content": SUMMARY_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+            model=model,
+            timeout=settings.short_term_summary_timeout_seconds,
+            max_retries=0,
+            max_tokens=512,
+            client=client,
+        )
+    except LLMError as e:
+        logger.warning("生成会话摘要失败，回退为摘录: %s", e)
+        return ""
 
 
 def _filter_overflow_turns(overflow: list[ChatMessage]) -> list[ChatMessage]:

@@ -232,6 +232,41 @@ def _delta_reasoning(delta: Any) -> str:
     return ""
 
 
+def _wants_json(response_format: dict[str, Any] | None) -> bool:
+    """``response_format={"type": "json_object"}`` → 原生接口的 ``format="json"``。"""
+    return bool(response_format) and response_format.get("type") == "json_object"
+
+
+def _native_ollama(base: OpenAI):
+    """本地网关确认是 Ollama 时，返回原生调用函数；否则 None。
+
+    只对**本地**网关生效：主网关是线上服务，走原生接口毫无意义；回退路径
+    始终是 OpenAI 兼容调用，所以任何判断失误都只是退化成旧行为。
+    """
+    local_url = (settings.local_llm()[0] or "").rstrip("/")
+    # 测试替身 / 自定义客户端可能没有 base_url：拿不到就不走原生路径
+    base_url = str(getattr(base, "base_url", "") or "").rstrip("/")
+    if not local_url or base_url != local_url:
+        return None
+    from ai_agent.llm import ollama
+
+    if not ollama.is_ollama(base_url):
+        return None
+
+    def _call(messages, *, model, timeout, max_tokens, temperature, json_mode):
+        return ollama.chat(
+            messages,
+            base_url=base_url,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            json_mode=json_mode,
+        )
+
+    return _call
+
+
 def complete_chat(
     messages: list[ChatMessage],
     model: str | None = None,
@@ -265,6 +300,35 @@ def complete_chat(
     if max_retries is not None:
         options["max_retries"] = max_retries
     base = client or _client
+
+    # 本地 Ollama 走原生接口：OpenAI 兼容口不认 think=False，思考型模型会把
+    # max_tokens 全耗在 reasoning 上、content 返回空（见 llm/ollama.py）。
+    native = _native_ollama(base)
+    if native:
+        try:
+            content = native(
+                messages,
+                model=model or settings.model,
+                timeout=timeout,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_mode=_wants_json(response_format),
+            )
+        except Exception as e:  # 原生失败就回退，不让链路挂掉
+            logger.warning("Ollama 原生接口失败，回退 OpenAI 兼容口：%s", e)
+        else:
+            if diagnostics is not None:
+                diagnostics.clear()
+                diagnostics.update(
+                    {
+                        "finish_reason": "stop",
+                        "content_chars": len(content),
+                        "reasoning_chars": 0,
+                        "completion_tokens": None,
+                    }
+                )
+            return content
+
     client = base.with_options(**options) if options else base
     payload: dict[str, Any] = {
         "model": model or settings.model,

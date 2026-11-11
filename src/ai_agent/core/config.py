@@ -380,7 +380,7 @@ class Settings(BaseSettings):
     memory_top_k: int
     memory_score_threshold: float
     memory_merge_threshold: float = 0.7
-    memory_merge_timeout_seconds: float = 8
+    memory_merge_timeout_seconds: float = 30
     memory_model: str = ""
     # 情景记忆存活时间（秒）。episode 是「当前阶段近况」，不是画像：过期后
     # 检索/合并都看不见，后台再物理删除。招股书、天气、游戏点子混在一个
@@ -403,7 +403,7 @@ class Settings(BaseSettings):
     #   不支持会直接 400 —— 调用侧已做降级，退回 off 再跑一次。
     # 默认 off：记忆抽取常走 SMALL_MODEL（可能是 Ollama），贸然开启会整条
     # 链路 400。先在支持 JSON 模式的网关上实测后再打开。
-    memory_extract_json_mode: str = "off"
+    memory_extract_json_mode: str = "json_object"
 
     def local_llm(self) -> tuple[str, str]:
         """向量、整页 OCR 和轻量任务的网关。未单独配置时跟主网关。"""
@@ -432,7 +432,7 @@ class Settings(BaseSettings):
 
     title_model: str = ""
     short_term_summary_model: str = ""
-    short_term_summary_timeout_seconds: float = 12
+    short_term_summary_timeout_seconds: float = 30
     title_timeout_seconds: float = 20
     session_cleanup_interval_seconds: int = 300
     session_empty_max_age_seconds: int = 3600

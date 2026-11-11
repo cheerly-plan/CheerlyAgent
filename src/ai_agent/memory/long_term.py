@@ -100,14 +100,16 @@ def extract_turn_memories(
     # 挂掉。默认 off，行为与开启前一致。
     fmt = json_response_format(settings.memory_extract_json_mode)
     try:
-        raw = complete_memory_chat(messages, max_tokens=384, response_format=fmt)
+        # 768 而不是 384：记忆是 JSON 数组，一次抽两三条就要 250+ token，
+        # 384 会把数组从中间截断（实测只留下第一条），解析出来静默少记
+        raw = complete_memory_chat(messages, max_tokens=768, response_format=fmt)
     except LLMError as e:
         if fmt is None:
             logger.warning("抽取长期记忆失败: %s", e)
             return []
         logger.warning("JSON 模式抽取失败（网关可能不支持），回退 prompt 约束: %s", e)
         try:
-            raw = complete_memory_chat(messages, max_tokens=384)
+            raw = complete_memory_chat(messages, max_tokens=768)
         except LLMError as e2:
             logger.warning("抽取长期记忆失败: %s", e2)
             return []
