@@ -74,3 +74,14 @@ def test_merged_row_keeps_best_distance_and_position():
     merged = _merge_same_table_rows(rows)
     assert merged[0]["distance"] == 0.10   # 合并结果占最佳成员的位置
     assert len(merged) == 2
+
+
+def test_zero_distance_is_treated_as_best():
+    """distance=0.0 是完全匹配，不能被 `or 1.0` 当成最差。"""
+    rows = [
+        _row(37, HEADER + "\n| a | 1 |", distance=0.4),
+        _row(38, HEADER + "\n| b | 2 |", distance=0.0),
+    ]
+    merged = _merge_same_table_rows(rows)
+    assert merged[0]["distance"] == 0.0
+    assert merged[0]["seq"] == 37          # 合并后从头开始

@@ -1077,11 +1077,19 @@ def _merge_same_table_rows(rows: list[dict]) -> list[dict]:
         )
         if len(text) > _MERGE_MAX_CHARS:
             continue
-        best = min(indexes, key=lambda i: rows[i].get("distance") or 1.0)
+        # 距离为 0.0 是完全匹配，不能用 `or 1.0` 兜底（会把最佳成员误判成最差）
+        def _distance(index: int) -> float:
+            value = rows[index].get("distance")
+            return 1.0 if value is None else float(value)
+
+        best = min(indexes, key=_distance)
         merged = dict(rows[best])
         merged["text"] = text
         merged["seq"] = seqs[0]
-        merged["page_end"] = max(int(m.get("page") or 0) for m in members) or merged.get("page")
+        pages = [int(m.get("page") or 0) for m in members if m.get("page")]
+        if pages:
+            merged["page"] = min(pages)
+            merged["page_end"] = max(pages)
         distances = [m["distance"] for m in members if m.get("distance") is not None]
         if distances:
             merged["distance"] = min(distances)

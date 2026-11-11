@@ -178,9 +178,13 @@ def age_tool_results(
         return messages
     # 从后往前数 user 消息，定位「轮次」边界
     user_positions = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    if not user_positions:
+        return messages
+    # keep=0 的语义是「只保留当前轮」，边界要落在**最后一条 user 消息**上；
+    # 直接用 len(messages) 会把当前轮正在用的工具结果也压掉。
     if keep and len(user_positions) <= keep:
         return messages
-    boundary = user_positions[-keep] if keep else len(messages)
+    boundary = user_positions[-keep] if keep else user_positions[-1]
     calls: dict[str, str] = {}
     for msg in messages:
         for call in msg.get("tool_calls") or []:
