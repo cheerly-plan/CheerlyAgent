@@ -367,13 +367,62 @@ def _format_hit_with_context(hit: Hit) -> str:
             "text": "",
         }
     ).rstrip("\n")
+    body = html_tables_to_markdown(hit.text)
     lines = [head]
     for text in hit.before:
-        lines.append(f"〔上文〕{_clip_tail(html_tables_to_markdown(text))}")
-    lines.append(html_tables_to_markdown(hit.text))
+        piece = _useful_neighbor(_clip_tail(html_tables_to_markdown(text)), body)
+        if piece:
+            lines.append(f"〔上文〕{piece}")
+    lines.append(body)
     for text in hit.after:
-        lines.append(f"〔下文〕{_clip_head(html_tables_to_markdown(text))}")
+        piece = _useful_neighbor(_clip_head(html_tables_to_markdown(text)), body)
+        if piece:
+            lines.append(f"〔下文〕{piece}")
     return "\n".join(lines)
+
+
+# 邻接片段与命中片重复到这个比例就不带：长表每片都重复表头，实测算下来
+# 邻接里 200 字有 60% 以上能在命中片里原样找到
+_NEIGHBOR_DUP_RATIO = 0.6
+_NEIGHBOR_MIN_KEEP = 24
+
+
+def _useful_neighbor(piece: str, body: str) -> str:
+    """邻接片段是否值得进上下文：只留真正新增的信息。
+
+    长表格被切成多片时，每片都重复表头（那是刻意的，避免切片独立后失去列名），
+    于是「下文的前 200 字」往往就是命中片开头那两行的复制品——实测邻接占单条
+    命中的 43%，其中大部分是这种重复。这里按两个规则裁：
+
+    * 片段里能在命中片找到的部分先剔掉（按行剥，不破坏表格结构）；
+    * 剩下的实义内容不足 ``_NEIGHBOR_MIN_KEEP`` 字就整段丢弃。
+
+    保留「原因有三：」这类真正的跨片续写——它们本来就不在命中片里。
+    """
+    if not piece.strip():
+        return ""
+    body_compact = _compact(body)
+    kept: list[str] = []
+    dropped = 0
+    for line in piece.splitlines():
+        compact = _compact(line)
+        if not compact:
+            continue
+        # 整行都能在命中片里找到（表头、表格续行）→ 不带
+        if len(compact) >= 8 and compact in body_compact:
+            dropped += 1
+            continue
+        kept.append(line)
+    text = "\n".join(kept).strip()
+    # 只有「确实删掉了东西、而剩下的又没什么实义」才整段丢；
+    # 本来就短的邻接（一句话的续写）不算重复，要留
+    if dropped and len(_compact(text)) < _NEIGHBOR_MIN_KEEP:
+        return ""
+    return text
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")
 
 
 def _clip_tail(text: str) -> str:
