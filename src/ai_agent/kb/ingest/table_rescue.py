@@ -96,6 +96,51 @@ def _column_count(text: str) -> int:
     return max(widths) if widths else 0
 
 
+# 整个单元格只由数字组成、且空格分隔出 ≥3 个数：列被压扁了。
+# 在全库 12147 个表格切片上标定：这条命中 38 片（0.31%），抽查全是真故障；
+# 放宽成「单格 ≥3 个数字」会命中 1920 片，因为 2026年9月30日 这种日期里
+# 也带着三个数字，所以必须要求整格只有数字。
+_PURE_NUMBERS = re.compile(r"^-?\d[\d,.]*(?:\s+-?\d[\d,.]*){2,}$")
+
+# 表头出现同一个字符连续 4 次以上（`年年年年年年年年2025 …`）：find_tables 把
+# 「年」「月」各当成一列的结果。样本少（全库 8 片），只作为辅助信号。
+_REPEAT_CHARS = re.compile(r"(.)\1{3,}")
+
+
+def _table_cells(text: str) -> list[list[str]]:
+    """切成二维单元格；HTML 表先转 Markdown。"""
+    from ai_agent.kb.ingest.chunking import html_tables_to_markdown
+
+    raw = html_tables_to_markdown(text) if "<table" in (text or "").lower() else (text or "")
+    grid: list[list[str]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if all(re.fullmatch(r"-{2,}", cell or "-") for cell in cells):
+            continue  # 分隔行
+        grid.append(cells)
+    return grid
+
+
+def collapsed_cells(text: str) -> int:
+    """「多个数值被塞进同一格」的单元格数。"""
+    count = 0
+    for cells in _table_cells(text):
+        count += sum(1 for cell in cells if _PURE_NUMBERS.match(cell))
+    return count
+
+
+def has_repeated_header(text: str) -> bool:
+    """表头是否出现连续重复字符（表头被按字切碎的特征）。"""
+    for cells in _table_cells(text)[:4]:
+        for cell in cells:
+            if len(cell) <= 30 and _REPEAT_CHARS.search(cell):
+                return True
+    return False
+
+
 def _candidates(segments: list[Segment], crashed_pages: set[int]) -> dict[int, list[int]]:
     """页 → 该页上「坏掉的表格段」下标。"""
     by_page: dict[int, list[int]] = {}
@@ -103,7 +148,13 @@ def _candidates(segments: list[Segment], crashed_pages: set[int]) -> dict[int, l
         page = seg.page or 0
         if page <= 0:
             continue
-        broken = seg.kind == TABLE and _PLACEHOLDER.search(seg.text or "")
+        text = seg.text or ""
+        # 三类坏表：表头变占位「列2」、列被压扁（多个数值挤一格）、表头被切碎
+        broken = seg.kind == TABLE and (
+            _PLACEHOLDER.search(text)
+            or collapsed_cells(text) >= 1
+            or has_repeated_header(text)
+        )
         if broken or page in crashed_pages:
             if seg.kind == TABLE or page in crashed_pages:
                 by_page.setdefault(page, []).append(index)

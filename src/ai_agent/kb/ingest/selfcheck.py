@@ -35,6 +35,7 @@ class FileIssues:
     page_marks: int = 0
     placeholder_tables: int = 0
     split_numbers: list[str] = field(default_factory=list)
+    collapsed_tables: int = 0
     identity_failures: list[str] = field(default_factory=list)
     tiny_chunks: int = 0
 
@@ -43,6 +44,7 @@ class FileIssues:
         return not (
             self.page_marks
             or self.placeholder_tables
+            or self.collapsed_tables
             or self.split_numbers
             or self.identity_failures
         )
@@ -55,6 +57,8 @@ class FileIssues:
             bits.append(f"数字被劈开 {len(self.split_numbers)}")
         if self.placeholder_tables:
             bits.append(f"占位列头表 {self.placeholder_tables}")
+        if self.collapsed_tables:
+            bits.append(f"列被压扁的表 {self.collapsed_tables}")
         if self.identity_failures:
             bits.append(f"恒等式不成立 {len(self.identity_failures)}")
         return "、".join(bits) if bits else "正常"
@@ -127,6 +131,18 @@ def check_balance_identity(texts: list[str]) -> list[str]:
     return problems
 
 
+def _collapsed(text: str) -> bool:
+    """这张表是否「多个数值被塞进同一格」（列被压扁）。
+
+    实测中国银行利润表：`| 一、营业收入 | 162,201 491,204 133,776 391,889 … |`
+    —— 8 个数字挤在一格里，模型无法判断哪个是母公司、哪个是 1-9 月。
+    这类页面会被 `table_rescue` 送 OCR 重出，这里只负责在 `doctor` 里点名。
+    """
+    from ai_agent.kb.ingest.table_rescue import collapsed_cells
+
+    return collapsed_cells(text) > 0
+
+
 def check_chunks(texts: list[str]) -> FileIssues:
     """对一份文件的全部切片做体检。"""
     issues = FileIssues(chunks=len(texts))
@@ -138,6 +154,8 @@ def check_chunks(texts: list[str]) -> FileIssues:
             issues.tiny_chunks += 1
         if _PLACEHOLDER.search(text):
             issues.placeholder_tables += 1
+        if _collapsed(text):
+            issues.collapsed_tables += 1
         for line in text.splitlines():
             if not line.startswith("|"):
                 continue

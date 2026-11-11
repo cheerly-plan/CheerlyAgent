@@ -95,3 +95,37 @@ def test_rescue_drops_every_table_on_the_page(monkeypatch):
     assert "股票简称" in page7[0].text
     assert "正文段落" not in page7[0].text       # 正文不重复
     assert any(s.page == 8 for s in out)        # 别的页不受影响
+
+
+def test_collapsed_cells_detects_crammed_numbers():
+    """中国银行利润表实录：8 个数字挤在一格 → 列被压扁。"""
+    from ai_agent.kb.ingest.table_rescue import collapsed_cells
+
+    text = (
+        "| 项目 | 本期 |\n|---|---|\n"
+        "| 一、营业收入 | 162,201 491,204 133,776 391,889 169,462 526,365 |"
+    )
+    assert collapsed_cells(text) == 1
+
+
+def test_collapsed_cells_ignores_dates():
+    """2026年9月30日 里也有三个数字，但不能当成压扁的表。"""
+    from ai_agent.kb.ingest.table_rescue import collapsed_cells
+
+    text = "| 项目 | 日期 |\n|---|---|\n| 报表日 | 2026年9月30日 |"
+    assert collapsed_cells(text) == 0
+
+
+def test_collapsed_cells_works_on_html_tables():
+    from ai_agent.kb.ingest.table_rescue import collapsed_cells
+
+    html = "<table><tr><td>营业收入</td><td>1 2 3 4</td></tr></table>"
+    assert collapsed_cells(html) == 1
+
+
+def test_repeated_header_detects_split_year_column():
+    """`年年年年年年年年2025` 是 find_tables 按字切表头的产物。"""
+    from ai_agent.kb.ingest.table_rescue import has_repeated_header
+
+    assert has_repeated_header("| 年年年年年年年年2025 | 2026 |\n|---|---|\n| a | 1 |")
+    assert not has_repeated_header("| 项目 | 2026年 |\n|---|---|\n| a | 1 |")
