@@ -148,7 +148,7 @@ def test_column_limit_allows_multi_period_reports():
         "|---|---|---|---|---|---|\n"
         "| a | 1 | 2 | 3 | 4 | 5 |\n| b | 6 | 7 | 8 | 9 | 10 |"
     )
-    assert _column_limit(old) >= 13
+    assert _column_limit(old) >= 13      # 13 列的多期间报表要放行
 
 
 def test_column_limit_still_catches_shredded_output():
@@ -156,3 +156,23 @@ def test_column_limit_still_catches_shredded_output():
 
     normal = "| 项目 | 本期 |\n|---|---|\n| a | 1 |"
     assert _column_limit(normal) <= _COLUMN_CAP
+
+
+def test_ocr_merged_subtotal_cell_is_not_flagged():
+    """OCR 会把末尾小计列并进一格（3 个数）；对 OCR 结果按 4 个起算。"""
+    from ai_agent.kb.ingest.table_rescue import collapsed_cells
+
+    html = (
+        "<table><tr><td>四、本期期末余额</td>"
+        "<td>30,235,334,684.73 464,468,866.63 30,699,803,551.36</td></tr></table>"
+    )
+    assert collapsed_cells(html) == 1              # 兜底触发用 3
+    assert collapsed_cells(html, min_values=4) == 0  # 体检用 4，不再报可疑
+
+
+def test_column_limit_is_absolute_cap():
+    """文字层列数不可信（占位/压扁），只看绝对上限。"""
+    from ai_agent.kb.ingest.table_rescue import _COLUMN_CAP, _column_limit
+
+    placeholder = "| 项目 | 列2 | 列3 |\n|---|---|---|\n| a | 1 | 2 |"
+    assert _column_limit(placeholder) == _COLUMN_CAP >= 15

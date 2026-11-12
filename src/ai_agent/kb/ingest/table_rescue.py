@@ -101,13 +101,14 @@ def _column_limit(old_text: str) -> int:
     * 中大力德所有者权益变动表：文字层 6 列，OCR 13 列（12 个期间列），
       2.17 倍同样被挡，但那 13 列是对的。
 
-    所以：列被压扁的页按绝对上限判断；其余放宽到 3 倍（多列报表常见），
-    两者都不超过 ``_COLUMN_CAP``。真正防"读错数"的是数字校验那一道。
+    全量重跑后仍有 7 份文件的页卡在这一闸上（文字层 3~4 列、OCR 11~15 列，
+    全是所有者权益变动表 / 子公司明细这类多列报表，数字校验全过）。倍数关系
+    在这些页上没有意义——文字层的列数本身就是错的。
+
+    所以只保留绝对上限 ``_COLUMN_CAP``：30 列以上才认为是切碎的字符网格。
+    真正防"读错数"的是数字校验那一道，它对这些页全部通过。
     """
-    old = _column_count(old_text)
-    if collapsed_cells(old_text) > 0:
-        return _COLUMN_CAP
-    return min(_COLUMN_CAP, max(old, 1) * 3)
+    return _COLUMN_CAP
 
 
 def _column_count(text: str) -> int:
@@ -147,11 +148,23 @@ def _table_cells(text: str) -> list[list[str]]:
     return grid
 
 
-def collapsed_cells(text: str) -> int:
-    """「多个数值被塞进同一格」的单元格数。"""
+_NUM_TOKEN = re.compile(r"^-?\d[\d,.]*$")
+
+
+def collapsed_cells(text: str, *, min_values: int = 3) -> int:
+    """「多个数值被塞进同一格」的单元格数。
+
+    ``min_values``：一格里至少几个数字才算。文字层塌陷通常是 3 个以上（长电
+    那页把 ``2,725,687,70`` 拆成三截）；而 OCR 输出的表**天然**会把末尾的
+    小计列并进一格（汇川 p74 出现 ``30,235,334,684.73 464,468,866.63 …``），
+    对已经兜底过的页按 4 个起算，免得同一条告警永远消不掉、反复重跑。
+    """
     count = 0
     for cells in _table_cells(text):
-        count += sum(1 for cell in cells if _PURE_NUMBERS.match(cell))
+        for cell in cells:
+            parts = cell.split()
+            if len(parts) >= min_values and all(_NUM_TOKEN.match(p) for p in parts):
+                count += 1
     return count
 
 

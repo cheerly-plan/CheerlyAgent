@@ -140,7 +140,10 @@ def _collapsed(text: str) -> bool:
     """
     from ai_agent.kb.ingest.table_rescue import collapsed_cells
 
-    return collapsed_cells(text) > 0
+    # OCR 兜底过的页（HTML 表）把阈值提到 4：OCR 会把末尾小计列并进一格，
+    # 3 个数字就算塌陷会让这些页永远报可疑、逼着用户反复重跑
+    ocr_table = (text or "").lstrip().startswith("<table")
+    return collapsed_cells(text, min_values=4 if ocr_table else 3) > 0
 
 
 def check_chunks(texts: list[str]) -> FileIssues:
