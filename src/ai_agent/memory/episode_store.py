@@ -139,10 +139,10 @@ class EpisodeStore(Database):
         cutoff = settings.memory_score_threshold if threshold is None else threshold
         with self._get_pool().connection() as conn:
             hits = self._similar_episodes(conn, vector, uid, top_k, cutoff)
-        # 第 4 步：检索命中即登记观察证据、刷新 TTL 基准。只挂在 search_episode
-        # 上——write_episode 内部为合并做的 _similar_episodes 不算「被记起」。
-        # 开关关闭时零额外 SQL，失败只记日志，绝不影响召回结果。
-        if settings.memory_promotion_enabled and hits:
+        # 检索命中即登记观察证据、刷新 TTL 基准。只挂在 search_episode 上——
+        # write_episode 内部为合并做的 _similar_episodes 不算「被记起」。
+        # 失败只记日志，绝不影响召回结果。
+        if hits:
             try:
                 self.record_episode_hits([hit.id for hit in hits], user_id=uid)
             except Exception:
@@ -172,13 +172,11 @@ class EpisodeStore(Database):
             ORDER BY embedding <=> %s
             LIMIT %s
             """
-        # 第 4 步：命中续期写的是 last_seen_at，检索若仍只看 created_at，
-        # 续期过的老记忆会留在库里却永远召不回，TTL 续期就成了空操作。
-        # 默认关闭时这段 SQL 逐字保持原样。
-        if settings.memory_promotion_enabled:
-            sql = sql.replace(
-                "OR created_at >=", "OR COALESCE(last_seen_at, created_at) >="
-            )
+        # 命中续期写的是 last_seen_at，检索若仍只看 created_at，续期过的老记忆
+        # 会留在库里却永远召不回，TTL 续期就成了空操作。
+        sql = sql.replace(
+            "OR created_at >=", "OR COALESCE(last_seen_at, created_at) >="
+        )
         rows = conn.execute(
             sql, (vector, user_id, ttl, ttl, vector, threshold, vector, k)
         ).fetchall()
@@ -202,32 +200,18 @@ class EpisodeStore(Database):
         )
         if ttl <= 0:
             return 0
-        # 第 4 步：命中续期 + 高热度保留 + 长期未命中降权。默认关闭时下面
-        # 的原 DELETE 逻辑逐字不变；开启后失败返回 0（宁可漏删，不误删刚
-        # 被反复用到的记忆）。
-        if settings.memory_promotion_enabled:
-            try:
-                return self.decay_and_cleanup_episodes(
-                    ttl_seconds=ttl,
-                    decay_seconds=settings.memory_promotion_decay_seconds,
-                    min_hits=settings.memory_promotion_min_hits,
-                    user_id=user_id,
-                )
-            except Exception:
-                logger.exception("渐进式情景记忆清理失败，本轮不删除")
-                return 0
-        where = "created_at < now() - (%s * interval '1 second')"
-        params: list[object] = [ttl]
-        if user_id:
-            where += " AND user_id = %s"
-            params.append(user_id)
-        with self._get_pool().connection() as conn:
-            result = conn.execute(
-                f"DELETE FROM agent_episode WHERE {where}",
-                params,
+        # 命中续期 + 高热度保留 + 长期未命中降权；失败返回 0（宁可漏删，
+        # 不误删刚被反复用到的记忆）。
+        try:
+            return self.decay_and_cleanup_episodes(
+                ttl_seconds=ttl,
+                decay_seconds=settings.memory_promotion_decay_seconds,
+                min_hits=settings.memory_promotion_min_hits,
+                user_id=user_id,
             )
-            conn.commit()
-            return result.rowcount or 0
+        except Exception:
+            logger.exception("渐进式情景记忆清理失败，本轮不删除")
+            return 0
 
     def _upsert_episode(
         self, conn: Connection, item: MemoryItem, vector: Vector

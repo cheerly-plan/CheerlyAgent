@@ -1,11 +1,11 @@
 """渐进式记忆 · 第 5 步：L4 蒸馏归档（决策 + 编排层）。
 
-第 4 步把「观察 → 复现 → 候选 → 人工批准」打通了，但批准完的结论和
+第 4 步把「观察 → 跨会话复现 → 候选 → 证据达标自动晋升」打通了，但晋升后的结论和
 长期高热度近况没有沉淀去向：episode 仍会因 TTL 慢慢降权退场，候选表只留
 状态。L4 做两件事：
 
-1. **蒸馏**：把「人工批准过的候选」和「跨会话、高热度 episode」写成
-   归档副本（幂等、带出处与审核人），供事后回溯；
+1. **蒸馏**：把「已晋升的候选」和「跨会话、高热度 episode」写成
+   归档副本（幂等、带出处），供事后回溯；
 2. **按需展开**：归档**永不自动进 system 人格块**，只能被
    ``GET /v1/memory/archive`` 或 ``expand_memory`` 显式取回，排序用
    ``progressive.relevance`` 的确定性 bigram（零 LLM / 零向量）。
@@ -15,9 +15,8 @@
 - **不搬空热库**：归档只是副本，episode / 画像 / 检索结果一字不改；
 - **不自动放行事实**：含数字条目能进归档，不代表能进画像，出处门禁仍在
   第 4 步的 ``evaluate_candidate`` 里，本模块不做任何事实判定；
-- **依赖第 4 步**：``memory_archive_enabled`` 必须与
-  ``memory_promotion_enabled`` 同时为真才生效（episode 证据列与候选表
-  都由第 4 步的 DDL 创建），单独打开只返回 disabled、零 DB 访问；
+- **恒定开启**：没有总开关；归档的准入由证据门槛（``memory_archive_min_*``）
+  决定，任一 DB 异常只返回空结果；
 - **fail-open**：任何 DB 异常只记日志，后台任务/接口返回空结果，不影响主对话。
 """
 
@@ -36,9 +35,8 @@ _ARCHIVE_TEXT_MAX = 800
 
 
 def archive_enabled() -> bool:
-    return bool(
-        settings.memory_archive_enabled and settings.memory_promotion_enabled
-    )
+    """归档恒定开启（没有总开关，级别由晋升梯的证据门槛控制）。"""
+    return True
 
 
 def _as_memory_item(row: dict, user_id: str) -> MemoryItem:

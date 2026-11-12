@@ -43,39 +43,6 @@ def _items() -> list[MemoryItem]:
 # ——— 默认分支：行为零变化 ———
 
 
-def test_default_settings_are_conservative():
-    assert settings.memory_progressive_enabled is False
-    assert settings.memory_index_top_k > 0
-    assert settings.memory_index_max_chars > 0
-
-
-def test_disabled_profile_prompt_is_byte_identical(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", False)
-    items = _items()
-    with patch("ai_agent.agents.loop.store.list_profile", return_value=items):
-        from ai_agent.agents import loop
-
-        assert loop._profile_prompt("u", user_input="研报深度层红框") == format_profile_block(items)
-
-
-def test_disabled_system_prompt_ignores_user_input(monkeypatch):
-    """新增的 user_input 参数在默认分支里不得改变任何输出。"""
-    monkeypatch.setattr(settings, "memory_progressive_enabled", False)
-    items = _items()
-    with (
-        patch("ai_agent.agents.loop.store.list_profile", return_value=items),
-        patch("ai_agent.agents.loop.skill_catalog", return_value=""),
-    ):
-        from ai_agent.agents import loop
-
-        baseline = loop._system_prompt("u", use_kb=False)
-        assert loop._system_prompt("u", use_kb=False, user_input="研报深度层红框") == baseline
-        assert format_profile_block(items) in baseline
-
-
-# ——— 索引块 ———
-
-
 def test_index_contains_header_note_and_relevant_items():
     items = _items()
     block, trace = build_memory_index(
@@ -182,7 +149,6 @@ def test_trace_emit_never_raises_on_broken_logger():
 
 
 def test_progressive_failure_falls_back_to_full_profile(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", True)
     items = _items()
     fake_logger = MagicMock()
     with (
@@ -199,7 +165,6 @@ def test_progressive_failure_falls_back_to_full_profile(monkeypatch):
 
 
 def test_enabled_end_to_end_injects_index_into_system_prompt(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", True)
     monkeypatch.setattr(settings, "memory_index_top_k", 2)
     monkeypatch.setattr(settings, "memory_index_max_chars", 800)
     items = _items()
@@ -238,29 +203,7 @@ def _episodes() -> list[MemoryItem]:
     ]
 
 
-def test_recall_disabled_by_default_does_not_touch_store(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", False)
-    monkeypatch.setattr(settings, "memory_auto_recall_enabled", False)
-    with patch("ai_agent.agents.loop.store.search_episode") as spy:
-        from ai_agent.agents import loop
-
-        assert loop._recall_block("u", "研报约定") == ""
-    spy.assert_not_called()
-
-
-def test_recall_requires_both_switches(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", False)
-    monkeypatch.setattr(settings, "memory_auto_recall_enabled", True)
-    with patch("ai_agent.agents.loop.store.search_episode") as spy:
-        from ai_agent.agents import loop
-
-        assert loop._recall_block("u", "研报约定") == ""
-    spy.assert_not_called()
-
-
 def test_recall_requires_non_empty_question(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", True)
-    monkeypatch.setattr(settings, "memory_auto_recall_enabled", True)
     with patch("ai_agent.agents.loop.store.search_episode") as spy:
         from ai_agent.agents import loop
 
@@ -269,8 +212,6 @@ def test_recall_requires_non_empty_question(monkeypatch):
 
 
 def test_recall_injects_hits_with_configured_k(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", True)
-    monkeypatch.setattr(settings, "memory_auto_recall_enabled", True)
     monkeypatch.setattr(settings, "memory_auto_recall_top_k", 3)
     with patch(
         "ai_agent.agents.loop.store.search_episode", return_value=_episodes()
@@ -286,8 +227,6 @@ def test_recall_injects_hits_with_configured_k(monkeypatch):
 
 
 def test_recall_fail_open_on_store_error(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", True)
-    monkeypatch.setattr(settings, "memory_auto_recall_enabled", True)
     with patch(
         "ai_agent.agents.loop.store.search_episode", side_effect=RuntimeError("db down")
     ):
@@ -315,24 +254,7 @@ def test_format_recall_block_empty_hits():
     assert format_recall_block([], max_chars=400) == ""
 
 
-def test_system_prompt_disabled_has_no_recall_block(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", False)
-    monkeypatch.setattr(settings, "memory_auto_recall_enabled", False)
-    with (
-        patch("ai_agent.agents.loop.store.list_profile", return_value=_items()),
-        patch("ai_agent.agents.loop.skill_catalog", return_value=""),
-    ):
-        from ai_agent.agents import loop
-
-        prompt = loop._system_prompt("u", use_kb=False, user_input="研报约定")
-        again = loop._system_prompt("u", use_kb=False, user_input="研报约定")
-    assert "【相关情景记忆（自动召回）】" not in prompt
-    assert again == prompt
-
-
 def test_system_prompt_enabled_includes_recall_block(monkeypatch):
-    monkeypatch.setattr(settings, "memory_progressive_enabled", True)
-    monkeypatch.setattr(settings, "memory_auto_recall_enabled", True)
     monkeypatch.setattr(settings, "memory_index_top_k", 2)
     with (
         patch("ai_agent.agents.loop.store.list_profile", return_value=_items()),
@@ -414,14 +336,6 @@ def test_expand_memory_no_hits_gives_explicit_hint():
         patch("ai_agent.tools.memory.memory.store.search_episode", return_value=[]),
     ):
         assert expand_memory("任意", kind="all") == "没有找到可展开的记忆条目"
-
-
-def test_registry_default_excludes_expand_memory():
-    from ai_agent.tools import registry
-
-    names = [s["function"]["name"] for s in registry.tool_schemas()]
-    assert "expand_memory" not in names
-    assert "expand_memory" not in registry.TOOLS_MAP
 
 
 def test_registry_exposes_expand_memory_when_enabled():

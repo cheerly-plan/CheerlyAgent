@@ -67,13 +67,7 @@ class MemoryStore(
             # 与旧版逐字一致。开启后先探测再删：一条失败的 DELETE 会让
             # psycopg 把事务置为 aborted，前面两个 DELETE 也会跟着回滚；
             # to_regclass 查不到只返回 NULL，不会报错。
-            from ai_agent.core.config import settings
-
-            optional_tables = []
-            if settings.memory_promotion_enabled:
-                optional_tables.append("agent_memory_candidate")
-            if settings.memory_archive_enabled:
-                optional_tables.append("agent_memory_archive")
+            optional_tables = ["agent_memory_candidate", "agent_memory_archive"]
             for table in optional_tables:
                 exists = conn.execute(
                     f"SELECT to_regclass('{table}') AS t"

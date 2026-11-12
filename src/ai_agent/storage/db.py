@@ -722,7 +722,7 @@ class Database:
             # 开关关闭时**连 DDL 都不执行**，老库保持原 schema 逐字不变；
             # 打开后首次启动用 ADD COLUMN IF NOT EXISTS + 默认值平滑升级，
             # 已有 episode 自动得到 hit_count=0 / 空会话集合，无需数据迁移。
-            if settings.memory_promotion_enabled:
+            if True:  # 渐进式记忆恒定开启：证据列与候选表始终建好
                 for column, definition in (
                     ("hit_count", "INT NOT NULL DEFAULT 0"),
                     ("last_seen_at", "TIMESTAMPTZ"),
@@ -766,9 +766,9 @@ class Database:
                     ON agent_memory_candidate (user_id, status)
                     """
                 )
-            # 第 5 步 L4 蒸馏归档：独立开关，关闭时连 DDL 都不执行。
-            # 归档是**只读副本 + 审计沉淀**，不搬空热库、不参与检索排序。
-            if settings.memory_archive_enabled:
+            # 第 5 步 L4 蒸馏归档：归档是**只读副本 + 审计沉淀**，
+            # 不搬空热库、不参与检索排序。
+            if True:  # 恒定开启，没有总开关
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS agent_memory_archive (

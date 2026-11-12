@@ -160,24 +160,22 @@ def test_evaluate_episode_reject_beats_everything():
 # ---------- 纯函数：候选审核与衰减 ----------
 
 
-def test_candidate_never_auto_promotes_without_approval():
-    d = evaluate_candidate(_candidate())
-    assert (d.stage, d.reason) == ("hold", "awaiting_approval")
-
-
 def test_candidate_holds_on_duplicate_or_missing_source():
     assert evaluate_candidate(_candidate(), duplicate=True).reason == "duplicate"
-    assert evaluate_candidate(
-        _candidate(text="占比 42%", source=""), approved=True
-    ).reason == "missing_source"
-    assert evaluate_candidate(
-        _candidate(session_seen=1), approved=False
-    ).reason == "insufficient_evidence"
+    assert (
+        evaluate_candidate(_candidate(text="占比 42%", source="")).reason
+        == "missing_source"
+    )
+    assert (
+        evaluate_candidate(_candidate(session_seen=1)).reason
+        == "insufficient_evidence"
+    )
 
 
-def test_candidate_promotes_only_when_approved():
-    d = evaluate_candidate(_candidate(), approved=True)
-    assert (d.stage, d.reason) == ("promote", "approved")
+def test_candidate_promotes_on_evidence_without_approval():
+    """跨会话复现够数就晋升 —— 不再需要人工逐条批准。"""
+    d = evaluate_candidate(_candidate())
+    assert (d.stage, d.reason) == ("promote", "evidence")
 
 
 def test_decay_reduces_heat_instead_of_deleting():
@@ -196,16 +194,7 @@ def test_should_retain_keeps_hot_episodes():
 # ---------- 编排层：observe / reject ----------
 
 
-def test_observe_is_noop_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    touch = MagicMock()
-    monkeypatch.setattr(store, "touch_episode_session", touch)
-    assert observe_episode(_item(), user_id="u1", chat_session_id="s1") is None
-    touch.assert_not_called()
-
-
 def test_observe_records_candidate_when_evidence_met(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     monkeypatch.setattr(store, "touch_episode_session", lambda *a, **k: (5, 3))
     upsert = MagicMock()
     monkeypatch.setattr(store, "upsert_candidate", upsert)
@@ -216,7 +205,6 @@ def test_observe_records_candidate_when_evidence_met(monkeypatch):
 
 
 def test_observe_stays_observe_when_evidence_weak(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     monkeypatch.setattr(store, "touch_episode_session", lambda *a, **k: (1, 1))
     upsert = MagicMock()
     monkeypatch.setattr(store, "upsert_candidate", upsert)
@@ -226,7 +214,6 @@ def test_observe_stays_observe_when_evidence_weak(monkeypatch):
 
 
 def test_observe_deletes_candidate_on_explicit_reject(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     monkeypatch.setattr(store, "touch_episode_session", lambda *a, **k: (5, 5))
     delete = MagicMock(return_value=1)
     monkeypatch.setattr(store, "delete_candidates_matching", delete)
@@ -238,44 +225,13 @@ def test_observe_deletes_candidate_on_explicit_reject(monkeypatch):
 
 
 def test_observe_fails_open_on_db_error(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     monkeypatch.setattr(
         store, "touch_episode_session", MagicMock(side_effect=RuntimeError("db down"))
     )
     assert observe_episode(_item(), user_id="u1", chat_session_id="s1") is None
 
 
-def test_reject_candidates_respects_switch_and_fails_open(monkeypatch):
-    delete = MagicMock(return_value=2)
-    monkeypatch.setattr(store, "delete_candidates_matching", delete)
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    assert reject_candidates("某条记忆", user_id="u1") == 0
-    assert reject_candidates("   ", user_id="u1") == 0
-    delete.assert_not_called()
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
-    assert reject_candidates("某条记忆", user_id="u1") == 2
-    monkeypatch.setattr(
-        store, "delete_candidates_matching", MagicMock(side_effect=RuntimeError("x"))
-    )
-    assert reject_candidates("某条记忆", user_id="u1") == 0
-
-
-# ---------- 编排层：候选审核 ----------
-
-
-def test_review_is_noop_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    listing = MagicMock()
-    monkeypatch.setattr(store, "list_candidates", listing)
-    monkeypatch.setattr(store, "list_candidate_users", listing)
-    assert review_pending_candidates(user_id="u1") == 0
-    assert review_all_pending_candidates() == 0
-    listing.assert_not_called()
-
-
 def test_review_holds_candidates_by_default(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
-    monkeypatch.setattr(settings, "memory_promotion_auto_approve", False)
     monkeypatch.setattr(
         store,
         "list_candidates",
@@ -293,8 +249,6 @@ def test_review_holds_candidates_by_default(monkeypatch):
 
 
 def test_review_promotes_when_approved_and_profile_accepts(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
-    monkeypatch.setattr(settings, "memory_promotion_auto_approve", True)
     monkeypatch.setattr(
         store,
         "list_candidates",
@@ -315,8 +269,6 @@ def test_review_promotes_when_approved_and_profile_accepts(monkeypatch):
 
 
 def test_review_does_not_mark_promoted_when_deduped(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
-    monkeypatch.setattr(settings, "memory_promotion_auto_approve", True)
     monkeypatch.setattr(
         store,
         "list_candidates",
@@ -336,14 +288,6 @@ def test_review_does_not_mark_promoted_when_deduped(monkeypatch):
     mark.assert_not_called()
 
 
-def test_approve_candidate_is_noop_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    get = MagicMock()
-    monkeypatch.setattr(store, "get_candidate", get)
-    assert approve_candidate("c1", user_id="u1") is False
-    get.assert_not_called()
-
-
 def _pending_row(**kwargs):
     row = dict(
         id="c1", text="用中文回答", facet="preference", source="",
@@ -354,7 +298,6 @@ def _pending_row(**kwargs):
 
 
 def test_approve_candidate_writes_profile_and_marks_promoted(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     monkeypatch.setattr(store, "get_candidate", lambda *a, **k: _pending_row())
     monkeypatch.setattr(
         "ai_agent.memory.profile.apply_profile_action", lambda *a, **k: _item("用中文回答")
@@ -366,7 +309,6 @@ def test_approve_candidate_writes_profile_and_marks_promoted(monkeypatch):
 
 
 def test_approve_candidate_still_blocks_numbers_without_source(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     monkeypatch.setattr(
         store, "get_candidate", lambda *a, **k: _pending_row(text="占比 42%", source="")
     )
@@ -377,7 +319,6 @@ def test_approve_candidate_still_blocks_numbers_without_source(monkeypatch):
 
 
 def test_approve_candidate_rejects_non_pending_and_dedup(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     monkeypatch.setattr(
         store, "get_candidate", lambda *a, **k: _pending_row(status="rejected")
     )
@@ -393,7 +334,6 @@ def test_approve_candidate_rejects_non_pending_and_dedup(monkeypatch):
 
 
 def test_review_all_iterates_users(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     seen: list[str] = []
     monkeypatch.setattr(store, "list_candidate_users", lambda **k: ["u1", "u2"])
     monkeypatch.setattr(
@@ -409,7 +349,6 @@ def test_review_all_iterates_users(monkeypatch):
 
 
 def test_search_episode_has_no_hit_sql_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
     obj, sink = _fake_store(monkeypatch, rows=[])
     monkeypatch.setattr(
         "ai_agent.memory.episode_store.embed_query", lambda q: [0.1] * 8
@@ -419,7 +358,6 @@ def test_search_episode_has_no_hit_sql_when_disabled(monkeypatch):
 
 
 def test_search_episode_records_hits_when_enabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     rows = [
         dict(id="e1", user_id="u1", text="在学 BFF", created_at="2026-01-01", score=0.9)
     ]
@@ -435,7 +373,6 @@ def test_search_episode_records_hits_when_enabled(monkeypatch):
 
 
 def test_search_episode_fails_open_when_hit_recording_breaks(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     rows = [
         dict(id="e1", user_id="u1", text="在学 BFF", created_at="2026-01-01", score=0.9)
     ]
@@ -449,18 +386,7 @@ def test_search_episode_fails_open_when_hit_recording_breaks(monkeypatch):
     assert [h.id for h in obj.search_episode("BFF", user_id="u1")] == ["e1"]
 
 
-def test_similar_episodes_ttl_keeps_created_at_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    obj, sink = _fake_store(monkeypatch, rows=[])
-    with obj._get_pool().connection() as conn:
-        obj._similar_episodes(conn, MagicMock(), "u1", 3, 0.5)
-    sql = "\n".join(s for s, _ in sink)
-    assert "OR created_at >= now()" in sql
-    assert "COALESCE(last_seen_at" not in sql
-
-
 def test_similar_episodes_ttl_uses_last_seen_when_enabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     obj, sink = _fake_store(monkeypatch, rows=[])
     with obj._get_pool().connection() as conn:
         obj._similar_episodes(conn, MagicMock(), "u1", 3, 0.5)
@@ -468,17 +394,7 @@ def test_similar_episodes_ttl_uses_last_seen_when_enabled(monkeypatch):
     assert "OR COALESCE(last_seen_at, created_at) >= now()" in sql
 
 
-def test_cleanup_keeps_original_delete_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    obj, sink = _fake_store(monkeypatch, rowcount=1)
-    assert obj.cleanup_expired_episodes(user_id="u1") == 1
-    sql = "\n".join(s for s, _ in sink)
-    assert "DELETE FROM agent_episode WHERE created_at <" in sql
-    assert "last_decay_at" not in sql
-
-
 def test_cleanup_uses_ttl_renewal_and_decay_when_enabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     obj, sink = _fake_store(monkeypatch, rowcount=2)
     assert obj.cleanup_expired_episodes(user_id="u1") == 2
     sql = "\n".join(s for s, _ in sink)
@@ -488,7 +404,6 @@ def test_cleanup_uses_ttl_renewal_and_decay_when_enabled(monkeypatch):
 
 
 def test_cleanup_fails_open_without_deleting_when_progressive_breaks(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     obj, sink = _fake_store(monkeypatch, rowcount=2)
     monkeypatch.setattr(
         obj, "decay_and_cleanup_episodes", MagicMock(side_effect=RuntimeError("db down"))
@@ -523,17 +438,7 @@ def test_decay_and_cleanup_issues_decay_then_delete(monkeypatch):
 # ---------- schema 与接线 ----------
 
 
-def test_ensure_schema_skips_promotion_ddl_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    obj, sink = _fake_store(monkeypatch)
-    obj.ensure_schema()
-    sql = "\n".join(s for s, _ in sink)
-    assert "agent_memory_candidate" not in sql
-    assert "ADD COLUMN IF NOT EXISTS hit_count" not in sql
-
-
 def test_ensure_schema_adds_columns_and_candidate_table_when_enabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     obj, sink = _fake_store(monkeypatch)
     obj.ensure_schema()
     sql = "\n".join(s for s, _ in sink)
@@ -558,7 +463,6 @@ def test_capture_turn_forwards_session_id(monkeypatch):
 def test_write_extracted_observes_episode_with_session_id(monkeypatch):
     from ai_agent.memory import long_term
 
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
     written = _item("在学 BFF")
     monkeypatch.setattr(store, "write_episode", lambda *a, **k: written)
     observed = MagicMock(return_value=None)

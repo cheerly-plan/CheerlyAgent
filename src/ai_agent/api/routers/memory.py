@@ -6,9 +6,8 @@
 
 安全约束（与研报 M2 审核同一套纪律）：
 
-- **默认关闭**：``memory_promotion_enabled=False`` 时候选端点一律 409、
-  零 DB 访问；归档端点由 ``memory_archive_enabled`` 单独控制。新增路由
-  本身不影响任何既有链路。
+- **恒定可用**：候选层与归档层常驻（渐进式记忆没有总开关），端点的
+  权限隔离与出处门禁是唯一的防线。
 - **按 user_id 严格隔离**：普通用户只能看/审自己的记忆，请求里的
   ``user_id`` 会被强制忽略；只有管理员可以指定别的用户。
 - **出处由人填，绝不由 LLM 补**：含数字/量化词的候选必须带 ``source``
@@ -34,20 +33,6 @@ router = APIRouter(prefix="/v1/memory", tags=["memory"])
 _CANDIDATE_STATUS = r"^(pending|promoted|rejected)$"
 
 
-def _require_promotion() -> None:
-    if not settings.memory_promotion_enabled:
-        raise HTTPException(
-            status_code=409, detail="候选记忆审核未启用（MEMORY_PROMOTION_ENABLED=false）"
-        )
-
-
-def _require_archive() -> None:
-    if not settings.memory_archive_enabled:
-        raise HTTPException(
-            status_code=409, detail="L4 记忆归档未启用（MEMORY_ARCHIVE_ENABLED=false）"
-        )
-
-
 def _is_admin(user: UserRecord) -> bool:
     return settings.is_admin_username(user.username)
 
@@ -64,7 +49,6 @@ def _owner(user: UserRecord, requested: str | None) -> str:
 @router.get("/candidates/users")
 def list_candidate_users(user: UserRecord = Depends(get_current_user)) -> dict:
     """管理员列出有待审候选的用户 id，供按用户逐个审核。"""
-    _require_promotion()
     if not _is_admin(user):
         raise HTTPException(status_code=403, detail="仅管理员可查看跨用户审核队列")
     try:
@@ -83,7 +67,6 @@ def list_candidates(
     user: UserRecord = Depends(get_current_user),
 ) -> dict:
     """候选队列。普通用户只看自己；管理员可用 user_id 指定用户。"""
-    _require_promotion()
     owner = _owner(user, user_id)
     try:
         items = store.list_candidates(owner, status=status, limit=limit)
@@ -103,7 +86,6 @@ def approve_candidate(
     user: UserRecord = Depends(get_current_user),
 ) -> dict:
     """人工批准：升 L1 画像 + 记录审核人/备注。含数字候选须补人工出处。"""
-    _require_promotion()
     owner = _owner(user, user_id)
     try:
         row = store.get_candidate(candidate_id, user_id=owner)
@@ -150,7 +132,6 @@ def reject_candidate(
     user: UserRecord = Depends(get_current_user),
 ) -> dict:
     """人工驳回：候选标 rejected 保留追溯，不写画像。"""
-    _require_promotion()
     owner = _owner(user, user_id)
 
     from ai_agent.memory.promotion import reject_candidate as do_reject
@@ -181,7 +162,6 @@ def search_archive(
 
     归档**不会**自动进 system，只能被这里或 ``expand_memory`` 显式取回。
     """
-    _require_archive()
     owner = _owner(user, user_id)
     from ai_agent.memory.archive import search_archive as do_search
 
@@ -198,7 +178,6 @@ def distill_archive(
     user: UserRecord = Depends(get_current_user),
 ) -> dict:
     """手动触发一次蒸馏。后台清理线程也会定期跑同一函数（幂等）。"""
-    _require_archive()
     owner = _owner(user, user_id)
     from ai_agent.memory.archive import distill_memory
 

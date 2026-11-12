@@ -221,26 +221,20 @@ def _profile_prompt(user_id: str, *, user_input: str = "") -> str:
         logger.exception("用户画像读取失败")
         return ""
 
-    # 默认分支与原实现逐字一致：全量画像块，不经任何新代码裁剪。
-    # 渐进链路只在开关打开时进入，且任何异常都 fail-open 回退到这里。
-    if not settings.memory_progressive_enabled:
+    # 渐进式记忆恒定启用：注入「索引 + 与当前问句相关的条目」，被省略的
+    # 画像由 expand_memory 按需展开。任何异常 fail-open 回退到全量画像。
+    try:
+        block, trace = build_memory_index(
+            items,
+            user_input=user_input,
+            top_k=settings.memory_index_top_k,
+            max_chars=settings.memory_index_max_chars,
+            expand_hint=True,
+        )
+    except Exception:
+        logger.exception("渐进式记忆块构建失败，回退全量画像")
         block = format_profile_block(items)
-        trace = full_trace(items, block)
-    else:
-        try:
-            block, trace = build_memory_index(
-                items,
-                user_input=user_input,
-                top_k=settings.memory_index_top_k,
-                max_chars=settings.memory_index_max_chars,
-                # 本分支即渐进开关打开，registry 在启动时按同一开关注册了
-                # expand_memory；此时才可以在索引文案里指引用它。
-                expand_hint=True,
-            )
-        except Exception:
-            logger.exception("渐进式记忆块构建失败，回退全量画像")
-            block = format_profile_block(items)
-            trace = full_trace(items, block, reason="fallback_error", mode="fallback")
+        trace = full_trace(items, block, reason="fallback_error", mode="fallback")
     if settings.memory_trace_enabled:
         trace.emit(logger)
     return block
@@ -249,15 +243,10 @@ def _profile_prompt(user_id: str, *, user_input: str = "") -> str:
 def _recall_block(user_id: str, user_input: str) -> str:
     """第 3 步：按当前问句自动召回情景记忆摘要，不依赖模型主动调工具。
 
-    三重前置条件任一不满足就直接返回空串——默认关闭时这条路径完全不执行，
-    ``_system_prompt`` 的 tail 与改动前逐字一致。召回会多一次本地 embedding
-    与向量查询，故任何异常都 fail-open 跳过，不让记忆链路拖垮对话。
+    没有问句时不召回（空查询的向量结果没有意义）。召回会多一次本地
+    embedding 与向量查询，任何异常都 fail-open 跳过，不让记忆链路拖垮对话。
     """
-    if not (
-        settings.memory_progressive_enabled
-        and settings.memory_auto_recall_enabled
-        and user_input.strip()
-    ):
+    if not user_input.strip():
         return ""
     try:
         hits = store.search_episode(

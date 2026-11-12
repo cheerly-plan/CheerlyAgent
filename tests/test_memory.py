@@ -158,15 +158,26 @@ def test_write_episode_keeps_unrelated(mem_store):
     assert len(_episode_texts(mem_store, "a")) == 2
 
 
-def _age_episodes(store: MemoryStore, user_id: str, hours: float = 2) -> None:
+def _age_episodes(
+    store: MemoryStore, user_id: str, hours: float = 2, *, include_seen: bool = False
+) -> None:
+    """把 episode 的创建时间推回过去。
+
+    ``include_seen=True`` 连 last_seen_at 一起推——检索命中会续期，只推
+    created_at 的话，刚被检索过的记忆仍然没过期（这正是续期该有的行为）。
+    """
+    seen_clause = (
+        ", last_seen_at = now() - (%s * interval '1 hour')" if include_seen else ""
+    )
+    params = [hours, hours, user_id] if include_seen else [hours, user_id]
     with store._get_pool().connection() as conn:
         conn.execute(
-            """
+            f"""
             UPDATE agent_episode
-            SET created_at = now() - (%s * interval '1 hour')
+            SET created_at = now() - (%s * interval '1 hour'){seen_clause}
             WHERE user_id = %s
             """,
-            (hours, user_id),
+            params,
         )
         conn.commit()
 
@@ -175,7 +186,8 @@ def test_search_episode_hides_expired(mem_store, monkeypatch):
     monkeypatch.setattr(settings, "memory_episode_ttl_seconds", 3600)
     mem_store.write_episode("上周用 pytest 修过登录", user_id="a")
     assert mem_store.search_episode("pytest", user_id="a")
-    _age_episodes(mem_store, "a")
+    # 检索命中会把 last_seen_at 续到现在，过期判定要连它一起推回过去
+    _age_episodes(mem_store, "a", include_seen=True)
     assert mem_store.search_episode("pytest", user_id="a") == []
 
 

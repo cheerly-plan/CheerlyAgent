@@ -1,7 +1,7 @@
 """渐进式记忆 · 第 4 步的 DB 层（独立 mixin，零业务判断）。
 
 只做四件事：命中计数 / 跨会话证据登记 / 候选表读写 / 衰减与续期清理。
-所有 SQL 都只在 ``memory_promotion_enabled`` 打开后才会被调用；调用方
+所有 SQL 都由 promotion 编排层调用；调用方
 （``EpisodeStore`` 与 ``promotion.py``）负责开关判断与 fail-open 兜底。
 
 与 ``ensure_schema`` 里的新列/新表配套：老库通过 ``ADD COLUMN IF NOT

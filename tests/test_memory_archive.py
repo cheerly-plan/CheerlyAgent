@@ -100,45 +100,14 @@ def _pending_row(**kwargs):
 
 
 def _enable_promotion(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
+    """渐进式记忆已无开关，恒开；保留这个空实现让既有用例的调用点不动。"""
 
 
 def _enable_archive(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
-    monkeypatch.setattr(settings, "memory_archive_enabled", True)
+    _enable_promotion(monkeypatch)
 
 
 # ---------- 审核端点：默认关闭 / 权限隔离 ----------
-
-
-def test_all_endpoints_are_gated_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    monkeypatch.setattr(settings, "memory_archive_enabled", False)
-    get = MagicMock()
-    monkeypatch.setattr(store, "list_candidates", get)
-    monkeypatch.setattr(store, "get_candidate", get)
-    monkeypatch.setattr(store, "list_archive_rows", get)
-
-    cases = [
-        lambda: memory_router.list_candidates(
-            status="pending", limit=20, user_id=None, user=_user()
-        ),
-        lambda: memory_router.approve_candidate(
-            "c1", MemoryApproveRequest(), user_id=None, user=_user()
-        ),
-        lambda: memory_router.reject_candidate(
-            "c1", MemoryRejectRequest(), user_id=None, user=_user()
-        ),
-        lambda: memory_router.search_archive(
-            query="", limit=5, user_id=None, user=_user()
-        ),
-        lambda: memory_router.distill_archive(user_id=None, user=_user()),
-    ]
-    for call in cases:
-        with pytest.raises(HTTPException) as exc:
-            call()
-        assert exc.value.status_code == 409
-    get.assert_not_called()
 
 
 def test_candidate_users_is_admin_only(monkeypatch):
@@ -358,28 +327,6 @@ def test_reject_candidate_ignores_already_decided(monkeypatch):
 # ---------- L4：开关、蒸馏、检索 ----------
 
 
-def test_archive_requires_both_switches(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
-    monkeypatch.setattr(settings, "memory_archive_enabled", False)
-    assert archive_enabled() is False
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    monkeypatch.setattr(settings, "memory_archive_enabled", True)
-    assert archive_enabled() is False
-    monkeypatch.setattr(settings, "memory_promotion_enabled", True)
-    assert archive_enabled() is True
-
-
-def test_distill_is_noop_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_archive_enabled", False)
-    calls = MagicMock()
-    monkeypatch.setattr(store, "list_stable_candidates", calls)
-    monkeypatch.setattr(store, "list_stable_episodes", calls)
-    assert distill_memory(user_id="u1")["disabled"] is True
-    assert search_archive("研报", user_id="u1") == []
-    assert distill_all_users() == 0
-    calls.assert_not_called()
-
-
 def test_distill_archives_promoted_candidates_and_stable_episodes(monkeypatch):
     _enable_archive(monkeypatch)
     monkeypatch.setattr(
@@ -520,15 +467,6 @@ def test_archive_endpoints_return_payload(monkeypatch):
 # ---------- L4 展开：expand_memory ----------
 
 
-def test_expand_memory_has_no_archive_block_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_archive_enabled", False)
-    with (
-        patch("ai_agent.tools.memory.memory.store.list_profile", return_value=[]),
-        patch("ai_agent.tools.memory.memory.store.search_episode", return_value=[]),
-    ):
-        assert expand_memory("任意", kind="all") == "没有找到可展开的记忆条目"
-
-
 def test_expand_memory_appends_archive_when_enabled(monkeypatch):
     _enable_archive(monkeypatch)
     monkeypatch.setattr(
@@ -564,16 +502,6 @@ def test_expand_memory_archive_failure_does_not_break_other_sections(monkeypatch
 
 
 # ---------- DB 层：DDL / 幂等 / 清理 ----------
-
-
-def test_ensure_schema_skips_archive_table_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    monkeypatch.setattr(settings, "memory_archive_enabled", False)
-    obj, sink = _fake_store(monkeypatch)
-    obj.ensure_schema()
-    sql = "\n".join(s for s, _ in sink)
-    assert "agent_memory_archive" not in sql
-    assert "reviewed_by" not in sql
 
 
 def test_ensure_schema_creates_archive_table_and_review_columns(monkeypatch):
@@ -635,16 +563,6 @@ def test_mark_candidate_records_reviewer_when_supplied(monkeypatch):
     sql, params = sink[0]
     assert "reviewed_by = %s" in sql and "reviewed_at = now()" in sql
     assert params == ("rejected", "alice", "不是长期偏好", "c1", "u1")
-
-
-def test_clear_long_term_keeps_original_sql_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "memory_promotion_enabled", False)
-    monkeypatch.setattr(settings, "memory_archive_enabled", False)
-    obj, sink = _fake_store(monkeypatch)
-    obj.clear_long_term("u1")
-    sql = "\n".join(s for s, _ in sink)
-    assert "to_regclass" not in sql
-    assert "agent_memory_archive" not in sql
 
 
 def test_clear_long_term_scopes_optional_tables_by_user(monkeypatch):

@@ -1,7 +1,7 @@
 """渐进式记忆 · 第 5 步的 DB 层：L4 蒸馏归档（独立 mixin）。
 
 只做三件事：挑出「够稳定」的记忆、幂等写入归档表、按用户读回归档。
-所有 SQL 只在 ``memory_archive_enabled`` 与 ``memory_promotion_enabled``
+所有 SQL 都由 archive 编排层调用，
 **同时**打开后才会被编排层调用（episode 的证据列与候选表都由第 4 步创建）。
 
 归档语义是「**只读副本 + 审计沉淀**」：不删 episode、不改画像、不改检索

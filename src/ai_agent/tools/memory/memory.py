@@ -86,18 +86,14 @@ def expand_memory(query: str, kind: str = "all") -> str:
                 body = "\n".join(f"- [{hit.id}] {hit.text}" for hit in hits)
                 parts.append(f"相关情景记忆全文（共 {len(hits)} 条）：\n{body}")
     # 第 5 步：L4 归档只在显式展开时出现，永不自动进 system 人格块。
-    # 开关关闭时这段完全不执行，expand_memory 的输出与第 3 步逐字一致。
     if kind == "all":
-        from ai_agent.core.config import settings
+        try:
+            from ai_agent.memory.archive import search_archive
 
-        if settings.memory_archive_enabled:
-            try:
-                from ai_agent.memory.archive import search_archive
-
-                entries = search_archive(query)
-            except Exception:
-                parts.append("L4 归档读取暂不可用")
-            else:
+            entries = search_archive(query)
+        except Exception:
+            parts.append("L4 归档读取暂不可用")
+        else:
                 if entries:
                     body = "\n".join(
                         f"- [{entry.get('id', '')}] {entry.get('text', '')}"

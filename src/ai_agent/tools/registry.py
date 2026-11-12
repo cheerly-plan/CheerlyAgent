@@ -52,11 +52,8 @@ from ai_agent.core.config import settings as _settings  # noqa: E402
 
 if _settings.kb_search_list_only:
     TOOLS.append(kb_read_tool)
-# 渐进式记忆第 3 步：只有打开渐进开关才把 expand_memory 挂给模型。
-# 与 kb_read 一样是模块级静态注册（部署级开关，改配置需重启）——默认关闭时
-# TOOLS / TOOLS_MAP / tool_schemas() 三者逐字不变，模型看不到这个工具。
-if _settings.memory_progressive_enabled:
-    TOOLS.append(memory_expand_tool)
+# 渐进式记忆第 3 步：expand_memory 按需展开被索引省略的条目，恒定注册。
+TOOLS.append(memory_expand_tool)
 TOOLS_MAP = {t.name: t for t in TOOLS}
 _TOOL_SCHEMAS = [t.schema() for t in TOOLS]
 

@@ -9,12 +9,12 @@
 本模块把「哪些证据算够、什么能升、什么必须拦」做成**确定性纯函数**，
 再由薄薄一层编排把它们接到现有的 store 上。核心纪律与研报推断层一致：
 
-- **候选永不进 system 人格块**，也**默认不自动升 L1**：一条错记污染整场
-  会话，比漏记一条偏好严重得多。晋升必须显式批准（或打开 auto_approve）。
+- **候选永不直接进 system 人格块**：晋升要过确定性门禁（跨会话复现 +
+  出处），晋升后写入画像才可能被注入。
 - **数字/事实类必须带出处**：无出处的数字不给晋升，连候选都不轻易进。
 - **用户明确否定立即删除**，不走衰减；长期未命中只降权、不物理删除。
-- **纯加法、默认关闭**：``memory_promotion_enabled=False`` 时本模块所有编排
-  函数直接返回，既有抽取 / TTL / 画像写入路径逐字不变。
+- **恒定开启**：没有总开关。安全性来自门禁本身（候选要复现、数字要出处），
+  不来自配置。
 - **fail-open**：任何 DB / 依赖异常都只记日志，绝不影响主对话。
 
 第 5 步补上两件事：``/v1/memory/candidates`` 的人工审核端点（批准时可
@@ -133,25 +133,26 @@ def evaluate_candidate(
     *,
     min_sessions: int = 3,
     duplicate: bool = False,
-    approved: bool = False,
 ) -> PromotionDecision:
-    """L3 候选能否升 L1 画像。
+    """L3 候选能否升 L1 画像——只看证据，不需要人工批准。
 
-    ``approved`` 默认 False：候选**默认不自动晋升**，只累积证据。这是第 4 步
-    最重要的安全门禁——去重/冲突检测由 ``apply_profile_action`` 复用既有
-    ``sanitize_profile_action`` + Jev 完成，本函数只管证据与批准。
+    三道门禁都是**确定性**的，不依赖人：
+    * 去重（同文本已在画像里）；
+    * 出处门禁：含数字/量化词的条目必须能回溯到出处；
+    * 跨会话复现：至少 ``min_sessions`` 个会话里出现过。
+
+    晋升后的写入复用 ``apply_profile_action`` 既有的 facet 归一化、
+    ``is_redundant_profile`` 确定性去重与 Jev 语义去重，本层不另造一套。
     """
     if duplicate:
         return PromotionDecision("hold", "duplicate", candidate.text, candidate.facet)
     if needs_source(candidate.text) and not has_source(candidate.source):
         return PromotionDecision("hold", "missing_source", candidate.text, candidate.facet)
-    if candidate.session_seen < min_sessions and not approved:
+    if candidate.session_seen < min_sessions:
         return PromotionDecision(
             "hold", "insufficient_evidence", candidate.text, candidate.facet
         )
-    if not approved:
-        return PromotionDecision("hold", "awaiting_approval", candidate.text, candidate.facet)
-    return PromotionDecision("promote", "approved", candidate.text, candidate.facet)
+    return PromotionDecision("promote", "evidence", candidate.text, candidate.facet)
 
 
 def decay_hit_count(hit_count: int, idle_seconds: float, decay_seconds: int) -> int:
@@ -176,11 +177,9 @@ def observe_episode(
 ) -> PromotionDecision | None:
     """写入 episode 后登记观察证据；达到门槛才产出 L3 候选。
 
-    只在开关开启时工作。任何异常返回 None 并记日志，绝不阻断抽取链路。
+    任何异常返回 None 并记日志，绝不阻断抽取链路。
     ``source`` 由调用方给出（目前只有结构化来源才传，普通对话留空）。
     """
-    if not settings.memory_promotion_enabled:
-        return None
     uid = user_id or current_user_id()
     try:
         if chat_session_id:
@@ -224,8 +223,8 @@ def observe_episode(
 
 
 def reject_candidates(text: str, *, user_id: str | None = None) -> int:
-    """用户明确否定：候选立即删除，不走衰减。默认关闭时零动作。"""
-    if not settings.memory_promotion_enabled or not (text or "").strip():
+    """用户明确否定：候选立即删除，不走衰减。"""
+    if not (text or "").strip():
         return 0
     uid = user_id or current_user_id()
     try:
@@ -236,15 +235,13 @@ def reject_candidates(text: str, *, user_id: str | None = None) -> int:
 
 
 def review_pending_candidates(*, user_id: str | None = None, limit: int = 20) -> int:
-    """后台审核 L3 候选。默认 auto_approve=False → 一条都不晋升。
+    """后台审核 L3 候选：证据够就自动晋升，不需要人工逐条批准。
 
     批准后的写入复用 ``apply_profile_action``：它已经带了 facet 归一化、
     ``is_redundant_profile`` 确定性去重与 Jev 语义去重，本层不另造一套冲突
     检测，避免两套门禁口径漂移。写入被去重拦下（返回 None）时候选保持
     pending 并标注，不误标为已晋升。
     """
-    if not settings.memory_promotion_enabled:
-        return 0
     uid = user_id or current_user_id()
     approved_count = 0
     try:
@@ -266,7 +263,6 @@ def review_pending_candidates(*, user_id: str | None = None, limit: int = 20) ->
         decision = evaluate_candidate(
             candidate,
             min_sessions=settings.memory_promotion_min_sessions,
-            approved=settings.memory_promotion_auto_approve,
         )
         if decision.stage != "promote":
             logger.info(
@@ -303,19 +299,19 @@ def approve_candidate(
     reviewed_by: str = "",
     note: str = "",
 ) -> bool:
-    """人工批准单条候选 → 升 L1 画像（第 5 步接上 HTTP 审核端点）。
+    """人工批准单条候选 → 升 L1 画像。
 
-    这是「候选默认不自动晋升」的配套落点：没打开 auto_approve 时，后台审核
-    只记 hold 日志，真正放行靠这个函数。仍要过 ``evaluate_candidate`` 的出处
-    门禁与 ``apply_profile_action`` 的去重门禁——**人工批准不等于绕过事实校验**。
+    自动审核（``review_pending_candidates``）已经按证据放行，这个入口是
+    **人工兜底**：审核人核对原文后可以补录出处，让原本卡在出处门禁的条目
+    通过；也可以提前放行证据还不足的条目。仍然要过 ``evaluate_candidate``
+    的出处门禁与 ``apply_profile_action`` 的去重门禁——**人工批准不等于绕过
+    事实校验**。
 
     ``source`` 是第 5 步新增的人工出处补录：含数字/量化词的候选在抽取阶段
     因为「结构化出处通道未打通」而恒为 hold，审核人核对原文后把出处填进
     请求体，才能在批准时放行。字符串来自人，绝不来自 LLM 现场抽数。
     不传 source 时读取路径与第 4 步逐字一致。
     """
-    if not settings.memory_promotion_enabled:
-        return False
     uid = user_id or current_user_id()
     try:
         if source and source.strip():
@@ -334,11 +330,8 @@ def approve_candidate(
             session_seen=int(row.get("session_seen") or 0),
             status="pending",
         )
-        decision = evaluate_candidate(
-            candidate,
-            min_sessions=settings.memory_promotion_min_sessions,
-            approved=True,
-        )
+        # 人工批准：跳过「跨会话复现」这条证据门槛，其余门禁照旧
+        decision = evaluate_candidate(candidate, min_sessions=0)
         if decision.stage != "promote":
             logger.info(
                 "memory_candidate approval blocked id=%s reason=%s by=%s",
@@ -372,8 +365,6 @@ def reject_candidate(
     note: str = "",
 ) -> bool:
     """人工驳回单条候选（记审核人/备注，不删行以便追溯）。"""
-    if not settings.memory_promotion_enabled:
-        return False
     uid = user_id or current_user_id()
     try:
         row = store.get_candidate(candidate_id, user_id=uid)
@@ -392,9 +383,7 @@ def reject_candidate(
 
 
 def review_all_pending_candidates(*, limit_per_user: int = 20) -> int:
-    """后台线程入口：按用户遍历待审候选。默认关闭时零 DB 访问。"""
-    if not settings.memory_promotion_enabled:
-        return 0
+    """后台线程入口：按用户遍历待审候选。"""
     try:
         users = store.list_candidate_users(status="pending")
     except Exception:

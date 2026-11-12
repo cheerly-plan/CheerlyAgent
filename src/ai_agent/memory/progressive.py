@@ -16,8 +16,8 @@ system 尾部，只受 ``system_dynamic_max_chars`` 这个整体动态块上限�
 2. ``MemoryTrace``：记录注入/丢弃的 id、得分、字符数与裁剪原因，只进日志。
 
 设计约束（与项目既有记忆哲学一致）：
-- **纯加法、默认关闭**：``memory_progressive_enabled=False`` 时调用方走原来的
-  ``format_profile_block`` 路径，送模型的 prompt 逐字节不变。本模块不参与该分支。
+- **纯加法**：本模块只产出记忆块，不写库、不动 episode、不改抽取链路；
+  调用方在任何异常下都回退到全量画像 ``format_profile_block``。
 - **零 LLM / 零向量调用**：相关性用确定性字符二元组重叠（中文友好），
   不引入 embedding 请求、不增加延迟、不带来新的失败点。
 - **只写不改**：不写库、不动 episode、不改抽取与画像写入链路。
