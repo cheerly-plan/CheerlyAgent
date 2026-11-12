@@ -19,6 +19,7 @@ from ai_agent.memory.gate import jev_noul
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.memory.llm_calls import complete_memory_chat
 from ai_agent.memory.profile import ProfileAction, apply_profile_action
+from ai_agent.memory.promotion import observe_episode
 from ai_agent.storage.store import store
 from ai_agent.prompts.memory import (
     EXTRACT_SYSTEM,
@@ -47,6 +48,7 @@ def capture_long_term(
     turn: list[ChatMessage],
     summary: str,
     user_input: str,
+    chat_session_id: str = "",
 ) -> None:
     if not any(msg.get("role") == "assistant" for msg in turn):
         return
@@ -75,7 +77,12 @@ def capture_long_term(
         existing_profile=existing_profile,
     )
     for item in items:
-        _write_extracted(user_id, item)
+        _write_extracted(
+            user_id,
+            item,
+            chat_session_id=chat_session_id,
+            user_input=user_input,
+        )
 
 
 def extract_turn_memories(
@@ -126,7 +133,13 @@ def extract_turn_memories(
     return items
 
 
-def _write_extracted(user_id: str, item: ExtractedMemory) -> None:
+def _write_extracted(
+    user_id: str,
+    item: ExtractedMemory,
+    *,
+    chat_session_id: str = "",
+    user_input: str = "",
+) -> None:
     try:
         if item.kind == "profile":
             apply_profile_action(
@@ -134,7 +147,15 @@ def _write_extracted(user_id: str, item: ExtractedMemory) -> None:
                 user_id=user_id,
             )
         else:
-            store.write_episode(item.content, user_id=user_id)
+            written = store.write_episode(item.content, user_id=user_id)
+            # 第 4 步：抽取落库后进观察态。开关关闭时 observe_episode 直接
+            # 返回，既有写入语义逐字不变；开启时异常也由它自己 fail-open。
+            observe_episode(
+                written,
+                user_id=user_id,
+                chat_session_id=chat_session_id,
+                user_input=user_input,
+            )
     except Exception:
         logger.exception("长期记忆写入失败 kind=%s", item.kind)
 

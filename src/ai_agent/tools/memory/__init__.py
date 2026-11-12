@@ -4,7 +4,11 @@
 profile/episode 与存储门面，不依赖知识库或研报域。
 """
 
-from ai_agent.tools.memory.memory import memory_search_tool, memory_write_tool
+from ai_agent.tools.memory.memory import (
+    memory_expand_tool,
+    memory_search_tool,
+    memory_write_tool,
+)
 
-__all__ = ["memory_search_tool", "memory_write_tool"]
+__all__ = ["memory_expand_tool", "memory_search_tool", "memory_write_tool"]
 

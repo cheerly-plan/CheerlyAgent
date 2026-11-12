@@ -313,3 +313,25 @@ class ReportDecisionRequest(BaseModel):
         description="要处置的审核项 id；留空表示整批",
     )
     note: str = Field(default="", max_length=500, description="审核备注，写进审计记录")
+
+
+class MemoryApproveRequest(BaseModel):
+    """批准一条 L3 候选记忆升入 L1 画像（渐进式记忆第 5 步）。
+
+    source 只能由审核人**核对原文后手工填写**：含数字/量化词的候选必须
+    带出处才能放行，服务端绝不用 LLM 现场补出处。留空时按原出处判定，
+    缺出处一律 409，不会悄悄放行。
+    """
+
+    source: str = Field(
+        default="",
+        max_length=500,
+        description="人工核对的可回溯出处（如「2026Q3 年报第 12 页」）；含数字的候选必填",
+    )
+    note: str = Field(default="", max_length=500, description="审核备注，写进审计记录")
+
+
+class MemoryRejectRequest(BaseModel):
+    """驳回一条 L3 候选；行保留为 rejected，便于追溯，不进画像。"""
+
+    note: str = Field(default="", max_length=500, description="驳回原因，写进审计记录")

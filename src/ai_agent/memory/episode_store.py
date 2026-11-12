@@ -138,7 +138,16 @@ class EpisodeStore(Database):
         top_k = k or settings.memory_top_k
         cutoff = settings.memory_score_threshold if threshold is None else threshold
         with self._get_pool().connection() as conn:
-            return self._similar_episodes(conn, vector, uid, top_k, cutoff)
+            hits = self._similar_episodes(conn, vector, uid, top_k, cutoff)
+        # 第 4 步：检索命中即登记观察证据、刷新 TTL 基准。只挂在 search_episode
+        # 上——write_episode 内部为合并做的 _similar_episodes 不算「被记起」。
+        # 开关关闭时零额外 SQL，失败只记日志，绝不影响召回结果。
+        if settings.memory_promotion_enabled and hits:
+            try:
+                self.record_episode_hits([hit.id for hit in hits], user_id=uid)
+            except Exception:
+                logger.exception("情景记忆命中计数失败 user_id=%s", uid)
+        return hits
 
     def _similar_episodes(
         self,
@@ -149,8 +158,7 @@ class EpisodeStore(Database):
         threshold: float,
     ) -> list[MemoryItem]:
         ttl = settings.memory_episode_ttl_seconds
-        rows = conn.execute(
-            """
+        sql = """
             SELECT
                 id::text AS id,
                 user_id,
@@ -163,8 +171,16 @@ class EpisodeStore(Database):
               AND 1 - (embedding <=> %s) >= %s
             ORDER BY embedding <=> %s
             LIMIT %s
-            """,
-            (vector, user_id, ttl, ttl, vector, threshold, vector, k),
+            """
+        # 第 4 步：命中续期写的是 last_seen_at，检索若仍只看 created_at，
+        # 续期过的老记忆会留在库里却永远召不回，TTL 续期就成了空操作。
+        # 默认关闭时这段 SQL 逐字保持原样。
+        if settings.memory_promotion_enabled:
+            sql = sql.replace(
+                "OR created_at >=", "OR COALESCE(last_seen_at, created_at) >="
+            )
+        rows = conn.execute(
+            sql, (vector, user_id, ttl, ttl, vector, threshold, vector, k)
         ).fetchall()
         return [
             MemoryItem(
@@ -186,6 +202,20 @@ class EpisodeStore(Database):
         )
         if ttl <= 0:
             return 0
+        # 第 4 步：命中续期 + 高热度保留 + 长期未命中降权。默认关闭时下面
+        # 的原 DELETE 逻辑逐字不变；开启后失败返回 0（宁可漏删，不误删刚
+        # 被反复用到的记忆）。
+        if settings.memory_promotion_enabled:
+            try:
+                return self.decay_and_cleanup_episodes(
+                    ttl_seconds=ttl,
+                    decay_seconds=settings.memory_promotion_decay_seconds,
+                    min_hits=settings.memory_promotion_min_hits,
+                    user_id=user_id,
+                )
+            except Exception:
+                logger.exception("渐进式情景记忆清理失败，本轮不删除")
+                return 0
         where = "created_at < now() - (%s * interval '1 second')"
         params: list[object] = [ttl]
         if user_id:

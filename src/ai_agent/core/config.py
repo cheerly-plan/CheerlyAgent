@@ -407,6 +407,48 @@ class Settings(BaseSettings):
     # 向量空间里，旧近况不淘汰就会把新问题带到别的公司。0 = 永不过期。
     memory_episode_ttl_seconds: int = 7 * 24 * 3600
 
+    # 渐进式记忆 · 第 1–2 步（见 memory/progressive.py）。默认全关：开关关闭时
+    # _profile_prompt 走原来的 format_profile_block 路径，送模型的 prompt 逐字节不变。
+    # 打开后改为「记忆索引 + 与当前问句相关的 top-k 画像」；相关性是确定性字符
+    # 二元组重叠，不调模型、不调向量库、不增加延迟。
+    # memory_index_max_chars 是**记忆块自己**的字符预算，与整体动态块上限
+    # system_dynamic_max_chars 各管一层：前者决定注入几条、后者兜底整段 system。
+    memory_progressive_enabled: bool = False
+    memory_index_top_k: int = 8
+    memory_index_max_chars: int = 800
+    # 只写一行结构化日志，不进 prompt、不进响应。开关关闭时也记录，
+    # 便于灰度前先观察全量注入的实际体量。
+    memory_trace_enabled: bool = True
+    # 渐进式记忆 · 第 3 步：按当前问句自动召回情景记忆摘要（不依赖模型主动
+    # 调 search_memory）。只在 memory_progressive_enabled 同时打开时生效。
+    # 每轮会多一次本地 embedding + 向量查询，故单独设开关、默认关闭。
+    memory_auto_recall_enabled: bool = False
+    memory_auto_recall_top_k: int = 3
+    memory_auto_recall_max_chars: int = 400
+    # 渐进式记忆 · 第 4 步：观察态 / 命中证据 / L3 候选晋升梯。
+    # 默认全关，关闭时 episode 仍是「7 天 TTL 到期物理删除」，抽取与画像
+    # 写入路径逐字不变；打开后命中续期、跨会话证据累积、候选只进待审队列。
+    memory_promotion_enabled: bool = False
+    memory_promotion_min_sessions: int = 3
+    memory_promotion_min_hits: int = 3
+    # 同一轮里自动召回 + 抽取检索会各查一次，时间窗内只算一次命中
+    memory_promotion_hit_dedupe_seconds: int = 300
+    memory_promotion_decay_seconds: int = 14 * 24 * 3600
+    # 候选**默认不自动升 L1 画像**：一条错记会污染整场会话。打开后仍需
+    # 通过 apply_profile_action 既有的确定性 + Jev 去重门禁。
+    memory_promotion_auto_approve: bool = False
+    # 渐进式记忆 · 第 5 步：L3 候选的人工审核入口与 L4 蒸馏归档。
+    # 审核端点复用 memory_promotion_enabled（候选表由它创建，不另设开关）：
+    # 关闭时候选端点一律 409、零 DB 访问。归档是第 4 步之上的可选层，
+    # **必须与 memory_promotion_enabled 同时打开才生效**（episode 证据列与
+    # 候选表都由第 4 步 DDL 创建）；关闭时连 DDL 与后台蒸馏都不执行，
+    # 归档条目永不进 system 人格块。
+    memory_archive_enabled: bool = False
+    memory_archive_min_hits: int = 3
+    memory_archive_min_sessions: int = 3
+    memory_archive_batch: int = 200
+    memory_archive_top_k: int = 5
+
     # Jev 门控（System One 决策模型）：长期记忆抽取的前置判断——Noul 概率
     # 低于 memory_gate_threshold 时跳过本轮抽取，省掉一次小模型调用。
     # 未配 key 时门控关闭，行为退化为每轮直接抽取；门控任何失败都

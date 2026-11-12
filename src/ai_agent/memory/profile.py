@@ -154,6 +154,11 @@ def apply_profile_action(
         # 防止否定一条偏好时把同 facet 的其他条目全清掉
         text = None if is_mutex_facet(facet) else (cleaned.content or None)
         store.delete_profile_facet(facet, user_id=uid, text=text)
+        # 第 4 步：明确否定要连 L3 候选一起删，不能让它继续攒证据后复活。
+        # 默认关闭时零动作；精确文本匹配，宁可漏删也不误删别的候选。
+        from ai_agent.memory.promotion import reject_candidates
+
+        reject_candidates(cleaned.content, user_id=uid)
         logger.info(
             "delete_profile user_id=%s facet=%s text=%s", uid, facet, text or "*"
         )

@@ -718,6 +718,81 @@ class Database:
                 ON agent_kb_file USING hnsw (summary_embedding vector_cosine_ops)
                 """
             )
+            # 渐进式记忆 · 第 4 步：观察态证据与 L3 候选层。
+            # 开关关闭时**连 DDL 都不执行**，老库保持原 schema 逐字不变；
+            # 打开后首次启动用 ADD COLUMN IF NOT EXISTS + 默认值平滑升级，
+            # 已有 episode 自动得到 hit_count=0 / 空会话集合，无需数据迁移。
+            if settings.memory_promotion_enabled:
+                for column, definition in (
+                    ("hit_count", "INT NOT NULL DEFAULT 0"),
+                    ("last_seen_at", "TIMESTAMPTZ"),
+                    ("last_decay_at", "TIMESTAMPTZ"),
+                    ("sessions_seen", "TEXT[] NOT NULL DEFAULT '{}'"),
+                ):
+                    conn.execute(
+                        f"ALTER TABLE agent_episode "
+                        f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+                    )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_memory_candidate (
+                        id UUID PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        facet TEXT NOT NULL DEFAULT 'other',
+                        source TEXT NOT NULL DEFAULT '',
+                        hit_count INT NOT NULL DEFAULT 0,
+                        session_seen INT NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                # 第 5 步：人工审核轨迹。表可能在第 4 步已建过，所以用
+                # ADD COLUMN IF NOT EXISTS 平滑升级，老库零迁移。
+                for column, definition in (
+                    ("reviewed_by", "TEXT NOT NULL DEFAULT ''"),
+                    ("review_note", "TEXT NOT NULL DEFAULT ''"),
+                    ("reviewed_at", "TIMESTAMPTZ"),
+                ):
+                    conn.execute(
+                        f"ALTER TABLE agent_memory_candidate "
+                        f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+                    )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS agent_memory_candidate_user_status_idx
+                    ON agent_memory_candidate (user_id, status)
+                    """
+                )
+            # 第 5 步 L4 蒸馏归档：独立开关，关闭时连 DDL 都不执行。
+            # 归档是**只读副本 + 审计沉淀**，不搬空热库、不参与检索排序。
+            if settings.memory_archive_enabled:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_memory_archive (
+                        id UUID PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        origin_id TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        facet TEXT NOT NULL DEFAULT 'other',
+                        source TEXT NOT NULL DEFAULT '',
+                        hit_count INT NOT NULL DEFAULT 0,
+                        session_seen INT NOT NULL DEFAULT 0,
+                        reviewed_by TEXT NOT NULL DEFAULT '',
+                        archived_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        UNIQUE (user_id, kind, origin_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS agent_memory_archive_user_idx
+                    ON agent_memory_archive (user_id, archived_at DESC)
+                    """
+                )
             conn.commit()
 
     def close(self) -> None:

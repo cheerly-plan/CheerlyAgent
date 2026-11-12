@@ -94,10 +94,16 @@ def _replace_last_turn(
 
 
 def _capture_turn(
-    user_id: str, turn: list[ChatMessage], summary: str, user_input: str
+    user_id: str,
+    turn: list[ChatMessage],
+    summary: str,
+    user_input: str,
+    chat_session_id: str = "",
 ) -> None:
     try:
-        capture_long_term(user_id, turn, summary, user_input)
+        capture_long_term(
+            user_id, turn, summary, user_input, chat_session_id=chat_session_id
+        )
     except Exception:
         logger.exception("长期记忆抽取失败")
 

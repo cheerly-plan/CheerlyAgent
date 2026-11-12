@@ -17,6 +17,7 @@ from ai_agent.api.routers.health import router as health_router
 from ai_agent.api.routers.inspect import router as inspect_router
 from ai_agent.api.routers.kb import router as kb_router
 from ai_agent.api.routers.kg import router as kg_router
+from ai_agent.api.routers.memory import router as memory_router
 from ai_agent.api.routers.report import router as report_router
 from ai_agent.api.routers.session import router as session_router
 from ai_agent.api.routers.user import router as user_router
@@ -119,6 +120,9 @@ def create_app() -> FastAPI:
     app.include_router(kb_router)
     app.include_router(kg_router)
     app.include_router(report_router)
+    # 渐进式记忆第 5 步：候选人工审核 + L4 归档查询。路由常驻，但端点
+    # 内部各自检查开关，默认全关时零 DB 访问、不影响既有响应契约。
+    app.include_router(memory_router)
 
     @app.exception_handler(AgentError)
     async def agent_error(_request: Request, exc: AgentError) -> JSONResponse:

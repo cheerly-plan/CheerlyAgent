@@ -12,7 +12,11 @@ from ai_agent.tools.kb import (
     kb_search_tool,
     kg_search_tool,
 )
-from ai_agent.tools.memory import memory_search_tool, memory_write_tool
+from ai_agent.tools.memory import (
+    memory_expand_tool,
+    memory_search_tool,
+    memory_write_tool,
+)
 from ai_agent.tools.misc import weather_tool, web_search_tool
 from ai_agent.tools.report import (
     generate_report_tool,
@@ -48,6 +52,11 @@ from ai_agent.core.config import settings as _settings  # noqa: E402
 
 if _settings.kb_search_list_only:
     TOOLS.append(kb_read_tool)
+# 渐进式记忆第 3 步：只有打开渐进开关才把 expand_memory 挂给模型。
+# 与 kb_read 一样是模块级静态注册（部署级开关，改配置需重启）——默认关闭时
+# TOOLS / TOOLS_MAP / tool_schemas() 三者逐字不变，模型看不到这个工具。
+if _settings.memory_progressive_enabled:
+    TOOLS.append(memory_expand_tool)
 TOOLS_MAP = {t.name: t for t in TOOLS}
 _TOOL_SCHEMAS = [t.schema() for t in TOOLS]
 
@@ -63,6 +72,8 @@ TOOL_OUTPUT_LIMITS: dict[str, int] = {
     # 两段式里 kb_read 是模型按需取全文，读 2~3 条就 3k+，给宽一点
     "kb_read": 6000,
     "report_extract_indicators": 4000,
+    # 展开的是全量画像 + 情景原文，截断会让「未列出的条目」再次消失
+    "expand_memory": 4000,
 }
 
 

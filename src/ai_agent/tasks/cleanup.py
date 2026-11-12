@@ -64,6 +64,28 @@ class MaintenanceCleaner:
             except Exception:
                 logger.exception("清理过期情景记忆失败")
             try:
+                # 第 4 步：L3 候选审核。开关关闭时零 DB 访问；开启后默认
+                # auto_approve=False，只记 hold 日志、一条都不升 L1。
+                if settings.memory_promotion_enabled:
+                    from ai_agent.memory.promotion import review_all_pending_candidates
+
+                    promoted = review_all_pending_candidates()
+                    if promoted:
+                        logger.info("候选记忆晋升画像 %s 条", promoted)
+            except Exception:
+                logger.exception("候选记忆审核失败")
+            try:
+                # 第 5 步：L4 蒸馏归档。archive_enabled() 要求两个开关同时
+                # 打开，关闭时零 DB 访问；写入幂等，重复跑不会产生副本。
+                from ai_agent.memory.archive import archive_enabled, distill_all_users
+
+                if archive_enabled():
+                    archived = distill_all_users()
+                    if archived:
+                        logger.info("L4 归档新增 %s 条", archived)
+            except Exception:
+                logger.exception("L4 记忆归档失败")
+            try:
                 from ai_agent.report.cleanup import cleanup_reports
 
                 reports = cleanup_reports()

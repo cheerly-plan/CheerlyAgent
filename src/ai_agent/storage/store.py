@@ -11,9 +11,11 @@ storage 与 db / auth_store / embeddings 同层。
 from ai_agent.kb.graph.graph_store import KgStore
 from ai_agent.kb.graph.graph_write import KgWriteStore
 from ai_agent.kb.store import KbStore
+from ai_agent.memory.archive_store import ArchiveStore
 from ai_agent.memory.checkpoint_store import CheckpointStore
 from ai_agent.memory.episode_store import EpisodeStore
 from ai_agent.memory.profile_store import ProfileStore
+from ai_agent.memory.promotion_store import PromotionStore
 from ai_agent.memory.session_store import SessionStore
 from ai_agent.storage.auth_store import AuthStore
 from ai_agent.storage.db import (
@@ -40,9 +42,11 @@ __all__ = [
 
 
 class MemoryStore(
+    ArchiveStore,
     AuthStore,
     EpisodeStore,
     ProfileStore,
+    PromotionStore,
     SessionStore,
     CheckpointStore,
     KbStore,
@@ -59,6 +63,31 @@ class MemoryStore(
             else:
                 conn.execute("DELETE FROM agent_episode")
                 conn.execute("DELETE FROM agent_user_profile")
+            # 候选层是第 4 步的可选表。默认关闭时这段完全不执行，清理语句
+            # 与旧版逐字一致。开启后先探测再删：一条失败的 DELETE 会让
+            # psycopg 把事务置为 aborted，前面两个 DELETE 也会跟着回滚；
+            # to_regclass 查不到只返回 NULL，不会报错。
+            from ai_agent.core.config import settings
+
+            optional_tables = []
+            if settings.memory_promotion_enabled:
+                optional_tables.append("agent_memory_candidate")
+            if settings.memory_archive_enabled:
+                optional_tables.append("agent_memory_archive")
+            for table in optional_tables:
+                exists = conn.execute(
+                    f"SELECT to_regclass('{table}') AS t"
+                ).fetchone()
+                if not (exists and exists.get("t")):
+                    continue
+                # 按 user_id 收敛：clear_long_term(user_id=...) 不该把别人
+                # 的候选/归档一起清掉（第 4 步这里曾是全表 DELETE）。
+                if user_id:
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE user_id = %s", (user_id,)
+                    )
+                else:
+                    conn.execute(f"DELETE FROM {table}")
             conn.commit()
 
 

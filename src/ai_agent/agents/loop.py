@@ -33,6 +33,11 @@ from ai_agent.kb.retrieval.scope import (
 from ai_agent.llm.client import stream_chat
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
 from ai_agent.memory.facets import format_profile_block
+from ai_agent.memory.progressive import (
+    build_memory_index,
+    format_recall_block,
+    full_trace,
+)
 from ai_agent.memory.short_term import (
     assemble,
     short_term_memory,
@@ -208,14 +213,66 @@ def _llm_error_message(error: LLMError) -> str:
     return "模型服务暂时不可用，请稍后重试"
 
 
-def _profile_prompt(user_id: str) -> str:
+def _profile_prompt(user_id: str, *, user_input: str = "") -> str:
     try:
         items = store.list_profile(user_id)
         logger.info("list_profile user_id=%s count=%s", user_id, len(items))
     except Exception:
         logger.exception("用户画像读取失败")
         return ""
-    return format_profile_block(items)
+
+    # 默认分支与原实现逐字一致：全量画像块，不经任何新代码裁剪。
+    # 渐进链路只在开关打开时进入，且任何异常都 fail-open 回退到这里。
+    if not settings.memory_progressive_enabled:
+        block = format_profile_block(items)
+        trace = full_trace(items, block)
+    else:
+        try:
+            block, trace = build_memory_index(
+                items,
+                user_input=user_input,
+                top_k=settings.memory_index_top_k,
+                max_chars=settings.memory_index_max_chars,
+                # 本分支即渐进开关打开，registry 在启动时按同一开关注册了
+                # expand_memory；此时才可以在索引文案里指引用它。
+                expand_hint=True,
+            )
+        except Exception:
+            logger.exception("渐进式记忆块构建失败，回退全量画像")
+            block = format_profile_block(items)
+            trace = full_trace(items, block, reason="fallback_error", mode="fallback")
+    if settings.memory_trace_enabled:
+        trace.emit(logger)
+    return block
+
+
+def _recall_block(user_id: str, user_input: str) -> str:
+    """第 3 步：按当前问句自动召回情景记忆摘要，不依赖模型主动调工具。
+
+    三重前置条件任一不满足就直接返回空串——默认关闭时这条路径完全不执行，
+    ``_system_prompt`` 的 tail 与改动前逐字一致。召回会多一次本地 embedding
+    与向量查询，故任何异常都 fail-open 跳过，不让记忆链路拖垮对话。
+    """
+    if not (
+        settings.memory_progressive_enabled
+        and settings.memory_auto_recall_enabled
+        and user_input.strip()
+    ):
+        return ""
+    try:
+        hits = store.search_episode(
+            user_input,
+            k=settings.memory_auto_recall_top_k,
+            user_id=user_id,
+        )
+        block = format_recall_block(
+            hits, max_chars=settings.memory_auto_recall_max_chars
+        )
+        logger.info("memory_recall hits=%d chars=%d", len(hits), len(block))
+        return block
+    except Exception:
+        logger.exception("情景记忆自动召回失败，本轮跳过")
+        return ""
 
 
 def _kb_capability_block(kb_file_ids: tuple[str, ...] = ()) -> str:
@@ -295,7 +352,11 @@ def _period_inventory(ready: list[dict]) -> str:
 
 
 def _system_prompt(
-    user_id: str, *, use_kb: bool = True, kb_file_ids: tuple[str, ...] = ()
+    user_id: str,
+    *,
+    use_kb: bool = True,
+    kb_file_ids: tuple[str, ...] = (),
+    user_input: str = "",
 ) -> str:
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
@@ -303,9 +364,17 @@ def _system_prompt(
     core = build_system_prompt(use_kb=use_kb, report_catalog=skill_catalog())
     # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
     # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。
-    block = _profile_prompt(user_id)
+    # 无问句时保持原来的调用形式：存量测试会把 _profile_prompt 换成只收
+    # 位置参数的桩，多传一个关键字参数会把它们打挂；顺带让这条路径与
+    # 改动前逐字一致。只有真的拿到问句才把相关性查询传下去。
+    block = (
+        _profile_prompt(user_id, user_input=user_input)
+        if user_input
+        else _profile_prompt(user_id)
+    )
     cap_block = _kb_capability_block(kb_file_ids) if use_kb else ""
-    tail = "\n\n".join(p for p in (_today_line(), block, cap_block) if p)
+    recall = _recall_block(user_id, user_input)
+    tail = "\n\n".join(p for p in (_today_line(), block, recall, cap_block) if p)
     if not tail:
         return core
     # 动态块原先完全不受上下文预算约束：画像条数、库内文档类型数、报告类型
@@ -400,12 +469,26 @@ def run_stream(
             replacing = True
             user_input = str(recent[-1].get("content") or "")
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, kb_file_ids=kb_file_ids), summary, recent
+                _system_prompt(
+                    user_id,
+                    use_kb=use_kb,
+                    kb_file_ids=kb_file_ids,
+                    user_input=user_input,
+                ),
+                summary,
+                recent
             )
             persisted = len(messages)
         else:
             messages = assemble(
-                _system_prompt(user_id, use_kb=use_kb, kb_file_ids=kb_file_ids), summary, recent
+                _system_prompt(
+                    user_id,
+                    use_kb=use_kb,
+                    kb_file_ids=kb_file_ids,
+                    user_input=user_input,
+                ),
+                summary,
+                recent
             )
             persisted = len(messages)
             turn_anchor = {"role": "user", "content": user_input}
@@ -479,14 +562,21 @@ def run_stream(
                 )
                 if completed:
                     _turn_finalizer.submit(
-                        _capture_turn, user_id, turn, summary, user_input
+                        _capture_turn,
+                        user_id,
+                        turn,
+                        summary,
+                        user_input,
+                        chat_session_id,
                     )
                 _turn_finalizer.submit(
                     _compress_and_cache, user_id, chat_session_id, messages, summary
                 )
             else:
                 if completed:
-                    _capture_turn(user_id, turn, summary, user_input)
+                    _capture_turn(
+                        user_id, turn, summary, user_input, chat_session_id
+                    )
                 _compress_and_cache(user_id, chat_session_id, messages, summary)
 
 
