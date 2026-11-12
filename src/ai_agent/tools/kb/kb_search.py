@@ -67,7 +67,10 @@ def _question_names_files_query_lost(tool_query: str, asked: str) -> bool:
     if not named:
         return False
     kept = {str(fid) for fid in mentioned_file_ids(tool_query)}
-    return not named <= kept
+    # 只有主体**全被收掉**才回退整句。模型保留了一部分主体时不要动它——
+    # 「中微的营收，跟兆易比，谁多」这句问句里有两家，检索词只留中微是
+    # 模型在聚焦，硬换回整句会把兆易的片段混进来（实测两家混排）。
+    return not kept
 
 
 def _kinds_user_asked(asked: str, kinds: list[str] | None) -> list[str] | None:
@@ -216,6 +219,75 @@ def retrieve_for_question(
     return parsed_ids, hits
 
 
+def _subjects_in(text: str) -> list[str]:
+    """问句点名的公司主体（按文件清单顺序去重）。
+
+    `mentioned_subjects` 会把「兆易创新」和「兆易创新科技集团」当成两个，
+    这里归到文件行的 subject 字段上，一家只算一次。
+    """
+    from ai_agent.kb.retrieval.router import mentioned_file_ids
+
+    try:
+        rows = {str(row["file_id"]): row for row in store.list_kb_files()}
+    except Exception:
+        logger.warning("多主体检索拿文件列表失败", exc_info=True)
+        return []
+    seen: list[str] = []
+    for fid in mentioned_file_ids(text):
+        subject = str(rows.get(str(fid), {}).get("subject") or "").strip()
+        if subject and subject not in seen:
+            seen.append(subject)
+    return seen
+
+
+def _search_by_subject(
+    query: str,
+    *,
+    top_k: int,
+    kinds: list[str] | None,
+    sections: list[str] | None,
+) -> str | None:
+    """问句里有多家主体时，逐家检索并分组返回；只有一家返回 None 走原流程。"""
+    asked = current_question().strip() or query
+    subjects = _subjects_in(asked)
+    if len(subjects) < 2:
+        return None
+
+    blocks: list[str] = []
+    for subject in subjects:
+        try:
+            parsed_ids, hits = retrieve_for_question(
+                query, files=[subject], top_k=top_k, kinds=kinds, sections=sections
+            )
+        except Exception:
+            logger.exception("按主体检索失败 subject=%s", subject)
+            continue
+        if parsed_ids == [] or not hits:
+            blocks.append(f"【{subject}】库里没有检索到相关内容。")
+            continue
+        relevant = _keep_relevant(hits)
+        if not relevant:
+            blocks.append(f"【{subject}】库里没有检索到相关内容。")
+            continue
+        add_citations(_citations_of(relevant))
+        body = "\n\n".join(_format_hit_with_context(hit) for hit in relevant)
+        periods: list[str] = []
+        for hit in relevant:
+            period = (hit.period or "").strip()
+            if period and period not in periods:
+                periods.append(period)
+        head = f"【{subject}】" + (f"命中报告期：{'、'.join(periods)}" if periods else "")
+        blocks.append(f"{head}\n\n{body}")
+
+    if not blocks:
+        return None
+    note = (
+        "问句点名了多家主体，下面是**按主体分别检索**的结果，每段只含该公司的片段；"
+        "对比时注意各自的报告期可能不同。"
+    )
+    return f"{note}\n\n" + "\n\n".join(blocks)
+
+
 def _named_scope(query: str, files: list[str] | None, parsed_ids: list | None) -> bool:
     """范围里每一份都是问句或 files 点到的，没有摘要补进来的其他公司。"""
     if not parsed_ids:
@@ -237,6 +309,13 @@ def _kb_search(
 ) -> str:
     if not store.has_ready_kb_file():
         return KB_EMPTY_HINT
+
+    # 问句点名了多家公司：按主体**各查一次**，分组返回。
+    # 混在一次检索里排序，一家会挤掉另一家的名额（实测问中微，前两条是兆易）。
+    if not files:
+        grouped = _search_by_subject(query, top_k=top_k, kinds=kinds, sections=sections)
+        if grouped is not None:
+            return grouped
 
     try:
         parsed_ids, hits = retrieve_for_question(
