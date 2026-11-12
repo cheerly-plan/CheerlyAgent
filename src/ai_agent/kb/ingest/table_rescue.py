@@ -87,6 +87,29 @@ def _table_blocks(text: str) -> list[str]:
     return [match.strip() for match in _TABLE_BLOCK.findall(text or "") if match.strip()]
 
 
+# 列数上限的绝对天花板：再宽就不是表格，是被切碎的字符网格
+_COLUMN_CAP = 30
+
+
+def _column_limit(old_text: str) -> int:
+    """OCR 结果的列数上限。
+
+    原先一律「文字层列数 × 2」，实测把两个正当场景挡在门外：
+
+    * 中国银行合并利润表：文字层把 8 个期间压成 2 列（列被压扁），OCR 正确
+      读出 9 列，2×2=4 直接判"切得过碎"——原文列数在这种情况下本来就不可信；
+    * 中大力德所有者权益变动表：文字层 6 列，OCR 13 列（12 个期间列），
+      2.17 倍同样被挡，但那 13 列是对的。
+
+    所以：列被压扁的页按绝对上限判断；其余放宽到 3 倍（多列报表常见），
+    两者都不超过 ``_COLUMN_CAP``。真正防"读错数"的是数字校验那一道。
+    """
+    old = _column_count(old_text)
+    if collapsed_cells(old_text) > 0:
+        return _COLUMN_CAP
+    return min(_COLUMN_CAP, max(old, 1) * 3)
+
+
 def _column_count(text: str) -> int:
     """表格段的最大列数（HTML 按 <td> 数，Markdown 按 | 数）。"""
     if "<td" in text or "<th" in text:
@@ -213,8 +236,13 @@ def rescue_table_pages(
             stats["校验未过"] += 1
             continue
         payload = "\n\n".join(tables)
-        if _column_count(payload) > max(_column_count(old_text), 1) * 2:
-            logger.info("表格页 OCR 切得过碎 page=%d，保留文字层", page)
+        if _column_count(payload) > _column_limit(old_text):
+            logger.info(
+                "表格页 OCR 切得过碎 page=%d（OCR %d 列 > 上限 %d），保留文字层",
+                page,
+                _column_count(payload),
+                _column_limit(old_text),
+            )
             stats["校验未过"] += 1
             continue
         if not numbers_verified(payload, _page_digit_stream(path, page)):

@@ -129,3 +129,30 @@ def test_repeated_header_detects_split_year_column():
 
     assert has_repeated_header("| 年年年年年年年年2025 | 2026 |\n|---|---|\n| a | 1 |")
     assert not has_repeated_header("| 项目 | 2026年 |\n|---|---|\n| a | 1 |")
+
+
+def test_column_limit_trusts_ocr_on_collapsed_tables():
+    """列被压扁时文字层列数不可信：2 列塞了 8 个数，OCR 读成 9 列是对的。"""
+    from ai_agent.kb.ingest.table_rescue import _COLUMN_CAP, _column_limit
+
+    collapsed = "| 项目 | 本期 |\n|---|---|\n| 营业收入 | 162,201 491,204 133,776 391,889 |"
+    assert _column_limit(collapsed) == _COLUMN_CAP
+
+
+def test_column_limit_allows_multi_period_reports():
+    """所有者权益变动表：文字层 6 列、OCR 13 列（12 个期间列），要放行。"""
+    from ai_agent.kb.ingest.table_rescue import _column_limit
+
+    old = (
+        "| 项目 | 本期 | 上期 | 年初 | 增减 | 备注 |\n"
+        "|---|---|---|---|---|---|\n"
+        "| a | 1 | 2 | 3 | 4 | 5 |\n| b | 6 | 7 | 8 | 9 | 10 |"
+    )
+    assert _column_limit(old) >= 13
+
+
+def test_column_limit_still_catches_shredded_output():
+    from ai_agent.kb.ingest.table_rescue import _COLUMN_CAP, _column_limit
+
+    normal = "| 项目 | 本期 |\n|---|---|\n| a | 1 |"
+    assert _column_limit(normal) <= _COLUMN_CAP
