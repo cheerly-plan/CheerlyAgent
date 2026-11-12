@@ -593,6 +593,52 @@ def _question_already_retrieved(messages: list[ChatMessage]) -> bool:
     return False
 
 
+def _followup_subjects(
+    messages: list[ChatMessage],
+    file_ids: list[uuid.UUID] | None,
+) -> set[str]:
+    """当前句省略主体时，回看此前几轮用户问话点过的库内主体。
+
+    追问常把主体留在上一轮（「那毛利率呢」「去年呢」）。强制检索门只看
+    当前句字面会把这类问句放过去，模型不查库、拿上一轮的检索片段或训练
+    记忆直接作答。回看窗口与查询改写共用 kb_rewrite_history_turns，命中
+    任意一轮即认定这句仍是知识库追问。读库失败 fail-open 返回空（不强制，
+    与字面检测的放行语义一致）。只回看主体；人名/子公司等实体追问更少见，
+    不在这次兜底范围里。
+    """
+    from ai_agent.kb.retrieval import mentioned_subjects
+
+    cur: int | None = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            cur = i
+            break
+    if cur is None:
+        return set()
+    turns = 0
+    for i in range(cur - 1, -1, -1):
+        if messages[i].get("role") != "user":
+            continue
+        text = str(messages[i].get("content") or "").strip()
+        if not text:
+            continue
+        turns += 1
+        if turns > settings.kb_rewrite_history_turns:
+            break
+        try:
+            hits = mentioned_subjects(text, file_ids=file_ids)
+        except Exception:
+            logger.warning("追问主体回看检测失败，按不强制处理", exc_info=True)
+            return set()
+        if hits:
+            logger.info(
+                "追问未点名主体，回看此前问句命中 subjects=%s",
+                "、".join(sorted(hits)),
+            )
+            return hits
+    return set()
+
+
 _KG_PREFETCH_MARK = "【图谱邻域】"
 
 
@@ -639,8 +685,9 @@ def _must_call_kb_tool(
 
     主体（公司名、简称）和图谱实体（人名、子公司、产品）都会触发。
     只强制「必须查」，选 kb_search 还是 kg_search 仍由模型按【知识库能力】决定。
-    只看当前这句用户消息。上一轮查过别的对象不算数；这句之后已经有
-    工具结果（续跑、检索完准备作答）也不再强制。读库失败则放行。
+    当前句字面点名主体/实体就强制；追问省略了主体时，回看前几轮用户问句
+    是否点过主体（见 _followup_subjects，可用 kb_followup_force_enabled 关闭）。
+    这句之后已经有工具结果（续跑、检索完准备作答）不再强制。读库失败则放行。
     """
     names = {t.get("function", {}).get("name") for t in tools}
     if not (_KB_RETRIEVAL_TOOLS & names):
@@ -671,6 +718,11 @@ def _must_call_kb_tool(
     # 主体命中已经足够强制检索，但实体仍要查：问的是公司 A 里的实体 B 时，
     # 日志里得看得到 B，不能因为 A 命中就把实体检测跳过。
     entities = mentioned_entities(text, file_ids=file_ids)
+    if not subjects and not entities and settings.kb_followup_force_enabled:
+        # 追问兜底：这句没点名主体，但前几轮问句点过库内主体——主体多半被
+        # 省略或写成了指代。字面检测会放行，模型便不查库直接作答；这里把
+        # 这句仍按知识库追问强制检索（具体主体回看逻辑见 _followup_subjects）。
+        subjects = _followup_subjects(messages, file_ids)
     if subjects or entities:
         logger.info(
             "问句命中知识库，强制调用工具 subjects=%s entities=%s",

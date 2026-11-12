@@ -347,6 +347,11 @@ class Settings(BaseSettings):
     kb_rewrite_model: str = ""
     kb_rewrite_timeout_seconds: float = 3.0
     kb_rewrite_history_turns: int = 2
+    # 追问强制检索：当前问句没点名主体、但此前 kb_rewrite_history_turns 轮
+    # 用户问话里点过库内主体时（主体被省略或写成指代，如「那毛利率呢」），
+    # 仍按知识库追问强制先调 kb_search/kg_search。关掉即退回旧行为：
+    # 只看当前句字面点名（回滚旋钮，见 agents/loop.py _followup_subjects）。
+    kb_followup_force_enabled: bool = True
     # 检索增强改写（multi-query）：把一条查询扩写成多条变体分别检索后 RRF 融合，
     # 提升对比/口语长问句召回。默认关闭——开启会显著增加检索次数与延迟，
     # 请先用评测验证效果与延迟可接受再用于生产。

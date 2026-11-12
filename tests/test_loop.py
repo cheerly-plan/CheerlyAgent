@@ -1271,6 +1271,125 @@ def test_question_about_a_report_still_forces_retrieval():
         assert _must_call_kb_tool(messages, tools) is True
 
 
+def test_must_call_kb_tool_forces_followup_without_subject():
+    """追问省略主体（「那毛利率呢」），上一轮问句点过库内主体 → 同样强制检索。"""
+    tools = [{"function": {"name": "kb_search"}}, {"function": {"name": "kg_search"}}]
+    messages = [
+        {"role": "user", "content": "中科飞测的营业收入是多少"},
+        {"role": "assistant", "content": "营业收入为 1.2 亿元。"},
+        {"role": "user", "content": "那毛利率呢"},
+    ]
+
+    def subjects(query, file_ids=None):
+        return {"中科飞测"} if "中科飞测" in query else set()
+
+    with (
+        patch("ai_agent.kb.retrieval.mentioned_subjects", side_effect=subjects),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
+    ):
+        assert _must_call_kb_tool(messages, tools) is True
+
+
+def test_must_call_kb_tool_followup_skips_when_flag_off():
+    """回看兜底开关关掉（kb_followup_force_enabled=False）→ 退回旧行为不强制。"""
+    tools = [{"function": {"name": "kb_search"}}]
+    messages = [
+        {"role": "user", "content": "中科飞测的营业收入是多少"},
+        {"role": "assistant", "content": "答"},
+        {"role": "user", "content": "那毛利率呢"},
+    ]
+
+    def subjects(query, file_ids=None):
+        return {"中科飞测"} if "中科飞测" in query else set()
+
+    with (
+        patch("ai_agent.agents.loop.settings.kb_followup_force_enabled", False),
+        patch("ai_agent.kb.retrieval.mentioned_subjects", side_effect=subjects),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
+    ):
+        assert _must_call_kb_tool(messages, tools) is False
+
+
+def test_must_call_kb_tool_followup_not_forced_without_history_subject():
+    """历史问句也没点过主体的追问：保持不强制，别把闲聊追问也锁进知识库。"""
+    tools = [{"function": {"name": "kb_search"}}]
+    messages = [
+        {"role": "user", "content": "今天天气如何"},
+        {"role": "assistant", "content": "晴"},
+        {"role": "user", "content": "那明天呢"},
+    ]
+    with (
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value=set()),
+        patch("ai_agent.kb.retrieval.mentioned_entities", return_value=[]),
+    ):
+        assert _must_call_kb_tool(messages, tools) is False
+
+
+def test_run_loop_requires_kb_tool_on_followup_question():
+    """run_loop 集成：追问省略主体时，第一步只留知识库工具并强制调用；查完放开。"""
+    fake_schemas = [
+        {"function": {"name": "get_weather"}},
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "kg_search"}},
+    ]
+    seen: list[tuple[str, list[str]]] = []
+
+    def capture(messages, tools, tool_choice="auto"):
+        seen.append((tool_choice, [t["function"]["name"] for t in tools]))
+        if tool_choice == "required":
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "name": "kb_search",
+                            "arguments": {"query": "毛利率"},
+                        }
+                    ],
+                },
+            )
+            return
+        yield ("text", "根据报告")
+        yield ("result", {"content": "根据报告", "tool_calls": []})
+
+    def subjects(query, file_ids=None):
+        return {"中科飞测"} if "中科飞测" in query else set()
+
+    messages = [
+        {"role": "user", "content": "中科飞测的营业收入是多少"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "old", "name": "kb_search", "arguments": {"query": "营业收入"}}
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "old",
+            "name": "kb_search",
+            "content": "营业收入 1",
+        },
+        {"role": "assistant", "content": "1"},
+        {"role": "user", "content": "那毛利率呢"},
+    ]
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.execute_tool", return_value="毛利率 40%"),
+        patch("ai_agent.kb.retrieval.mentioned_subjects", side_effect=subjects),
+    ):
+        events = list(run_loop(messages))
+
+    assert seen[0] == ("required", ["kb_search", "kg_search"])
+    assert seen[1][0] == "auto"
+    assert seen[1][1] == ["get_weather", "kb_search", "kg_search"]
+    assert events[-1]["type"] == "done"
+    assert any(e.get("type") == "tool_start" for e in events)
+
+
 def test_run_loop_requires_kb_tool_when_question_names_entity():
     """问句点名图谱实体（不是文件主体）时，同样强制调用知识库工具。"""
     fake_schemas = [
