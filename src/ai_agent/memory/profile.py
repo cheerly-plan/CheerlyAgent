@@ -219,7 +219,14 @@ def apply_profile_action(
         return None
     # 冲突消解：同 facet 里「说的是同一件事、但内容变了」的旧条目先标记覆盖。
     # 不删行——留档能回答「以前是什么」，也避免把用户的一句反问误判成纠错。
-    superseded = find_superseded(cleaned.content, facet, existing)
+    #
+    # 互斥 facet 不能走这里：write_profile 对它们是「同一确定性 id 的 upsert」，
+    # 旧行和新行是同一行。若再调用 supersede_profile_items，刚写入的新值会被
+    # 立刻标成 superseded_at，从 list_profile 里消失（职业/姓名/地区/语言的
+    # 补充式更新都会踩到，例如「前端开发」→「资深前端开发」）。
+    superseded = (
+        [] if is_mutex_facet(facet) else find_superseded(cleaned.content, facet, existing)
+    )
     written = store.write_profile(
         cleaned.content,
         user_id=uid,

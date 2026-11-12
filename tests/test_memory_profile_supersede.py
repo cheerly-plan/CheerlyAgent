@@ -69,6 +69,39 @@ def test_new_fact_supersedes_old_one(mem_store):
     assert "财报数据默认用万元" in _texts(mem_store, active=False)
 
 
+@pytest.mark.parametrize(
+    ("facet", "old", "new"),
+    [
+        ("name", "张三", "张三丰"),
+        ("occupation", "前端开发", "资深前端开发"),
+        ("locale", "北京", "北京市"),
+        ("language", "中文", "简体中文"),
+    ],
+)
+def test_mutex_facet_update_keeps_new_value_active(mem_store, facet, old, new):
+    """互斥 facet 用同一 id 覆盖，不能再把覆盖后的同一行标成 superseded。
+
+    回归：曾经 occupation「前端开发」→「资深前端开发」写入成功后，
+    list_profile 立刻返回空——新旧行是同一个 id，supersede 把新值也标掉了。
+    """
+    apply_profile_action(ProfileAction("add", facet, old))
+    apply_profile_action(ProfileAction("update", facet, new))
+
+    active = mem_store.list_profile(UID)
+    assert [item.text for item in active] == [new]
+    with mem_store._get_pool().connection() as conn:
+        row = conn.execute(
+            """
+            SELECT superseded_at
+            FROM agent_user_profile
+            WHERE user_id = %s AND facet = %s
+            """,
+            (UID, facet),
+        ).fetchone()
+    assert row is not None
+    assert row["superseded_at"] is None
+
+
 def test_unrelated_preference_coexists(mem_store):
     apply_profile_action(ProfileAction("add", "preference", "财报数据默认用万元"))
     apply_profile_action(ProfileAction("add", "preference", "不喜欢用表格回答"))
