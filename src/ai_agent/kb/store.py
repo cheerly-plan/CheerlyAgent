@@ -1086,6 +1086,66 @@ class KbStore:
         total = int(row["total"] or 0)
         return total, {kw: int(row[f"df{i}"] or 0) for i, kw in enumerate(keywords)}
 
+    def fetch_kb_chunks_by_prefix(
+        self, refs: list[tuple[str, int]]
+    ) -> dict[tuple[str, int], dict]:
+        """按 ``(file_id 前缀, seq)`` 取切片原文，返回 {(前缀, seq): row}。
+
+        模型拿到的引用是 8 位短 id（抄全 UUID 容易抄错），这里用前缀匹配。
+        """
+        if not refs:
+            return {}
+        prefixes = sorted({prefix for prefix, _ in refs})
+        seqs = sorted({seq for _, seq in refs})
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.file_id::text AS file_id, c.seq, c.page, c.page_end,
+                       c.kind, c.section, c.scope, c.period, c.text, f.filename
+                FROM agent_kb_chunk c JOIN agent_kb_file f ON f.id = c.file_id
+                WHERE left(c.file_id::text, 8) = ANY(%(prefixes)s::text[])
+                  AND c.seq = ANY(%(seqs)s::int[])
+                """,
+                {"prefixes": prefixes, "seqs": seqs},
+            ).fetchall()
+        out: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            prefix = str(row["file_id"])[:8]
+            key = (prefix, int(row["seq"]))
+            if key in {(p, s) for p, s in refs}:
+                out[key] = dict(row)
+        return out
+
+    def fetch_kb_chunks(
+        self, pairs: list[tuple[uuid.UUID, int]]
+    ) -> dict[tuple[str, int], dict]:
+        """按 (file_id, seq) 取切片原文：{(file_id, seq): {filename, page, ...}}。
+
+        给 ``kb_read`` 用：检索结果只带引用（file:seq），原文始终从库里现读，
+        所以读回来的一定是**当前**内容——知识库重跑后不会读到旧文本。
+        """
+        if not pairs:
+            return {}
+        wanted = {(str(fid), int(seq)) for fid, seq in pairs}
+        file_ids = sorted({fid for fid, _ in wanted})
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.file_id::text AS file_id, c.seq, c.page, c.page_end,
+                       c.kind, c.section, c.scope, c.period, c.text, f.filename
+                FROM agent_kb_chunk c JOIN agent_kb_file f ON f.id = c.file_id
+                WHERE c.file_id = ANY(%(ids)s::uuid[])
+                """,
+                {"ids": file_ids},
+            ).fetchall()
+        out: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            key = (str(row["file_id"]), int(row["seq"]))
+            if key not in wanted:
+                continue
+            out[key] = dict(row)
+        return out
+
     def kb_chunk_neighbors(
         self,
         pairs: list[tuple[uuid.UUID, int]],

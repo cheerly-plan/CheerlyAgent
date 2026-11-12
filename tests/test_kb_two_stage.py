@@ -1,15 +1,22 @@
-"""两段式检索（影子模式）：清单不打码不漏数、kb_read 能取回全文。"""
+"""两段式检索：清单带引用、kb_read 按引用回库里读原文。
+
+缓存正文的旧实现已经去掉——切片引用（``file 前 8 位:seq``）本身就是稳定标识，
+``kb_read`` 拿它现读库，所以进程重启、多实例部署、知识库重跑都不会读到旧内容。
+"""
 
 import uuid
+from unittest.mock import patch
 
 from ai_agent.core.config import settings
 from ai_agent.kb.retrieval.retrieval import Hit
 from ai_agent.tools.kb import kb_search as ks
 
+FILE_ID = "3823ff6e-1111-2222-3333-444455556666"
 
-def _hit(seq: int, page: int, text: str) -> Hit:
+
+def _hit(seq: int, page: int, text: str, file_id: str = FILE_ID) -> Hit:
     return Hit(
-        file_id="f1",
+        file_id=file_id,
         filename="某公司2026年第三季度报告",
         seq=seq,
         page=page,
@@ -21,83 +28,93 @@ def _hit(seq: int, page: int, text: str) -> Hit:
     )
 
 
+def _row(seq: int, text: str) -> dict:
+    return {
+        "file_id": FILE_ID,
+        "seq": seq,
+        "page": 10,
+        "page_end": 10,
+        "kind": "table",
+        "section": "四、季度财务报表",
+        "scope": None,
+        "period": "2026Q3",
+        "text": text,
+        "filename": "某公司2026年第三季度报告",
+    }
+
+
 def test_preview_masks_numbers():
     """清单预览不能漏出金额，否则模型会拿预览直接作答。"""
-    text = "| 货币资金 | 5,060,456,799.16 | 5,574,955,555.50 |"
-    preview = ks._preview(text)
+    preview = ks._preview("| 货币资金 | 5,060,456,799.16 | 5,574,955,555.50 |")
     assert "5,060,456,799" not in preview
     assert "5,574,955,555" not in preview
     assert "…" in preview
 
 
-def test_list_format_has_index_and_location():
-    hits = [_hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |"), _hit(40, 11, "合并利润表")]
-    ks.set_last_hits(hits)
+def test_list_format_has_index_location_and_ref():
+    hits = [_hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |")]
     lines = ks._format_hit_list(hits)
     assert lines.startswith("[1] ")
     assert "第10页" in lines
-    assert "1,589,422,902.20" not in lines   # 金额必须打码
+    assert "3823ff6e:39" in lines          # 抬头里带引用，kb_read 靠它读回
+    assert "1,589,422,902.20" not in lines  # 金额仍然打码
 
 
-def test_read_hits_returns_full_text():
-    hits = [_hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |"), _hit(40, 11, "合并利润表")]
-    ks.set_last_hits(hits)
-    detail = ks._read_hits([1])
-    assert "1,589,422,902.20" in detail
+def test_full_mode_header_carries_ref():
+    hit = _hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |")
+    out = ks._format_hit_with_context(hit)
+    assert "〔ref=3823ff6e:39〕" in out
 
 
-def test_read_hits_without_cache_hints_to_search():
-    ks.set_last_hits([])
-    assert "先 kb_search" in ks._read_hits([1])
+def test_extract_refs_from_tool_output():
+    text = "〔ref=3823ff6e:35〕…〔ref=61a849b4:179〕…〔ref=3823ff6e:35〕"
+    assert ks.extract_refs(text) == ["3823ff6e:35", "61a849b4:179"]
 
 
-def test_read_hits_with_query_missing_cache_asks_research():
-    """给了检索词却查不到缓存时，不能把"最近一次检索"的无关结果塞回去。"""
-    ks.set_last_hits([_hit(1, 1, "别的检索")])
-    out = ks._read_hits([1], query="完全不相干的词")
+def test_read_hits_reads_current_text_from_db():
+    with patch.object(
+        ks.store, "fetch_kb_chunks_by_prefix",
+        return_value={("3823ff6e", 39): _row(39, "| 五、净利润 | 1,589,422,902.20 |")},
+    ):
+        out = ks._read_hits(refs=["3823ff6e:39"])
+    assert "1,589,422,902.20" in out
+
+
+def test_read_hits_without_refs_asks_for_ref():
+    assert "没有可读取的引用" in ks._read_hits(refs=[])
+
+
+def test_read_hits_unknown_ref_asks_research():
+    with patch.object(ks.store, "fetch_kb_chunks_by_prefix", return_value={}):
+        out = ks._read_hits(refs=["deadbeef:1"])
     assert "重新 kb_search" in out
-    assert "别的检索" not in out
 
 
-def test_read_hits_out_of_range():
-    ks.set_last_hits([_hit(1, 1, "a")])
-    # 越界编号会退回默认前 3 条，不会返回空
-    assert "a" in ks._read_hits([9])
+def test_read_hits_ignores_malformed_refs():
+    with patch.object(ks.store, "fetch_kb_chunks_by_prefix", return_value={}) as spy:
+        out = ks._read_hits(refs=["不是引用", "3823ff6e"])
+    assert "没有可读取的引用" in out
+    spy.assert_not_called()
+
+
+def test_read_hits_is_stateless_across_processes():
+    """没有进程内缓存：同样的引用两次都回库里读，结果一致。"""
+    payload = {("3823ff6e", 39): _row(39, "| 净利润 | 100 |")}
+    with patch.object(ks.store, "fetch_kb_chunks_by_prefix", return_value=payload) as spy:
+        first = ks._read_hits(refs=["3823ff6e:39"])
+        second = ks._read_hits(refs=["3823ff6e:39"])
+    assert first == second
+    assert spy.call_count == 2
 
 
 def test_list_only_flag_declared_off_by_default():
-    """声明默认关（.env 打开后不影响这条断言）。"""
     from ai_agent.core.config import Settings
 
     assert Settings.model_fields["kb_search_list_only"].default is False
 
 
-def test_cache_survives_thread_boundary():
-    """工具跑在线程池里：kb_search 与 kb_read 是两次独立调用。
-
-    早先用 ContextVar 存命中，工作线程之间不共享，kb_read 永远读不到——
-    线上表现为模型反复「搜索→读取失败」，直到步数预算耗尽。
-    """
-    import threading
-
-    hits = [_hit(1, 1, "| 负债合计 | 100 |")]
-    ks.set_last_hits(hits, search_id="abc123")
-    got: list[int] = []
-
-    def _other_thread() -> None:
-        got.append(len(ks._read_hits([1], "abc123")))
-
-    worker = threading.Thread(target=_other_thread)
-    worker.start()
-    worker.join()
-    assert got == [1] or got[0] > 0, "跨线程读不到缓存"
-
-
-# ——— 按问句读回（历史轮次老化后取原文） ———
-
-
-def test_search_caches_hits_by_query(monkeypatch):
-    """kb_search 把结果按问句缓存，供后续轮次 kb_read 读回。"""
+def test_ref_round_trip_through_search(monkeypatch):
+    """kb_search 输出里的引用能直接喂回 kb_read。"""
     monkeypatch.setattr(ks.store, "has_ready_kb_file", lambda: True)
     hits = [_hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |")]
     monkeypatch.setattr(
@@ -105,25 +122,10 @@ def test_search_caches_hits_by_query(monkeypatch):
     )
     monkeypatch.setattr(ks.settings, "kb_search_list_only", False)
     out = ks._kb_search("长电科技 2026Q3 净利润")
-    assert "1,589,422,902.20" in out
-    back = ks._read_hits(query="长电科技 2026Q3 净利润")
-    assert "1,589,422,902.20" in back
-
-
-def test_query_lookup_ignores_whitespace(monkeypatch):
-    monkeypatch.setattr(ks.store, "has_ready_kb_file", lambda: True)
-    hits = [_hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |")]
-    monkeypatch.setattr(
-        ks, "retrieve_for_question", lambda *a, **kw: ([uuid.uuid4()], hits)
-    )
-    monkeypatch.setattr(ks.settings, "kb_search_list_only", False)
-    ks._kb_search("长电科技  2026Q3   净利润")
-    assert "1,589,422,902.20" in ks._read_hits(query="长电科技 2026Q3 净利润")
-
-
-def test_read_without_ids_returns_first_three():
-    hits = [_hit(i, i, f"第{i}条") for i in range(1, 6)]
-    ks.set_last_hits(hits)
-    out = ks._read_hits()
-    assert "第1条" in out and "第3条" in out
-    assert "第4条" not in out
+    refs = ks.extract_refs(out)
+    assert refs == ["3823ff6e:39"]
+    with patch.object(
+        ks.store, "fetch_kb_chunks_by_prefix",
+        return_value={("3823ff6e", 39): _row(39, "| 五、净利润 | 1,589,422,902.20 |")},
+    ):
+        assert "1,589,422,902.20" in ks._kb_read(refs=refs)

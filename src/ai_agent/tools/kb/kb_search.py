@@ -7,9 +7,6 @@
 
 import os
 import re
-import threading
-import uuid
-from collections import OrderedDict
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -19,6 +16,7 @@ from ai_agent.core.logging import get_logger
 from ai_agent.kb.ingest.chunking import html_tables_to_markdown
 from ai_agent.kb.retrieval.citations import Citation, add_citations
 from ai_agent.kb.retrieval.retrieval import (
+    _attach_neighbors,
     Hit,
     format_where,
     search_knowledge_multi,
@@ -36,9 +34,7 @@ from ai_agent.storage.store import store
 from ai_agent.prompts.tools import (
     KB_EMPTY_HINT,
     KB_READ_DESC,
-    KB_READ_IDS_DESC,
-    KB_READ_QUERY_DESC,
-    KB_READ_SEARCH_ID_DESC,
+    KB_READ_REFS_DESC,
     KB_SEARCH_LIST_NOTE,
     KB_ERROR_HINT,
     KB_FILES_DESC,
@@ -272,12 +268,9 @@ def _kb_search(
     # 引用走旁路交给上层（SSE 下发 + 随消息落库），文本里仍保留
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(relevant))
-    search_id = set_last_hits(relevant, search_id=uuid.uuid4().hex[:8])
-    # 按问句再存一份：历史轮次老化后模型只记得当时的检索词，据此读回同一批证据
-    cache_hits_by_query(query, relevant)
     if settings.kb_search_list_only:
         # 影子模式：只回清单，全文由模型用 kb_read 取
-        return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant, search_id)}"
+        return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant)}"
     body = "\n\n".join(_format_hit_with_context(hit) for hit in relevant)
     periods: list[str] = []
     for hit in relevant:
@@ -294,67 +287,19 @@ def _kb_search(
     return f"{note}\n\n{body}"
 
 
-# 上一次 kb_search 的命中，按清单编号索引，kb_read 靠它取全文。
-#
-# **不能用 ContextVar**：工具跑在线程池的工作线程里（loop._run_tool_with_progress），
-# 每次调用都是新上下文，写进去的缓存在下一个工具调用里读不到——实测表现为
-# kb_search 给了清单、kb_read 却回「没有可读取的检索结果」，模型于是反复重查
-# 直到耗尽步数预算。改成进程级缓存，按 (用户, 检索编号) 索引。
-_HIT_CACHE: "OrderedDict[tuple[str, str], dict[int, Hit]]" = OrderedDict()
-_HIT_CACHE_LOCK = threading.Lock()
-_HIT_CACHE_MAX = 64
-_LAST_SEARCH: dict[str, str] = {}  # 用户 → 最近一次检索编号（模型漏填时的兜底）
-
+_REF_PATTERN = re.compile(r"ref=([0-9a-f]{6,}):(\d+)")
 # 清单预览里把数字打码：模型若直接拿预览作答，至少不会编出一个"看起来对"的金额
 _PREVIEW_NUM = re.compile(r"-?\d[\d,]*\.?\d*")
 
 
-def set_last_hits(hits: list[Hit], *, search_id: str = "latest") -> str:
-    """缓存本次命中，返回检索编号（模型要把它抄进 kb_read）。"""
-    from ai_agent.storage.db import current_user_id
-
-    user = current_user_id() or "-"
-    payload = {index: hit for index, hit in enumerate(hits, start=1)}
-    with _HIT_CACHE_LOCK:
-        _HIT_CACHE[(user, search_id)] = payload
-        _HIT_CACHE.move_to_end((user, search_id))
-        while len(_HIT_CACHE) > _HIT_CACHE_MAX:
-            _HIT_CACHE.popitem(last=False)
-        _LAST_SEARCH[user] = search_id
-    return search_id
-
-
-def cache_hits_by_query(query: str, hits: list[Hit]) -> None:
-    """按问句缓存本次命中，供后续轮次用 kb_read 读回。
-
-    历史轮次的工具原文会被「老化」成一行引用，模型要细节时不必重新检索——
-    重新检索可能换一批切片（同一问题换个说法就命中另一张表），证据链就断了。
-    """
-    from ai_agent.storage.db import current_user_id
-
-    key = _query_key(query)
-    if not key:
-        return
-    user = current_user_id() or "-"
-    payload = {index: hit for index, hit in enumerate(hits, start=1)}
-    with _HIT_CACHE_LOCK:
-        _HIT_CACHE[(user, f"q:{key}")] = payload
-        _HIT_CACHE.move_to_end((user, f"q:{key}"))
-        while len(_HIT_CACHE) > _HIT_CACHE_MAX:
-            _HIT_CACHE.popitem(last=False)
-
-
-def _query_key(query: str) -> str:
-    return re.sub(r"\s+", "", (query or "").strip().lower())
-
-
-def last_hits(search_id: str | None = None) -> dict[int, Hit]:
-    from ai_agent.storage.db import current_user_id
-
-    user = current_user_id() or "-"
-    with _HIT_CACHE_LOCK:
-        key = (user, search_id or _LAST_SEARCH.get(user, ""))
-        return dict(_HIT_CACHE.get(key) or {})
+def extract_refs(text: str) -> list[str]:
+    """从工具结果正文里抠出 ``file:seq`` 引用（老化成一行时要用）。"""
+    seen: list[str] = []
+    for match in _REF_PATTERN.finditer(text or ""):
+        token = f"{match.group(1)}:{match.group(2)}"
+        if token not in seen:
+            seen.append(token)
+    return seen
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -365,11 +310,9 @@ def _preview(text: str, limit: int = 60) -> str:
     return body[:limit] + ("…" if len(body) > limit else "")
 
 
-def _format_hit_list(hits: list[Hit], search_id: str = "") -> str:
+def _format_hit_list(hits: list[Hit]) -> str:
     """两段式第一段：只给位置 + 打码预览，正文与邻接都不下发。"""
     lines: list[str] = []
-    if search_id:
-        lines.append(f"检索编号：{search_id}（调 kb_read 时原样带上）")
     for index, hit in enumerate(hits, start=1):
         where = _format_hit(
             {
@@ -380,6 +323,7 @@ def _format_hit_list(hits: list[Hit], search_id: str = "") -> str:
                 "section": hit.section,
                 "seq": hit.seq,
                 "period": hit.period,
+                "file_id": hit.file_id,
                 "text": "",
             }
         ).rstrip("\n")
@@ -387,39 +331,50 @@ def _format_hit_list(hits: list[Hit], search_id: str = "") -> str:
     return "\n".join(lines)
 
 
-def _read_hits(
-    ids: list[int] | None = None,
-    search_id: str | None = None,
-    query: str | None = None,
-) -> str:
-    """按编号读回某次检索的全文（含邻接）。
+def _read_hits(refs: list[str] | None = None) -> str:
+    """按引用（``file 前 8 位:seq``）回库里读原文，带上邻接。
 
-    不重新检索：结果来自 ``kb_search`` 当时的缓存，保证「读回的是同一批证据」。
-    传 ``query`` 时按问句找缓存（历史轮次老化后，模型手里只有当时的检索词）；
-    两者都不传时退回该用户最近一次检索。
+    只认引用、不复制正文：读到的永远是库里当前的内容，进程重启 / 多实例部署
+    都不受影响。引用来自 ``kb_search`` 抬头里的 ``〔ref=…〕``，历史结果被
+    老化成一行后，那行里也带着它。
     """
-    if query:
-        # 明确给了检索词就只认它：退回"最近一次检索"会把无关证据塞给模型
-        from ai_agent.storage.db import current_user_id
+    parsed: list[tuple[str, int]] = []
+    for raw in refs or []:
+        match = re.fullmatch(r"\s*([0-9a-fA-F]{6,})\s*:\s*(\d+)\s*", str(raw))
+        if match:
+            parsed.append((match.group(1).lower(), int(match.group(2))))
+    if not parsed:
+        return "没有可读取的引用。请从工具结果的〔ref=…〕里挑，或重新 kb_search。"
 
-        user = current_user_id() or "-"
-        with _HIT_CACHE_LOCK:
-            hits = dict(_HIT_CACHE.get((user, f"q:{_query_key(query)}")) or {})
-        if not hits:
-            return (
-                "缓存里没有这次检索（可能已过期或服务重启），"
-                "请用同样的检索词重新 kb_search。"
+    rows = store.fetch_kb_chunks_by_prefix(parsed)
+    if not rows:
+        return "这些引用在知识库里找不到了（可能文件已重跑或删除），请重新 kb_search。"
+
+    hits: list[Hit] = []
+    for (prefix, seq) in parsed:
+        row = rows.get((prefix, seq))
+        if row is None:
+            continue
+        hits.append(
+            Hit(
+                file_id=str(row["file_id"]),
+                filename=row.get("filename") or "",
+                seq=int(row["seq"]),
+                page=row.get("page"),
+                kind=row.get("kind") or "text",
+                text=row.get("text") or "",
+                distance=None,
+                page_end=row.get("page_end"),
+                section=row.get("section"),
+                scope=row.get("scope"),
+                period=str(row.get("period") or ""),
             )
-    else:
-        hits = last_hits(search_id or None)
-        if not hits:
-            return "缓存里没有最近一次检索结果，请先 kb_search。"
-    wanted = [i for i in (ids or []) if i in hits] or sorted(hits)[:3]
-    picked = [hits[i] for i in wanted if i in hits]
-    if not picked:
-        return f"编号不在这次检索里（有效范围 1~{len(hits)}），请重新 kb_search。"
-    add_citations(_citations_of(picked))
-    return "\n\n".join(_format_hit_with_context(hit) for hit in picked)
+        )
+    if not hits:
+        return "这些引用在知识库里找不到了，请重新 kb_search。"
+    hits = _attach_neighbors(hits)
+    add_citations(_citations_of(hits))
+    return "\n\n".join(_format_hit_with_context(hit) for hit in hits)
 
 
 def _user_limited_scope(files: list[str] | None, parsed_ids: list | None) -> bool:
@@ -486,9 +441,24 @@ def _format_hit(row: dict) -> str:
         where = f"{period} · {where}"
     # 引用芯片仍用库存的 HTML（前端要 colspan）。这里只改模型看到的正文。
     body = html_tables_to_markdown(row.get("text") or "")
+    ref = _ref_of(row)
+    tail = f"〔ref={ref}〕" if ref else ""
     if kind == "figure":
-        return f"[{row['filename']} · {where}（图像识别，可能有误差）]\n{body}"
-    return f"[{row['filename']} · {where}]\n{body}"
+        return f"[{row['filename']} · {where}（图像识别，可能有误差）]{tail}\n{body}"
+    return f"[{row['filename']} · {where}]{tail}\n{body}"
+
+
+def _ref_of(row: dict) -> str:
+    """切片的稳定引用：``file_id 前 8 位:seq``。
+
+    只带引用、不复制正文：``kb_read`` 拿它回库里读原文，读到的永远是当前内容，
+    也不会因为进程重启 / 多实例而失效。
+    """
+    file_id = str(row.get("file_id") or "")
+    seq = row.get("seq")
+    if not file_id or seq is None:
+        return ""
+    return f"{file_id[:8]}:{int(seq)}"
 
 
 def _format_hit_with_context(hit: Hit) -> str:
@@ -506,6 +476,7 @@ def _format_hit_with_context(hit: Hit) -> str:
             "section": hit.section,
             "seq": hit.seq,
             "period": hit.period,
+            "file_id": hit.file_id,
             "text": "",
         }
     ).rstrip("\n")
@@ -578,13 +549,11 @@ def _clip_head(text: str) -> str:
 
 
 class KbReadArgs(BaseModel):
-    ids: list[int] = Field(default_factory=list, description=KB_READ_IDS_DESC)
-    query: str = Field(default="", description=KB_READ_QUERY_DESC)
-    search_id: str = Field(default="", description=KB_READ_SEARCH_ID_DESC)
+    refs: list[str] = Field(default_factory=list, description=KB_READ_REFS_DESC)
 
 
-def _kb_read(ids: list[int] | None = None, query: str = "", search_id: str = "") -> str:
-    return _read_hits(ids, search_id or None, query or None)
+def _kb_read(refs: list[str] | None = None) -> str:
+    return _read_hits(refs)
 
 
 kb_read_tool = Tool(

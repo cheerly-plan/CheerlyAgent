@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from ai_agent.agents.turn import _checkpoint_update
 from ai_agent.core.logging import get_logger
@@ -157,9 +158,11 @@ def _enforce_budget(fitted: list[ChatMessage], max_chars: int) -> list[ChatMessa
 
 _AGED_MARK = (
     "〔本结果 {chars} 字原文已省略{note}"
-    "；需要细节用 kb_read 读回（同一批证据，不重新检索）〕"
+    "；需要细节用 kb_read(refs=[…]) 按引用读回原文〕"
 )
 _KB_TOOLS = ("kb_search", "kg_search")
+# 工具抬头里的切片引用：〔ref=7b75379b:39〕
+_REF_PATTERN = re.compile(r"ref=([0-9a-f]{6,}):(\d+)")
 
 
 def age_tool_results(
@@ -211,11 +214,15 @@ def age_tool_results(
             chars=len(content), note=f"，检索：{note}" if note else ""
         )
         if msg.get("name") in _KB_TOOLS:
-            # 知识库检索的结果能用 kb_read 按问句读回，比"重新检索"更稳
-            stub = stub.replace(
-                "；需要细节用 kb_read 读回（同一批证据，不重新检索）",
-                "；需要细节用 kb_read(query=…, ids=[1,2,3]) 读回同一批证据",
-            )
+            # 知识库结果抬头里带 〔ref=file:seq〕，把它们原样留在省略行里，
+            # 模型据此就能读回原文，不依赖任何进程内缓存
+            refs = _REF_PATTERN.findall(content)
+            if refs:
+                listed = ",".join(f'"{prefix}:{seq}"' for prefix, seq in refs[:6])
+                stub = stub.replace(
+                    "；需要细节用 kb_read(refs=[…]) 按引用读回原文",
+                    f"；需要细节用 kb_read(refs=[{listed}]) 读回原文",
+                )
         out.append({**msg, "content": f"{clip_text(head, 80)}\n{stub}"})
         changed = True
     # 没有可老化的内容时返回原对象：调用方依赖「预算充裕就原样返回」的语义
