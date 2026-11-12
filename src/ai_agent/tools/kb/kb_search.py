@@ -7,6 +7,7 @@
 
 import os
 import re
+from contextvars import ContextVar
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -268,6 +269,7 @@ def _kb_search(
     # 引用走旁路交给上层（SSE 下发 + 随消息落库），文本里仍保留
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(relevant))
+    set_refs(relevant)
     if settings.kb_search_list_only:
         # 影子模式：只回清单，全文由模型用 kb_read 取
         return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant)}"
@@ -327,7 +329,11 @@ def _format_hit_list(hits: list[Hit]) -> str:
                 "text": "",
             }
         ).rstrip("\n")
-        lines.append(f"[{index}] {where}\n    {_preview(hit.text)}")
+        # 清单模式只给位置，模型必须靠引用才能取全文，所以这里带上 ref
+        lines.append(
+            f"[{index}] {where}〔ref={_ref_of({'file_id': hit.file_id, 'seq': hit.seq})}〕"
+            f"\n    {_preview(hit.text)}"
+        )
     return "\n".join(lines)
 
 
@@ -441,11 +447,25 @@ def _format_hit(row: dict) -> str:
         where = f"{period} · {where}"
     # 引用芯片仍用库存的 HTML（前端要 colspan）。这里只改模型看到的正文。
     body = html_tables_to_markdown(row.get("text") or "")
-    ref = _ref_of(row)
-    tail = f"〔ref={ref}〕" if ref else ""
     if kind == "figure":
-        return f"[{row['filename']} · {where}（图像识别，可能有误差）]{tail}\n{body}"
-    return f"[{row['filename']} · {where}]{tail}\n{body}"
+        return f"[{row['filename']} · {where}（图像识别，可能有误差）]\n{body}"
+    return f"[{row['filename']} · {where}]\n{body}"
+
+
+# 本次检索的切片引用。**不写进正文**——写进去模型会把它抄进回答（实测
+# 回答里出现「〔ref=…〕」）。改为放进上下文变量，由 loop 记到工具消息的
+# refs 字段上；只有历史结果被老化时才把它写进省略行，供 kb_read 读回。
+_LAST_REFS: ContextVar[list[str]] = ContextVar("kb_last_refs", default=[])
+
+
+def set_refs(hits: list[Hit]) -> list[str]:
+    refs = [ref for ref in (_ref_of({"file_id": h.file_id, "seq": h.seq}) for h in hits) if ref]
+    _LAST_REFS.set(refs)
+    return refs
+
+
+def take_refs() -> list[str]:
+    return list(_LAST_REFS.get())
 
 
 def _ref_of(row: dict) -> str:

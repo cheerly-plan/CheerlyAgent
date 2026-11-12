@@ -60,10 +60,24 @@ def test_list_format_has_index_location_and_ref():
     assert "1,589,422,902.20" not in lines  # 金额仍然打码
 
 
-def test_full_mode_header_carries_ref():
+def test_full_mode_header_has_no_ref():
+    """正文里不能出现 ref —— 模型会把它抄进回答（实测泄漏）。"""
     hit = _hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |")
     out = ks._format_hit_with_context(hit)
-    assert "〔ref=3823ff6e:39〕" in out
+    assert "ref=" not in out
+
+
+def test_refs_are_passed_out_of_band(monkeypatch):
+    """引用走旁路（ContextVar），由 loop 记到工具消息的 refs 字段。"""
+    monkeypatch.setattr(ks.store, "has_ready_kb_file", lambda: True)
+    hits = [_hit(39, 10, "| 五、净利润 | 1,589,422,902.20 |")]
+    monkeypatch.setattr(
+        ks, "retrieve_for_question", lambda *a, **kw: ([uuid.uuid4()], hits)
+    )
+    monkeypatch.setattr(ks.settings, "kb_search_list_only", False)
+    out = ks._kb_search("长电科技 2026Q3 净利润")
+    assert "ref=" not in out
+    assert ks.take_refs() == ["3823ff6e:39"]
 
 
 def test_extract_refs_from_tool_output():
@@ -122,7 +136,7 @@ def test_ref_round_trip_through_search(monkeypatch):
     )
     monkeypatch.setattr(ks.settings, "kb_search_list_only", False)
     out = ks._kb_search("长电科技 2026Q3 净利润")
-    refs = ks.extract_refs(out)
+    refs = ks.take_refs()
     assert refs == ["3823ff6e:39"]
     with patch.object(
         ks.store, "fetch_kb_chunks_by_prefix",

@@ -214,11 +214,11 @@ def age_tool_results(
             chars=len(content), note=f"，检索：{note}" if note else ""
         )
         if msg.get("name") in _KB_TOOLS:
-            # 知识库结果抬头里带 〔ref=file:seq〕，把它们原样留在省略行里，
-            # 模型据此就能读回原文，不依赖任何进程内缓存
-            refs = _REF_PATTERN.findall(content)
+            # 引用不在正文里（否则模型会抄进回答），而是工具消息的 refs 字段。
+            # 老化时把它写进省略行，模型据此 kb_read 读回原文，不依赖进程内缓存。
+            refs = [str(ref) for ref in (msg.get("refs") or [])]
             if refs:
-                listed = ",".join(f'"{prefix}:{seq}"' for prefix, seq in refs[:6])
+                listed = ",".join(f'"{ref}"' for ref in refs[:6])
                 stub = stub.replace(
                     "；需要细节用 kb_read(refs=[…]) 按引用读回原文",
                     f"；需要细节用 kb_read(refs=[{listed}]) 读回原文",

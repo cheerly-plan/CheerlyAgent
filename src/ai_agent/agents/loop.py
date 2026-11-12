@@ -134,7 +134,7 @@ def _run_tool_with_progress(
     def _emit_event(event: dict) -> None:
         progress_q.put(dict(event))
 
-    def _worker() -> tuple[str, list[dict]]:
+    def _worker() -> tuple[str, list[dict], list[str]]:
         scope_token = set_kb_scope(kb_file_ids)
         rewrite_token = set_rewrite_context(prev_turn)
         question_token = set_kb_question(question)
@@ -144,7 +144,10 @@ def _run_tool_with_progress(
             with collect_citations() as cited:
                 with user_scope(user_id):
                     output = execute_tool(name, arguments)
-            return output, list(cited)
+            # 切片引用走旁路：写进正文会被模型抄进回答（实测「〔ref=…〕」泄漏）
+            from ai_agent.tools.kb.kb_search import take_refs
+
+            return output, list(cited), take_refs()
         finally:
             reset_event_emitter(event_token)
             reset_progress(progress_token)
@@ -178,8 +181,8 @@ def _run_tool_with_progress(
             yield item
             continue
         yield {"type": "tool_progress", "name": name, "message": item}
-    output, cited = future.result()
-    yield {"type": "_tool_result", "content": output, "sources": cited}
+    output, cited, refs = future.result()
+    yield {"type": "_tool_result", "content": output, "sources": cited, "refs": refs}
 
 
 def _attach_sources(
@@ -868,6 +871,7 @@ def run_loop(
             if call["name"] in _PROGRESS_TOOLS:
                 output = ""
                 cited = []
+                refs: list[str] = []
                 for event in _run_tool_with_progress(
                     call["name"],
                     call["arguments"],
@@ -878,6 +882,7 @@ def run_loop(
                     if event.get("type") == "_tool_result":
                         output = str(event.get("content") or "")
                         cited = list(event.get("sources") or [])
+                        refs = list(event.get("refs") or [])
                         continue
                     if event.get("type") == "report_job":
                         report_job_id = str(event.get("job_id") or "")
@@ -888,10 +893,14 @@ def run_loop(
                     extract_prev_turn(messages, settings.kb_rewrite_history_turns)
                 )
                 question_token = set_kb_question(_latest_user_text(messages))
+                refs = []
                 try:
                     with collect_citations() as cited:
                         with user_scope(user_id):
                             output = execute_tool(call["name"], call["arguments"])
+                    from ai_agent.tools.kb.kb_search import take_refs
+
+                    refs = take_refs()
                 finally:
                     reset_kb_scope(scope_token)
                     reset_rewrite_context(rewrite_token)
@@ -913,14 +922,17 @@ def run_loop(
             if turn_sources:
                 end_event["sources"] = turn_sources
             yield end_event
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": call["name"],
-                    "content": output,
-                }
-            )
+            tool_message: ChatMessage = {
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "name": call["name"],
+                "content": output,
+            }
+            if refs:
+                # 只给老化步骤用：把引用写进省略行，模型据此 kb_read 读回原文。
+                # 不进正文，避免被抄进回答；LLM payload 的白名单也不会发它。
+                tool_message["refs"] = refs
+            messages.append(tool_message)
             if run_id:
                 step += 1
                 _checkpoint_update(run_id, messages, step)
