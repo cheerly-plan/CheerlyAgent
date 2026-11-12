@@ -64,7 +64,6 @@ _tool_progress_pool = ThreadPoolExecutor(
 )
 
 from ai_agent.agents.messages import (
-    RefScrubber,
     _canonical_args,
     _dedupe_seam,
     _drop_empty_assistant,
@@ -135,7 +134,7 @@ def _run_tool_with_progress(
     def _emit_event(event: dict) -> None:
         progress_q.put(dict(event))
 
-    def _worker() -> tuple[str, list[dict], list[str]]:
+    def _worker() -> tuple[str, list[dict]]:
         scope_token = set_kb_scope(kb_file_ids)
         rewrite_token = set_rewrite_context(prev_turn)
         question_token = set_kb_question(question)
@@ -145,10 +144,7 @@ def _run_tool_with_progress(
             with collect_citations() as cited:
                 with user_scope(user_id):
                     output = execute_tool(name, arguments)
-            # 切片引用走旁路：写进正文会被模型抄进回答（实测「〔ref=…〕」泄漏）
-            from ai_agent.tools.kb.kb_search import take_refs
-
-            return output, list(cited), take_refs()
+            return output, list(cited)
         finally:
             reset_event_emitter(event_token)
             reset_progress(progress_token)
@@ -182,8 +178,8 @@ def _run_tool_with_progress(
             yield item
             continue
         yield {"type": "tool_progress", "name": name, "message": item}
-    output, cited, refs = future.result()
-    yield {"type": "_tool_result", "content": output, "sources": cited, "refs": refs}
+    output, cited = future.result()
+    yield {"type": "_tool_result", "content": output, "sources": cited}
 
 
 def _attach_sources(
@@ -739,21 +735,14 @@ def run_loop(
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
             context = _fit_context(messages, settings.llm_context_char_budget)
-            scrub = RefScrubber()
             for kind, payload in stream_chat(
                 context, step_tools, tool_choice=tool_choice
             ):
                 if kind == "text":
                     streamed += payload
-                    visible = scrub.feed(payload)
-                    if visible:
-                        yield {"type": "text", "content": visible}
+                    yield {"type": "text", "content": payload}
                 else:
                     result = payload
-            tail = scrub.flush()
-            if tail:
-                streamed += tail
-                yield {"type": "text", "content": tail}
         except LLMError as e:
             # 详情只进日志；上游异常文本可能带出 URL/响应片段，不透传给客户端
             logger.error("LLM 调用失败: %s", e)
@@ -817,19 +806,12 @@ def run_loop(
                     context = _fit_context(
                         messages, settings.llm_context_char_budget
                     )
-                    scrub = RefScrubber()
                     for kind, payload in stream_chat(context, []):
                         if kind == "text":
                             streamed += payload
-                            visible = scrub.feed(payload)
-                            if visible:
-                                yield {"type": "text", "content": visible}
+                            yield {"type": "text", "content": payload}
                         else:
                             result = payload
-                    tail = scrub.flush()
-                    if tail:
-                        streamed += tail
-                        yield {"type": "text", "content": tail}
                 except LLMError as e:
                     logger.error("空回答收尾失败: %s", e)
                     yield {"type": "error", "message": _llm_error_message(e)}
@@ -886,7 +868,6 @@ def run_loop(
             if call["name"] in _PROGRESS_TOOLS:
                 output = ""
                 cited = []
-                refs: list[str] = []
                 for event in _run_tool_with_progress(
                     call["name"],
                     call["arguments"],
@@ -897,7 +878,6 @@ def run_loop(
                     if event.get("type") == "_tool_result":
                         output = str(event.get("content") or "")
                         cited = list(event.get("sources") or [])
-                        refs = list(event.get("refs") or [])
                         continue
                     if event.get("type") == "report_job":
                         report_job_id = str(event.get("job_id") or "")
@@ -908,14 +888,10 @@ def run_loop(
                     extract_prev_turn(messages, settings.kb_rewrite_history_turns)
                 )
                 question_token = set_kb_question(_latest_user_text(messages))
-                refs = []
                 try:
                     with collect_citations() as cited:
                         with user_scope(user_id):
                             output = execute_tool(call["name"], call["arguments"])
-                    from ai_agent.tools.kb.kb_search import take_refs
-
-                    refs = take_refs()
                 finally:
                     reset_kb_scope(scope_token)
                     reset_rewrite_context(rewrite_token)
@@ -937,17 +913,14 @@ def run_loop(
             if turn_sources:
                 end_event["sources"] = turn_sources
             yield end_event
-            tool_message: ChatMessage = {
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "name": call["name"],
-                "content": output,
-            }
-            if refs:
-                # 只给老化步骤用：把引用写进省略行，模型据此 kb_read 读回原文。
-                # 不进正文，避免被抄进回答；LLM payload 的白名单也不会发它。
-                tool_message["refs"] = refs
-            messages.append(tool_message)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": call["name"],
+                    "content": output,
+                }
+            )
             if run_id:
                 step += 1
                 _checkpoint_update(run_id, messages, step)
@@ -972,19 +945,12 @@ def run_loop(
     try:
         context = _fit_context(messages, settings.llm_context_char_budget)
         result: ChatResult | None = None
-        scrub = RefScrubber()
         for kind, payload in stream_chat(context, []):
             if kind == "text":
                 streamed += payload
-                visible = scrub.feed(payload)
-                if visible:
-                    yield {"type": "text", "content": visible}
+                yield {"type": "text", "content": payload}
             else:
                 result = payload
-        tail = scrub.flush()
-        if tail:
-            streamed += tail
-            yield {"type": "text", "content": tail}
         final_content = str((result or {}).get("content") or "") or streamed
         _stash_final(final_content)
         if run_id:

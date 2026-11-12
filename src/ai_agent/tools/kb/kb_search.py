@@ -7,7 +7,6 @@
 
 import os
 import re
-from contextvars import ContextVar
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -35,7 +34,8 @@ from ai_agent.storage.store import store
 from ai_agent.prompts.tools import (
     KB_EMPTY_HINT,
     KB_READ_DESC,
-    KB_READ_REFS_DESC,
+    KB_READ_LOCATION_DESC,
+    KB_READ_PAGE_DESC,
     KB_SEARCH_LIST_NOTE,
     KB_ERROR_HINT,
     KB_FILES_DESC,
@@ -269,7 +269,6 @@ def _kb_search(
     # 引用走旁路交给上层（SSE 下发 + 随消息落库），文本里仍保留
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(relevant))
-    set_refs(relevant)
     if settings.kb_search_list_only:
         # 影子模式：只回清单，全文由模型用 kb_read 取
         return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant)}"
@@ -289,19 +288,7 @@ def _kb_search(
     return f"{note}\n\n{body}"
 
 
-_REF_PATTERN = re.compile(r"ref=([0-9a-f]{6,}):(\d+)")
-# 清单预览里把数字打码：模型若直接拿预览作答，至少不会编出一个"看起来对"的金额
 _PREVIEW_NUM = re.compile(r"-?\d[\d,]*\.?\d*")
-
-
-def extract_refs(text: str) -> list[str]:
-    """从工具结果正文里抠出 ``file:seq`` 引用（老化成一行时要用）。"""
-    seen: list[str] = []
-    for match in _REF_PATTERN.finditer(text or ""):
-        token = f"{match.group(1)}:{match.group(2)}"
-        if token not in seen:
-            seen.append(token)
-    return seen
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -329,38 +316,39 @@ def _format_hit_list(hits: list[Hit]) -> str:
                 "text": "",
             }
         ).rstrip("\n")
-        # 清单模式只给位置，模型必须靠引用才能取全文，所以这里带上 ref
-        lines.append(
-            f"[{index}] {where}〔ref={_ref_of({'file_id': hit.file_id, 'seq': hit.seq})}〕"
-            f"\n    {_preview(hit.text)}"
-        )
+        lines.append(f"[{index}] {where}\n    {_preview(hit.text)}")
     return "\n".join(lines)
 
 
-def _read_hits(refs: list[str] | None = None) -> str:
-    """按引用（``file 前 8 位:seq``）回库里读原文，带上邻接。
+_PAGE_IN_TEXT = re.compile(r"第\s*(\d+)\s*(?:[–\-~]\s*(\d+)\s*)?页")
 
-    只认引用、不复制正文：读到的永远是库里当前的内容，进程重启 / 多实例部署
-    都不受影响。引用来自 ``kb_search`` 抬头里的 ``〔ref=…〕``，历史结果被
-    老化成一行后，那行里也带着它。
+
+def _read_hits(location: str = "", page: int | None = None) -> str:
+    """按「位置」读回切片原文：文件名 + 页码，带上下文。
+
+    不传内部编号：位置就是命中抬头里那串 ``文件名 · 第3页``——模型回答时本来
+    就要交代出处，抄它比抄一串十六进制自然，也不会把内部标识带进回答。
     """
-    parsed: list[tuple[str, int]] = []
-    for raw in refs or []:
-        match = re.fullmatch(r"\s*([0-9a-fA-F]{6,})\s*:\s*(\d+)\s*", str(raw))
-        if match:
-            parsed.append((match.group(1).lower(), int(match.group(2))))
-    if not parsed:
-        return "没有可读取的引用。请从工具结果的〔ref=…〕里挑，或重新 kb_search。"
+    raw = (location or "").strip().strip("[]（）()[]")
+    if not raw:
+        return "请给出位置，例如 kb_read(location=\"兆易创新2026年第三季度报告 · 第3页\")。"
 
-    rows = store.fetch_kb_chunks_by_prefix(parsed)
+    if page is None:
+        found = _PAGE_IN_TEXT.search(raw)
+        if found:
+            page = int(found.group(1))
+    # 文件名是位置串的头一段；去掉「第N页」和章节，剩下的当模糊匹配词
+    name = re.split(r"·|第\s*\d+\s*(?:[–\-~]\s*\d+\s*)?页", raw)[0].strip()
+    name = name.strip("[]（）()[]· ")
+    if not name:
+        return "没认出文件名，请照命中抬头里的「文件名 · 第N页」原样传入。"
+
+    rows = store.fetch_kb_chunks_by_location(name, page)
     if not rows:
-        return "这些引用在知识库里找不到了（可能文件已重跑或删除），请重新 kb_search。"
+        return f"没找到「{name}{f' 第{page}页' if page else ''}」的切片，可能文件已重跑或删除，请重新 kb_search。"
 
     hits: list[Hit] = []
-    for (prefix, seq) in parsed:
-        row = rows.get((prefix, seq))
-        if row is None:
-            continue
+    for row in rows:
         hits.append(
             Hit(
                 file_id=str(row["file_id"]),
@@ -376,8 +364,6 @@ def _read_hits(refs: list[str] | None = None) -> str:
                 period=str(row.get("period") or ""),
             )
         )
-    if not hits:
-        return "这些引用在知识库里找不到了，请重新 kb_search。"
     hits = _attach_neighbors(hits)
     add_citations(_citations_of(hits))
     return "\n\n".join(_format_hit_with_context(hit) for hit in hits)
@@ -452,33 +438,36 @@ def _format_hit(row: dict) -> str:
     return f"[{row['filename']} · {where}]\n{body}"
 
 
-# 本次检索的切片引用。**不写进正文**——写进去模型会把它抄进回答（实测
-# 回答里出现「〔ref=…〕」）。改为放进上下文变量，由 loop 记到工具消息的
-# refs 字段上；只有历史结果被老化时才把它写进省略行，供 kb_read 读回。
-_LAST_REFS: ContextVar[list[str]] = ContextVar("kb_last_refs", default=[])
+def _format_hit(row: dict) -> str:
+    """按内容类型给出引用位置：
+    - text：PDF 有页码（跨页切片给区间），无页文档退化为段号
+    - table：PDF/Word 用页码，Excel 用 sheet 序号（表N）
+    - figure：读图结果必须标注「图像识别」，避免模型当成原文数据引用
 
-
-def set_refs(hits: list[Hit]) -> list[str]:
-    refs = [ref for ref in (_ref_of({"file_id": h.file_id, "seq": h.seq}) for h in hits) if ref]
-    _LAST_REFS.set(refs)
-    return refs
-
-
-def take_refs() -> list[str]:
-    return list(_LAST_REFS.get())
-
-
-def _ref_of(row: dict) -> str:
-    """切片的稳定引用：``file_id 前 8 位:seq``。
-
-    只带引用、不复制正文：``kb_read`` 拿它回库里读原文，读到的永远是当前内容，
-    也不会因为进程重启 / 多实例而失效。
+    有章节时追加「· 第十节 管理层讨论与分析」：模型回答时能直接说清
+    「哪一节里的哪一页」，用户核对时不用再靠页码猜章节。
     """
-    file_id = str(row.get("file_id") or "")
-    seq = row.get("seq")
-    if not file_id or seq is None:
-        return ""
-    return f"{file_id[:8]}:{int(seq)}"
+    kind = row.get("kind") or "text"
+    where = format_where(
+        kind=kind,
+        page=row.get("page"),
+        page_end=row.get("page_end"),
+        seq=int(row.get("seq") or 0),
+        filename=row.get("filename") or "",
+        mime=row.get("mime") or "",
+    )
+    section = row.get("section")
+    if section and kind != "figure":
+        where = f"{where} · {section}"
+    # 表格正文经常只有「本报告期」，年份写在文件上。抬头带上报告期，两年才分得开。
+    period = str(row.get("period") or "").strip()
+    if period:
+        where = f"{period} · {where}"
+    # 引用芯片仍用库存的 HTML（前端要 colspan）。这里只改模型看到的正文。
+    body = html_tables_to_markdown(row.get("text") or "")
+    if kind == "figure":
+        return f"[{row['filename']} · {where}（图像识别，可能有误差）]\n{body}"
+    return f"[{row['filename']} · {where}]\n{body}"
 
 
 def _format_hit_with_context(hit: Hit) -> str:
@@ -569,11 +558,12 @@ def _clip_head(text: str) -> str:
 
 
 class KbReadArgs(BaseModel):
-    refs: list[str] = Field(default_factory=list, description=KB_READ_REFS_DESC)
+    location: str = Field(default="", description=KB_READ_LOCATION_DESC)
+    page: int | None = Field(default=None, description=KB_READ_PAGE_DESC)
 
 
-def _kb_read(refs: list[str] | None = None) -> str:
-    return _read_hits(refs)
+def _kb_read(location: str = "", page: int | None = None) -> str:
+    return _read_hits(location, page)
 
 
 kb_read_tool = Tool(

@@ -1086,35 +1086,33 @@ class KbStore:
         total = int(row["total"] or 0)
         return total, {kw: int(row[f"df{i}"] or 0) for i, kw in enumerate(keywords)}
 
-    def fetch_kb_chunks_by_prefix(
-        self, refs: list[tuple[str, int]]
-    ) -> dict[tuple[str, int], dict]:
-        """按 ``(file_id 前缀, seq)`` 取切片原文，返回 {(前缀, seq): row}。
+    def fetch_kb_chunks_by_location(
+        self, name: str, page: int | None = None, *, limit: int = 3
+    ) -> list[dict]:
+        """按「文件名片段 + 页码」取切片：``kb_read`` 用，位置就是回答里的出处。
 
-        模型拿到的引用是 8 位短 id（抄全 UUID 容易抄错），这里用前缀匹配。
+        命中的位置是模型本来就要交代的东西（文件名 · 第N页），不需要另造编号。
         """
-        if not refs:
-            return {}
-        prefixes = sorted({prefix for prefix, _ in refs})
-        seqs = sorted({seq for _, seq in refs})
+        like = f"%{name.strip()}%"
         with self._get_pool().connection() as conn:
             rows = conn.execute(
                 """
                 SELECT c.file_id::text AS file_id, c.seq, c.page, c.page_end,
                        c.kind, c.section, c.scope, c.period, c.text, f.filename
                 FROM agent_kb_chunk c JOIN agent_kb_file f ON f.id = c.file_id
-                WHERE left(c.file_id::text, 8) = ANY(%(prefixes)s::text[])
-                  AND c.seq = ANY(%(seqs)s::int[])
+                WHERE f.filename LIKE %(like)s
+                  AND (
+                    %(page)s::int IS NULL
+                    OR c.page = %(page)s::int
+                    OR (c.page <= %(page)s::int
+                        AND COALESCE(c.page_end, c.page) >= %(page)s::int)
+                  )
+                ORDER BY c.seq
+                LIMIT %(limit)s
                 """,
-                {"prefixes": prefixes, "seqs": seqs},
+                {"like": like, "page": page, "limit": limit},
             ).fetchall()
-        out: dict[tuple[str, int], dict] = {}
-        for row in rows:
-            prefix = str(row["file_id"])[:8]
-            key = (prefix, int(row["seq"]))
-            if key in {(p, s) for p, s in refs}:
-                out[key] = dict(row)
-        return out
+        return [dict(row) for row in rows]
 
     def fetch_kb_chunks(
         self, pairs: list[tuple[uuid.UUID, int]]

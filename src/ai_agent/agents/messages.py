@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 from ai_agent.agents.turn import _checkpoint_update
 from ai_agent.core.logging import get_logger
@@ -156,50 +155,11 @@ def _enforce_budget(fitted: list[ChatMessage], max_chars: int) -> list[ChatMessa
     return fitted
 
 
-# 模型偶尔会把内部引用标记当正文复述出来（"〔ref=5875a71d:17〕"）。这类标记只
-# 是给 kb_read 用的，绝不能出现在回答里——统一在这里刮掉。
-_REF_MARK = re.compile(r"〔\s*ref\s*=\s*[0-9a-fA-F:\-]{0,40}\s*〕")
-
-
-
-def strip_ref_marks(text: str) -> str:
-    return _REF_MARK.sub("", text or "")
-
-
-class RefScrubber:
-    """流式输出时刮掉引用标记。
-
-    标记可能被切在两个 chunk 之间，所以尾巴上若是「半个标记」就先扣住，
-    等下一块到齐再判断；否则用户会先看到半个 ``〔ref=58`` 再消失。
-    """
-
-    def __init__(self) -> None:
-        self._pending = ""
-
-    def feed(self, text: str) -> str:
-        buf = self._pending + (text or "")
-        # 末尾可能是未闭合的标记：从后往前找最后一个 〔
-        cut = len(buf)
-        open_at = buf.rfind("〔")
-        if open_at != -1 and "〕" not in buf[open_at:]:
-            # 未闭合的 〔 一律先扣住：标记可能被切成 〔r / 〔ref=5875 / …
-            cut = open_at
-        self._pending = buf[cut:]
-        return _REF_MARK.sub("", buf[:cut])
-
-    def flush(self) -> str:
-        rest = _REF_MARK.sub("", self._pending)
-        self._pending = ""
-        return rest
-
-
 _AGED_MARK = (
     "〔本结果 {chars} 字原文已省略{note}"
-    "；需要细节用 kb_read(refs=[…]) 按引用读回原文〕"
+    "；需要原文可用 kb_read(location=\"上面的文件名 · 第N页\") 读回〕"
 )
 _KB_TOOLS = ("kb_search", "kg_search")
-# 工具抬头里的切片引用：〔ref=7b75379b:39〕
-_REF_PATTERN = re.compile(r"ref=([0-9a-f]{6,}):(\d+)")
 
 
 def age_tool_results(
@@ -250,16 +210,6 @@ def age_tool_results(
         stub = _AGED_MARK.format(
             chars=len(content), note=f"，检索：{note}" if note else ""
         )
-        if msg.get("name") in _KB_TOOLS:
-            # 引用不在正文里（否则模型会抄进回答），而是工具消息的 refs 字段。
-            # 老化时把它写进省略行，模型据此 kb_read 读回原文，不依赖进程内缓存。
-            refs = [str(ref) for ref in (msg.get("refs") or [])]
-            if refs:
-                listed = ",".join(f'"{ref}"' for ref in refs[:6])
-                stub = stub.replace(
-                    "；需要细节用 kb_read(refs=[…]) 按引用读回原文",
-                    f"；需要细节用 kb_read(refs=[{listed}]) 读回原文",
-                )
         out.append({**msg, "content": f"{clip_text(head, 80)}\n{stub}"})
         changed = True
     # 没有可老化的内容时返回原对象：调用方依赖「预算充裕就原样返回」的语义
