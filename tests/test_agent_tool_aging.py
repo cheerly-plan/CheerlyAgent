@@ -58,3 +58,35 @@ def test_no_tool_messages_returns_same_object():
         {"role": "user", "content": "问2"},
     ]
     assert age_tool_results(messages, keep_turns=1) is messages
+
+
+def test_ref_marks_are_scrubbed_from_streaming_output():
+    """模型会把内部引用标记复述出来，输出侧必须刮掉。"""
+    from ai_agent.agents.messages import RefScrubber
+
+    text = "一致行动人〔ref=5875a71d:17〕；股东总数〔ref=5875a71d〕。"
+    for size in (3, 8, 20, 40):
+        scrub = RefScrubber()
+        out = ""
+        for i in range(0, len(text), size):
+            out += scrub.feed(text[i : i + size])
+        out += scrub.flush()
+        assert "ref=" not in out
+        assert "一致行动人" in out and "股东总数" in out
+
+
+def test_aged_stub_keeps_refs_for_read_back():
+    """老化行里要保留引用，否则模型没法 kb_read 读回原文。"""
+    content = "[\u5f20\u4e09\u62a5\u544a \u00b7 \u7b2c3\u9875]\n" + "数" * 900
+    messages = [
+        {"role": "user", "content": "问1"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "kb_search", "arguments": {"query": "q"}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "kb_search", "content": content,
+         "refs": ["5875a71d:17", "5875a71d:13"]},
+        {"role": "user", "content": "问2"},
+        {"role": "user", "content": "问3"},
+    ]
+    aged = age_tool_results(messages, keep_turns=2)
+    stub = aged[2]["content"]
+    assert 'refs=["5875a71d:17","5875a71d:13"]' in stub
+    assert "原文已省略" in stub

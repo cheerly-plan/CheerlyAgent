@@ -64,6 +64,7 @@ _tool_progress_pool = ThreadPoolExecutor(
 )
 
 from ai_agent.agents.messages import (
+    RefScrubber,
     _canonical_args,
     _dedupe_seam,
     _drop_empty_assistant,
@@ -738,14 +739,21 @@ def run_loop(
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
             context = _fit_context(messages, settings.llm_context_char_budget)
+            scrub = RefScrubber()
             for kind, payload in stream_chat(
                 context, step_tools, tool_choice=tool_choice
             ):
                 if kind == "text":
                     streamed += payload
-                    yield {"type": "text", "content": payload}
+                    visible = scrub.feed(payload)
+                    if visible:
+                        yield {"type": "text", "content": visible}
                 else:
                     result = payload
+            tail = scrub.flush()
+            if tail:
+                streamed += tail
+                yield {"type": "text", "content": tail}
         except LLMError as e:
             # 详情只进日志；上游异常文本可能带出 URL/响应片段，不透传给客户端
             logger.error("LLM 调用失败: %s", e)
@@ -809,12 +817,19 @@ def run_loop(
                     context = _fit_context(
                         messages, settings.llm_context_char_budget
                     )
+                    scrub = RefScrubber()
                     for kind, payload in stream_chat(context, []):
                         if kind == "text":
                             streamed += payload
-                            yield {"type": "text", "content": payload}
+                            visible = scrub.feed(payload)
+                            if visible:
+                                yield {"type": "text", "content": visible}
                         else:
                             result = payload
+                    tail = scrub.flush()
+                    if tail:
+                        streamed += tail
+                        yield {"type": "text", "content": tail}
                 except LLMError as e:
                     logger.error("空回答收尾失败: %s", e)
                     yield {"type": "error", "message": _llm_error_message(e)}
@@ -957,12 +972,19 @@ def run_loop(
     try:
         context = _fit_context(messages, settings.llm_context_char_budget)
         result: ChatResult | None = None
+        scrub = RefScrubber()
         for kind, payload in stream_chat(context, []):
             if kind == "text":
                 streamed += payload
-                yield {"type": "text", "content": payload}
+                visible = scrub.feed(payload)
+                if visible:
+                    yield {"type": "text", "content": visible}
             else:
                 result = payload
+        tail = scrub.flush()
+        if tail:
+            streamed += tail
+            yield {"type": "text", "content": tail}
         final_content = str((result or {}).get("content") or "") or streamed
         _stash_final(final_content)
         if run_id:
