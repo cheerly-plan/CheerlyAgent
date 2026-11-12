@@ -15,7 +15,7 @@ def _no_key(monkeypatch):
 
 
 def test_jev_noul_returns_none_without_key():
-    with patch("ai_agent.core.http._fetch") as urlopen:
+    with patch("ai_agent.core.http._read_json") as urlopen:
         assert jev_noul("这条消息是否紧急？", "state") is None
     urlopen.assert_not_called()
 
@@ -30,7 +30,7 @@ def test_jev_noul_parses_probability(monkeypatch):
         captured["body"] = json.loads(req.data.decode())
         return {"model": "jev-1.13.0", "answers": {"gate": {"type": "noul", "noul": 0.87}}}
 
-    with patch("ai_agent.core.http._fetch", side_effect=fake_fetch):
+    with patch("ai_agent.core.http._read_json", side_effect=fake_fetch):
         assert jev_noul("这条消息是否紧急？", "客户被重复扣款") == pytest.approx(0.87)
 
     assert captured["url"].endswith("/v1/systemone")
@@ -42,7 +42,7 @@ def test_jev_noul_parses_probability(monkeypatch):
 def test_jev_noul_missing_field_returns_none(monkeypatch):
     monkeypatch.setattr(gate.settings, "jev_api_key", "k")
     with patch(
-        "ai_agent.core.http._fetch",
+        "ai_agent.core.http._read_json",
         return_value={"answers": {}},
     ):
         assert jev_noul("q", "state") is None
@@ -52,7 +52,7 @@ def test_jev_noul_non_numeric_returns_none(monkeypatch):
     monkeypatch.setattr(gate.settings, "jev_api_key", "k")
     # bool 是 int 的子类，必须排除
     with patch(
-        "ai_agent.core.http._fetch",
+        "ai_agent.core.http._read_json",
         return_value={"answers": {"gate": {"type": "noul", "noul": True}}},
     ):
         assert jev_noul("q", "state") is None
@@ -61,7 +61,7 @@ def test_jev_noul_non_numeric_returns_none(monkeypatch):
 def test_jev_noul_network_error_returns_none(monkeypatch):
     monkeypatch.setattr(gate.settings, "jev_api_key", "k")
     with patch(
-        "ai_agent.core.http._fetch",
+        "ai_agent.core.http._read_json",
         side_effect=urllib.error.URLError("connection refused"),
     ):
         assert jev_noul("q", "state") is None
@@ -81,7 +81,7 @@ def test_jev_batch_parses_multiple_answers(monkeypatch):
             },
         }
 
-    with patch("ai_agent.core.http._fetch", side_effect=fake_fetch):
+    with patch("ai_agent.core.http._read_json", side_effect=fake_fetch):
         result = jev_noul_batch(
             {"fabrication": "是否编造", "omission": "是否遗漏"}, "state"
         )
@@ -93,7 +93,7 @@ def test_jev_batch_any_missing_answer_returns_none(monkeypatch):
     """半套概率不可用：整体返回 None，避免调用方拿不完整结果决策。"""
     monkeypatch.setattr(gate.settings, "jev_api_key", "k")
     with patch(
-        "ai_agent.core.http._fetch",
+        "ai_agent.core.http._read_json",
         return_value={"answers": {"fabrication": {"type": "noul", "noul": 0.5}}},
     ):
         assert jev_noul_batch({"fabrication": "a", "omission": "b"}, "state") is None

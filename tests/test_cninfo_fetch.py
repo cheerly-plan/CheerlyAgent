@@ -19,6 +19,9 @@ def _enable_and_clear(monkeypatch):
     monkeypatch.setattr(settings, "enable_cninfo_fetch", True)
     monkeypatch.setattr(settings, "cninfo_request_interval_seconds", 0.0)
     monkeypatch.setattr(settings, "cninfo_ingest_wait_seconds", 1)
+    # 体积阈值按测试意图显式给定：2MB 的全文算「小」，要保留全文而不是摘要。
+    # 依赖 settings 默认值会让这条测试随配置漂移（默认已是 1.0MB）。
+    monkeypatch.setattr(settings, "cninfo_full_max_mb", 10.0)
     cninfo.clear_stock_cache()
     yield
     cninfo.clear_stock_cache()

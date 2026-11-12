@@ -88,7 +88,13 @@ async def lifespan(app: FastAPI):
         _logger.error("关闭后仍有线程未退出，强制结束进程（避免 8000 假死）")
         os._exit(1)
 
-    threading.Thread(target=_exit_watchdog, name="exit-watchdog", daemon=True).start()
+    # 只在「真的起了一个服务进程」时装看门狗：lifespan 在测试里也会被进入，
+    # 无条件起线程会在 5 秒后把跑测试的进程直接 os._exit 掉（实测整套用例
+    # 跑到 83% 被静默杀掉，没有任何失败摘要）。
+    if os.environ.get("ALMOST_AGENT_SERVE") == "1":
+        threading.Thread(
+            target=_exit_watchdog, name="exit-watchdog", daemon=True
+        ).start()
     if os.environ.get("ALMOST_AGENT_RELOAD") == "1":
         _logger.info("热重载：跳过线程池 atexit join，硬退 worker")
         os._exit(0)

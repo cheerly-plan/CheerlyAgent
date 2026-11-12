@@ -30,13 +30,13 @@ def _evidence(quote: str) -> Evidence:
     )
 
 
-def _fact(value: str = "526,365", period: str = "2026Q3") -> IndicatorFact:
+def _fact(value: str = "526,365,000,000", period: str = "2026Q3") -> IndicatorFact:
     return IndicatorFact(
         subject="中国银行股份有限公司",
         period=period,
         name="营业收入",
         value=value,
-        unit="百万元",
+        unit="元",
         column="年初至报告期末",
         scope="consolidated",
         evidence=_evidence(f"营业收入 | {value}"),
@@ -92,7 +92,7 @@ def test_provenance_keeps_full_file_id():
 
 def test_anchor_digits_are_not_reported_as_unchecked_numbers():
     """短锚点里的 7 / 75379 不是金额，校验器扫数字前必须整体剔除。"""
-    facts = [_fact(), _fact("491,204", "2025Q3")]
+    facts = [_fact(), _fact("491,204,000,000", "2025Q3")]
     document = compose_report(_plan(), facts)
     result = validate_report(document, facts, plan=_plan())
     assert result.passed, [(f.kind, f.message) for f in result.findings]
@@ -101,7 +101,7 @@ def test_anchor_digits_are_not_reported_as_unchecked_numbers():
 
 
 def test_citation_gate_still_requires_a_marker():
-    facts = [_fact(), _fact("491,204", "2025Q3")]
+    facts = [_fact(), _fact("491,204,000,000", "2025Q3")]
     document = compose_report(_plan(), facts)
     document.markdown = document.markdown.replace(ANCHOR, "").replace(FILENAME, "某份文件")
     result = validate_report(document, facts, plan=_plan())

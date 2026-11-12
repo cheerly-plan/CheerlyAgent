@@ -15,7 +15,13 @@ from ai_agent.report.compare import (
     format_compare,
 )
 from ai_agent.report.compose import compose_report
-from ai_agent.report.extract import Evidence, IndicatorFact, _NUMBER, read_indicator
+from ai_agent.report.extract import (
+    Evidence,
+    IndicatorFact,
+    _NUMBER,
+    ensure_amount_units,
+    read_indicator,
+)
 from ai_agent.report.parse import OutlineItem, ReportPlan, parse_request
 from ai_agent.report.pdf import charts_from_series
 from ai_agent.report.validate import validate_report
@@ -282,20 +288,19 @@ def test_chart_skips_incomparable_periods_marks_comparable_ones():
 
 
 def test_validate_allows_derived_value_with_full_evidence_chain():
-    facts = [
-        _fact("2026Q1", "178,846", "f-q1"),
-        _fact("2026H1", "356 903", "f-h1"),
-        _fact("2026Q3", "526,365", "f-q3"),
-    ]
-    plan = _plan()
-    document = compose_report(plan, facts)
-    series = compare_measures(
+    # 走真实入口：金额先折成元（validate 要求对比表统一为元）
+    facts = ensure_amount_units(
         [
-            _measure("2026Q1", "178,846", source_key="f-q1"),
-            _measure("2026H1", "356 903", source_key="f-h1"),
-            _measure("2026Q3", "526,365", source_key="f-q3"),
+            _fact("2026Q1", "178,846", "f-q1"),
+            _fact("2026H1", "356 903", "f-h1"),
+            _fact("2026Q3", "526,365", "f-q3"),
         ]
     )
+    plan = _plan()
+    document = compose_report(plan, facts)
+    # series 也要从折算后的事实来（pipeline 就是这条路径），否则白名单里是
+    # 百万元口径的推导值，正文写的是元，判「未核对数字」
+    series = compare_measures([fact.to_measure() for fact in facts])
     result = validate_report(document, facts, plan=plan, series=series)
     assert "-4.83%" in document.markdown
     assert result.passed, [item.message for item in result.findings]
@@ -303,11 +308,13 @@ def test_validate_allows_derived_value_with_full_evidence_chain():
 
 def test_validate_blocks_derived_value_without_evidence_chain():
     """手工塞一个无出处的推导 Change：正文数字必须被拦下，不能当成已核对。"""
-    facts = [
-        _fact("2026Q1", "178,846", "f-q1"),
-        _fact("2026H1", "356 903", "f-h1"),
-        _fact("2026Q3", "526,365", "f-q3"),
-    ]
+    facts = ensure_amount_units(
+        [
+            _fact("2026Q1", "178,846", "f-q1"),
+            _fact("2026H1", "356 903", "f-h1"),
+            _fact("2026Q3", "526,365", "f-q3"),
+        ]
+    )
     plan = _plan()
     document = compose_report(plan, facts)
     tampered = SeriesCompare(

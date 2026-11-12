@@ -175,7 +175,9 @@ def test_pipeline_uses_reported_yoy_and_still_passes_validation(out_dir, monkeyp
     assert result.validation.passed is True
     assert "同比 7.16%" in result.document.markdown
     assert "没有可写入的同比或环比" not in result.document.markdown
-    assert "取数列：年初至报告期末" in result.document.markdown
+    # 取数列现在渲染成指标表的一列（「期间口径／范围／取数列」），不再写成
+    # 「取数列：…” 的句子；断言取数列本身出现在正文里。
+    assert "年初至报告期末" in result.document.markdown
     assert "年初至报告期末" in result.document.html
 
 

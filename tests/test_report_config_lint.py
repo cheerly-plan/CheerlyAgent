@@ -165,7 +165,7 @@ def test_lifespan_runs_lint_and_does_not_block_on_failure(monkeypatch):
     monkeypatch.setattr(
         app_module,
         "kb_pipeline",
-        SimpleNamespace(recover_stuck=lambda: None, shutdown=lambda: None),
+        SimpleNamespace(recover_stuck=lambda **_: None, shutdown=lambda **_: None),
     )
     monkeypatch.setattr(
         app_module,
@@ -178,7 +178,7 @@ def test_lifespan_runs_lint_and_does_not_block_on_failure(monkeypatch):
         SimpleNamespace(start=lambda: None, stop=lambda: None),
     )
     monkeypatch.setattr(app_module, "shutdown_title_jobs", lambda: None)
-    monkeypatch.setattr(app_module, "shutdown_turn_finalizer", lambda: None)
+    monkeypatch.setattr(app_module, "shutdown_turn_finalizer", lambda **_: None)
     monkeypatch.setattr(app_module, "store", SimpleNamespace(close=lambda: None))
 
     fake_app = SimpleNamespace(state=SimpleNamespace())

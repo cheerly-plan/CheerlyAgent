@@ -86,6 +86,9 @@ def normalize_amount(
     """
     raw_unit = (unit or "").strip()
     text = (value or "").strip().replace(",", "").replace("，", "")
+    # 半年报摘要用空格做千分位（「356 903」）。不去掉空格，Decimal 解析失败，
+    # 这一期就不折算，累计链里混进「元」和「百万元」两种单位，环比直接算不出来。
+    text = re.sub(r"(?<=\d)[ \t\u00a0](?=\d)", "", text)
     if not text or raw_unit in {"", "%", "％", "百分点", "次"}:
         return value, raw_unit, raw_unit, False
     scale = _UNIT_SCALE.get(raw_unit)
