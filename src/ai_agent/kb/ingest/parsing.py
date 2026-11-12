@@ -47,7 +47,7 @@ class Segment:
 # 待重解析清单——2026-11-10 那次「页码切片 / 续表丢表头」就是靠人工才发现
 # 42 份文件仍是旧规则切出来的。
 # 改动解析、切分、表头/表题处理时**必须**一起改这里。
-PARSER_VERSION = "2026-11-12.4"
+PARSER_VERSION = "2026-11-12.5"
 
 _SUPPORTED = {".pdf", ".docx", ".xlsx", ".xlsm", ".md", ".markdown", ".txt", ".csv"}
 

@@ -30,7 +30,10 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ai_agent.core.logging import get_logger
 from ai_agent.kb.ingest.parsing import FIGURE, TABLE, TEXT, Segment
+
+logger = get_logger(__name__)
 
 # Excel 的 page 是 sheet 序号；PDF/Word 的 page 是页码。文档里的「表格16」
 # 是作者自己编的表号，解析层不会去数，引用只能落到页。
@@ -150,7 +153,9 @@ def chunk_segments(
 
     for seg in _carry_md_table_captions(
         _carry_html_page_headers(
-            _coalesce_segments(_drop_noise(segments), max_chars=max_chars)
+            _drop_page_boilerplate(
+                _coalesce_segments(_drop_noise(segments), max_chars=max_chars)
+            )
         )
     ):
         if seg.kind == TABLE:
@@ -188,8 +193,10 @@ def chunk_segments(
             flow.append(seg)
     flush_plain()
     flush_flow()
-    return _expand_long_html_tables(
-        chunks, max_chars=max_chars, group_mode=table_group_mode
+    return _drop_duplicate_chunks(
+        _expand_long_html_tables(
+            chunks, max_chars=max_chars, group_mode=table_group_mode
+        )
     )
 
 
@@ -574,6 +581,116 @@ def _html_header_to_carry(rows: list[str]) -> list[str] | None:
 # 表题行：合并资产负债表 / 母公司利润表 / 现金流量表（续）…
 _CAPTION_LINE = re.compile(r"^(?:合并|母公司)?[\u4e00-\u9fa5]{1,14}表(?:（续）|\(续\))?$")
 _UNIT_LINE = re.compile(r"^(?:单位|币种)[:：]")
+
+
+# 页眉页脚候选：一行在多页重复出现。太长的不算（正文里重复的句子不该删），
+# 太短的不算（「合计」「不适用」这类单元格值本身没信息量，但也不能乱删）
+_BOILER_MIN_CHARS = 5
+_BOILER_MAX_CHARS = 60
+# 出现在几页以上算样板
+_BOILER_MIN_PAGES = 3
+# 标题行不参与（章节名常常每页重印，但它有用）
+_HEADING_LINE = re.compile(r"^(?:[一二三四五六七八九十]+[、．.]|[（(][一二三四五六七八九十]+[）)])")
+
+
+def _drop_page_boilerplate(segments: list[Segment]) -> list[Segment]:
+    """剔除页眉页脚：同一行在 ≥3 页重复出现就判为样板。
+
+    实测《机器人 2026 半年报》有 14 片一模一样的内容——
+    「沈阳新松机器人自动化股份有限公司2026 年半年度报告全文」，正文每一页
+    的页脚都印一遍；《汇川技术》财报页脚则是「公司负责人：… 主管会计工作
+    负责人：… 会计机构负责人：…」，15 页各一份。
+
+    这些片没有信息量，却会占检索名额（问「机器人 半年报」可能命中那行页脚）。
+    按"跨页重复"判断而不是写死字符串：换一份文档、换个公司名同样生效。
+    """
+    pages_by_line: dict[str, set[int]] = {}
+    text_pages: set[int] = set()
+    for seg in segments:
+        if seg.kind != TEXT or not seg.page:
+            continue
+        text_pages.add(seg.page)
+        for line in (seg.text or "").splitlines():
+            text = line.strip()
+            if not (_BOILER_MIN_CHARS <= len(text) <= _BOILER_MAX_CHARS):
+                continue
+            if _HEADING_LINE.match(text):
+                continue
+            pages_by_line.setdefault(text, set()).add(seg.page)
+    total_pages = max(len(text_pages), 1)
+    boiler = {
+        line
+        for line, pages in pages_by_line.items()
+        if _looks_like_boilerplate(line, len(pages), total_pages)
+    }
+    if not boiler:
+        return segments
+    out: list[Segment] = []
+    for seg in segments:
+        if seg.kind != TEXT or not seg.page:
+            out.append(seg)
+            continue
+        kept = [
+            line
+            for line in (seg.text or "").splitlines()
+            if line.strip() and line.strip() not in boiler
+        ]
+        text = "\n".join(kept).strip()
+        if text:
+            out.append(
+                Segment(text, seg.page, seg.kind, seg.section, seg.scope, seg.page_end)
+            )
+    logger.info("剔除页眉页脚样本行 %d 条（跨页重复）", len(boiler))
+    return out
+
+
+# 签名栏：财报每页底部「公司负责人：X」这类整行
+_SIGNATURE_LINE = re.compile(r"^[\u4e00-\u9fa5]{0,8}负责人\s*[:：]\s*\S{1,12}$")
+# 页眉整行：公司名 + 报告类型 + 「全文」
+_FOOTER_ONLY = re.compile(r"^.{0,40}(?:年度报告|半年度报告|季度报告)全文$")
+
+
+def _looks_like_boilerplate(line: str, pages: int, total_pages: int) -> bool:
+    """这一行是不是页眉/页脚/签名栏。
+
+    不能只看「跨 3 页重复」：实测机器人那份报告里「确定该组合依据的说明：」
+    在 6 页出现、「减变动金额」在 4 页出现——它们是**正文/表格碎片**（表格行
+    被切断后落进正文段），删掉会把数据弄丢。
+
+    也不能只看「含报告类型」：解析器常把页眉与正文拼成一行（
+    ``…2026 年半年度报告全文：☑（已勾选）适用``），那一行里还有真内容。
+
+    所以只认两种**整行**形态：签名栏、页眉整行（前后没有别的字）。其余一律
+    不动——宁可留几条样板，不能删掉数据。
+    """
+    if pages < _BOILER_MIN_PAGES:
+        return False
+    return bool(_SIGNATURE_LINE.match(line) or _FOOTER_ONLY.match(line))
+
+
+def _drop_duplicate_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    """同一文件内正文完全相同的片只留第一份。
+
+    来源有三类：页眉页脚（上面已按跨页重复清掉大部分）、同一张权益变动表在
+    同一页被文字层和 OCR 各切一遍、以及 `_expand_long_html_tables` 二次切分
+    时的重叠。重复片会同时占多个检索位次，模型看到的却是同一份内容。
+
+    只去**同一页内**的重复：同样的表出现在不同页（正文与附录各印一次）是有
+    意的，跨页合并会把两处出处压成一个，引用位置也就丢了。
+    """
+    seen: set[tuple[int | None, str]] = set()
+    out: list[Chunk] = []
+    for chunk in chunks:
+        key = (chunk.page, re.sub(r"\s+", "", chunk.text or ""))
+        if not key[1]:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(chunk)
+    if len(out) != len(chunks):
+        logger.info("切片内完全相同的内容已去重 %d 片", len(chunks) - len(out))
+    return out
 
 
 def _carry_md_table_captions(segments: list[Segment]) -> list[Segment]:
