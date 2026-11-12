@@ -22,7 +22,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ai_agent.api.dependencies import get_current_user
-from ai_agent.api.schemas import MemoryApproveRequest, MemoryRejectRequest
+from ai_agent.api.schemas import (
+    MemoryApproveRequest,
+    MemoryRejectRequest,
+    MemorySettingsRequest,
+)
 from ai_agent.core.config import settings
 from ai_agent.memory.promotion import has_source, needs_source
 from ai_agent.storage.db import UserRecord
@@ -41,7 +45,7 @@ def _owner(user: UserRecord, requested: str | None) -> str:
     """普通用户强制看自己；管理员可指定 user_id，未指定时默认自己。"""
     if requested and requested != user.user_id:
         if not _is_admin(user):
-            raise HTTPException(status_code=403, detail="只能审核自己的记忆")
+            raise HTTPException(status_code=403, detail="只能操作自己的记忆")
         return requested
     return user.user_id
 
@@ -151,25 +155,224 @@ def reject_candidate(
     }
 
 
+@router.get("/settings")
+def get_memory_settings(
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """读取用户级记忆开关。默认开启。"""
+    owner = _owner(user, user_id)
+    return {
+        "user_id": owner,
+        "enabled": store.memory_enabled(owner),
+    }
+
+
+@router.put("/settings")
+def update_memory_settings(
+    req: MemorySettingsRequest,
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """打开/关闭用户级记忆。
+
+    关闭后：不写新记忆、不注入旧记忆、不挂 memory 工具；已有数据保留，
+    用户仍可通过本路由的 profile/episodes/export 查看、导出、删除。
+    """
+    owner = _owner(user, user_id)
+    try:
+        enabled = store.set_memory_enabled(req.enabled, user_id=owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="记忆开关保存失败")
+    return {"user_id": owner, "enabled": enabled}
+
+
+@router.get("/profile")
+def list_profile(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    include_inactive: bool = Query(default=False),
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """分页查看 L1 画像；include_inactive 可看到被覆盖/软过期的留档。"""
+    owner = _owner(user, user_id)
+    try:
+        items, has_more = store.list_profile_page(
+            owner,
+            limit=limit,
+            offset=offset,
+            include_inactive=include_inactive,
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="画像记忆读取失败")
+    return {
+        "user_id": owner,
+        "total": len(items),
+        "items": items,
+        "has_more": has_more,
+        "next_offset": offset + len(items) if has_more else None,
+    }
+
+
+@router.delete("/profile/{item_id}")
+def delete_profile_item(
+    item_id: str,
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """删除一条 L1 画像（同时清掉同文候选与归档副本，避免重新出现）。"""
+    owner = _owner(user, user_id)
+    try:
+        deleted = store.delete_profile_item(item_id, user_id=owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="画像记忆删除失败")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="没有该画像条目")
+    return {"user_id": owner, "item_id": item_id, "deleted": True}
+
+
+@router.delete("/profile")
+def clear_profile(
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """清空该用户的 L1 画像，返回删除条数。"""
+    owner = _owner(user, user_id)
+    try:
+        deleted = store.clear_profile(owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="画像记忆清空失败")
+    return {"user_id": owner, "deleted": deleted}
+
+
+@router.get("/episodes")
+def list_episodes(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    include_expired: bool = Query(default=False),
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """分页查看 L2 情景记忆；include_expired 可看到已过 TTL 尚未物理删除的。"""
+    owner = _owner(user, user_id)
+    try:
+        items, has_more = store.list_episodes_page(
+            owner,
+            limit=limit,
+            offset=offset,
+            include_expired=include_expired,
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="情景记忆读取失败")
+    return {
+        "user_id": owner,
+        "total": len(items),
+        "items": items,
+        "has_more": has_more,
+        "next_offset": offset + len(items) if has_more else None,
+    }
+
+
+@router.delete("/episodes/{episode_id}")
+def delete_episode(
+    episode_id: str,
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """删除一条 L2 情景记忆（含归档 episode 副本与 pending 候选）。"""
+    owner = _owner(user, user_id)
+    try:
+        deleted = store.delete_episode(episode_id, user_id=owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="情景记忆删除失败")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="没有该情景记忆")
+    return {"user_id": owner, "episode_id": episode_id, "deleted": True}
+
+
+@router.delete("/episodes")
+def clear_episodes(
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """清空该用户的 L2 情景记忆，返回删除条数。"""
+    owner = _owner(user, user_id)
+    try:
+        deleted = store.clear_episodes(owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="情景记忆清空失败")
+    return {"user_id": owner, "deleted": deleted}
+
+
+@router.get("/export")
+def export_memory(
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """导出 L1–L4 全量记忆（含开关状态与候选/归档），用于备份或迁移。"""
+    owner = _owner(user, user_id)
+    try:
+        return store.export_memory(owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="记忆导出失败")
+
+
+@router.delete("")
+def clear_memory(
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """删除该用户全部长期记忆（画像/情景/候选/归档），不可恢复。"""
+    owner = _owner(user, user_id)
+    try:
+        store.clear_long_term(owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="记忆删除失败")
+    return {"user_id": owner, "deleted": True}
+
+
 @router.get("/archive")
 def search_archive(
     query: str = Query(default="", max_length=200),
     limit: int = Query(default=5, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
     user_id: str | None = Query(default=None),
     user: UserRecord = Depends(get_current_user),
 ) -> dict:
     """按需展开 L4 归档（确定性相关性排序，零 LLM / 零向量调用）。
 
     归档**不会**自动进 system，只能被这里或 ``expand_memory`` 显式取回。
+    query 为空时按 archived_at 倒序分页；有 query 时按相关性排序后分页。
     """
     owner = _owner(user, user_id)
-    from ai_agent.memory.archive import search_archive as do_search
-
     try:
-        items = do_search(query, user_id=owner, top_k=limit)
+        if query.strip():
+            from ai_agent.memory.archive import search_archive as do_search
+
+            items = do_search(
+                query,
+                user_id=owner,
+                top_k=limit + 1,
+                offset=offset,
+            )
+        else:
+            items = store.list_archive_rows(
+                owner, limit=limit + 1, offset=offset
+            )
+            for item in items:
+                item["score"] = 0.0
     except Exception:
         raise HTTPException(status_code=502, detail="归档记忆读取失败")
-    return {"total": len(items), "user_id": owner, "items": items}
+    has_more = len(items) > limit
+    items = items[:limit]
+    return {
+        "user_id": owner,
+        "total": len(items),
+        "items": items,
+        "has_more": has_more,
+        "next_offset": offset + len(items) if has_more else None,
+    }
 
 
 @router.post("/archive/distill")

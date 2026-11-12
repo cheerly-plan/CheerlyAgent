@@ -141,6 +141,7 @@ def chat_sse_events(
     use_web_search: bool = True,
     use_kb: bool = False,
     kb_file_ids: tuple[str, ...] = (),
+    memory_enabled: bool = True,
 ) -> Iterator[str]:
     # 并发槽已在路由处理器里 acquire（超限返回 429）；这里只负责释放
     try:
@@ -153,6 +154,7 @@ def chat_sse_events(
             use_web_search=use_web_search,
             use_kb=use_kb,
             kb_file_ids=kb_file_ids,
+            memory_enabled=memory_enabled,
         ):
             if event.get("type") == "text":
                 answer_parts.append(event.get("content") or "")
@@ -172,10 +174,17 @@ def _stream(
     use_web_search: bool,
     use_kb: bool = False,
     kb_file_ids: tuple[str, ...] = (),
+    memory_enabled: bool = True,
 ) -> StreamingResponse:
     return _stream_response(
         chat_sse_events(
-            user_id, session_id, content, use_web_search, use_kb, kb_file_ids
+            user_id,
+            session_id,
+            content,
+            use_web_search,
+            use_kb,
+            kb_file_ids,
+            memory_enabled,
         )
     )
 
@@ -221,6 +230,7 @@ def chat(
             req.web_search,
             req.use_kb,
             tuple(req.kb_file_ids),
+            memory_enabled=user.memory_enabled,
         )
     return _stream(
         user.user_id,
@@ -229,6 +239,7 @@ def chat(
         req.web_search,
         req.use_kb,
         tuple(req.kb_file_ids),
+        memory_enabled=user.memory_enabled,
     )
 
 
@@ -238,6 +249,7 @@ def _stream_regenerate(
     use_web_search: bool,
     use_kb: bool = False,
     kb_file_ids: tuple[str, ...] = (),
+    memory_enabled: bool = True,
 ) -> StreamingResponse:
     """重新生成最后一条回答：不重复保存用户消息，末尾旧回答先从历史剔除。"""
 
@@ -253,6 +265,7 @@ def _stream_regenerate(
                 use_web_search=use_web_search,
                 use_kb=use_kb,
                 kb_file_ids=kb_file_ids,
+                memory_enabled=memory_enabled,
             ):
                 if event.get("type") == "text":
                     answer_parts.append(event.get("content") or "")
@@ -303,11 +316,19 @@ def chat_resume(
     if store.has_running_checkpoint(user.user_id, cp["chat_session_id"]):
         raise HTTPException(status_code=409, detail="该会话有正在进行的回复")
     _acquire_chat_slot()
-    return _stream_resume(user.user_id, req.run_id, cp["chat_session_id"])
+    return _stream_resume(
+        user.user_id,
+        req.run_id,
+        cp["chat_session_id"],
+        memory_enabled=user.memory_enabled,
+    )
 
 
 def _stream_resume(
-    user_id: str, resume_run_id: str, session_id: str
+    user_id: str,
+    resume_run_id: str,
+    session_id: str,
+    memory_enabled: bool = True,
 ) -> StreamingResponse:
     def events() -> Iterator[str]:
         try:
@@ -319,6 +340,7 @@ def _stream_resume(
                 chat_session_id="default",  # 占位，run_stream 会从 checkpoint 覆盖
                 finalize_background=True,
                 resume_run_id=resume_run_id,
+                memory_enabled=memory_enabled,
             ):
                 if event.get("type") == "text":
                     answer_parts.append(event.get("content") or "")

@@ -138,6 +138,55 @@ def test_write_episode_merges_similar(mem_store):
     assert "aggregation" in texts[0]
 
 
+def test_write_episode_merge_aggregates_evidence(mem_store, monkeypatch):
+    """合并相近 episode 时，hit_count 求和、sessions_seen 取并集。
+
+    回归：此前只删 stale 行，被并掉那条的跨会话证据跟着消失，合并后的
+    记忆可能永远达不到晋升/归档门槛。
+    """
+    monkeypatch.setattr(settings, "memory_merge_threshold", 0.99)
+    first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
+    second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")
+    assert first.id != second.id
+
+    with mem_store._get_pool().connection() as conn:
+        conn.execute(
+            """
+            UPDATE agent_episode
+            SET hit_count = 4, sessions_seen = ARRAY['s1','s2']::text[],
+                last_seen_at = now()
+            WHERE id::text = %s
+            """,
+            (first.id,),
+        )
+        conn.execute(
+            """
+            UPDATE agent_episode
+            SET hit_count = 3, sessions_seen = ARRAY['s2','s3']::text[],
+                last_seen_at = now()
+            WHERE id::text = %s
+            """,
+            (second.id,),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(settings, "memory_merge_threshold", 0.6)
+    merged = mem_store.write_episode("learning nodejs bff redis", user_id="a")
+    with mem_store._get_pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT hit_count, sessions_seen
+            FROM agent_episode
+            WHERE user_id = %s
+            """,
+            ("a",),
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["hit_count"] == 7
+    assert sorted(rows[0]["sessions_seen"]) == ["s1", "s2", "s3"]
+    assert merged.hits == 7
+
+
 def test_write_episode_stores_compacted_sentence(mem_store, monkeypatch):
     monkeypatch.setattr(
         "ai_agent.memory.episode_store.compact_episode_texts",

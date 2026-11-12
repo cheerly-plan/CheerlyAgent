@@ -88,14 +88,21 @@ class ArchiveStore(Database):
                         "agent_memory_archive", uid, f"{kind}:{origin_id}"
                     )
                 )
-                result = conn.execute(
+                row = conn.execute(
                     """
                     INSERT INTO agent_memory_archive (
                         id, user_id, kind, origin_id, text, facet, source,
                         hit_count, session_seen, reviewed_by, archived_at
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-                    ON CONFLICT (user_id, kind, origin_id) DO NOTHING
+                    ON CONFLICT (user_id, kind, origin_id) DO UPDATE
+                        SET text = EXCLUDED.text,
+                            facet = EXCLUDED.facet,
+                            source = EXCLUDED.source,
+                            hit_count = EXCLUDED.hit_count,
+                            session_seen = EXCLUDED.session_seen,
+                            reviewed_by = EXCLUDED.reviewed_by
+                    RETURNING (xmax = 0) AS inserted
                     """,
                     (
                         item_id,
@@ -109,20 +116,28 @@ class ArchiveStore(Database):
                         int(entry.get("session_seen") or 0),
                         str(entry.get("reviewed_by") or ""),
                     ),
-                )
-                written += result.rowcount or 0
+                ).fetchone()
+                if row and row.get("inserted"):
+                    written += 1
             conn.commit()
         return written
 
     def list_archive_rows(
-        self, user_id: str | None = None, *, limit: int = 200
+        self,
+        user_id: str | None = None,
+        *,
+        limit: int = 200,
+        offset: int = 0,
     ) -> list[dict]:
         """取最近归档条目；相关性排序在编排层用确定性 bigram 做。
 
         不把排序塞进 SQL：归档查询要零向量、零 LLM，且与 ``progressive``
-        的画像相关性口径完全一致（同一套 ``relevance``）。
+        的画像相关性口径完全一致（同一套 ``relevance``）。``offset`` 供
+        管理页翻页；无 query 时直接按 archived_at 倒序稳定分页。
         """
         uid = user_id or current_user_id()
+        page = max(1, min(int(limit), 1000))
+        start = max(0, int(offset))
         with self._get_pool().connection() as conn:
             rows = conn.execute(
                 """
@@ -134,18 +149,30 @@ class ArchiveStore(Database):
                        archived_at::text AS archived_at
                 FROM agent_memory_archive
                 WHERE user_id = %s
-                ORDER BY archived_at DESC
-                LIMIT %s
+                ORDER BY archived_at DESC, id
+                LIMIT %s OFFSET %s
                 """,
-                (uid, max(1, limit)),
+                (uid, page, start),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_episode_users(self) -> list[str]:
-        """后台线程没有 user context，按用户遍历，避免只处理 default。"""
+    def list_episode_users(self, *, enabled_only: bool = False) -> list[str]:
+        """后台线程没有 user context，按用户遍历，避免只处理 default。
+
+        ``enabled_only`` 供后台蒸馏跳过明确关闭记忆的用户。
+        """
+        enabled_filter = ""
+        if enabled_only:
+            enabled_filter = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_memory_setting s
+                  WHERE s.user_id = agent_episode.user_id
+                    AND s.enabled = FALSE
+              )
+            """
         with self._get_pool().connection() as conn:
             rows = conn.execute(
-                "SELECT DISTINCT user_id FROM agent_episode"
+                f"SELECT DISTINCT user_id FROM agent_episode WHERE TRUE {enabled_filter}"
             ).fetchall()
         return [str(row["user_id"]) for row in rows]
 

@@ -434,7 +434,7 @@ def test_search_archive_fail_open_on_db_error(monkeypatch):
 
 def test_distill_all_users_merges_and_deduplicates(monkeypatch):
     _enable_archive(monkeypatch)
-    monkeypatch.setattr(store, "list_episode_users", lambda: ["u1", "u2"])
+    monkeypatch.setattr(store, "list_episode_users", lambda **k: ["u1", "u2"])
     monkeypatch.setattr(
         store, "list_candidate_users", lambda **k: ["u2", "u3"]
     )
@@ -515,7 +515,7 @@ def test_ensure_schema_creates_archive_table_and_review_columns(monkeypatch):
 
 
 def test_write_archive_entries_is_idempotent_and_skips_empty(monkeypatch):
-    obj, sink = _fake_store(monkeypatch, rowcount=1)
+    obj, sink = _fake_store(monkeypatch, rows=[{"inserted": True}])
     assert obj.write_archive_entries([], user_id="u1") == 0
     assert sink == []
     n = obj.write_archive_entries(
@@ -526,7 +526,8 @@ def test_write_archive_entries_is_idempotent_and_skips_empty(monkeypatch):
         user_id="u1",
     )
     assert n == 1
-    assert "ON CONFLICT (user_id, kind, origin_id) DO NOTHING" in sink[0][0]
+    assert "ON CONFLICT (user_id, kind, origin_id) DO UPDATE" in sink[0][0]
+    assert "RETURNING (xmax = 0) AS inserted" in sink[0][0]
 
 
 def test_list_stable_episodes_sql_uses_evidence_columns(monkeypatch):

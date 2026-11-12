@@ -49,7 +49,10 @@ def capture_long_term(
     summary: str,
     user_input: str,
     chat_session_id: str = "",
+    memory_enabled: bool = True,
 ) -> None:
+    if not memory_enabled:
+        return
     if not any(msg.get("role") == "assistant" for msg in turn):
         return
     # Jev 门控：命中阈值以下直接跳过，省掉向量检索 + 小模型抽取；
@@ -155,6 +158,7 @@ def _write_extracted(
                 user_id=user_id,
                 chat_session_id=chat_session_id,
                 user_input=user_input,
+                facet=item.facet,
             )
     except Exception:
         logger.exception("长期记忆写入失败 kind=%s", item.kind)
@@ -335,7 +339,14 @@ def _memory_from_row(row: object) -> ExtractedMemory | None:
     if kind == "episode":
         if len(content) < 4 or len(content) > 200:
             return None
-        return ExtractedMemory(kind="episode", content=content)
+        # 模型若给了 facet 就透传；空串让 observe_episode 用确定性推断，
+        # 不要在这一层直接写死成 other
+        facet = normalize_facet(row.get("facet"))
+        return ExtractedMemory(
+            kind="episode",
+            content=content,
+            facet="" if facet == "other" else facet,
+        )
     if kind != "profile":
         return None
     op = str(row.get("op") or "add").strip()

@@ -109,3 +109,84 @@ def coalesce_by_facet(
             )
         last[facet] = item
     return [last[facet] for facet in order]
+
+
+# 候选 facet 的确定性推断。候选来自 episode（用户正在做的事/近况），
+# 原先一律落 ``other``，晋升进画像后丢掉「偏好/约束/职业」语义，排序和
+# 注入都按「其他」降权。这里不调模型，只用保守的线索词把「本质是画像事实」
+# 的 episode 归到正确 facet；判断不了就老实留 ``other``。
+_FACET_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "constraint",
+        (
+            "必须",
+            "不要",
+            "禁止",
+            "只能",
+            "不能",
+            "以后都",
+            "每次都",
+            "一律",
+            "务必",
+            "再也别",
+        ),
+    ),
+    ("name", ("我叫", "名叫", "名字是", "姓名是", "称呼我", "叫我")),
+    (
+        "language",
+        (
+            "用中文",
+            "用英文",
+            "用英语",
+            "说中文",
+            "说英文",
+            "简体中文",
+            "繁体中文",
+            "语言偏好",
+        ),
+    ),
+    (
+        "locale",
+        ("住在", "搬到", "居住在", "居住地", "所在城市", "老家在", "定居"),
+    ),
+    (
+        "occupation",
+        (
+            "职业",
+            "工作",
+            "岗位",
+            "任职",
+            "转行",
+            "工程师",
+            "程序员",
+            "设计师",
+            "研究员",
+            "分析师",
+            "经理",
+            "律师",
+            "医生",
+            "老师",
+            "做前端",
+            "做后端",
+        ),
+    ),
+    (
+        "preference",
+        ("喜欢", "偏好", "更喜欢", "不喜欢", "习惯用", "常用", "倾向于", "爱用"),
+    ),
+)
+
+
+def infer_facet(text: str, default: str = "other") -> str:
+    """从一段用户近况里推断画像 facet（0~1 个最可能的分类）。
+
+    只认显式线索词，宁可返回 ``default`` 也不猜。用于 L2 episode 晋升到
+    L3 候选时保留语义；不参与画像写入本身的 facet 决策。
+    """
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return default
+    for facet, hints in _FACET_HINTS:
+        if any(hint in normalized for hint in hints):
+            return facet
+    return default

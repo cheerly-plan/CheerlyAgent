@@ -69,6 +69,8 @@ class UserRecord:
     username: str  # 登录名，仅用于认证
     display_name: str
     created_at: str = ""
+    # 用户级记忆开关；读取失败/旧库无设置行时默认开启
+    memory_enabled: bool = True
 
 
 class Database:
@@ -815,6 +817,17 @@ class Database:
                     ON agent_memory_archive (user_id, archived_at DESC)
                     """
                 )
+            # 用户级记忆开关。关闭只停止读写与工具挂载，不删已有数据；
+            # 删除是 /v1/memory 的显式动作。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_memory_setting (
+                    user_id TEXT PRIMARY KEY,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
             conn.commit()
 
     def close(self) -> None:

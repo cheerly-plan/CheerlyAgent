@@ -240,11 +240,19 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | 长期 | `long_term.py` | 向量化的事实与偏好，召回按相似度阈值过滤；写入走门控 → 抽取 → 噪声过滤 → 三层去重 |
 | 情景 | `episode_store.py` / `episode_merge.py` | 带 TTL 的事件片段，支持相近情节合并 |
 | 画像 | `profile.py` / `facets.py` / `profile_store.py` | 用户维度的稳定画像与分面；分面分互斥（覆盖）与累积（追加）两类，删除语义按分面区分 |
+| 候选 | `promotion.py` / `promotion_store.py` | 观察态证据、跨会话复现、候选审核与自动晋升；候选 facet 由抽取结果或确定性线索词推断 |
+| 归档 | `archive.py` / `archive_store.py` | L1/L2 的只读副本，按需展开；重复蒸馏会更新文本/证据，不会产生副本 |
+| 开关 | `setting_store.py` | 用户级记忆开关：关闭后不写、不注入、不挂记忆工具；已有数据保留，可查看/导出/删除 |
 
 写入链路每轮最多产出 2 条，跑在 `_turn_finalizer` 线程池里，不阻塞 SSE。
 门控（`gate.py`）用外部概率模型判断「本轮值不值得抽取」，低于
 `memory_gate_threshold` 就跳过，省掉一次抽取调用；该服务不可用时 fail-open
 （宁可多抽一次，不可静默丢记忆）。
+
+L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 L1–L4 全量数据；
+`DELETE /v1/memory` 清空长期记忆。删除 L1/L2 单条时会同步清理同文候选与归档副本，
+避免删掉后又被后台晋升/蒸馏带回来。归档重复蒸馏走 `ON CONFLICT DO UPDATE`，
+文本、出处与证据会随源数据刷新；查询支持 `limit` / `offset`。
 
 ## 认证与隔离
 
@@ -262,6 +270,14 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | POST | `/v1/chat/resume` | 凭 `run_id` 断点续跑 |
 | GET | `/v1/chat/pending_run` | 查询可续跑的 run |
 | GET | `/v1/chat/memory` | 会话历史分页（不是长期记忆管理） |
+| GET/PUT | `/v1/memory/settings` | 用户级记忆开关 |
+| GET/DELETE | `/v1/memory/profile` | L1 画像分页查看 / 清空 |
+| DELETE | `/v1/memory/profile/{id}` | 删除单条画像 |
+| GET/DELETE | `/v1/memory/episodes` | L2 情景分页查看 / 清空 |
+| DELETE | `/v1/memory/episodes/{id}` | 删除单条情景 |
+| GET | `/v1/memory/export` | 导出 L1–L4 全量记忆 |
+| DELETE | `/v1/memory` | 清空长期记忆（画像/情景/候选/归档） |
+|  | `/v1/memory/candidates`、`/v1/memory/archive` | 候选审核、归档查询与分页 |
 |  | `/v1/session`、`/v1/auth`、`/user` | 会话、登录注册、用户信息 |
 |  | `/v1/kb/**` | 知识库上传、切片、标签、维护 |
 |  | `/v1/kg/**` | 图谱查询与维护 |
@@ -272,8 +288,8 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 |  | `/v1/report/reviews/**` | 审核队列、批准／驳回、定稿 |
 |  | `/v1/inspect/**` | 管理员回看用户会话与每轮工具调用 |
 
-> 长期记忆目前**没有对外的查看/删除接口**，只有 `search_memory` / `write_memory`
-> 两个工具。做隐私合规前需要先补一个管理端点。
+> 普通用户只能操作自己的记忆，管理员可通过 `user_id` 指定用户；关闭记忆开关
+> 只停止读写与工具挂载，不会隐式删除已有数据。
 
 ---
 
@@ -307,6 +323,11 @@ uv run alembic revision -m "说明"    # 新增迁移
 | `scripts/eval_graph.py` | `scripts/cases/gold_graph.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
 | `scripts/eval_memory.py` | `scripts/cases/memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写 |
 | `scripts/eval_memory.py --recall` | `scripts/cases/episode_eval_cases.json` | 2 | 情景记忆召回（写入后检索，用完删除） |
+| `tests/test_memory_e2e.py` | — | 1 条生命周期 | 写入 → 注入 → 晋升 → 归档 → 删除；真库 + 确定性桩，不调模型 |
+
+`eval_memory` 在 `eval/config.json` 里是 **blocking**：nightly 或显式
+`--allow-external` 跑，通过率跌破阈值会阻断发布。`memory_e2e` 是 T1 blocking，
+CI 每次 PR/push 用 pgvector 服务跑确定性生命周期，不依赖模型密钥。
 
 另有 `scripts/cases/retrieval_eval_cases.json`（22 条，检索脚本的默认集）、
 `scripts/cases/retrieval_eval_cases_3f.json`（20 条）是早期小样本集，保留作对照。
@@ -326,6 +347,9 @@ uv run python scripts/eval_tool_route.py
 
 # 图谱构建质量（只读，但要求库里有金标对应的那份文件；--before 传上次报告可对比）
 uv run python scripts/eval_graph.py --gold scripts/cases/gold_graph.json --file-id <id>
+
+# 记忆端到端（需要 Postgres；CI 的 memory-e2e job 会自动起 pgvector）
+uv run pytest tests/test_memory_e2e.py -q
 ```
 
 ### 当前基线（2026-11-03）

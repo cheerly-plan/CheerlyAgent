@@ -181,14 +181,30 @@ class PromotionStore(Database):
             ).fetchone()
         return dict(row) if row else None
 
-    def list_candidate_users(self, *, status: str = "pending") -> list[str]:
-        """后台清理线程没有 user context，按用户逐个审核，避免只处理 default。"""
+    def list_candidate_users(
+        self, *, status: str = "pending", enabled_only: bool = False
+    ) -> list[str]:
+        """后台清理线程没有 user context，按用户逐个审核，避免只处理 default。
+
+        ``enabled_only`` 供后台维护使用：跳过明确关闭记忆的用户，避免开关
+        已经关了、后台还在把候选晋升进画像。
+        """
+        enabled_filter = ""
+        if enabled_only:
+            enabled_filter = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_memory_setting s
+                  WHERE s.user_id = agent_memory_candidate.user_id
+                    AND s.enabled = FALSE
+              )
+            """
         with self._get_pool().connection() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT user_id
                 FROM agent_memory_candidate
                 WHERE status = %s
+                {enabled_filter}
                 """,
                 (status,),
             ).fetchall()

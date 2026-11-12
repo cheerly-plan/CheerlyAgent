@@ -188,3 +188,99 @@ class ProfileStore(Database):
             )
             for row in rows
         ]
+
+    # ---- L1 管理：分页查看 / 单条删除 / 清空 ----
+    def list_profile_page(
+        self,
+        user_id: str | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        include_inactive: bool = False,
+    ) -> tuple[list[dict], bool]:
+        """分页列出画像。``include_inactive`` 打开时把被覆盖/过期的也带出。
+
+        返回 (items, has_more)。items 是 dict，带 expires_at / superseded_at，
+        管理页要能解释「为什么这条现在不生效」。
+        """
+        uid = user_id or current_user_id()
+        page = max(1, min(int(limit), 200))
+        start = max(0, int(offset))
+        where = "user_id = %s"
+        if not include_inactive:
+            where += (
+                " AND superseded_at IS NULL"
+                " AND (expires_at IS NULL OR expires_at > now())"
+            )
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id::text AS id, user_id, text, facet,
+                       created_at::text AS created_at,
+                       expires_at::text AS expires_at,
+                       superseded_at::text AS superseded_at
+                FROM agent_user_profile
+                WHERE {where}
+                ORDER BY created_at DESC, id
+                LIMIT %s OFFSET %s
+                """,
+                (uid, page + 1, start),
+            ).fetchall()
+        items = [dict(row) for row in rows[:page]]
+        return items, len(rows) > page
+
+    def delete_profile_item(
+        self, item_id: str, user_id: str | None = None
+    ) -> bool:
+        """删除一条画像，并清掉由它派生、可能把它重新带回来的记录。
+
+        - pending/promoted 候选按原文精确匹配删除；
+        - L4 里 kind='promoted' 的同文副本一起删（归档只是副本，不应在
+          用户删除后还能通过导出/展开看到）。
+        """
+        uid = user_id or current_user_id()
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT text
+                FROM agent_user_profile
+                WHERE user_id = %s AND id::text = %s
+                """,
+                (uid, item_id),
+            ).fetchone()
+            if row is None:
+                return False
+            text = str(row["text"])
+            conn.execute(
+                "DELETE FROM agent_user_profile WHERE user_id = %s AND id::text = %s",
+                (uid, item_id),
+            )
+            conn.execute(
+                "DELETE FROM agent_memory_candidate WHERE user_id = %s AND text = %s",
+                (uid, text),
+            )
+            conn.execute(
+                """
+                DELETE FROM agent_memory_archive
+                WHERE user_id = %s AND kind = 'promoted' AND text = %s
+                """,
+                (uid, text),
+            )
+            conn.commit()
+        return True
+
+    def clear_profile(self, user_id: str | None = None) -> int:
+        """清空 L1 画像。返回删除行数。
+
+        只删 profile 行；候选/归档是独立层，需要全量删除走
+        ``/v1/memory``（clear_long_term）。单条删除已经做了派生记录清理，
+        这里保持「清空 L1」语义简单可预期。
+        """
+        uid = user_id or current_user_id()
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                "DELETE FROM agent_user_profile WHERE user_id = %s RETURNING id",
+                (uid,),
+            ).fetchall()
+            conn.commit()
+        return len(rows)

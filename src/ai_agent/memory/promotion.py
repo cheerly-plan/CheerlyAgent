@@ -31,6 +31,7 @@ from typing import Literal
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
+from ai_agent.memory.facets import infer_facet, normalize_facet
 from ai_agent.storage.db import MemoryItem, current_user_id
 from ai_agent.storage.store import store
 
@@ -174,11 +175,14 @@ def observe_episode(
     chat_session_id: str = "",
     user_input: str = "",
     source: str = "",
+    facet: str = "",
 ) -> PromotionDecision | None:
     """写入 episode 后登记观察证据；达到门槛才产出 L3 候选。
 
     任何异常返回 None 并记日志，绝不阻断抽取链路。
     ``source`` 由调用方给出（目前只有结构化来源才传，普通对话留空）。
+    ``facet`` 从抽取结果透传；为空/``other`` 时用确定性线索词推断，
+    避免所有候选都落 ``other``、晋升后丢掉偏好/约束语义。
     """
     uid = user_id or current_user_id()
     try:
@@ -198,9 +202,12 @@ def observe_episode(
             min_hits=settings.memory_promotion_min_hits,
         )
         if decision.stage == "candidate":
+            candidate_facet = normalize_facet(facet) if facet else "other"
+            if candidate_facet == "other":
+                candidate_facet = infer_facet(item.text)
             store.upsert_candidate(
                 text=item.text,
-                facet="other",
+                facet=candidate_facet,
                 source=source,
                 hit_count=hit_count,
                 session_seen=session_seen,
@@ -385,7 +392,7 @@ def reject_candidate(
 def review_all_pending_candidates(*, limit_per_user: int = 20) -> int:
     """后台线程入口：按用户遍历待审候选。"""
     try:
-        users = store.list_candidate_users(status="pending")
+        users = store.list_candidate_users(status="pending", enabled_only=True)
     except Exception:
         logger.exception("候选记忆用户列表读取失败")
         return 0

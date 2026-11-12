@@ -335,3 +335,9 @@ class MemoryRejectRequest(BaseModel):
     """驳回一条 L3 候选；行保留为 rejected，便于追溯，不进画像。"""
 
     note: str = Field(default="", max_length=500, description="驳回原因，写进审计记录")
+
+
+class MemorySettingsRequest(BaseModel):
+    """用户级记忆开关：false = 不写、不注入、不挂记忆工具；数据保留。"""
+
+    enabled: bool

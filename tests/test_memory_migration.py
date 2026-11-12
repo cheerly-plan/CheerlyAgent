@@ -44,6 +44,7 @@ _MEMORY_SQL_MARKERS = (
     "agent_memory_archive",
     "agent_memory_archive_user_idx",
     "archived_at",
+    "agent_memory_setting",
 )
 
 
@@ -146,6 +147,9 @@ def test_upgrade_head_on_empty_database_creates_memory_schema():
                 "source",
                 "archived_at",
             } <= _columns(conn, "agent_memory_archive")
+            assert {"enabled", "updated_at"} <= _columns(
+                conn, "agent_memory_setting"
+            )
             indexes = {
                 str(row[0])
                 for row in conn.execute(

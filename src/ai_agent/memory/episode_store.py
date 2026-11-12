@@ -75,6 +75,27 @@ class EpisodeStore(Database):
                 self._upsert_episode(conn, item, src_vector)
                 conn.commit()
                 return item
+            # 合并前先把所有被并掉的 episode 的证据聚到 keeper 上：
+            # hit_count 求和、sessions_seen 取并集。此前只删 stale 行，
+            # 被并掉那条的跨会话证据一起消失，合并后的记忆可能永远
+            # 达不到晋升/归档门槛。
+            evidence_rows = conn.execute(
+                """
+                SELECT COALESCE(hit_count, 0)::int AS hit_count,
+                       COALESCE(sessions_seen, '{}'::text[]) AS sessions_seen
+                FROM agent_episode
+                WHERE user_id = %s AND id::text = ANY(%s::text[])
+                """,
+                (uid, [hit.id for hit in hits]),
+            ).fetchall()
+            merged_hits = sum(int(row["hit_count"]) for row in evidence_rows)
+            merged_sessions = sorted(
+                {
+                    str(session)
+                    for row in evidence_rows
+                    for session in (row["sessions_seen"] or [])
+                }
+            )
             if stale_ids:
                 conn.execute(
                     """
@@ -83,26 +104,34 @@ class EpisodeStore(Database):
                     """,
                     (uid, stale_ids),
                 )
-            if merged_text != keeper.text or stale_ids:
+            changed = merged_text != keeper.text or bool(stale_ids)
+            if changed:
                 conn.execute(
                     """
                     UPDATE agent_episode
-                    SET text = %s, embedding = %s, created_at = %s
+                    SET text = %s, embedding = %s, created_at = %s,
+                        last_seen_at = %s, hit_count = %s, sessions_seen = %s
                     WHERE id = %s AND user_id = %s
                     """,
                     (
                         merged_text,
                         merged_vector,
                         now,
+                        now,
+                        merged_hits,
+                        merged_sessions,
                         uuid.UUID(keeper.id),
                         uid,
                     ),
                 )
                 logger.info(
-                    "merge_episode user_id=%s keeper=%s stale=%s text=%s",
+                    "merge_episode user_id=%s keeper=%s stale=%s hits=%s "
+                    "sessions=%s text=%s",
                     uid,
                     keeper.id,
                     len(stale_ids),
+                    merged_hits,
+                    len(merged_sessions),
                     merged_text,
                 )
             conn.commit()
@@ -111,6 +140,8 @@ class EpisodeStore(Database):
                 user_id=uid,
                 text=merged_text,
                 created_at=keeper.created_at if merged_text == keeper.text else now,
+                hits=merged_hits,
+                last_seen=now if changed else keeper.last_seen,
             )
 
     def _episode_texts(
@@ -230,3 +261,108 @@ class EpisodeStore(Database):
             """,
             (item.id, item.user_id, item.text, vector, item.created_at),
         )
+
+    # ---- L2 管理：分页查看 / 单条删除 / 清空 ----
+    def list_episodes_page(
+        self,
+        user_id: str | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        include_expired: bool = False,
+    ) -> tuple[list[dict], bool]:
+        """分页列出情景记忆。默认只列 TTL 内仍会被召回的条目。"""
+        uid = user_id or current_user_id()
+        page = max(1, min(int(limit), 200))
+        start = max(0, int(offset))
+        ttl = max(0, int(settings.memory_episode_ttl_seconds))
+        where = "user_id = %s"
+        params: list[object] = [uid]
+        if not include_expired and ttl > 0:
+            where += (
+                " AND COALESCE(last_seen_at, created_at)"
+                " >= now() - (%s * interval '1 second')"
+            )
+            params.append(ttl)
+        params.extend([page + 1, start])
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id::text AS id, user_id, text,
+                       created_at::text AS created_at,
+                       COALESCE(last_seen_at, created_at)::text AS last_seen,
+                       COALESCE(hit_count, 0)::int AS hit_count,
+                       cardinality(COALESCE(sessions_seen, '{{}}'::text[]))
+                           AS session_seen
+                FROM agent_episode
+                WHERE {where}
+                ORDER BY COALESCE(last_seen_at, created_at) DESC, id
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params),
+            ).fetchall()
+        items = [dict(row) for row in rows[:page]]
+        return items, len(rows) > page
+
+    def delete_episode(
+        self, episode_id: str, user_id: str | None = None
+    ) -> bool:
+        """删除一条情景记忆及其派生副本/待晋升候选。
+
+        promoted 候选对应的是已经进 L1 的结论，不随 L2 单条删除一起抹掉；
+        只清 pending 候选，避免它之后又把同一条内容晋升回画像。
+        """
+        uid = user_id or current_user_id()
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT text
+                FROM agent_episode
+                WHERE user_id = %s AND id::text = %s
+                """,
+                (uid, episode_id),
+            ).fetchone()
+            if row is None:
+                return False
+            text = str(row["text"])
+            conn.execute(
+                "DELETE FROM agent_episode WHERE user_id = %s AND id::text = %s",
+                (uid, episode_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM agent_memory_archive
+                WHERE user_id = %s AND kind = 'episode' AND origin_id = %s
+                """,
+                (uid, episode_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM agent_memory_candidate
+                WHERE user_id = %s AND status = 'pending' AND text = %s
+                """,
+                (uid, text),
+            )
+            conn.commit()
+        return True
+
+    def clear_episodes(self, user_id: str | None = None) -> int:
+        """清空 L2 情景记忆（含归档 episode 副本与 pending 候选）。"""
+        uid = user_id or current_user_id()
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                "DELETE FROM agent_episode WHERE user_id = %s RETURNING id",
+                (uid,),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM agent_memory_archive "
+                "WHERE user_id = %s AND kind = 'episode'",
+                (uid,),
+            )
+            conn.execute(
+                "DELETE FROM agent_memory_candidate "
+                "WHERE user_id = %s AND status = 'pending'",
+                (uid,),
+            )
+            conn.commit()
+        return len(rows)

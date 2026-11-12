@@ -5,6 +5,27 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 from ai_agent.agents.budget import Budget
+from ai_agent.agents.messages import (
+    _canonical_args,
+    _dedupe_seam,
+    _drop_empty_assistant,
+    _fit_context,
+    _keep_prefill_tail,
+    _output_digest,
+    _pop_incomplete_assistant,
+    _stash_partial_assistant,
+)
+from ai_agent.agents.turn import (
+    _capture_turn,
+    _checkpoint_create,
+    _checkpoint_finish,
+    _checkpoint_update,
+    _compress_and_cache,
+    _persist_turn,
+    _replace_last_turn,
+    _session_state,
+)
+
 from ai_agent.prompts.chat import (
     RUNTIME_BUDGET_EXHAUSTED,
     RUNTIME_DUP_CALL,
@@ -61,27 +82,6 @@ _KB_CAP_MAX_DOC_TYPES = 8
 _DYNAMIC_CLIP_MARK = "\n[系统动态信息已省略 {n} 字符，完整清单请用 kb_list_files 查询]\n"
 _tool_progress_pool = ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="tool-progress"
-)
-
-from ai_agent.agents.messages import (
-    _canonical_args,
-    _dedupe_seam,
-    _drop_empty_assistant,
-    _fit_context,
-    _keep_prefill_tail,
-    _output_digest,
-    _pop_incomplete_assistant,
-    _stash_partial_assistant,
-)
-from ai_agent.agents.turn import (
-    _capture_turn,
-    _checkpoint_create,
-    _checkpoint_finish,
-    _checkpoint_update,
-    _compress_and_cache,
-    _persist_turn,
-    _replace_last_turn,
-    _session_state,
 )
 
 logger = get_logger(__name__)
@@ -350,13 +350,18 @@ def _system_prompt(
     user_id: str,
     *,
     use_kb: bool = True,
+    use_memory: bool = True,
     kb_file_ids: tuple[str, ...] = (),
     user_input: str = "",
 ) -> str:
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
-    core = build_system_prompt(use_kb=use_kb, report_catalog=skill_catalog())
+    core = build_system_prompt(
+        use_kb=use_kb,
+        use_memory=use_memory,
+        report_catalog=skill_catalog(),
+    )
     # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
     # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。
     # 无问句时保持原来的调用形式：存量测试会把 _profile_prompt 换成只收
@@ -364,11 +369,11 @@ def _system_prompt(
     # 改动前逐字一致。只有真的拿到问句才把相关性查询传下去。
     block = (
         _profile_prompt(user_id, user_input=user_input)
-        if user_input
-        else _profile_prompt(user_id)
+        if use_memory and user_input
+        else (_profile_prompt(user_id) if use_memory else "")
     )
     cap_block = _kb_capability_block(kb_file_ids) if use_kb else ""
-    recall = _recall_block(user_id, user_input)
+    recall = _recall_block(user_id, user_input) if use_memory else ""
     tail = "\n\n".join(p for p in (_today_line(), block, recall, cap_block) if p)
     if not tail:
         return core
@@ -399,6 +404,7 @@ def run_stream(
     use_web_search: bool = True,
     use_kb: bool = True,
     kb_file_ids: tuple[str, ...] = (),
+    memory_enabled: bool = True,
 ) -> Iterator[ChatEvent]:
     if resume_run_id and regenerate:
         raise ValueError("regenerate 与 resume_run_id 互斥")
@@ -467,6 +473,7 @@ def run_stream(
                 _system_prompt(
                     user_id,
                     use_kb=use_kb,
+                    use_memory=memory_enabled,
                     kb_file_ids=kb_file_ids,
                     user_input=user_input,
                 ),
@@ -479,6 +486,7 @@ def run_stream(
                 _system_prompt(
                     user_id,
                     use_kb=use_kb,
+                    use_memory=memory_enabled,
                     kb_file_ids=kb_file_ids,
                     user_input=user_input,
                 ),
@@ -513,6 +521,7 @@ def run_stream(
             use_web_search=use_web_search,
             use_kb=use_kb,
             kb_file_ids=kb_file_ids,
+            use_memory=memory_enabled,
         ):
             if event.get("type") == "error":
                 failed = True
@@ -563,6 +572,7 @@ def run_stream(
                         summary,
                         user_input,
                         chat_session_id,
+                        memory_enabled=memory_enabled,
                     )
                 _turn_finalizer.submit(
                     _compress_and_cache, user_id, chat_session_id, messages, summary
@@ -570,7 +580,12 @@ def run_stream(
             else:
                 if completed:
                     _capture_turn(
-                        user_id, turn, summary, user_input, chat_session_id
+                        user_id,
+                        turn,
+                        summary,
+                        user_input,
+                        chat_session_id,
+                        memory_enabled=memory_enabled,
                     )
                 _compress_and_cache(user_id, chat_session_id, messages, summary)
 
@@ -740,6 +755,7 @@ def run_loop(
     use_web_search: bool = True,
     use_kb: bool = True,
     kb_file_ids: tuple[str, ...] = (),
+    use_memory: bool = True,
     budget: Budget | None = None,
 ) -> Iterator[ChatEvent]:
     if budget is None:
@@ -754,6 +770,8 @@ def run_loop(
         # 研报积木与入口都依赖知识库表格抽取，知识库关掉时一起下线。
         # report_compare / report_validate 是纯计算与校验，不触知识库，保留。
         excluded.update({"kb_search", "kg_search", "generate_report", "report_extract_indicators"})
+    if not use_memory:
+        excluded.update({"search_memory", "write_memory", "expand_memory"})
     tools = [s for s in tool_schemas() if s["function"]["name"] not in excluded]
     if use_kb:
         _attach_kg_prefetch(messages, kb_file_ids)

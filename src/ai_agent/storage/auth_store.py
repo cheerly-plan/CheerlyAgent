@@ -87,14 +87,19 @@ class AuthStore:
             username=row["username"],
             display_name=row["display_name"],
             created_at=row["created_at"].isoformat(),
+            memory_enabled=bool(row.get("memory_enabled", True)),
         )
 
     def authenticate(self, username: str, password: str) -> UserRecord | None:
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 """
-                SELECT id, username, display_name, password_hash, created_at
-                FROM agent_user WHERE username = %s
+                SELECT u.id, u.username, u.display_name, u.password_hash,
+                       u.created_at,
+                       COALESCE(s.enabled, TRUE) AS memory_enabled
+                FROM agent_user u
+                LEFT JOIN agent_memory_setting s ON s.user_id = u.id::text
+                WHERE u.username = %s
                 """,
                 (username,),
             ).fetchone()
@@ -105,6 +110,7 @@ class AuthStore:
             username=row["username"],
             display_name=row["display_name"],
             created_at=row["created_at"].isoformat(),
+            memory_enabled=bool(row.get("memory_enabled", True)),
         )
 
     def issue_token(self, user_id: str) -> tuple[str, datetime]:
@@ -132,9 +138,11 @@ class AuthStore:
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 """
-                SELECT u.id, u.username, u.display_name, u.created_at
+                SELECT u.id, u.username, u.display_name, u.created_at,
+                       COALESCE(s.enabled, TRUE) AS memory_enabled
                 FROM agent_auth_token t
                 JOIN agent_user u ON u.id = t.user_id
+                LEFT JOIN agent_memory_setting s ON s.user_id = u.id::text
                 WHERE t.token_hash = %s AND t.expires_at > now()
                 """,
                 (hash_token(token),),
@@ -146,6 +154,7 @@ class AuthStore:
             username=row["username"],
             display_name=row["display_name"],
             created_at=row["created_at"].isoformat(),
+            memory_enabled=bool(row.get("memory_enabled", True)),
         )
 
     def list_users(self, limit: int = 200) -> list[UserRecord]:

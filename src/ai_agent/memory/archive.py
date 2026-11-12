@@ -50,15 +50,27 @@ def _as_memory_item(row: dict, user_id: str) -> MemoryItem:
 
 
 def search_archive(
-    query: str, *, user_id: str | None = None, top_k: int | None = None
+    query: str,
+    *,
+    user_id: str | None = None,
+    top_k: int | None = None,
+    offset: int = 0,
 ) -> list[dict]:
-    """按当前问句展开归档。确定性排序、零模型调用、异常返回空列表。"""
+    """按当前问句展开归档。确定性排序、零模型调用、异常返回空列表。
+
+    ``offset`` 用于管理页翻页：先按相关性排全部候选，再切片。为了保证
+    深页也能拿到结果，读取窗口会随 offset 扩大（上限仍受归档批量控制）。
+    """
     if not archive_enabled():
         return []
     uid = user_id or current_user_id()
     k = settings.memory_archive_top_k if top_k is None else max(1, top_k)
+    start = max(0, int(offset))
     try:
-        rows = store.list_archive_rows(uid, limit=settings.memory_archive_batch)
+        rows = store.list_archive_rows(
+            uid,
+            limit=settings.memory_archive_batch + start,
+        )
     except Exception:
         logger.exception("L4 归档读取失败 user=%s", uid)
         return []
@@ -70,7 +82,7 @@ def search_archive(
         ),
     )
     out: list[dict] = []
-    for row in ranked[:k]:
+    for row in ranked[start : start + k]:
         item = dict(row)
         item["score"] = round(relevance(query, _as_memory_item(row, uid)), 4)
         out.append(item)
@@ -166,11 +178,13 @@ def distill_all_users(*, limit_per_user: int | None = None) -> int:
         return 0
     users: set[str] = set()
     try:
-        users.update(store.list_episode_users())
+        users.update(store.list_episode_users(enabled_only=True))
     except Exception:
         logger.exception("L4 归档：episode 用户列表读取失败")
     try:
-        users.update(store.list_candidate_users(status="promoted"))
+        users.update(
+            store.list_candidate_users(status="promoted", enabled_only=True)
+        )
     except Exception:
         logger.exception("L4 归档：候选用户列表读取失败")
     total = 0

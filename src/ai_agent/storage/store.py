@@ -14,9 +14,11 @@ from ai_agent.kb.store import KbStore
 from ai_agent.memory.archive_store import ArchiveStore
 from ai_agent.memory.checkpoint_store import CheckpointStore
 from ai_agent.memory.episode_store import EpisodeStore
+from ai_agent.memory.export_store import ExportStore
 from ai_agent.memory.profile_store import ProfileStore
 from ai_agent.memory.promotion_store import PromotionStore
 from ai_agent.memory.session_store import SessionStore
+from ai_agent.memory.setting_store import MemorySettingStore
 from ai_agent.storage.auth_store import AuthStore
 from ai_agent.storage.db import (
     DEFAULT_SESSION_TITLE,
@@ -45,6 +47,8 @@ class MemoryStore(
     ArchiveStore,
     AuthStore,
     EpisodeStore,
+    ExportStore,
+    MemorySettingStore,
     ProfileStore,
     PromotionStore,
     SessionStore,

@@ -99,10 +99,18 @@ def _capture_turn(
     summary: str,
     user_input: str,
     chat_session_id: str = "",
+    memory_enabled: bool = True,
 ) -> None:
+    if not memory_enabled:
+        return
     try:
         capture_long_term(
-            user_id, turn, summary, user_input, chat_session_id=chat_session_id
+            user_id,
+            turn,
+            summary,
+            user_input,
+            chat_session_id=chat_session_id,
+            memory_enabled=memory_enabled,
         )
     except Exception:
         logger.exception("长期记忆抽取失败")

@@ -202,6 +202,21 @@ def test_observe_records_candidate_when_evidence_met(monkeypatch):
     assert d.stage == "candidate"
     upsert.assert_called_once()
     assert upsert.call_args.kwargs["session_seen"] == 3
+    # episode 没带 facet 时按文本线索推断，不再一律 other
+    assert upsert.call_args.kwargs["facet"] == "preference"
+
+
+def test_observe_uses_explicit_candidate_facet(monkeypatch):
+    monkeypatch.setattr(store, "touch_episode_session", lambda *a, **k: (5, 3))
+    upsert = MagicMock()
+    monkeypatch.setattr(store, "upsert_candidate", upsert)
+    observe_episode(
+        _item("在做 BFF 聚合层"),
+        user_id="u1",
+        chat_session_id="s1",
+        facet="occupation",
+    )
+    assert upsert.call_args.kwargs["facet"] == "occupation"
 
 
 def test_observe_stays_observe_when_evidence_weak(monkeypatch):
