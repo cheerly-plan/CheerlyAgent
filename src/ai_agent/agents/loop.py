@@ -88,7 +88,7 @@ logger = get_logger(__name__)
 
 # 问句点名了库内主体或图谱实体时，第一步只留这两个工具并强制调用。
 # 天气、记忆、联网留在后面的轮次，避免模型用它们应付「必须调一个工具」。
-_KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search"})
+_KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search", "kb_read"})
 
 # 「生成一份研报」走独立流水线：工具自己会检索、抽取、计算、校验。
 # 这类请求不必先被强制查一轮 kb_search，否则既多烧一次调用，又把原文片段

@@ -45,13 +45,14 @@ TOOLS = [
     report_compare_tool,
     report_validate_tool,
 ]
-# kb_read 只服务两段式：清单模式下模型才需要「按编号取全文」。
-# 不开两段式时不注册——否则模型会对着一个永远不会更新的缓存反复调用，
-# 实测把步数预算烧光（kb_read 回「没有可读取的检索结果」→ 重查 → 再读）。
+# kb_read 恒注册：历史轮次的工具原文会被老化成一行引用，模型要细节时用它
+# 读回原文——按问句查缓存，不重新检索，拿到的还是当时那批证据。
+# （曾经只在两段式下注册，导致老化后的结果无处读回，只能整段重查。）
 from ai_agent.core.config import settings as _settings  # noqa: E402
 
+TOOLS.append(kb_read_tool)
 if _settings.kb_search_list_only:
-    TOOLS.append(kb_read_tool)
+    pass  # 清单模式只是把当前轮的 kb_search 换成"只回清单"，工具本身一样
 # 渐进式记忆第 3 步：expand_memory 按需展开被索引省略的条目，恒定注册。
 TOOLS.append(memory_expand_tool)
 TOOLS_MAP = {t.name: t for t in TOOLS}

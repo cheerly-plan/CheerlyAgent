@@ -37,6 +37,7 @@ from ai_agent.prompts.tools import (
     KB_EMPTY_HINT,
     KB_READ_DESC,
     KB_READ_IDS_DESC,
+    KB_READ_QUERY_DESC,
     KB_READ_SEARCH_ID_DESC,
     KB_SEARCH_LIST_NOTE,
     KB_ERROR_HINT,
@@ -272,6 +273,8 @@ def _kb_search(
     # 「文件名 · 位置」抬头，模型据此在回答里交代出处
     add_citations(_citations_of(relevant))
     search_id = set_last_hits(relevant, search_id=uuid.uuid4().hex[:8])
+    # 按问句再存一份：历史轮次老化后模型只记得当时的检索词，据此读回同一批证据
+    cache_hits_by_query(query, relevant)
     if settings.kb_search_list_only:
         # 影子模式：只回清单，全文由模型用 kb_read 取
         return f"{KB_SEARCH_LIST_NOTE}\n\n{_format_hit_list(relevant, search_id)}"
@@ -321,6 +324,30 @@ def set_last_hits(hits: list[Hit], *, search_id: str = "latest") -> str:
     return search_id
 
 
+def cache_hits_by_query(query: str, hits: list[Hit]) -> None:
+    """按问句缓存本次命中，供后续轮次用 kb_read 读回。
+
+    历史轮次的工具原文会被「老化」成一行引用，模型要细节时不必重新检索——
+    重新检索可能换一批切片（同一问题换个说法就命中另一张表），证据链就断了。
+    """
+    from ai_agent.storage.db import current_user_id
+
+    key = _query_key(query)
+    if not key:
+        return
+    user = current_user_id() or "-"
+    payload = {index: hit for index, hit in enumerate(hits, start=1)}
+    with _HIT_CACHE_LOCK:
+        _HIT_CACHE[(user, f"q:{key}")] = payload
+        _HIT_CACHE.move_to_end((user, f"q:{key}"))
+        while len(_HIT_CACHE) > _HIT_CACHE_MAX:
+            _HIT_CACHE.popitem(last=False)
+
+
+def _query_key(query: str) -> str:
+    return re.sub(r"\s+", "", (query or "").strip().lower())
+
+
 def last_hits(search_id: str | None = None) -> dict[int, Hit]:
     from ai_agent.storage.db import current_user_id
 
@@ -360,14 +387,37 @@ def _format_hit_list(hits: list[Hit], search_id: str = "") -> str:
     return "\n".join(lines)
 
 
-def _read_hits(ids: list[int], search_id: str | None = None) -> str:
-    """两段式第二段：按编号取全文（含邻接）。"""
-    hits = last_hits(search_id)
-    if not hits:
-        return "没有可读取的检索结果，请先调用 kb_search。"
-    picked = [hits[i] for i in ids if i in hits]
+def _read_hits(
+    ids: list[int] | None = None,
+    search_id: str | None = None,
+    query: str | None = None,
+) -> str:
+    """按编号读回某次检索的全文（含邻接）。
+
+    不重新检索：结果来自 ``kb_search`` 当时的缓存，保证「读回的是同一批证据」。
+    传 ``query`` 时按问句找缓存（历史轮次老化后，模型手里只有当时的检索词）；
+    两者都不传时退回该用户最近一次检索。
+    """
+    if query:
+        # 明确给了检索词就只认它：退回"最近一次检索"会把无关证据塞给模型
+        from ai_agent.storage.db import current_user_id
+
+        user = current_user_id() or "-"
+        with _HIT_CACHE_LOCK:
+            hits = dict(_HIT_CACHE.get((user, f"q:{_query_key(query)}")) or {})
+        if not hits:
+            return (
+                "缓存里没有这次检索（可能已过期或服务重启），"
+                "请用同样的检索词重新 kb_search。"
+            )
+    else:
+        hits = last_hits(search_id or None)
+        if not hits:
+            return "缓存里没有最近一次检索结果，请先 kb_search。"
+    wanted = [i for i in (ids or []) if i in hits] or sorted(hits)[:3]
+    picked = [hits[i] for i in wanted if i in hits]
     if not picked:
-        return f"编号不在上一次检索结果里（有效范围 1~{len(hits)}），请重新 kb_search。"
+        return f"编号不在这次检索里（有效范围 1~{len(hits)}），请重新 kb_search。"
     add_citations(_citations_of(picked))
     return "\n\n".join(_format_hit_with_context(hit) for hit in picked)
 
@@ -528,12 +578,13 @@ def _clip_head(text: str) -> str:
 
 
 class KbReadArgs(BaseModel):
-    ids: list[int] = Field(description=KB_READ_IDS_DESC)
+    ids: list[int] = Field(default_factory=list, description=KB_READ_IDS_DESC)
+    query: str = Field(default="", description=KB_READ_QUERY_DESC)
     search_id: str = Field(default="", description=KB_READ_SEARCH_ID_DESC)
 
 
-def _kb_read(ids: list[int], search_id: str = "") -> str:
-    return _read_hits(ids, search_id or None)
+def _kb_read(ids: list[int] | None = None, query: str = "", search_id: str = "") -> str:
+    return _read_hits(ids, search_id or None, query or None)
 
 
 kb_read_tool = Tool(

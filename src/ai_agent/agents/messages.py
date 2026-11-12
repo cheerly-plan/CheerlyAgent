@@ -155,7 +155,11 @@ def _enforce_budget(fitted: list[ChatMessage], max_chars: int) -> list[ChatMessa
     return fitted
 
 
-_AGED_MARK = "〔本结果 {chars} 字原文已省略{note}；需要细节请重新调用该工具〕"
+_AGED_MARK = (
+    "〔本结果 {chars} 字原文已省略{note}"
+    "；需要细节用 kb_read 读回（同一批证据，不重新检索）〕"
+)
+_KB_TOOLS = ("kb_search", "kg_search")
 
 
 def age_tool_results(
@@ -206,6 +210,12 @@ def age_tool_results(
         stub = _AGED_MARK.format(
             chars=len(content), note=f"，检索：{note}" if note else ""
         )
+        if msg.get("name") in _KB_TOOLS:
+            # 知识库检索的结果能用 kb_read 按问句读回，比"重新检索"更稳
+            stub = stub.replace(
+                "；需要细节用 kb_read 读回（同一批证据，不重新检索）",
+                "；需要细节用 kb_read(query=…, ids=[1,2,3]) 读回同一批证据",
+            )
         out.append({**msg, "content": f"{clip_text(head, 80)}\n{stub}"})
         changed = True
     # 没有可老化的内容时返回原对象：调用方依赖「预算充裕就原样返回」的语义
