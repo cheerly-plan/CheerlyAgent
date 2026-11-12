@@ -169,7 +169,10 @@ def chunk_segments(
                     kind=seg.kind,
                     page_end=seg.page_end if seg.page_end is not None else seg.page,
                     section=seg.section,
-                    scope=seg.scope,
+                    # 解析阶段没标出 scope 的（表题原本在上一页、靠跨页补题才
+                    # 补上来的），这里从切片首行补：母公司/合并口径直接决定
+                    # 「问母公司某科目」时这个片会不会被 SCOPE_PARENT 过滤掉。
+                    scope=seg.scope or _scope_from_caption(piece),
                 )
                 for piece in _chunk_table(
                     seg.text, max_chars=max_chars, group_mode=table_group_mode
@@ -691,6 +694,20 @@ def _drop_duplicate_chunks(chunks: list[Chunk]) -> list[Chunk]:
     if len(out) != len(chunks):
         logger.info("切片内完全相同的内容已去重 %d 片", len(chunks) - len(out))
     return out
+
+
+def _scope_from_caption(text: str) -> str | None:
+    """从表题推报表口径：``母公司资产负债表`` → parent、``合并利润表`` → consolidated。
+
+    只看**第一行**。整段里出现「归属于母公司所有者的净利润」是科目名，不代表
+    这张表是母公司口径——按全文匹配会把合并报表误标成 parent。
+    """
+    head = next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
+    if head.startswith("母公司"):
+        return "parent"
+    if head.startswith("合并"):
+        return "consolidated"
+    return None
 
 
 def _carry_md_table_captions(segments: list[Segment]) -> list[Segment]:
