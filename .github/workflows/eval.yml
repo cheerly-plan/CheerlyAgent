@@ -1,0 +1,91 @@
+name: 评测门禁
+
+# PR / push 只跑 T0 静态层（秒级、零密钥）；nightly 与手动触发在配置了
+# EVAL_DOTENV secret 时跑 T0+T1+T2，未配置时自动降级为只跑 T0。
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: "0 18 * * *" # UTC 18:00 = 北京时间次日 02:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv sync --group dev
+
+      - name: 确认基线已提交
+        run: |
+          if [ ! -f eval/baseline.json ]; then
+            echo "::error::eval/baseline.json 未提交进仓库，门禁无法做相对基线 diff"
+            exit 1
+          fi
+
+      - name: 准备评测配置
+        env:
+          EVAL_DOTENV: ${{ secrets.EVAL_DOTENV }}
+        run: |
+          if [ -n "$EVAL_DOTENV" ]; then
+            printf '%s\n' "$EVAL_DOTENV" > .env
+            echo "EVAL_ENV_READY=true" >> "$GITHUB_ENV"
+            echo "使用仓库 secret EVAL_DOTENV，T1/T2 可用"
+          else
+            # config.py 在模块级执行 settings = Settings()，10 个字段无默认值；
+            # 缺任一都会让 tests/test_eval_retrieval.py 在 import 阶段直接崩掉。
+            # 这里只填占位值让 T0 能 import：T0 不连库、不调模型。
+            # 值本身不是凭据；真凭据走上面的 EVAL_DOTENV。
+            printf '%s\n' \
+              'BASE_URL=http://127.0.0.1:1/v1' \
+              'API_KEY=ci-placeholder' \
+              'MODEL=ci-placeholder' \
+              'DATABASE_URL=postgresql://ci:ci@127.0.0.1:1/ci' \
+              'EMBEDDING_MODEL=ci-placeholder' \
+              'EMBEDDING_DIM=8' \
+              'MEMORY_TOP_K=5' \
+              'MEMORY_SCORE_THRESHOLD=0.5' \
+              'SHORT_TERM_MEMORY_MAX_TURNS=10' \
+              'SHORT_TERM_MEMORY_MAX_TOKENS=2000' > .env
+            echo "EVAL_ENV_READY=false" >> "$GITHUB_ENV"
+            echo "::warning::未配置 EVAL_DOTENV，本次只跑 T0 静态门禁"
+          fi
+          chmod 600 .env
+
+      - name: 运行评测门禁
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "push" ]; then
+            uv run python scripts/eval_run.py --tiers 0
+          elif [ "$EVAL_ENV_READY" = "true" ]; then
+            uv run python scripts/eval_run.py --tiers 0,1,2 --allow-external
+          else
+            uv run python scripts/eval_run.py --tiers 0
+          fi
+
+      - name: 上传报告与趋势
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-${{ github.run_id }}
+          path: |
+            data/eval/runs/*.json
+            data/eval/trend.jsonl
+          if-no-files-found: ignore

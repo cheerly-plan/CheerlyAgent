@@ -1,0 +1,67 @@
+{
+  "version": 2,
+  "enabled_tiers": [0, 1, 2],
+  "timeouts_s": {
+    "pytest_eval_selftest": 120,
+    "ruff_eval_scripts": 60,
+    "eval_retrieval": 300,
+    "eval_graph_retrieval_validate": 180,
+    "eval_graph": 180,
+    "eval_tool_route": 600,
+    "eval_memory": 600
+  },
+  "diff": {
+    "metric_tolerance": 0.05,
+    "metric_keys": ["pass_rate"],
+    "block_on_new_failures": true,
+    "block_on_invalid_cases": true,
+    "block_on_env_error": true
+  },
+  "suites": [
+    {
+      "name": "eval_retrieval",
+      "tier": 1,
+      "command": "uv run python scripts/eval_retrieval.py",
+      "exit_map": {"0": "pass", "1": "regression", "2": "invalid_cases"},
+      "requires_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
+      "policy": "blocking",
+      "note": "默认关重排测纯检索质量；脚本内置 hit@3 >= 0.85；退出码 2 = 用例与语料对不上（main 里 validate_cases 前置）"
+    },
+    {
+      "name": "eval_graph_retrieval_validate",
+      "tier": 1,
+      "command": "uv run python scripts/eval_graph_retrieval.py --validate",
+      "exit_map": {"0": "pass", "1": "invalid_cases"},
+      "requires_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
+      "policy": "blocking",
+      "note": "全量评测 main() 恒返回 0、无质量语义，故只跑 --validate 做用例有效性门禁；质量指标待解析 --out 明细后接入"
+    },
+    {
+      "name": "eval_graph",
+      "tier": 1,
+      "command": "uv run python scripts/eval_graph.py",
+      "exit_map": {"0": "pass", "1": "env_error"},
+      "requires_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
+      "policy": "informational",
+      "note": "退出码 1 = 找不到文件或图谱为空；脚本没有通过线，只挡环境数据缺失，指标仅记录不阻断"
+    },
+    {
+      "name": "eval_tool_route",
+      "tier": 2,
+      "command": "uv run python scripts/eval_tool_route.py",
+      "exit_map": {"0": "pass", "1": "advisory_fail", "2": "env_error"},
+      "requires_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
+      "policy": "advisory",
+      "note": "脚本内置通过率 >= 0.8；要调模型、结果有抖动，失败只记趋势不阻断发布"
+    },
+    {
+      "name": "eval_memory",
+      "tier": 2,
+      "command": "uv run python scripts/eval_memory.py",
+      "exit_map": {"0": "pass", "1": "advisory_fail", "2": "env_error"},
+      "requires_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
+      "policy": "advisory",
+      "note": "脚本内置通过率 >= 0.8；抽取会调模型。刻意不跑 --recall（会写库、要评测专用用户）"
+    }
+  ]
+}
