@@ -44,6 +44,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -92,6 +93,9 @@ def normalize_expect(expect: dict) -> list[dict]:
     return [{"filename": expect["filename"], "texts": texts}]
 
 
+_HTML_FRAGMENT_TAG = re.compile(r"</?(?:table|tr|td|th)\b[^>]*>", re.IGNORECASE)
+
+
 def _norm(text: str) -> str:
     """比对前的归一化：HTML 表转 Markdown + 去掉所有空白。
 
@@ -107,6 +111,14 @@ def _norm(text: str) -> str:
     raw = text or ""
     if "<table" in raw.lower():
         raw = html_tables_to_markdown(raw)
+    # 期望串里还可能是**表格碎片**（`<td>货币资金</td><td>35,914…`），此时没有
+    # 外层 <table>，转不了 Markdown。直接去掉标签和后两种格式共有的分隔符，
+    # 让「横线表格」「HTML 单元格」在比对时落到同一个纯文本形态。
+    raw = _HTML_FRAGMENT_TAG.sub("", raw)
+    raw = raw.replace("|", "")
+    # 全角/半角统一：原文是「营业收入（元）」，用例常写成「营业收入(元)」。
+    # NFKC 把（）→()、：→:、，→, 一次抹平，剩下的差异才是真内容差异
+    raw = unicodedata.normalize("NFKC", raw)
     return re.sub(r"\s+", "", raw)
 
 
