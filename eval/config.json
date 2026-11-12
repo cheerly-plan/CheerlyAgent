@@ -8,7 +8,8 @@
     "eval_graph_retrieval_validate": 180,
     "eval_graph": 180,
     "eval_tool_route": 600,
-    "eval_memory": 600
+    "eval_memory": 600,
+    "memory_e2e": 180
   },
   "diff": {
     "metric_tolerance": 0.05,
@@ -26,6 +27,15 @@
       "requires_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
       "policy": "blocking",
       "note": "默认关重排测纯检索质量；脚本内置 hit@3 >= 0.85；退出码 2 = 用例与语料对不上（main 里 validate_cases 前置）"
+    },
+    {
+      "name": "memory_e2e",
+      "tier": 1,
+      "command": "uv run pytest -q tests/test_memory_e2e.py",
+      "exit_map": {"0": "pass", "1": "regression"},
+      "requires_env": ["DATABASE_URL"],
+      "policy": "blocking",
+      "note": "确定性记忆生命周期：写入→注入→晋升→归档→删除；不调模型，DB 用 pgvector；CI 的 memory-e2e job 与 nightly 都会跑"
     },
     {
       "name": "eval_graph_retrieval_validate",
@@ -58,10 +68,10 @@
       "name": "eval_memory",
       "tier": 2,
       "command": "uv run python scripts/eval_memory.py",
-      "exit_map": {"0": "pass", "1": "advisory_fail", "2": "env_error"},
+      "exit_map": {"0": "pass", "1": "regression", "2": "env_error"},
       "requires_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
-      "policy": "advisory",
-      "note": "脚本内置通过率 >= 0.8；抽取会调模型。刻意不跑 --recall（会写库、要评测专用用户）"
+      "policy": "blocking",
+      "note": "脚本内置通过率 >= 0.8；抽取会调模型，只在 nightly / 显式 --allow-external 时跑。已从 advisory 提为 blocking：通过率跌破阈值会阻断发布；刻意不跑 --recall（会写库）"
     }
   ]
 }

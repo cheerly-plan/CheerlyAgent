@@ -25,8 +25,9 @@
     uv run python scripts/eval_run.py --tiers 0,1,2 --allow-external   CI 全量
 
 T1/T2 会连 DB / 调模型，必须显式加 --allow-external 才执行；缺依赖环境变量的
-suite 标为 skipped，不阻断。T2 结果只写 data/eval/trend.jsonl 做趋势观测，
-永不阻断发布。
+suite 标为 skipped，不阻断。suite 是否阻断由 config 里的 ``policy`` 决定：
+``blocking`` 会进入门禁，``advisory`` / ``informational`` 只记趋势。T2 默认
+advisory；eval_memory 已被显式提为 blocking（需要模型，nightly 才跑）。
 
 退出码：0 放行 / 1 新增回归 / 2 结果或用例集不可信 / 3 环境错误 / 4 参数或基线错误。
 """
@@ -460,7 +461,7 @@ def collect_external_suite(item: dict, cfg: dict, available: set[str]) -> SuiteR
 
 
 def append_trend(report: dict) -> None:
-    """T2 逐次结果追加到 jsonl，只看趋势、不阻断，也不进 system。"""
+    """T2 逐次结果追加到 jsonl，供趋势观测；是否阻断仍由 policy 决定。"""
     advisory = {
         name: suite for name, suite in report["suites"].items()
         if suite.get("tier", 0) >= 2
@@ -533,6 +534,18 @@ def build_report(suites: list[SuiteResult], cfg: dict, tiers: list[int]) -> dict
     }
 
 
+def suite_policy(cfg: dict, name: str, tier: int) -> str:
+    """suite 的阻断策略：config 显式声明优先，缺省沿用历史分层语义。
+
+    T0/T1 默认 blocking，T2 默认 advisory；eval_memory 这类 T2 可以在
+    config 里显式写 blocking，不再被「T2 永不阻断」的硬编码吃掉。
+    """
+    for item in cfg.get("suites", []):
+        if item.get("name") == name:
+            return str(item.get("policy") or "advisory")
+    return "blocking" if tier < 2 else "advisory"
+
+
 def diff_against_baseline(report: dict, baseline: dict, cfg: dict) -> dict:
     """逐条 diff。基线 pass→本轮 fail 才算新增回归；存量失败不阻断。"""
     new_failures: list[str] = []
@@ -547,6 +560,7 @@ def diff_against_baseline(report: dict, baseline: dict, cfg: dict) -> dict:
 
     for suite_name, current in report["suites"].items():
         tier = current.get("tier", 0)
+        policy = suite_policy(cfg, suite_name, tier)
         base_suite = baseline.get("suites", {}).get(suite_name, {})
         base_cases = base_suite.get("cases", {})
         current_cases = current["cases"]
@@ -558,11 +572,12 @@ def diff_against_baseline(report: dict, baseline: dict, cfg: dict) -> dict:
             if status == "fail":
                 if previous in (None, "pass"):
                     new_failures.append(label)
-                    # T2 调模型、结果有抖动，失败只记趋势，绝不阻断发布
-                    if tier >= 2:
-                        advisory_new_failures.append(label)
-                    else:
+                    # 阻断看 policy：T2 默认只记趋势，但 eval_memory 等
+                    # 显式标 blocking 的 suite 仍必须阻断发布
+                    if policy == "blocking":
                         blocking_new_failures.append(label)
+                    else:
+                        advisory_new_failures.append(label)
                 else:
                     still_failing.append(label)
             elif status == "pass" and previous == "fail":
@@ -576,11 +591,14 @@ def diff_against_baseline(report: dict, baseline: dict, cfg: dict) -> dict:
     tolerance = cfg["diff"]["metric_tolerance"]
     for suite_name, current in report["suites"].items():
         base_metrics = baseline.get("suites", {}).get(suite_name, {}).get("metrics", {})
+        metric_policy = suite_policy(
+            cfg, suite_name, current.get("tier", 0)
+        )
         for key in cfg["diff"]["metric_keys"]:
             if key in base_metrics and key in current["metrics"]:
                 delta = round(current["metrics"][key] - base_metrics[key], 4)
                 metric_delta[f"{suite_name}.{key}"] = delta
-                if stable and delta < -tolerance and current.get("tier", 0) < 2:
+                if stable and delta < -tolerance and metric_policy == "blocking":
                     metric_regressions.append(
                         f"{suite_name}.{key} {delta:+.4f} 低于 -{tolerance}"
                     )
@@ -610,11 +628,12 @@ def diff_against_baseline(report: dict, baseline: dict, cfg: dict) -> dict:
 
 
 def decide(report: dict, diff: dict, cfg: dict) -> tuple[str, int]:
-    """门禁顺序：结果可信性优先于分数。T2 只做趋势，永不阻断发布。"""
+    """门禁顺序：结果可信性优先于分数。阻断范围由 suite 的 policy 决定。"""
     rules = cfg["diff"]
 
     def blocking(name: str) -> bool:
-        return report["suites"][name].get("tier", 0) in (0, 1)
+        suite = report["suites"][name]
+        return suite_policy(cfg, name, suite.get("tier", 0)) == "blocking"
 
     env_errors = [
         name for name, suite in report["suites"].items()
@@ -699,7 +718,7 @@ def print_report(report: dict, report_path: Path) -> None:
         for label in diff.get("blocking_new_failures", diff["new_failures"])[:10]:
             print(f"  [回归] {label}")
         for label in diff.get("advisory_new_failures", []):
-            print(f"  [趋势] T2 未过阈值（不阻断）：{label}")
+            print(f"  [趋势] 未过阈值（非阻断）：{label}")
         for label in diff["removed_cases"][:10]:
             print(f"  [警告] 用例被移除：{label}")
         for label in diff["metric_regressions"]:

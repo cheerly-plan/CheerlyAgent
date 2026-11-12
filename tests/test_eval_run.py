@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.eval_run import (
+    CONFIG_PATH,
     CmdResult,
     SuiteResult,
     _validate_episode,
@@ -23,6 +24,8 @@ from scripts.eval_run import (
     decide,
     diff_against_baseline,
     env_keys,
+    load_json,
+    suite_policy,
 )
 
 CFG = {
@@ -324,6 +327,44 @@ def test_t2_failure_is_advisory_and_does_not_block():
     assert diff["advisory_new_failures"] == ["demo_eval::demo_eval::exit"]
     assert diff["blocking_new_failures"] == []
     assert decide(report, diff, CFG) == ("pass", 0)
+
+
+def _cfg_with_policy(name="demo_eval", tier=2, policy="blocking"):
+    return {
+        **CFG,
+        "suites": [{"name": name, "tier": tier, "policy": policy}],
+    }
+
+
+def test_shipped_config_marks_memory_gates_blocking():
+    cfg = load_json(CONFIG_PATH)
+    assert suite_policy(cfg, "eval_memory", 2) == "blocking"
+    assert suite_policy(cfg, "memory_e2e", 1) == "blocking"
+
+
+def test_configured_t2_blocking_policy_blocks():
+    """eval_memory 这类 T2 显式标 blocking 时，不再被「T2 只做趋势」吃掉。"""
+    report = _tier_report(2, "fail")
+    cfg = _cfg_with_policy(tier=2, policy="blocking")
+    diff = diff_against_baseline(report, {}, cfg)
+    assert diff["blocking_new_failures"] == ["demo_eval::demo_eval::exit"]
+    assert diff["advisory_new_failures"] == []
+    assert decide(report, diff, cfg) == ("regression", 1)
+
+
+def test_configured_t1_advisory_policy_does_not_block():
+    report = _tier_report(1, "fail")
+    cfg = _cfg_with_policy(tier=1, policy="advisory")
+    diff = diff_against_baseline(report, {}, cfg)
+    assert diff["advisory_new_failures"]
+    assert diff["blocking_new_failures"] == []
+    assert decide(report, diff, cfg) == ("pass", 0)
+
+
+def test_configured_blocking_t2_env_error_blocks():
+    report = _tier_report(2, "pass", infra="env_error")
+    cfg = _cfg_with_policy(tier=2, policy="blocking")
+    assert decide(report, {}, cfg) == ("env_error", 3)
 
 
 def test_t1_failure_blocks():
