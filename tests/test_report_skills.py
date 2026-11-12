@@ -337,7 +337,9 @@ def test_extract_tool_returns_facts_with_basis_and_missing(monkeypatch):
         {"subjects": ["中国银行股份有限公司"], "period": "2026Q3"},
     )
     assert "1.27%" in out
-    assert "[7b75379b]" in out
+    # 出处用「文件名 · 第N页」，不再把内部 file_id 短锚点喂给模型
+    assert "中国银行股份有限公司2026年第三季度报告.pdf · 第7页" in out
+    assert "[7b75379b]" not in out
     assert "第7页" in out
     assert "禁止换算" in out
     assert "不良贷款率" in out  # 缺口如实回传，不静默丢

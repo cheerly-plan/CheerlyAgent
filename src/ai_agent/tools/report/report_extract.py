@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.prompts.tools import REPORT_EXTRACT_DESC
 from ai_agent.report.basis import label as basis_label
-from ai_agent.report.extract import citation_anchor, extract_indicators
+from ai_agent.report.extract import extract_indicators
 from ai_agent.report.industry import company_type_of, default_indicators
 from ai_agent.tools.base import Tool
 
@@ -64,14 +64,17 @@ def _report_extract(subjects: list[str], period: str, indicators: list[str]) -> 
     for fact in result.facts[:_MAX_FACTS]:
         basis = basis_label(fact.period, fact.basis, fact.coverage_months) if fact.basis else ""
         evidence = fact.evidence
+        # 出处用「文件名 · 第N页」，跟 kb_search/kb_read 的抬头同一格式：
+        # 模型能直接拿去 kb_read 读回，也不会把内部 file_id 抄进回答
         where = []
-        if evidence.page is not None:
+        if evidence.page is not None and evidence.filename:
+            where.append(f"{evidence.filename} · 第{evidence.page}页")
+        elif evidence.filename:
+            where.append(evidence.filename)
+        elif evidence.page is not None:
             where.append(f"第{evidence.page}页")
         if evidence.section:
             where.append(evidence.section)
-        anchor = citation_anchor(evidence.file_id)
-        if anchor:
-            where.append(anchor)
         prefix = f"{basis}" if basis else fact.period
         lines.append(
             f"- {fact.subject} {prefix} {fact.name} = {fact.value}{fact.unit}"
