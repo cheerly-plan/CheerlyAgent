@@ -1026,9 +1026,25 @@ _MERGE_MAX_GAP = 2        # 空档最多补 2 片
 _MERGE_MAX_CHARS = 2000   # 合并后的正文上限
 
 
+_FIRST_ROW = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
+_CELL = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.DOTALL | re.IGNORECASE)
+
+
 def _table_header(text: str) -> str:
-    """表格切片的表头指纹：前 3 个非空行（标题 / 表名 / 列名）。"""
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    """表格切片的表头指纹。
+
+    * Markdown：前 3 个非空行（标题 / 单位 / 列名）；
+    * HTML：**首行的单元格文字**。整段 HTML 是一行，按行取指纹会让同一张表
+      的两片各不相同——实测兆易创新 Q3 那张 OCR 表就在 top_k 里出现了两次。
+    """
+    raw = text or ""
+    if raw.lstrip().lower().startswith("<table"):
+        match = _FIRST_ROW.search(raw)
+        if match:
+            cells = [_CELL.sub(r"\1", cell) for cell in _CELL.findall(match.group(1))]
+            return re.sub(r"\s+", "", "".join(cells))
+        return re.sub(r"\s+", "", raw[:120])
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     return "".join(re.sub(r"\s+", "", ln) for ln in lines[:3])
 
 

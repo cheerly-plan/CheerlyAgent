@@ -681,8 +681,11 @@ def _drop_duplicate_chunks(chunks: list[Chunk]) -> list[Chunk]:
     只去**同一页内**的重复：同样的表出现在不同页（正文与附录各印一次）是有
     意的，跨页合并会把两处出处压成一个，引用位置也就丢了。
     """
+    # 先按 (页, 归一化正文) 精确去重，再把「被同页更大一片包含」的更小片丢掉：
+    # OCR 兜底时常把同一张表切成一大一小两片（长的 872 字、短的 552 字，后者
+    # 几乎是前者的子串），两片会同时进 top_k 占掉名额。
     seen: set[tuple[int | None, str]] = set()
-    out: list[Chunk] = []
+    unique: list[Chunk] = []
     for chunk in chunks:
         key = (chunk.page, re.sub(r"\s+", "", chunk.text or ""))
         if not key[1]:
@@ -690,9 +693,25 @@ def _drop_duplicate_chunks(chunks: list[Chunk]) -> list[Chunk]:
         if key in seen:
             continue
         seen.add(key)
-        out.append(chunk)
+        unique.append(chunk)
+
+    by_page: dict[int | None, list[tuple[str, Chunk]]] = {}
+    for chunk in unique:
+        by_page.setdefault(chunk.page, []).append(
+            (re.sub(r"\s+", "", chunk.text or ""), chunk)
+        )
+    dropped: set[int] = set()
+    for items in by_page.values():
+        items.sort(key=lambda pair: len(pair[0]), reverse=True)
+        for i, (_big, _chunk) in enumerate(items):
+            for small_text, small_chunk in items[i + 1 :]:
+                if small_text and id(small_chunk) not in dropped and any(
+                    small_text in big for big, _ in items[:i]
+                ):
+                    dropped.add(id(small_chunk))
+    out = [chunk for chunk in unique if id(chunk) not in dropped]
     if len(out) != len(chunks):
-        logger.info("切片内完全相同的内容已去重 %d 片", len(chunks) - len(out))
+        logger.info("切片去重 %d 片（含同页包含关系）", len(chunks) - len(out))
     return out
 
 
