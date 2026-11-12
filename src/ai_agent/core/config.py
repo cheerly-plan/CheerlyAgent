@@ -419,6 +419,12 @@ class Settings(BaseSettings):
     memory_trace_enabled: bool = True
     memory_auto_recall_top_k: int = 3
     memory_auto_recall_max_chars: int = 400
+    # 易变事实（职业/居住地）的软过期天数：到期后不再注入 prompt，但保留在库里
+    # 供审计；重新抽到同一条会刷新。0 = 不设过期。
+    memory_fact_ttl_days: int = 180
+    # 同 facet 两条记忆的字符重叠达到这个比例，视为「同一件事的新说法」——
+    # 覆盖旧的（superseded），而不是并存。低于这个值认为互不相干。
+    memory_supersede_overlap: float = 0.5
     memory_promotion_min_sessions: int = 3
     memory_promotion_min_hits: int = 3
     # 同一轮里自动召回 + 抽取检索会各查一次，时间窗内只算一次命中

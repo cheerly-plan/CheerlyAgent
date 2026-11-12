@@ -152,6 +152,24 @@ class Database:
                 ADD COLUMN IF NOT EXISTS facet TEXT NOT NULL DEFAULT 'other'
                 """
             )
+            # 渐进式记忆：画像条目的时效与覆盖
+            #   expires_at    易变事实（职业/居住地）的软过期；NULL = 永不过期
+            #   superseded_at 被新事实覆盖的时间；非空即失效，只在库里留档
+            for column, definition in (
+                ("expires_at", "TIMESTAMPTZ"),
+                ("superseded_at", "TIMESTAMPTZ"),
+            ):
+                conn.execute(
+                    f"ALTER TABLE agent_user_profile "
+                    f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+                )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_user_profile_active_idx
+                ON agent_user_profile (user_id, facet)
+                WHERE superseded_at IS NULL
+                """
+            )
             # 历史遗留：全 facet 唯一索引会把多条独立偏好挤成一行，
             # 只保留互斥型 facet 的单行约束，其余 facet 允许多条共存
             conn.execute(

@@ -52,6 +52,57 @@ def _profile_norm(text: str) -> str:
     return text.lower().translate(str.maketrans("", "", " \t\r\n。；;，,、.（）()（）"))
 
 
+def profile_overlap(a: str, b: str) -> float:
+    """两条画像文本的字符集重叠度（0~1）。与 is_redundant_profile 同一口径。"""
+    left, right = set(_profile_norm(a)), set(_profile_norm(b))
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left)
+
+
+def find_superseded(
+    content: str,
+    facet: str,
+    existing: list[MemoryItem],
+    *,
+    min_overlap: float | None = None,
+) -> list[MemoryItem]:
+    """找出被这条新记忆「覆盖」的旧条目。
+
+    同 facet、字符重叠 ≥ ``memory_supersede_overlap``，且内容不完全相同——
+    典型场景是「以后财报都用亿元」覆盖「默认用万元」，或补齐后的职业描述
+    覆盖旧的简述。完全相同的那条不动：那是幂等重写，只需刷新有效期。
+    """
+    from ai_agent.core.config import settings
+
+    threshold = (
+        settings.memory_supersede_overlap if min_overlap is None else min_overlap
+    )
+    new_norm = _profile_norm(content)
+    out: list[MemoryItem] = []
+    for item in existing:
+        if (item.facet or "other") != facet:
+            continue
+        old_norm = _profile_norm(item.text)
+        if not old_norm or old_norm == new_norm:
+            continue
+        if profile_overlap(content, item.text) >= threshold:
+            out.append(item)
+    return out
+
+
+def _profile_expires_at(facet: str) -> str | None:
+    """易变事实给软过期；稳定事实（姓名/语言/偏好/约束）不过期。"""
+    from datetime import datetime, timedelta, timezone
+
+    from ai_agent.core.config import settings
+
+    days = settings.memory_fact_ttl_days
+    if days <= 0 or facet not in ("occupation", "locale"):
+        return None
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+
 def is_redundant_profile(content: str, facet: str, existing: list[MemoryItem]) -> bool:
     new_norm = _profile_norm(content)
     if not new_norm:
@@ -166,7 +217,24 @@ def apply_profile_action(
     # 累积 facet 写入前过 Jev 语义去重（模型转述的近义条目拦在这里）
     if not is_mutex_facet(facet) and _jev_duplicate(cleaned.content, facet, existing):
         return None
-    return store.write_profile(cleaned.content, user_id=uid, facet=facet)
+    # 冲突消解：同 facet 里「说的是同一件事、但内容变了」的旧条目先标记覆盖。
+    # 不删行——留档能回答「以前是什么」，也避免把用户的一句反问误判成纠错。
+    superseded = find_superseded(cleaned.content, facet, existing)
+    written = store.write_profile(
+        cleaned.content,
+        user_id=uid,
+        facet=facet,
+        expires_at=_profile_expires_at(facet),
+    )
+    if superseded:
+        store.supersede_profile_items([item.id for item in superseded], user_id=uid)
+        logger.info(
+            "profile_superseded facet=%s new=%s old=%s",
+            facet,
+            cleaned.content[:60],
+            [item.text[:40] for item in superseded][:3],
+        )
+    return written
 
 
 def apply_profile_text(content: str, user_id: str | None = None) -> str:

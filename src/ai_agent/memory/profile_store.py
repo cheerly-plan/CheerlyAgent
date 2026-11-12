@@ -16,6 +16,7 @@ class ProfileStore(Database):
         user_id: str | None = None,
         *,
         facet: str = "other",
+        expires_at: str | None = None,
     ) -> MemoryItem:
         uid = user_id or current_user_id()
         text = text.strip()
@@ -38,26 +39,32 @@ class ProfileStore(Database):
             if mutex:
                 row = conn.execute(
                     """
-                    INSERT INTO agent_user_profile (id, user_id, text, facet, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO agent_user_profile
+                        (id, user_id, text, facet, created_at, expires_at, superseded_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NULL)
                     ON CONFLICT (user_id, facet) WHERE facet IN
                         ('name', 'language', 'locale', 'occupation')
                     DO UPDATE SET
                         text = EXCLUDED.text,
-                        created_at = EXCLUDED.created_at
+                        created_at = EXCLUDED.created_at,
+                        expires_at = EXCLUDED.expires_at,
+                        superseded_at = NULL
                     RETURNING id::text AS id
                     """,
-                    (item.id, item.user_id, item.text, item.facet, item.created_at),
+                    (item.id, item.user_id, item.text, item.facet, item.created_at, expires_at),
                 ).fetchone()
             else:
                 row = conn.execute(
                     """
-                    INSERT INTO agent_user_profile (id, user_id, text, facet, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (id) DO NOTHING
+                    INSERT INTO agent_user_profile
+                        (id, user_id, text, facet, created_at, expires_at, superseded_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NULL)
+                    ON CONFLICT (id) DO UPDATE SET
+                        expires_at = EXCLUDED.expires_at,
+                        superseded_at = NULL
                     RETURNING id::text AS id
                     """,
-                    (item.id, item.user_id, item.text, item.facet, item.created_at),
+                    (item.id, item.user_id, item.text, item.facet, item.created_at, expires_at),
                 ).fetchone()
                 if row is None:
                     # 同文本已存在：取回原行，保持写入幂等
@@ -83,6 +90,30 @@ class ProfileStore(Database):
             item.text,
         )
         return item
+
+    def supersede_profile_items(
+        self, item_ids: list[str], user_id: str | None = None
+    ) -> int:
+        """把若干画像条目标为「已被覆盖」。
+
+        不删行：留档能回答「这个偏好以前是什么」，也方便排查是不是模型把
+        用户的一句反问当成了纠正。
+        """
+        ids = [item for item in item_ids if item]
+        if not ids:
+            return 0
+        uid = user_id or current_user_id()
+        with self._get_pool().connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE agent_user_profile
+                SET superseded_at = now()
+                WHERE user_id = %s AND id::text = ANY(%s) AND superseded_at IS NULL
+                """,
+                (uid, ids),
+            )
+            conn.commit()
+            return result.rowcount or 0
 
     def delete_profile_facet(
         self, facet: str, user_id: str | None = None, *, text: str | None = None
@@ -114,12 +145,26 @@ class ProfileStore(Database):
         return row is not None
 
     def list_profile(
-        self, user_id: str | None = None, limit: int = 20
+        self,
+        user_id: str | None = None,
+        limit: int = 20,
+        *,
+        include_inactive: bool = False,
     ) -> list[MemoryItem]:
+        """当前有效的画像条目。
+
+        默认只返回「未被覆盖、未过期」的：被新事实覆盖的（``superseded_at``）
+        和软过期且没再出现的（``expires_at``）都留在库里供审计，但不进 prompt。
+        ``include_inactive=True`` 供排查/管理端查看全量。
+        """
         uid = user_id or current_user_id()
+        where = "user_id = %s"
+        if not include_inactive:
+            where += " AND superseded_at IS NULL"
+            where += " AND (expires_at IS NULL OR expires_at > now())"
         with self._get_pool().connection() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     id::text AS id,
                     user_id,
@@ -127,7 +172,7 @@ class ProfileStore(Database):
                     facet,
                     created_at::text AS created_at
                 FROM agent_user_profile
-                WHERE user_id = %s
+                WHERE {where}
                 ORDER BY created_at DESC
                 LIMIT %s
                 """,

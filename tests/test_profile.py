@@ -1,5 +1,5 @@
 import logging
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.facets import format_profile_line, normalize_facet
@@ -148,7 +148,7 @@ def test_apply_profile_action_writes_llm_update():
         result = apply_profile_action(action, user_id="a")
     assert result is item
     write_profile.assert_called_once_with(
-        "5 年后端开发工程师", user_id="a", facet="occupation"
+        "5 年后端开发工程师", user_id="a", facet="occupation", expires_at=ANY
     )
 
 
@@ -244,7 +244,7 @@ def test_apply_profile_text_writes_with_facet():
         result = apply_profile_text("我是后端工程师", user_id="a")
     assert "用户是后端工程师" in result
     write_profile.assert_called_once_with(
-        "用户是后端工程师", user_id="a", facet="occupation"
+        "用户是后端工程师", user_id="a", facet="occupation", expires_at=ANY
     )
 
 
