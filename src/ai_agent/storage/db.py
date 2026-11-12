@@ -41,6 +41,10 @@ class MemoryItem:
     created_at: str
     score: float = 0.0
     facet: str = ""
+    # 最近一次被检索命中的时间（episode 用；为空时回落到 created_at）
+    last_seen: str | None = None
+    # 命中次数（episode 的观察证据；画像恒为 0）
+    hits: int = 0
 
 
 @dataclass

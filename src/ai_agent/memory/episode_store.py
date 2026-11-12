@@ -164,6 +164,8 @@ class EpisodeStore(Database):
                 user_id,
                 text,
                 created_at::text AS created_at,
+                COALESCE(last_seen_at, created_at)::text AS last_seen,
+                COALESCE(hit_count, 0) AS hit_count,
                 1 - (embedding <=> %s) AS score
             FROM agent_episode
             WHERE user_id = %s
@@ -187,6 +189,8 @@ class EpisodeStore(Database):
                 text=row["text"],
                 created_at=row["created_at"],
                 score=float(row["score"]),
+                last_seen=row.get("last_seen"),
+                hits=int(row.get("hit_count") or 0),
             )
             for row in rows
         ]

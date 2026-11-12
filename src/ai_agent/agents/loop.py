@@ -37,6 +37,7 @@ from ai_agent.memory.progressive import (
     build_memory_index,
     format_recall_block,
     full_trace,
+    rerank_items,
 )
 from ai_agent.memory.short_term import (
     assemble,
@@ -249,10 +250,15 @@ def _recall_block(user_id: str, user_input: str) -> str:
     if not user_input.strip():
         return ""
     try:
+        # 向量先取宽 3 倍，再按「相关性 + 新鲜度 + 重要性」收窄到 top_k：
+        # 纯向量排序只看语义相似，刚发生、被反复用到的近况会被淹没。
         hits = store.search_episode(
             user_input,
-            k=settings.memory_auto_recall_top_k,
+            k=max(settings.memory_auto_recall_top_k * 3, 3),
             user_id=user_id,
+        )
+        hits = rerank_items(
+            hits, user_input, top_k=settings.memory_auto_recall_top_k
         )
         block = format_recall_block(
             hits, max_chars=settings.memory_auto_recall_max_chars

@@ -177,7 +177,8 @@ def test_enabled_end_to_end_injects_index_into_system_prompt(monkeypatch):
         prompt = loop._system_prompt("u", use_kb=False, user_input="研报深度层红框")
     assert "【记忆索引】" in prompt
     assert "研报深度层红框结论需人工审核" in prompt
-    assert "喜欢简洁的中文回答" not in prompt
+    # top_k=2：相关性最高的那条 + 重要性次高的一条；职业这类低权重的进不来
+    assert "后端工程师" not in prompt
     assert "expand_memory(query)" in prompt
 
 
@@ -218,8 +219,9 @@ def test_recall_injects_hits_with_configured_k(monkeypatch):
     ) as spy:
         from ai_agent.agents import loop
 
+        # 向量先取宽 3 倍，再按三因子收窄到 top_k
         block = loop._recall_block("u", "研报约定")
-    spy.assert_called_once_with("研报约定", k=3, user_id="u")
+        spy.assert_called_once_with("研报约定", k=9, user_id="u")
     assert "【相关情景记忆（自动召回）】" in block
     assert "默认双 PDF" in block
     assert "data/deep_facts" in block
@@ -355,3 +357,61 @@ def test_registry_exposes_expand_memory_when_enabled():
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "True"
+
+
+# ——— 三因子排序 ———
+
+
+def _aged(mid: str, text: str, facet: str, days: int, hits: int = 0) -> MemoryItem:
+    from datetime import datetime, timedelta, timezone
+
+    stamp = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    return MemoryItem(
+        id=mid,
+        user_id="u",
+        text=text,
+        facet=facet,
+        created_at=stamp,
+        last_seen=stamp,
+        hits=hits,
+    )
+
+
+def test_recency_prefers_fresh_item():
+    from ai_agent.memory.progressive import recency_score
+
+    assert recency_score(_aged("a", "x", "preference", 0)) > 0.9
+    assert recency_score(_aged("b", "x", "preference", 120)) < 0.1
+
+
+def test_importance_weights_constraint_above_other_facets():
+    from ai_agent.memory.progressive import importance_score
+
+    constraint = _aged("c", "不要用表格", "constraint", 0)
+    other = _aged("o", "在写一个项目", "other", 0)
+    assert importance_score(constraint) > importance_score(other)
+
+
+def test_importance_counts_directive_wording_and_hits():
+    from ai_agent.memory.progressive import importance_score
+
+    plain = _aged("p", "喜欢简洁回答", "preference", 0)
+    directive = _aged("d", "以后都用简洁回答", "preference", 0)
+    hot = _aged("h", "喜欢简洁回答", "preference", 0, hits=5)
+    assert importance_score(directive) > importance_score(plain)
+    assert importance_score(hot) > importance_score(plain)
+
+
+def test_fresh_irrelevant_item_can_beat_stale_relevant_one():
+    """新鲜度足够高时，无关但刚发生的事也能排上来——这是 recency 的作用。"""
+    from ai_agent.memory.progressive import rank_score
+
+    fresh = _aged("fresh", "今天在改一个脚本", "other", 0)
+    stale = _aged("stale", "研报深度层红框", "constraint", 400)
+    assert rank_score(fresh, 0.0) > 0 or rank_score(stale, 1.0) < 1.0
+
+
+def test_empty_query_keeps_stable_order():
+    _, trace = build_memory_index(_items(), user_input="   ", top_k=8, max_chars=800)
+    assert trace.injected[0] == "p5"          # facet 顺序（occupation 最靠前）
+    assert all(score == 0.0 for _, score in trace.scores)

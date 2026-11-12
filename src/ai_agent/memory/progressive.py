@@ -30,7 +30,9 @@ system 尾部，只受 ``system_dynamic_max_chars`` 这个整体动态块上限�
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime
 
 from ai_agent.core.logging import get_logger
 from ai_agent.core.text import clip_text
@@ -134,6 +136,77 @@ def relevance(query: str, item: MemoryItem) -> float:
     return len(q & t) / len(q)
 
 
+# 重要性：按 facet 的固定权重 + 文本里的「长期指令」信号 + episode 命中热度。
+# 不做 LLM 打分——记忆排序必须可复现，同一份输入两次跑必须给同一个顺序。
+_FACET_IMPORTANCE = {
+    "constraint": 1.0,
+    "preference": 0.8,
+    "name": 0.7,
+    "language": 0.7,
+    "locale": 0.6,
+    "occupation": 0.6,
+    "other": 0.4,
+}
+# 「以后都 / 一律 / 必须 / 不要」这类词说明用户把这条当长期约束
+_DIRECTIVE = re.compile(r"以后都|今后|永远|一律|必须|不要|禁止|每次|始终|一律用")
+
+
+def _parse_stamp(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def recency_score(item: MemoryItem, *, now: float | None = None) -> float:
+    """0~1 的新鲜度：半衰期 ``memory_recency_half_life_days``。"""
+    from ai_agent.core.config import settings
+
+    stamp = _parse_stamp(item.last_seen) or _parse_stamp(item.created_at)
+    if stamp is None:
+        return 0.5
+    half_life = max(1, settings.memory_recency_half_life_days) * 86400
+    age = max(0.0, (now or time.time()) - stamp)
+    return 0.5 ** (age / half_life)
+
+
+def importance_score(item: MemoryItem) -> float:
+    """0~1 的重要性：facet 权重 + 长期指令措辞 + 命中热度。"""
+    base = _FACET_IMPORTANCE.get(item.facet or "other", 0.4)
+    if _DIRECTIVE.search(item.text or ""):
+        base += 0.3
+    base += min(item.hits / 5, 1.0) * 0.3
+    return min(1.0, base)
+
+
+def rank_score(item: MemoryItem, relevance_value: float) -> float:
+    """三者加权：相关性为主，新鲜度与重要性做修正。
+
+    Generative Agents 的 recency/importance/relevance 三因子，权重可配
+    （``MEMORY_RANK_WEIGHT_*``）。相关性为 0 但重要性高的条目仍能进前列——
+    这正是「永远不要用表格」这类长期约束该有的行为。
+    """
+    from ai_agent.core.config import settings
+
+    return (
+        settings.memory_rank_weight_relevance * relevance_value
+        + settings.memory_rank_weight_recency * recency_score(item)
+        + settings.memory_rank_weight_importance * importance_score(item)
+    )
+
+
+def rerank_items(
+    items: list[MemoryItem], query: str, *, top_k: int | None = None
+) -> list[MemoryItem]:
+    """按三因子重排（episode 召回用：向量先取宽一点，再按综合分收窄）。"""
+    scored = [(item, relevance(query, item)) for item in items]
+    ranked = sorted(scored, key=lambda pair: -rank_score(pair[0], pair[1]))
+    picked = [item for item, _ in ranked]
+    return picked[:top_k] if top_k else picked
+
+
 def _facet_counts(items: list[MemoryItem]) -> str:
     counts: dict[str, int] = {}
     for item in items:
@@ -165,15 +238,23 @@ def build_memory_index(
     if not items:
         return "", MemoryTrace(mode="index", total=0, budget=budget, reason="no_profile")
 
+    has_query = bool(user_input.strip())
     scored = [(item, relevance(user_input, item)) for item in items]
-    ranked = sorted(
-        scored,
-        key=lambda pair: (
-            -pair[1],
-            _FACET_RANK.get(pair[0].facet or "other", 99),
-            str(pair[0].id),
-        ),
-    )
+    if has_query:
+        # 有问句：相关性 + 新鲜度 + 重要性 三因子
+        scored = [(item, rank_score(item, rel)) for item, rel in scored]
+        ranked = sorted(scored, key=lambda pair: -pair[1])
+    else:
+        # 没有问句就排不了相关性，退回 facet + id 的稳定顺序（可复现）；
+        # 此时 trace.scores 记的是 relevance（全 0），不是三因子分
+        ranked = sorted(
+            scored,
+            key=lambda pair: (
+                -pair[1],
+                _FACET_RANK.get(pair[0].facet or "other", 99),
+                str(pair[0].id),
+            ),
+        )
     limit = len(ranked) if top_k <= 0 else max(0, top_k)
 
     lines = [PROFILE_BLOCK_HEADER]

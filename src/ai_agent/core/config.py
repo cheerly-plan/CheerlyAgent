@@ -414,6 +414,13 @@ class Settings(BaseSettings):
     # 「半开半关」的组合（16 种里 7 种是静默失效），排查成本比收益大。
     #
     # 下面只是**调参**，不是开关：
+    # 记忆排序三因子权重（Generative Agents 口径）：相关性为主，
+    # 新鲜度与重要性做修正。query 为空时退化成 facet+id 的稳定顺序。
+    memory_rank_weight_relevance: float = 0.5
+    memory_rank_weight_recency: float = 0.3
+    memory_rank_weight_importance: float = 0.2
+    # 新鲜度半衰期：30 天前的记忆权重降到一半
+    memory_recency_half_life_days: int = 30
     memory_index_top_k: int = 8
     memory_index_max_chars: int = 800
     memory_trace_enabled: bool = True
