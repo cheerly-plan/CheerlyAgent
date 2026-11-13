@@ -16,3 +16,6 @@ data/
 .pytest-tmp/
 .pytest-tmp-*/
 .pytest_cache/
+
+# 本地 Qwen tokenizer / 运行缓存
+.cache/

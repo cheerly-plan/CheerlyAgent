@@ -33,6 +33,10 @@ TITLE_OK: Final = "title.ok"
 NATIVE_ERROR: Final = "llm.native.error"
 NATIVE_EMPTY: Final = "llm.native.empty"
 NATIVE_FALLBACK: Final = "llm.native_fallback"
+CONTEXT_SOFT: Final = "context.shrink.soft"
+CONTEXT_HARD: Final = "context.shrink.hard"
+TOOL_RESULT_POOL_HIT: Final = "tool_result.pool.hit"
+TOOL_RESULT_POOL_MISS: Final = "tool_result.pool.miss"
 
 
 def incr(name: str, count: int = 1) -> None:

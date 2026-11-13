@@ -4,6 +4,7 @@ from ai_agent.core.logging import get_logger
 from ai_agent.llm.client import complete_chat, lightweight_llm
 from ai_agent.llm import metrics
 from ai_agent.llm.json_utils import load_llm_json
+from ai_agent.llm.tokenizer import clip_text_to_tokens, count_tokens
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.gate import jev_noul_batch
 from ai_agent.memory.short_term import crude_summary, flatten, iter_turns
@@ -240,11 +241,12 @@ def _format_overflow(overflow: list[ChatMessage]) -> str:
         if remain <= 0:
             lines.append("…")
             break
-        if len(line) > remain:
-            lines.append(line[:remain] + "…")
+        line_tokens = count_tokens(line)
+        if line_tokens > remain:
+            lines.append(clip_text_to_tokens(line, remain, "…"))
             break
         lines.append(line)
-        used += len(line) + 1
+        used += line_tokens + 1
     return "\n".join(lines)
 
 

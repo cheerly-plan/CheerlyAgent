@@ -5,60 +5,9 @@ from ai_agent.memory.short_term import (
     SUMMARY_USER_PREFIX,
     ShortTermMemory,
     assemble,
-    compact,
     compress,
     crude_summary,
 )
-
-
-def test_compact_keeps_system_and_recent_turns():
-    messages = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "1"},
-        {"role": "assistant", "content": "a1"},
-        {"role": "user", "content": "2"},
-        {"role": "assistant", "content": "a2"},
-        {"role": "user", "content": "3"},
-        {"role": "assistant", "content": "a3"},
-    ]
-    out = compact(messages, keep=2)
-    assert out[0]["role"] == "system"
-    assert [m["content"] for m in out[1:]] == ["2", "a2", "3", "a3"]
-
-
-def test_compact_drops_leading_tool():
-    messages = [
-        {"role": "system", "content": "sys"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{"id": "1", "name": "x", "arguments": {}}],
-        },
-        {"role": "tool", "tool_call_id": "1", "name": "x", "content": "ok"},
-        {"role": "user", "content": "hi"},
-    ]
-    out = compact(messages, keep=2)
-    assert out[0]["role"] == "system"
-    assert out[1]["role"] != "tool"
-    assert out[1]["content"] == "hi"
-
-
-def test_compact_keeps_tool_chain_inside_turn():
-    messages = [
-        {"role": "user", "content": "1"},
-        {"role": "assistant", "content": "a1"},
-        {"role": "user", "content": "天气"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{"id": "1", "name": "get_weather", "arguments": {}}],
-        },
-        {"role": "tool", "tool_call_id": "1", "name": "get_weather", "content": "20度"},
-        {"role": "assistant", "content": "20度"},
-    ]
-    out = compact(messages, keep=1)
-    assert [m["role"] for m in out] == ["user", "assistant", "tool", "assistant"]
-    assert out[0]["content"] == "天气"
 
 
 def test_assemble_inserts_summary_pair():
@@ -91,7 +40,7 @@ def test_compress_summarizes_overflow_turns():
         return "旧轮次摘要"
 
     recent, summary = compress(
-        messages, keep=2, old_summary="", summarize=fake_summarize
+        messages, old_summary="", summarize=fake_summarize, max_tokens=30
     )
     assert seen == [["1", "a1"]]
     assert summary == "旧轮次摘要"
@@ -106,7 +55,7 @@ def test_compress_does_not_summarize_within_window():
         {"role": "assistant", "content": "a2"},
     ]
     recent, summary = compress(
-        messages, keep=2, old_summary="", summarize=lambda *_: "不该调用"
+        messages, old_summary="", summarize=lambda *_: "不该调用", max_tokens=10000
     )
     assert summary == ""
     assert [m["content"] for m in recent] == ["1", "a1", "2", "a2"]
@@ -126,10 +75,10 @@ def test_compress_strips_existing_summary_pair():
         ],
     )
     recent, summary = compress(
-        messages, keep=2, old_summary="已有摘要", summarize=lambda *_: "新摘要"
+        messages, old_summary="已有摘要", summarize=lambda *_: "新摘要", max_tokens=30
     )
     assert summary == "新摘要"
-    assert [m["content"] for m in recent] == ["2", "a2", "3", "a3"]
+    assert [m["content"] for m in recent] == ["3", "a3"]
 
 
 def test_crude_summary_keeps_user_and_assistant():
@@ -147,29 +96,8 @@ def test_crude_summary_keeps_user_and_assistant():
     assert "忽略" not in text
 
 
-def test_save_compacts_to_max_turns():
-    memory = ShortTermMemory(max_turns=2)
-    memory.save(
-        "s1",
-        [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "1"},
-            {"role": "assistant", "content": "a1"},
-            {"role": "user", "content": "2"},
-            {"role": "assistant", "content": "a2"},
-            {"role": "user", "content": "3"},
-            {"role": "assistant", "content": "a3"},
-        ],
-        summary="旧摘要",
-    )
-    loaded = memory.load("s1")
-    assert loaded is not None
-    assert loaded.summary == "旧摘要"
-    assert [m["content"] for m in loaded.messages] == ["2", "a2", "3", "a3"]
-
-
 def test_short_term_isolates_users_with_same_session():
-    memory = ShortTermMemory(max_turns=10)
+    memory = ShortTermMemory()
     memory.save("s1", [{"role": "user", "content": "用户a"}], user_id="a")
     memory.save("s1", [{"role": "user", "content": "用户b"}], user_id="b")
     assert memory.load("s1", user_id="a").messages[0]["content"] == "用户a"
@@ -177,7 +105,7 @@ def test_short_term_isolates_users_with_same_session():
 
 
 def test_short_term_evicts_oldest_session():
-    memory = ShortTermMemory(max_turns=10, max_sessions=2)
+    memory = ShortTermMemory(max_sessions=2)
     memory.save("s1", [{"role": "user", "content": "1"}], user_id="a")
     memory.save("s2", [{"role": "user", "content": "2"}], user_id="b")
     memory.save("s3", [{"role": "user", "content": "3"}], user_id="c")
@@ -187,7 +115,7 @@ def test_short_term_evicts_oldest_session():
 
 
 def test_short_term_lru_keeps_recently_used():
-    memory = ShortTermMemory(max_turns=10, max_sessions=2)
+    memory = ShortTermMemory(max_sessions=2)
     memory.save("s1", [{"role": "user", "content": "1"}], user_id="a")
     memory.save("s2", [{"role": "user", "content": "2"}], user_id="b")
     memory.load("s1", user_id="a")
@@ -200,7 +128,6 @@ def test_short_term_lru_keeps_recently_used():
 def test_short_term_expires_idle_session():
     now = {"t": 0.0}
     memory = ShortTermMemory(
-        max_turns=10,
         max_sessions=10,
         ttl_seconds=10,
         clock=lambda: now["t"],
@@ -215,7 +142,6 @@ def test_short_term_expires_idle_session():
 def test_short_term_expires_idle_even_when_under_limit():
     now = {"t": 0.0}
     memory = ShortTermMemory(
-        max_turns=10,
         max_sessions=10,
         ttl_seconds=10,
         clock=lambda: now["t"],
@@ -230,7 +156,6 @@ def test_short_term_expires_idle_even_when_under_limit():
 def test_short_term_periodic_cleanup_expires_without_access():
     now = {"t": 0.0}
     memory = ShortTermMemory(
-        max_turns=10,
         max_sessions=10,
         ttl_seconds=10,
         cleanup_interval_seconds=0.02,
@@ -251,3 +176,61 @@ def test_short_term_periodic_cleanup_expires_without_access():
             assert dict(memory._sessions) == {}
     finally:
         memory.stop_cleanup()
+
+
+def test_save_keeps_history_under_token_budget():
+    memory = ShortTermMemory(max_tokens=10000)
+    memory.save(
+        "s1",
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "3"},
+            {"role": "assistant", "content": "a3"},
+        ],
+    )
+    loaded = memory.load("s1")
+    assert loaded is not None
+    assert [m["content"] for m in loaded.messages] == [
+        "1", "a1", "2", "a2", "3", "a3",
+    ]
+
+
+def test_compress_does_not_summarize_under_token_budget():
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "3"},
+        {"role": "assistant", "content": "a3"},
+    ]
+    recent, summary = compress(
+        messages,
+        summarize=lambda *_: "不该调用",
+        max_tokens=10000,
+    )
+    assert [m["content"] for m in recent if m["role"] != "system"] == [
+        "1", "a1", "2", "a2", "3", "a3",
+    ]
+    assert summary == ""
+
+
+def test_compress_summarizes_when_over_token_budget():
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "旧" * 300},
+        {"role": "assistant", "content": "答"},
+        {"role": "user", "content": "现在呢"},
+        {"role": "assistant", "content": "回答"},
+    ]
+    recent, summary = compress(
+        messages,
+        summarize=lambda old, overflow: "压缩摘要",
+        max_tokens=200,
+    )
+    assert summary == "压缩摘要"
+    assert "旧" * 300 not in [m["content"] for m in recent]

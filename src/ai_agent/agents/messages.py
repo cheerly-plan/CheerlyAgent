@@ -13,12 +13,14 @@ import json
 from ai_agent.agents.turn import _checkpoint_update
 from ai_agent.core.logging import get_logger
 from ai_agent.core.text import clip_text
+from ai_agent.llm import metrics
+from ai_agent.llm.tokenizer import clip_text_to_tokens, count_tokens
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.short_term import (
     assemble,
     fit_turns,
     flatten,
-    messages_chars,
+    messages_tokens,
     take_summary,
     take_system,
 )
@@ -111,9 +113,10 @@ def _pop_incomplete_assistant(messages: list[ChatMessage]) -> list[ChatMessage]:
 
 
 _SYSTEM_CLIP_MARK = "\n[系统提示词动态部分已省略，请按需用工具查询]\n"
+_TOOL_CLIP_MARK = "\n[工具结果已省略]"
 
 
-def _enforce_budget(fitted: list[ChatMessage], max_chars: int) -> list[ChatMessage]:
+def _enforce_budget(fitted: list[ChatMessage], max_tokens: int) -> list[ChatMessage]:
     """整轮丢完仍超预算时的兜底，绝不把超限请求直接发给模型。
 
     system 的动态块（画像 / 知识库能力清单 / 日期）拼在尾部，原先完全不受
@@ -121,43 +124,50 @@ def _enforce_budget(fitted: list[ChatMessage], max_chars: int) -> list[ChatMessa
     降级：裁 system 尾部 → 压缩当前回合的 tool 结果（保留 tool_call_id，
     不产生孤儿消息）。fitted 是 assemble 产出的副本，改动不碰原始 messages。
     """
-    if messages_chars(fitted) <= max_chars:
+    if messages_tokens(fitted) <= max_tokens:
         return fitted
     for idx, msg in enumerate(fitted):
-        if messages_chars(fitted) <= max_chars:
+        if messages_tokens(fitted) <= max_tokens:
             break
         if msg.get("role") != "system":
             continue
         content = str(msg.get("content") or "")
         # 短 system 换成省略标记反而更长，直接跳过，让 tool 结果去吸收超额
-        if len(content) <= len(_SYSTEM_CLIP_MARK):
+        if count_tokens(content) <= count_tokens(_SYSTEM_CLIP_MARK):
             continue
-        excess = messages_chars(fitted) - max_chars
-        keep = max(0, len(content) - excess - len(_SYSTEM_CLIP_MARK))
-        fitted[idx] = {**msg, "content": content[:keep] + _SYSTEM_CLIP_MARK}
+        excess = messages_tokens(fitted) - max_tokens
+        keep = max(0, count_tokens(content) - excess - count_tokens(_SYSTEM_CLIP_MARK))
+        fitted[idx] = {
+            **msg,
+            "content": clip_text_to_tokens(content, keep, _SYSTEM_CLIP_MARK),
+        }
     for idx, msg in enumerate(fitted):
-        if messages_chars(fitted) <= max_chars:
+        if messages_tokens(fitted) <= max_tokens:
             break
         if msg.get("role") != "tool":
             continue
         content = str(msg.get("content") or "")
-        excess = messages_chars(fitted) - max_chars
+        excess = messages_tokens(fitted) - max_tokens
         fitted[idx] = {
             **msg,
-            "content": clip_text(content, max(0, len(content) - excess)),
+            "content": clip_text_to_tokens(
+                content,
+                max(0, count_tokens(content) - excess),
+                _TOOL_CLIP_MARK,
+            ),
         }
-    if messages_chars(fitted) > max_chars:
+    if messages_tokens(fitted) > max_tokens:
         logger.error(
-            "上下文裁剪后仍超预算 chars=%d budget=%d",
-            messages_chars(fitted),
-            max_chars,
+            "上下文裁剪后仍超预算 tokens=%d budget=%d",
+            messages_tokens(fitted),
+            max_tokens,
         )
     return fitted
 
 
 _AGED_MARK = (
     "〔本结果 {chars} 字原文已省略{note}"
-    "；需要原文可用 kb_read(location=\"上面的文件名 · 第N页\") 读回〕"
+    "{ref_hint}{kb_hint}〕"
 )
 _KB_TOOLS = ("kb_search", "kg_search")
 
@@ -206,43 +216,104 @@ def age_tool_results(
             out.append(msg)          # 短的没必要换，标记本身可能更长
             continue
         head = content.splitlines()[0].strip()
-        note = calls.get(msg.get("tool_call_id", ""), "")
-        stub = _AGED_MARK.format(
-            chars=len(content), note=f"，检索：{note}" if note else ""
+        call_id = str(msg.get("tool_call_id") or "").strip()
+        raw_meta = msg.get("meta")
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
+        name = str(meta.get("tool") or msg.get("name") or "")
+        note = calls.get(call_id, "")
+        try:
+            chars = int(meta.get("raw_chars") or len(content))
+        except (TypeError, ValueError):
+            chars = len(content)
+        hint = ""
+        citations = meta.get("citations") or []
+        if citations:
+            first = citations[0] if isinstance(citations[0], dict) else {}
+            where = str(first.get("filename") or "").strip()
+            page = first.get("page")
+            if where and page is not None:
+                where = f"{where} · 第{page}页"
+            if where:
+                extra = f" 等{len(citations)}处" if len(citations) > 1 else ""
+                hint = f"；命中：{clip_text(where, 40)}{extra}"
+        elif meta.get("preview"):
+            hint = f"；开头：{clip_text(str(meta['preview']), 40)}"
+        ref_hint = (
+            f"；原文用 read_tool_result(tool_call_id=\"{call_id}\")"
+            if call_id
+            else ""
         )
+        kb_hint = (
+            "；知识库也可用 kb_read(location=\"文件名 · 第N页\")"
+            if name in _KB_TOOLS
+            else ""
+        )
+        stub = _AGED_MARK.format(
+            chars=chars,
+            note=f"，检索：{note}" if note else "",
+            ref_hint=ref_hint,
+            kb_hint=kb_hint,
+        )
+        # 元数据提示插在省略说明后面，保持「原文已省略」这句在前
+        if hint:
+            stub = stub.replace("原文已省略", f"原文已省略{hint}", 1)
         out.append({**msg, "content": f"{clip_text(head, 80)}\n{stub}"})
         changed = True
     # 没有可老化的内容时返回原对象：调用方依赖「预算充裕就原样返回」的语义
     return out if changed else messages
 
 
-def _fit_context(messages: list[ChatMessage], max_chars: int) -> list[ChatMessage]:
+def _fit_context(
+    messages: list[ChatMessage],
+    max_tokens: int,
+    *,
+    soft_limit: int = 0,
+) -> list[ChatMessage]:
     """超预算时对送模型的副本做裁剪：从最旧的完整轮次开始整轮丢弃。
 
     只动副本，原列表原封不动——落库、checkpoint 快照都依赖原始 messages。
     整轮（user + 其后的 assistant/tool）一起丢，保证 assistant(tool_calls)
     和它的 tool 结果永远成对，不会因裁剪出现孤儿 tool 消息（会被 API 400）。
     被丢的轮次由收尾的 compress() 用同一个预算并入会话摘要，不再静默蒸发。
+
+    ``soft_limit`` 是软水位：达到后先把工具结果的老化窗口收紧一轮，
+    避免「刚好没到硬上限」时还保留太多旧工具原文，下一轮突然撞墙。
     """
-    if max_chars <= 0:
+    if max_tokens <= 0:
         return messages
-    # 先给历史轮次的工具原文"老化"成一行引用：这是常规动作，不是超预算才做。
-    # 当前轮永远保留原文（模型正在读它），省的是早就用不上的旧检索结果。
-    messages = age_tool_results(messages)
-    if messages_chars(messages) <= max_chars:
-        return messages
+    before = messages_tokens(messages)
+    if soft_limit > 0 and before >= soft_limit:
+        metrics.incr(metrics.CONTEXT_SOFT)
+        # 软水位下比常规多收一轮；当前轮由 age_tool_results 单独保留
+        from ai_agent.core.config import settings
+
+        keep = max(0, int(settings.tool_result_full_turns) - 1)
+        aged = age_tool_results(messages, keep_turns=keep)
+        logger.info(
+            "上下文达到软水位 tokens=%d soft=%d；工具结果老化窗口收紧到 %d",
+            before,
+            soft_limit,
+            keep,
+        )
+    else:
+        aged = age_tool_results(messages)
+    if messages_tokens(aged) <= max_tokens:
+        return aged
+    messages = aged
     system, rest = take_system(messages)
     summary, _ = take_summary(rest)
-    turns, dropped = fit_turns(messages, max_chars)
+    turns, dropped = fit_turns(messages, max_tokens)
     sys_text = str(system[0].get("content") or "") if system else ""
     fitted = assemble(sys_text, summary, flatten(turns))
     if not sys_text and fitted and fitted[0].get("role") == "system":
         fitted = fitted[1:]
-    fitted = _enforce_budget(fitted, max_chars)
+    fitted = _enforce_budget(fitted, max_tokens)
+    metrics.incr(metrics.CONTEXT_HARD)
     logger.info(
-        "上下文超预算已裁剪 chars=%d budget=%d kept_turns=%d dropped_msgs=%d",
-        messages_chars(messages),
-        max_chars,
+        "上下文超预算已裁剪 tokens=%d budget=%d soft=%d kept_turns=%d dropped_msgs=%d",
+        messages_tokens(messages),
+        max_tokens,
+        soft_limit,
         len(turns),
         len(dropped),
     )

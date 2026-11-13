@@ -23,8 +23,9 @@ system 尾部，只受 ``system_dynamic_max_chars`` 这个整体动态块上限�
 - **只写不改**：不写库、不动 episode、不改抽取与画像写入链路。
 - **fail-open**：调用方负责捕获异常并回退全量画像；本模块保持纯函数，
   异常能直接冒出来以便测试和排障。
-- **单位是字符不是 token**：与 ``llm_context_char_budget`` /
-  ``system_dynamic_max_chars`` 保持同一口径（中文 1 字符 ≈ 0.6~1 token）。
+- **两块预算单位不同**：``system_dynamic_max_chars`` 是字符上限（用于
+  动态块形状控制）；上下文窗口改用 ``llm_context_token_budget`` + Qwen
+  tokenizer 计数。摘要/裁剪只认 token。
 """
 
 from __future__ import annotations

@@ -67,9 +67,7 @@ def _session_state(user_id: str, chat_session_id: str) -> tuple[list[ChatMessage
         return cached.messages, cached.summary
     try:
         summary = store.get_session_summary(user_id, chat_session_id)
-        recent = store.load_recent_turns(
-            user_id, chat_session_id, turns=short_term_memory.max_turns
-        )
+        recent = store.load_all_turns(user_id, chat_session_id)
     except Exception:
         logger.exception("会话记忆加载失败")
         return [], ""
@@ -126,12 +124,11 @@ def _compress_and_cache(
     try:
         window, new_summary = compress(
             messages,
-            keep=short_term_memory.max_turns,
             old_summary=summary,
             summarize=summarize_session,
-            # 与 _fit_context 同一个预算：被字符预算挤掉的轮次也要进摘要，
+            # 与 _fit_context 同一个口径：被 token 预算挤掉的轮次也要进摘要，
             # 否则它们只存在于「送模型副本」的裁剪里，下一轮就彻底找不回。
-            max_chars=settings.llm_context_char_budget,
+            max_tokens=settings.context_message_token_budget(),
         )
     except Exception:
         logger.exception("短期记忆压缩失败")

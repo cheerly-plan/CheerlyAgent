@@ -17,7 +17,12 @@ from ai_agent.tools.memory import (
     memory_search_tool,
     memory_write_tool,
 )
-from ai_agent.tools.misc import weather_tool, web_search_tool
+from ai_agent.tools.misc import (
+    read_tool_result_tool,
+    weather_tool,
+    web_search_tool,
+)
+from ai_agent.tools.base import ToolOutput
 from ai_agent.tools.report import (
     generate_report_tool,
     report_compare_tool,
@@ -34,6 +39,7 @@ logger = get_logger(__name__)
 TOOLS = [
     weather_tool,
     web_search_tool,
+    read_tool_result_tool,
     memory_search_tool,
     memory_write_tool,
     kb_list_files_tool,
@@ -45,9 +51,9 @@ TOOLS = [
     report_compare_tool,
     report_validate_tool,
 ]
-# kb_read 恒注册：历史轮次的工具原文会被老化成一行引用，模型要细节时用它
-# 读回原文——按问句查缓存，不重新检索，拿到的还是当时那批证据。
-# （曾经只在两段式下注册，导致老化后的结果无处读回，只能整段重查。）
+# kb_read 恒注册：按「文件名 · 第N页」读知识库当前原文并补上下文/引用。
+# 通用工具结果的读回由 read_tool_result 负责（按 tool_call_id 取原消息全文）；
+# 两者分工不同，都恒注册，避免老化后的结果无处读回。
 from ai_agent.core.config import settings as _settings  # noqa: E402
 
 TOOLS.append(kb_read_tool)
@@ -72,17 +78,33 @@ TOOL_OUTPUT_LIMITS: dict[str, int] = {
     "report_extract_indicators": 4000,
     # 展开的是全量画像 + 情景原文，截断会让「未列出的条目」再次消失
     "expand_memory": 4000,
+    "read_tool_result": 6000,
 }
 
 
-def _tool_output(tool, raw: str) -> str:
+def _tool_output(
+    tool, raw: str, arguments: dict | None = None
+) -> ToolOutput:
     limit = TOOL_OUTPUT_LIMITS.get(tool.name, tool.max_output_chars)
-    if limit <= 0 or len(raw) <= limit:
-        return raw
-    logger.info(
-        "工具输出已裁剪 name=%s chars=%d limit=%d", tool.name, len(raw), limit
-    )
-    return clip_text(raw, limit)
+    clipped = raw
+    if limit > 0 and len(raw) > limit:
+        logger.info(
+            "工具输出已裁剪 name=%s chars=%d limit=%d",
+            tool.name,
+            len(raw),
+            limit,
+        )
+        clipped = clip_text(raw, limit)
+    preview = (raw.splitlines()[0] if raw.splitlines() else "").strip()
+    meta = {
+        "tool": tool.name,
+        "arguments": arguments or {},
+        "raw_chars": len(raw),
+        "clipped_chars": len(clipped),
+        "truncated": len(clipped) < len(raw),
+        "preview": preview[:120],
+    }
+    return ToolOutput(clipped, raw=raw, meta=meta)
 
 
 def tool_schemas() -> list[dict]:
@@ -169,12 +191,12 @@ def execute_tool(name: str, arguments: dict) -> str:
         return f"ERROR: 未知工具 {name}"
     arguments = _coerce_stringified_lists(tool.args_model, arguments)
     try:
-        return _tool_output(tool, tool.run(**arguments))
+        return _tool_output(tool, tool.run(**arguments), arguments)
     except ValidationError:
         # 模型传的参数越界（depth=3 超过 le=2 之类）：夹回边界重试一次，别白费一轮
         try:
             clamped = _clamp_out_of_range_args(tool.args_model, arguments)
-            return _tool_output(tool, tool.run(**clamped))
+            return _tool_output(tool, tool.run(**clamped), clamped)
         except Exception as e:
             logger.warning("工具参数越界后夹取仍失败 name=%s: %s", name, e)
             return f"ERROR: 工具执行失败（{type(e).__name__}）"

@@ -545,6 +545,7 @@ dependencies = [
     { name = "pypdf" },
     { name = "python-docx" },
     { name = "pyyaml" },
+    { name = "tokenizers" },
     { name = "uvicorn" },
     { name = "weasyprint" },
 ]
@@ -574,6 +575,7 @@ requires-dist = [
     { name = "pypdf", specifier = ">=6.21.2" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "tokenizers", specifier = ">=0.21" },
     { name = "uvicorn", specifier = ">=0.54.0" },
     { name = "weasyprint", specifier = ">=70.0" },
 ]

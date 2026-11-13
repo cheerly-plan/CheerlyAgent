@@ -29,11 +29,24 @@ class Settings(BaseSettings):
     # 正常生成（chunk 间隔远小于 120s）不受影响。流式不做自动重试
     # （重试会从断点重复 yield 已发内容），彻底失败走断点续跑兜底。
     llm_stream_timeout_seconds: float = 120
-    # 送模型的上下文预算（字符数，0 = 不限制）：超过时从最旧的完整轮次开始
-    # 整轮丢弃（摘要对与当前回合保留），防止长对话 + 多步工具输出撑爆
-    # 模型上下文窗口导致整轮报错。中文 1 字符 ≈ 0.6~1 token，40000 字符
-    # 对 32k 窗口的模型是安全值；部署更大窗口的模型可调高。
-    llm_context_char_budget: int = 40000
+    # 送模型的上下文 token 预算（0 = 不限制）：超过时从最旧的完整轮次开始
+    # 整轮丢弃（摘要对与当前回合保留）。计数统一走 Qwen tokenizer，不再按
+    # 字符估算；28000 对 32k 窗口留出输出/tool schema 的余量。
+    llm_context_token_budget: int = 28000
+    # 软水位：达到「可用预算 × 比例」就先做更激进的工具结果老化，避免一轮
+    # 直接撞到硬上限。0 表示关闭软触发；软水位不会超过可用预算。
+    context_soft_limit_ratio: float = 0.85
+    # 给本轮输出和工具参数预留的 token 数；实际输入预算 = 硬上限 - 预留。
+    context_reserve_tokens: int = 4000
+    # 工具 schema 的固定预留（默认全量工具约 5k token）。loop 会按本轮
+    # 实际 step_tools 精确扣；摘要/短期缓存用这个固定值保持同一量级。
+    context_tool_schema_reserve_tokens: int = 5000
+    # Qwen tokenizer 文件；留空则依次查本地缓存/下载到 ~/.cache/cheely。
+    qwen_tokenizer_path: str = ""
+    qwen_tokenizer_url: str = (
+        "https://hf-mirror.com/Qwen/Qwen3-8B/resolve/main/tokenizer.json"
+    )
+    qwen_tokenizer_timeout_seconds: float = 30
     # system 提示词里动态拼接部分（画像 / 知识库能力清单 / 日期 / 报告类型）
     # 的硬上限。这些块原先完全不受上下文预算约束，随画像条数与库内文件数
     # 线性增长，极端情况下 system 自身就能把请求撑超限。超限时按行保头保尾
@@ -391,6 +404,13 @@ class Settings(BaseSettings):
     # 当前这轮永远完整——模型正在读它；历史轮次的原文才是上下文大头。
     # 设 0 表示除当前轮外全部省略，设负数关闭。
     tool_result_full_turns: int = 2
+    # 工具结果池：read_tool_result 在消息被老化/裁掉后仍能按 call_id 回放。
+    # 进程内 LRU + TTL；重启后回落到 checkpoint / 历史消息。
+    tool_result_pool_max_entries: int = 512
+    tool_result_pool_ttl_seconds: int = 7200
+    # 单条结果入池前的上限：防止一次 OCR/大表把进程内存撑爆。超过则截断，
+    # read_tool_result 会标注「池中已截断」，仍可回读大部分内容。
+    tool_result_pool_max_content_chars: int = 200_000
 
 
     kb_doc_route_top_k: int = 6
@@ -471,6 +491,30 @@ class Settings(BaseSettings):
         key = (self.local_api_key or "").strip() or self.api_key
         return url, key
 
+    def context_token_limits(self) -> tuple[int, int]:
+        """返回 (可用硬预算, 软水位) token 数。
+
+        ``llm_context_token_budget`` 是上下文硬上限；先扣掉输出/工具参数
+        预留，再按比例算软水位。工具 schema 的 token 由调用方另行扣减。
+        任一为 0 表示不限制/不触发。
+        """
+        hard = max(0, int(self.llm_context_token_budget))
+        if hard <= 0:
+            return 0, 0
+        usable = max(1, hard - max(0, int(self.context_reserve_tokens)))
+        ratio = min(max(float(self.context_soft_limit_ratio), 0.0), 1.0)
+        # 软水位按「扣掉输出预留后的可用预算」算，而不是按硬上限算：
+        # 否则 0.85 × 28000 只比可用 24000 低 200，软硬几乎同时触发。
+        soft = min(usable, int(usable * ratio))
+        return usable, soft
+
+    def context_message_token_budget(self) -> int:
+        """消息正文可用的 token 预算（再扣掉工具 schema 预留）。"""
+        usable, _ = self.context_token_limits()
+        if usable <= 0:
+            return 0
+        return max(1, usable - max(0, int(self.context_tool_schema_reserve_tokens)))
+
     def resolve_llm(self, business_model: str = "") -> str:
         """轻量任务的模型名。网关由 llm.client.lightweight_llm 决定，不要只拿这个名字去打主网关。"""
         return (business_model or "").strip() or self.small_model or self.model
@@ -484,7 +528,7 @@ class Settings(BaseSettings):
             name.strip() for name in self.admin_usernames.split(",") if name.strip()
         }
 
-    short_term_memory_max_turns: int
+    # 摘要输入（被挤出窗口的历史）的 token 预算，由 Qwen tokenizer 计数。
     short_term_memory_max_tokens: int
     short_term_memory_max_sessions: int = 1024
     short_term_memory_ttl_seconds: int = 3600

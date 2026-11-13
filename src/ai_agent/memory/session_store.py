@@ -344,22 +344,36 @@ class SessionStore(Database):
     def load_recent_turns(
         self, user_id: str, chat_session_id: str, turns: int
     ) -> list[ChatMessage]:
-        if turns <= 0:
+        # turns < 0 表示不按轮数截断：预算模式要看到全部历史，再由字符预算
+        # 决定哪些轮次进摘要；0 仍表示不加载。
+        if turns == 0:
             return []
         with self._get_pool().connection() as conn:
-            start = conn.execute(
-                """
-                SELECT MIN(seq) AS start_seq
-                FROM (
-                    SELECT seq
+            if turns < 0:
+                start = conn.execute(
+                    """
+                    SELECT MIN(seq) AS start_seq
                     FROM agent_chat_history
-                    WHERE user_id = %s AND chat_session_id = %s AND role = 'user'
-                    ORDER BY seq DESC
-                    LIMIT %s
-                ) recent_users
-                """,
-                (user_id, chat_session_id, turns),
-            ).fetchone()
+                    WHERE user_id = %s AND chat_session_id = %s
+                      AND role = 'user'
+                    """,
+                    (user_id, chat_session_id),
+                ).fetchone()
+            else:
+                start = conn.execute(
+                    """
+                    SELECT MIN(seq) AS start_seq
+                    FROM (
+                        SELECT seq
+                        FROM agent_chat_history
+                        WHERE user_id = %s AND chat_session_id = %s
+                          AND role = 'user'
+                        ORDER BY seq DESC
+                        LIMIT %s
+                    ) recent_users
+                    """,
+                    (user_id, chat_session_id, turns),
+                ).fetchone()
             start_seq = start["start_seq"] if start else None
             if start_seq is None:
                 return []
@@ -371,6 +385,22 @@ class SessionStore(Database):
                 ORDER BY seq
                 """,
                 (user_id, chat_session_id, start_seq),
+            ).fetchall()
+        return [_chat_message_from_row(row) for row in rows]
+
+    def load_all_turns(
+        self, user_id: str, chat_session_id: str
+    ) -> list[ChatMessage]:
+        """加载会话全部消息；预算模式不再按轮数截断历史。"""
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT role, content, tool_calls, tool_call_id, name, meta
+                FROM agent_chat_history
+                WHERE user_id = %s AND chat_session_id = %s
+                ORDER BY seq
+                """,
+                (user_id, chat_session_id),
             ).fetchall()
         return [_chat_message_from_row(row) for row in rows]
 
@@ -431,6 +461,13 @@ class SessionStore(Database):
         # DB 已清空，进程内热缓存必须一起失效，否则 TTL 内 load 仍会命中旧窗口，
         # 用户删掉的会话会「自己回来」。事务提交成功后再失效，避免清了缓存但库没清。
         short_term_memory.invalidate(user_id, chat_session_id)
+        try:
+            from ai_agent.tools.result_pool import tool_result_pool
+
+            tool_result_pool.clear(user_id, chat_session_id)
+        except Exception:
+            # 工具结果池是进程内缓存，清理失败不影响 DB 删除
+            pass
 
     def create_session(self, user_id: str, idempotency_key: str) -> SessionRecord:
         session_id = str(uuid.uuid4())
@@ -576,6 +613,12 @@ class SessionStore(Database):
             )
             conn.commit()
         short_term_memory.invalidate(user_id, session_id)
+        try:
+            from ai_agent.tools.result_pool import tool_result_pool
+
+            tool_result_pool.clear(user_id, session_id)
+        except Exception:
+            pass
         return True
 
     def cleanup_empty_unnamed_sessions(self, max_age_seconds: int = 3600) -> int:

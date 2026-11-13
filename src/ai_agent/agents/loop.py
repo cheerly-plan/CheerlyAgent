@@ -52,6 +52,7 @@ from ai_agent.kb.retrieval.scope import (
     set_rewrite_context,
 )
 from ai_agent.llm.client import stream_chat
+from ai_agent.llm.tokenizer import count_json_tokens
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
 from ai_agent.memory.facets import format_profile_block
 from ai_agent.memory.progressive import (
@@ -71,7 +72,13 @@ from ai_agent.tools.progress import (
     set_event_emitter,
     set_progress,
 )
+from ai_agent.tools.context import (
+    session_scope,
+    tool_result_index,
+    tool_results_scope,
+)
 from ai_agent.tools.registry import execute_tool, tool_schemas
+from ai_agent.tools.result_pool import tool_result_pool
 
 # 会长时间阻塞的工具：丢到工作线程，边跑边推 tool_progress。generate_report
 # 现在只提交后台任务（秒回），留在集合里是为了统一 user_scope / 引用收集的调用路径。
@@ -120,6 +127,7 @@ def _run_tool_with_progress(
     user_id: str,
     kb_file_ids: list[str] | None,
     messages: list[ChatMessage],
+    chat_session_id: str = "",
 ) -> Iterator[dict]:
     """在工作线程跑工具，主循环把进度转成 tool_progress；末尾 yield _tool_result。"""
     # 队列里可能是进度文案（str），也可能是工具抛出的结构化事件（dict）：
@@ -141,9 +149,11 @@ def _run_tool_with_progress(
         progress_token = set_progress(_emit)
         event_token = set_event_emitter(_emit_event)
         try:
-            with collect_citations() as cited:
-                with user_scope(user_id):
-                    output = execute_tool(name, arguments)
+            with tool_results_scope(tool_result_index(messages)):
+                with session_scope(chat_session_id):
+                    with collect_citations() as cited:
+                        with user_scope(user_id):
+                            output = execute_tool(name, arguments)
             return output, list(cited)
         finally:
             reset_event_emitter(event_token)
@@ -393,6 +403,59 @@ def _today_line() -> str:
     )
 
 
+def _fitted_context(
+    messages: list[ChatMessage], tools: list[dict] | None = None
+) -> list[ChatMessage]:
+    """按「硬上限 - 输出预留 - 工具 schema」和软水位裁剪送模型副本。"""
+    usable, soft = settings.context_token_limits()
+    if tools:
+        tool_tokens = count_json_tokens(tools)
+        usable = max(1, usable - tool_tokens)
+        soft = max(0, soft - tool_tokens)
+    return _fit_context(messages, usable, soft_limit=soft)
+
+
+def _remember_tool_result(
+    *,
+    user_id: str,
+    chat_session_id: str,
+    call_id: str,
+    name: str,
+    arguments: dict,
+    output: object,
+    cited: list,
+) -> dict:
+    """把裁剪前全文放进池子，并生成可持久化的 tool 消息 meta。"""
+    raw = str(getattr(output, "raw", output))
+    meta = dict(getattr(output, "meta", {}) or {})
+    meta.setdefault("tool", name)
+    meta.setdefault("arguments", arguments)
+    meta.setdefault("raw_chars", len(raw))
+    if "preview" not in meta:
+        lines = raw.splitlines()
+        meta["preview"] = (lines[0] if lines else "").strip()[:120]
+    if cited:
+        meta["citations"] = [
+            {
+                "filename": item.filename,
+                "page": item.page,
+                "page_end": item.page_end,
+                "kind": item.kind,
+                "section": item.section,
+            }
+            for item in cited[:5]
+        ]
+    tool_result_pool.put(
+        user_id,
+        chat_session_id,
+        call_id,
+        name,
+        raw,
+        meta,
+    )
+    return meta
+
+
 def run_stream(
     user_input: str,
     user_id: str = "default",
@@ -518,6 +581,7 @@ def run_stream(
             messages,
             user_id,
             run_id=run_id,
+            chat_session_id=chat_session_id,
             use_web_search=use_web_search,
             use_kb=use_kb,
             kb_file_ids=kb_file_ids,
@@ -752,6 +816,7 @@ def run_loop(
     user_id: str = "default",
     *,
     run_id: str | None = None,
+    chat_session_id: str = "",
     use_web_search: bool = True,
     use_kb: bool = True,
     kb_file_ids: tuple[str, ...] = (),
@@ -804,7 +869,7 @@ def run_loop(
             ]
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
-            context = _fit_context(messages, settings.llm_context_char_budget)
+            context = _fitted_context(messages, step_tools)
             for kind, payload in stream_chat(
                 context, step_tools, tool_choice=tool_choice
             ):
@@ -873,9 +938,7 @@ def run_loop(
                 streamed = ""
                 result = None
                 try:
-                    context = _fit_context(
-                        messages, settings.llm_context_char_budget
-                    )
+                    context = _fitted_context(messages, step_tools)
                     for kind, payload in stream_chat(context, []):
                         if kind == "text":
                             streamed += payload
@@ -944,9 +1007,10 @@ def run_loop(
                     user_id=user_id,
                     kb_file_ids=kb_file_ids,
                     messages=messages,
+                    chat_session_id=chat_session_id,
                 ):
                     if event.get("type") == "_tool_result":
-                        output = str(event.get("content") or "")
+                        output = event.get("content") or ""
                         cited = list(event.get("sources") or [])
                         continue
                     if event.get("type") == "report_job":
@@ -959,14 +1023,27 @@ def run_loop(
                 )
                 question_token = set_kb_question(_latest_user_text(messages))
                 try:
-                    with collect_citations() as cited:
-                        with user_scope(user_id):
-                            output = execute_tool(call["name"], call["arguments"])
+                    with tool_results_scope(tool_result_index(messages)):
+                        with session_scope(chat_session_id):
+                            with collect_citations() as cited:
+                                with user_scope(user_id):
+                                    output = execute_tool(
+                                        call["name"], call["arguments"]
+                                    )
                 finally:
                     reset_kb_scope(scope_token)
                     reset_rewrite_context(rewrite_token)
                     reset_kb_question(question_token)
             turn_sources = merge_sources(turn_sources, cited)
+            tool_meta = _remember_tool_result(
+                user_id=user_id,
+                chat_session_id=chat_session_id,
+                call_id=str(call.get("id") or ""),
+                name=call["name"],
+                arguments=call["arguments"],
+                output=output,
+                cited=cited,
+            )
             # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
             # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾
             out_key = (call["name"], _output_digest(output))
@@ -989,6 +1066,7 @@ def run_loop(
                     "tool_call_id": call["id"],
                     "name": call["name"],
                     "content": output,
+                    "meta": tool_meta,
                 }
             )
             if run_id:
@@ -1013,7 +1091,7 @@ def run_loop(
             messages.append({"role": "assistant", "content": content})
 
     try:
-        context = _fit_context(messages, settings.llm_context_char_budget)
+        context = _fitted_context(messages, step_tools)
         result: ChatResult | None = None
         for kind, payload in stream_chat(context, []):
             if kind == "text":

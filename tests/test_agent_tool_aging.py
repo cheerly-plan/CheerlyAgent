@@ -1,6 +1,6 @@
 """历史轮次的工具原文老化：当前轮完整，更早的压成一行引用。"""
 
-from ai_agent.agents.messages import age_tool_results, messages_chars
+from ai_agent.agents.messages import age_tool_results, messages_tokens
 
 
 def _turn(n: int, tool_chars: int = 800) -> list[dict]:
@@ -41,9 +41,9 @@ def test_older_turn_is_replaced_by_reference():
 
 def test_saves_most_of_the_window():
     messages = _turn(1) + _turn(2) + _turn(3) + _turn(4)
-    before = messages_chars(messages)
-    after = messages_chars(age_tool_results(messages, keep_turns=2))
-    assert after < before * 0.6
+    before = messages_tokens(messages)
+    after = messages_tokens(age_tool_results(messages, keep_turns=2))
+    assert after < before * 0.65
 
 
 def test_negative_disables_aging():

@@ -10,3 +10,16 @@ os.environ.setdefault("KB_OCR_MODEL", "")
 os.environ.setdefault("REPORT_ANALYSIS_ENABLED", "false")
 # 巨潮自动补齐默认关：回归不打外网；专用用例再 monkeypatch 打开
 os.environ.setdefault("ENABLE_CNINFO_FETCH", "false")
+
+# 单测不依赖 Qwen tokenizer 文件/网络：注入一个确定性的计数器。
+# 语义：1 个字符 ≈ 1 token，足够验证预算裁剪逻辑；tokenizer 本身由
+# tests/test_tokenizer.py 单独验证（有本地文件时）。
+from ai_agent.llm.tokenizer import configure_token_counter
+
+
+class _TestTokenCounter:
+    def count(self, text: str) -> int:
+        return max(1, len(text or ""))
+
+
+configure_token_counter(_TestTokenCounter())

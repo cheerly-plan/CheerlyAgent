@@ -18,6 +18,7 @@ dependencies = [
     "pgvector>=0.5.1",
     "psycopg[binary,pool]>=3.3.6",
     "pydantic-settings>=2.11.0",
+    "tokenizers>=0.21",
     "pymupdf>=2.0",
     "pypdf>=6.21.2",
     "python-docx>=1.2.0",

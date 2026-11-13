@@ -28,7 +28,7 @@ def _isolate_loop_memory():
     short_term_memory.clear()
     with (
         patch("ai_agent.agents.loop.store.list_profile", return_value=[]),
-        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=[]),
+        patch("ai_agent.agents.loop.store.load_all_turns", return_value=[]),
         patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
         patch("ai_agent.agents.loop.store.update_session_summary"),
         patch("ai_agent.agents.loop.store.append_chat"),
@@ -148,38 +148,6 @@ def test_loop_keeps_session_history():
     ]
     assert history.messages[-1]["content"] == "ok"
     assert history.summary == ""
-
-
-def test_loop_summarizes_overflow_turns():
-    original = short_term_memory.max_turns
-    short_term_memory.max_turns = 2
-    seen: list[list[str]] = []
-
-    def fake_stream(messages, tools, **kwargs):
-        seen.append([m.get("content") or "" for m in messages if m["role"] != "system"])
-        yield from _ok_stream(messages, tools)
-
-    try:
-        with patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream):
-            run("第一句", chat_session_id="s-compact")
-            run("第二句", chat_session_id="s-compact")
-            run("第三句", chat_session_id="s-compact")
-            run("第四句", chat_session_id="s-compact")
-        history = short_term_memory.load("s-compact")
-    finally:
-        short_term_memory.max_turns = original
-
-    assert history is not None
-    assert history.summary == "第一句;第二句"
-    assert [m["content"] for m in history.messages] == [
-        "第三句",
-        "ok",
-        "第四句",
-        "ok",
-    ]
-    assert seen[3][0].startswith(SUMMARY_USER_PREFIX)
-    assert "第一句" in seen[3][0]
-    assert seen[3][2:] == ["第二句", "ok", "第三句", "ok", "第四句"]
 
 
 def test_loop_injects_profile_memory():
@@ -309,7 +277,7 @@ def test_run_stream_hydrates_from_db_when_memory_empty():
         yield from _ok_stream(messages, tools)
 
     with (
-        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=history),
+        patch("ai_agent.agents.loop.store.load_all_turns", return_value=history),
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
     ):
         run("下一句", user_id="u1", chat_session_id="s-miss")
@@ -329,7 +297,7 @@ def test_run_stream_hydrates_summary_conversation():
         yield from _ok_stream(messages, tools)
 
     with (
-        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=history),
+        patch("ai_agent.agents.loop.store.load_all_turns", return_value=history),
         patch("ai_agent.agents.loop.store.get_session_summary", return_value="第一轮在问天气"),
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
     ):
@@ -353,7 +321,7 @@ def test_run_stream_skips_db_load_when_short_term_exists():
         run("第一句", user_id="u1", chat_session_id="s-hot")
 
     with (
-        patch("ai_agent.agents.loop.store.load_recent_turns", return_value=poison),
+        patch("ai_agent.agents.loop.store.load_all_turns", return_value=poison),
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
     ):
         run("第二句", user_id="u1", chat_session_id="s-hot")
@@ -391,7 +359,7 @@ def test_run_stream_survives_append_chat_failure():
 def test_run_stream_survives_load_chat_failure():
     with (
         patch(
-            "ai_agent.agents.loop.store.load_recent_turns",
+            "ai_agent.agents.loop.store.load_all_turns",
             side_effect=RuntimeError("db down"),
         ),
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
@@ -402,14 +370,12 @@ def test_run_stream_survives_load_chat_failure():
 def test_run_stream_requests_chat_window():
     with (
         patch(
-            "ai_agent.agents.loop.store.load_recent_turns", return_value=[]
-        ) as load_recent_turns,
+            "ai_agent.agents.loop.store.load_all_turns", return_value=[]
+        ) as load_all_turns,
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
     ):
         run("hi", user_id="u1", chat_session_id="s-lim")
-    load_recent_turns.assert_called_once_with(
-        "u1", "s-lim", turns=short_term_memory.max_turns
-    )
+    load_all_turns.assert_called_once_with("u1", "s-lim")
 
 
 def test_loop_isolates_short_term_by_user():
@@ -418,30 +384,6 @@ def test_loop_isolates_short_term_by_user():
         run("给b", user_id="b", chat_session_id="same")
     assert short_term_memory.load("same", user_id="a").messages[-2]["content"] == "给a"
     assert short_term_memory.load("same", user_id="b").messages[-2]["content"] == "给b"
-
-
-def test_loop_persists_summary_when_overflow():
-    original = short_term_memory.max_turns
-    short_term_memory.max_turns = 1
-    updated: list[str] = []
-
-    def fake_update(user_id, session_id, summary):
-        updated.append(summary)
-
-    try:
-        with (
-            patch(
-                "ai_agent.agents.loop.store.update_session_summary",
-                side_effect=fake_update,
-            ),
-            patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
-        ):
-            run("第一句", user_id="u1", chat_session_id="s-sum-save")
-            run("第二句", user_id="u1", chat_session_id="s-sum-save")
-    finally:
-        short_term_memory.max_turns = original
-
-    assert updated == ["第一句"]
 
 
 _REGEN_HISTORY = [
@@ -458,7 +400,7 @@ def test_regenerate_success_replaces_old_answer_atomically():
 
     with (
         patch(
-            "ai_agent.agents.loop.store.load_recent_turns",
+            "ai_agent.agents.loop.store.load_all_turns",
             return_value=_REGEN_HISTORY,
         ),
         patch(
@@ -498,7 +440,7 @@ def test_regenerate_failure_keeps_old_answer(failing):
 
     with (
         patch(
-            "ai_agent.agents.loop.store.load_recent_turns",
+            "ai_agent.agents.loop.store.load_all_turns",
             return_value=_REGEN_HISTORY,
         ),
         patch(
@@ -694,7 +636,7 @@ def test_run_stream_regenerate_interrupt_keeps_old_answer():
 
     with (
         patch(
-            "ai_agent.agents.loop.store.load_recent_turns",
+            "ai_agent.agents.loop.store.load_all_turns",
             return_value=_REGEN_HISTORY,
         ),
         patch(

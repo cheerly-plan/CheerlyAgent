@@ -4,6 +4,30 @@ from typing import Any
 from pydantic import BaseModel
 
 
+class ToolOutput(str):
+    """工具输出字符串，同时携带未裁剪原文和可持久化的元信息。
+
+    继承 str 是为了不破坏 ``execute_tool`` 的既有契约（调用方/测试都按字符串
+    使用）；loop 在追加 tool 消息前通过 ``.raw`` / ``.meta`` 把全文放进
+    tool result 池，并生成元数据占位。
+    """
+
+    raw: str
+    meta: dict
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        raw: str | None = None,
+        meta: dict | None = None,
+    ) -> "ToolOutput":
+        obj = super().__new__(cls, value)
+        obj.raw = value if raw is None else raw
+        obj.meta = dict(meta or {})
+        return obj
+
+
 class Tool:
     def __init__(
         self,

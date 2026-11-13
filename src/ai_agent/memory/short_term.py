@@ -5,6 +5,7 @@ from threading import Event, Lock, Thread
 from time import monotonic
 
 from ai_agent.core.config import settings
+from ai_agent.llm.tokenizer import count_messages_tokens
 from ai_agent.llm.types import ChatMessage
 
 # 摘要伪装成一轮 user/assistant 对话注入上下文。两个常量迁到了
@@ -60,24 +61,18 @@ def flatten(turns: list[list[ChatMessage]]) -> list[ChatMessage]:
     return [msg for turn in turns for msg in turn]
 
 
-def messages_chars(messages: list[ChatMessage]) -> int:
-    """上下文长度的粗估（字符数）：正文 + tool_calls 参数。
+def messages_tokens(messages: list[ChatMessage]) -> int:
+    """上下文 token 数：Qwen tokenizer 计数 + 每条消息的固定开销。
 
-    送模型前的裁剪与收尾时的摘要共用这一个口径，避免「一边按字符裁、
-    一边按轮数摘要」导致被裁掉的历史既不进窗口也不进摘要。
+    送模型前的裁剪、摘要触发和短期缓存共用这一个口径。
     """
-    total = 0
-    for msg in messages:
-        total += len(str(msg.get("content") or ""))
-        for call in msg.get("tool_calls") or []:
-            total += len(str(call.get("arguments") or ""))
-    return total
+    return count_messages_tokens(messages)
 
 
 def fit_turns(
-    messages: list[ChatMessage], max_chars: int
+    messages: list[ChatMessage], max_tokens: int
 ) -> tuple[list[list[ChatMessage]], list[ChatMessage]]:
-    """按字符预算从最旧整轮丢弃，返回 (保留轮次, 被丢的消息)。
+    """按 token 预算从最旧整轮丢弃，返回 (保留轮次, 被丢的消息)。
 
     system 与摘要对不参与丢弃；最后一个 turn 是当前回合，永不丢。
     被丢的消息由调用方决定是否并入摘要——它们不该静默蒸发。
@@ -85,23 +80,15 @@ def fit_turns(
     system, rest = take_system(messages)
     summary, rest = take_summary(rest)
     turns = iter_turns(rest)
-    if max_chars <= 0 or messages_chars(messages) <= max_chars:
+    if max_tokens <= 0 or messages_tokens(messages) <= max_tokens:
         return turns, []
     sys_text = str(system[0].get("content") or "") if system else ""
     overflow: list[ChatMessage] = []
     while len(turns) > 1:
         overflow.extend(turns.pop(0))
-        if messages_chars(assemble(sys_text, summary, flatten(turns))) <= max_chars:
+        if messages_tokens(assemble(sys_text, summary, flatten(turns))) <= max_tokens:
             break
     return turns, overflow
-
-
-def compact(messages: list[ChatMessage], keep: int) -> list[ChatMessage]:
-    system, rest = take_system(messages)
-    _, rest = take_summary(rest)
-    turns = iter_turns(rest)
-    recent = turns if keep < 0 else turns[-keep:]
-    return [*system, *flatten(recent)]
 
 
 def assemble(
@@ -132,32 +119,25 @@ def crude_summary(previous: str, overflow: list[ChatMessage]) -> str:
 
 def compress(
     messages: list[ChatMessage],
-    keep: int,
     old_summary: str = "",
     summarize: Callable[[str, list[ChatMessage]], str] | None = None,
-    max_chars: int = 0,
+    max_tokens: int = 0,
 ) -> tuple[list[ChatMessage], str]:
     """压缩出「送下一轮模型的窗口 + 覆盖全部被丢历史的摘要」。
 
-    ``keep`` 是轮数窗口，``max_chars`` 是与 ``_fit_context`` 同一个字符预算。
-    两者都要走：只按轮数压缩时，窗口内几轮大工具输出仍会超预算，送模型前
-    被整轮丢掉的历史既没进摘要也没进长期记忆——用户视角就是模型突然忘事。
-    现在预算挤掉的轮次和轮数窗口外的轮次一起进 ``overflow`` 交摘要。
+    不按固定轮数触发；只有总 token 超过 ``max_tokens`` 时，才把最旧轮次
+    挤进 ``overflow`` 交摘要。``max_tokens`` 与 ``_fit_context`` 同一口径。
     """
     found, rest = take_summary(messages)
     summary = old_summary.strip() or found
     turns = iter_turns(rest)
     overflow: list[ChatMessage] = []
-    if keep >= 0 and len(turns) > keep:
-        overflow = flatten(turns[:-keep])
-        turns = turns[-keep:]
-    if max_chars > 0:
+    if max_tokens > 0:
         system, _ = take_system(messages)
         sys_text = str(system[0].get("content") or "") if system else ""
-        turns, dropped = fit_turns(
-            assemble(sys_text, summary, flatten(turns)), max_chars
+        turns, overflow = fit_turns(
+            assemble(sys_text, summary, flatten(turns)), max_tokens
         )
-        overflow = [*overflow, *dropped]
     recent = flatten(turns)
     if not overflow:
         return recent, summary
@@ -186,11 +166,10 @@ class _Entry:
 class ShortTermMemory:
     def __init__(
         self,
-        max_turns: int = settings.short_term_memory_max_turns,
         max_sessions: int = settings.short_term_memory_max_sessions,
         ttl_seconds: int = settings.short_term_memory_ttl_seconds,
         cleanup_interval_seconds: int = settings.short_term_memory_cleanup_interval_seconds,
-        max_chars: int = settings.llm_context_char_budget,
+        max_tokens: int = settings.context_message_token_budget(),
         clock: Callable[[], float] = monotonic,
     ):
         self._sessions: OrderedDict[tuple[str, str], _Entry] = OrderedDict()
@@ -198,8 +177,7 @@ class ShortTermMemory:
         self._stop = Event()
         self._cleaner: Thread | None = None
         self._clock = clock
-        self.max_turns = max_turns
-        self.max_chars = max_chars
+        self.max_tokens = max_tokens
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
         self.cleanup_interval_seconds = cleanup_interval_seconds
@@ -223,9 +201,8 @@ class ShortTermMemory:
         summary: str = "",
     ) -> None:
         key = (user_id, chat_session_id)
-        # 与送模型前的裁剪同口径：轮数窗口之后再按字符预算裁一次，
-        # 保证热缓存里的窗口不会比模型实际看到的更宽（超预算照样被丢）。
-        turns, _ = fit_turns(compact(messages, self.max_turns), self.max_chars)
+        # 与送模型前的裁剪同口径：只按 token 预算裁，不按轮数。
+        turns, _ = fit_turns(messages, self.max_tokens)
         recent = flatten(turns)
         with self._lock:
             self._sessions[key] = _Entry(recent, summary.strip(), self._clock())

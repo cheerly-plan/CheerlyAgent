@@ -275,3 +275,18 @@ def build_web_search_max_results_desc(default: int) -> str:
 
 def build_kb_no_hit_scoped(count: int) -> str:
     return render(KB_NO_HIT_SCOPED_TEMPLATE, COUNT=str(count))
+
+# ——— 通用工具结果读取 ———
+READ_TOOL_RESULT_DESC = (
+    "按 tool_call_id 读取上下文里任意工具结果的完整原文。"
+    "历史轮次的工具结果会被老化成一行引用，引用里带着 tool_call_id；"
+    "需要旧结果里的细节、原文或完整表格时用它读回。"
+    "长结果支持 offset / max_chars 分页续读。"
+)
+READ_TOOL_RESULT_ID_DESC = (
+    "要读取的工具调用 id，从老化行里的 read_tool_result(tool_call_id=\"...\") 原样抄。"
+)
+READ_TOOL_RESULT_OFFSET_DESC = "从第几个字符开始读，默认 0；用于长结果续读。"
+READ_TOOL_RESULT_MAX_CHARS_DESC = (
+    "本次最多返回多少字符，默认 4000；范围 200–6000。"
+)

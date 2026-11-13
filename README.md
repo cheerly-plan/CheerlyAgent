@@ -32,7 +32,7 @@ cp .env.example .env          # 填入必填项，.env 已被 gitignore
 | `DATABASE_URL` | pgvector 连接串 |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | 嵌入模型与维度，两者须匹配 |
 | `MEMORY_TOP_K` / `MEMORY_SCORE_THRESHOLD` | 长期记忆召回条数与相似度阈值 |
-| `SHORT_TERM_MEMORY_MAX_TURNS` / `SHORT_TERM_MEMORY_MAX_TOKENS` | 短期记忆窗口 |
+| `SHORT_TERM_MEMORY_MAX_TOKENS` | 摘要输入（被挤出窗口的历史）的 token 预算 |
 
 另有 `POSTGRES_PASSWORD`：`docker-compose.yml` 里 postgres 服务用它初始化，
 须与 `DATABASE_URL` 中的密码一致。
@@ -147,6 +147,8 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `kb_search` | `tools/kb/kb_search.py` | 知识库检索，返回带文件名/页码/章节的引用片段 |
 | `kg_search` | `tools/kb/kg_search.py` | 知识图谱检索，返回实体邻域（三元组与关系描述） |
 | `kb_list_files` | `tools/kb/kb_list.py` | 列出库内文件清单（替代「目录注入」，模型需要时才主动查） |
+| `kb_read` | `tools/kb/kb_search.py` | 按「文件名 · 第N页」读回知识库原文与上下文 |
+| `read_tool_result` | `tools/misc/tool_result.py` | 按 `tool_call_id` 读回任意历史工具结果全文，支持 offset 分页 |
 | `search_memory` / `write_memory` | `tools/memory/memory.py` | 长期/情景记忆的检索与写入 |
 | `web_search` | `tools/misc/web_search.py` | 联网搜索（`ddgs`） |
 | `get_weather` | `tools/misc/weather.py` | 天气查询 |
@@ -236,7 +238,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 
 | 层 | 模块 | 内容 |
 |---|---|---|
-| 短期 | `short_term.py` | 会话窗口内的最近若干轮，超窗口后滚动摘要；摘要伪装成一轮 user/assistant 注入 |
+| 短期 | `short_term.py` | 会话窗口的最近历史；超 token 预算才滚动摘要（不按固定轮数提前摘要）；摘要伪装成一轮 user/assistant 注入 |
 | 长期 | `long_term.py` | 向量化的事实与偏好，召回按相似度阈值过滤；写入走门控 → 抽取 → 噪声过滤 → 三层去重 |
 | 情景 | `episode_store.py` / `episode_merge.py` | 带 TTL 的事件片段，支持相近情节合并 |
 | 画像 | `profile.py` / `facets.py` / `profile_store.py` | 用户维度的稳定画像与分面；分面分互斥（覆盖）与累积（追加）两类，删除语义按分面区分 |
@@ -253,6 +255,20 @@ L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 
 `DELETE /v1/memory` 清空长期记忆。删除 L1/L2 单条时会同步清理同文候选与归档副本，
 避免删掉后又被后台晋升/蒸馏带回来。归档重复蒸馏走 `ON CONFLICT DO UPDATE`，
 文本、出处与证据会随源数据刷新；查询支持 `limit` / `offset`。
+
+### 上下文管理
+
+- 所有上下文预算按 token 计数：`LLM_CONTEXT_TOKEN_BUDGET` 是硬上限，先扣
+  `CONTEXT_RESERVE_TOKENS`（输出/工具参数预留）和工具 schema 的 token，
+  得到实际输入预算；`CONTEXT_SOFT_LIMIT_RATIO` 是软水位，达到后先把工具
+  结果老化窗口收紧一轮。计数走 Qwen tokenizer（`QWEN_TOKENIZER_PATH`）。
+- 工具结果优先收缩：最近 `TOOL_RESULT_FULL_TURNS` 轮保留原文，更早的换成
+  元数据占位（工具名、命中文件/页码、参数、`tool_call_id`）。
+- 完整原文进入进程内 `tool_result_pool`（LRU + TTL + 单条上限），
+  `read_tool_result` 优先从池里按 `tool_call_id` 读回，池子没有才回落到
+  当前消息；池里的内容是裁剪前原文，不受单工具输出上限影响。
+- 软水位仍不够时整轮丢弃最旧对话；`assistant(tool_calls)` 与对应 `tool`
+  消息始终成对，不产生孤儿 tool 消息。
 
 ## 认证与隔离
 
