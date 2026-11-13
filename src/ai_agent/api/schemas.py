@@ -233,6 +233,10 @@ class InspectTurn(BaseModel):
     index: int
     question: str
     steps: list[InspectStep]
+    # 本轮新增内容的 token（提问 + 工具结果 + 模型输出，本地现算）。
+    # 这是「这一问灌进去多少」，不含被重复传输的历史。
+    input_tokens: int = 0
+    # 网关计费口径：同一轮多次请求的 prompt 相加，历史会被重复计入。
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
 
@@ -242,8 +246,11 @@ class InspectTurns(BaseModel):
     session_id: str
     title: str
     turns: list[InspectTurn]
-    # 整个会话的累计消耗；prompt 按轮相加会重复计历史，所以这里单独给
-    # 「输入合计」与「输出合计」，前端不要自学成才去把 turn 的 prompt 加起来
+    # 会话当前上下文总量（本地现算）：所有消息自身的 token 之和。
+    # 回答「这个会话现在有多满」。
+    context_tokens: int = 0
+    # 网关累计扣费：每次请求的 prompt 之和与输出之和。
+    # 回答「这个会话一共花了多少」，prompt 含历史重传，与 context_tokens 不同口径。
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
 

@@ -3,7 +3,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ai_agent.api.dependencies import require_admin
-from ai_agent.api.inspect_turns import sum_tokens, turns_from_messages
+from ai_agent.api.inspect_turns import (
+    input_tokens,
+    sum_tokens,
+    turns_from_messages,
+)
 from ai_agent.api.schemas import (
     InspectSession,
     InspectSessionList,
@@ -108,6 +112,9 @@ def list_turns(
         session_id=session.id,
         title=session.title,
         turns=turns,
+        # 会话有多满：所有消息自身 token 之和（本地现算，不依赖网关字段）
+        context_tokens=sum(input_tokens(m) for m in messages),
+        # 会话花了多少：网关累计扣费，prompt 含历史重传
         prompt_tokens=sum_tokens([t.prompt_tokens for t in turns]),
         completion_tokens=sum_tokens([t.completion_tokens for t in turns]),
     )

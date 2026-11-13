@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from ai_agent.api.schemas import InspectStep, InspectTurn
+from ai_agent.llm.tokenizer import count_message_tokens
 
 
 def _arguments(raw: object) -> dict[str, Any]:
@@ -47,6 +48,15 @@ def _tokens(msg: Any) -> tuple[int | None, int | None]:
     )
 
 
+def input_tokens(msg: Any) -> int:
+    """一条消息真正占用的上下文 token（含工具调用参数），本地现算。
+
+    与网关的 prompt_tokens 不是一个口径：网关每次请求都重传全部历史，
+    这里只算消息自身的量，用来回答「这一问新灌进去多少」。
+    """
+    return count_message_tokens(dict(msg))
+
+
 def sum_tokens(values: list[int | None]) -> int | None:
     """只要有一条采集到就求和；全都没有返回 None（老数据不显示成 0）。"""
     real = [v for v in values if v is not None]
@@ -60,11 +70,13 @@ def turns_from_messages(messages: list[Any]) -> list[InspectTurn]:
     calls: dict[str, dict[str, Any]] = {}
     turn_prompts: list[int | None] = []
     turn_completions: list[int | None] = []
+    turn_input = 0
     question = ""
     opened = False
 
     def close() -> None:
         nonlocal opened, steps, question, calls, turn_prompts, turn_completions
+        nonlocal turn_input
         if not opened:
             return
         turns.append(
@@ -72,6 +84,9 @@ def turns_from_messages(messages: list[Any]) -> list[InspectTurn]:
                 index=len(turns),
                 question=question,
                 steps=steps,
+                # 本轮新增内容：提问 + 工具结果 + 模型输出，工具结果通常占大头
+                input_tokens=turn_input,
+                # 网关计费口径：同一轮多次请求的 prompt 相加（历史被重复计费）
                 prompt_tokens=sum_tokens(turn_prompts),
                 completion_tokens=sum_tokens(turn_completions),
             )
@@ -80,6 +95,7 @@ def turns_from_messages(messages: list[Any]) -> list[InspectTurn]:
         calls = {}
         turn_prompts = []
         turn_completions = []
+        turn_input = 0
         question = ""
         opened = False
 
@@ -90,9 +106,11 @@ def turns_from_messages(messages: list[Any]) -> list[InspectTurn]:
             close()
             question = content
             opened = True
+            turn_input = input_tokens(msg)
             continue
         if not opened:
             continue
+        turn_input += input_tokens(msg)
         if role == "assistant":
             prompt_tokens, completion_tokens = _tokens(msg)
             if prompt_tokens is not None:

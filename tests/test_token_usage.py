@@ -151,3 +151,56 @@ def test_legacy_messages_show_no_tokens():
     assert turns[0].prompt_tokens is None
     assert turns[0].completion_tokens is None
     assert turns[0].steps[0].prompt_tokens is None
+
+def test_turn_input_tokens_counts_whole_turn():
+    """「当次输入」= 本轮新增内容，工具结果占大头也要算进去。"""
+    tool_text = "检索片段" * 200
+    messages = [
+        {"role": "user", "content": "现金流情况怎么样"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "name": "kb_search", "arguments": {"q": "现金流"}}
+        ], "prompt_tokens": 28552, "completion_tokens": 46},
+        {"role": "tool", "content": tool_text, "tool_call_id": "c1", "name": "kb_search"},
+        {"role": "assistant", "content": "经营活动现金流净额增长。",
+         "prompt_tokens": 30151, "completion_tokens": 879},
+    ]
+
+    turns = turns_from_messages(messages)
+
+    turn = turns[0]
+    # 远小于网关 prompt 之和（历史被重复计费），但远大于提问本身
+    assert turn.input_tokens < 28552 + 30151
+    assert turn.input_tokens > len(tool_text) * 0.5
+    # 输出仍是网关口径
+    assert turn.completion_tokens == 925
+
+
+def test_turn_input_tokens_includes_question_alone():
+    messages = [{"role": "user", "content": "你好"}]
+
+    turns = turns_from_messages(messages)
+
+    assert turns[0].input_tokens > 0
+    assert turns[0].completion_tokens is None
+
+
+def test_input_tokens_resets_between_turns():
+    messages = [
+        {"role": "user", "content": "第一问"},
+        {"role": "assistant", "content": "第一答"},
+        {"role": "user", "content": "第二问"},
+        {"role": "assistant", "content": "第二答"},
+    ]
+
+    turns = turns_from_messages(messages)
+
+    assert len(turns) == 2
+    # 第二轮只算自己那几条消息：不能把第一轮的量带过来。
+    # 直接拿单条消息的基准比较，避免写出恒真的断言。
+    from ai_agent.api.inspect_turns import input_tokens as _msg_tokens
+
+    expected_first = _msg_tokens(messages[0]) + _msg_tokens(messages[1])
+    expected_second = _msg_tokens(messages[2]) + _msg_tokens(messages[3])
+    assert turns[0].input_tokens == expected_first
+    assert turns[1].input_tokens == expected_second
+    assert turns[1].input_tokens < expected_first + expected_second
