@@ -551,6 +551,11 @@ class Settings(BaseSettings):
     short_term_memory_ttl_seconds: int = 3600
     short_term_memory_cleanup_interval_seconds: int = 300
 
+    # 会话摘要注入上下文时的 token 硬上限（0 = 不限制）。摘要每轮注入直到
+    # 会话结束，若不设上限，长会话里「旧摘要 + 新增对话」反复合并会越滚越大，
+    # 早期摘要里的遗漏/错误也随之持续污染后续回复。超限时保头裁剪并记指标。
+    summary_max_tokens: int = 800
+
     title_model: str = ""
     short_term_summary_model: str = ""
     short_term_summary_timeout_seconds: float = 30

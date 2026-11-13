@@ -73,7 +73,7 @@ MEMORY_WRITE_KIND_DESC = (
     "episode: 仅当用户明确要求记住某件近况时使用。"
 )
 
-# 渐进式记忆第 3 步：只在 memory_progressive_enabled 打开时注册。
+# 渐进式记忆第 3 步：expand_memory 恒定注册。
 # 关键是不能让模型以为 search_memory 能查到画像——它只查 episode。
 MEMORY_EXPAND_DESC = (
     "按主题展开当前用户的完整记忆条目（用户画像与跨会话情景记忆），返回原文。"

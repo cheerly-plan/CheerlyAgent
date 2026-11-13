@@ -34,11 +34,6 @@ logger = get_logger(__name__)
 _ARCHIVE_TEXT_MAX = 800
 
 
-def archive_enabled() -> bool:
-    """归档恒定开启（没有总开关，级别由晋升梯的证据门槛控制）。"""
-    return True
-
-
 def _as_memory_item(row: dict, user_id: str) -> MemoryItem:
     return MemoryItem(
         id=str(row.get("id") or ""),
@@ -61,8 +56,6 @@ def search_archive(
     ``offset`` 用于管理页翻页：先按相关性排全部候选，再切片。为了保证
     深页也能拿到结果，读取窗口会随 offset 扩大（上限仍受归档批量控制）。
     """
-    if not archive_enabled():
-        return []
     uid = user_id or current_user_id()
     k = settings.memory_archive_top_k if top_k is None else max(1, top_k)
     start = max(0, int(offset))
@@ -93,13 +86,6 @@ def distill_memory(
     *, user_id: str | None = None, limit: int | None = None
 ) -> dict:
     """蒸馏一个用户的稳定记忆为归档副本。幂等，可反复调用。"""
-    if not archive_enabled():
-        return {
-            "archived": 0,
-            "scanned_candidates": 0,
-            "scanned_episodes": 0,
-            "disabled": True,
-        }
     uid = user_id or current_user_id()
     batch = settings.memory_archive_batch if limit is None else max(1, limit)
 
@@ -168,14 +154,11 @@ def distill_memory(
         "archived": written,
         "scanned_candidates": len(candidates),
         "scanned_episodes": len(episodes),
-        "disabled": False,
     }
 
 
 def distill_all_users(*, limit_per_user: int | None = None) -> int:
     """后台清理线程入口：按用户遍历蒸馏，返回本轮新增归档条数。"""
-    if not archive_enabled():
-        return 0
     users: set[str] = set()
     try:
         users.update(store.list_episode_users(enabled_only=True))

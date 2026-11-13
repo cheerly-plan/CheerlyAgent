@@ -34,7 +34,10 @@ def _fallback_crude(previous: str, overflow: list[ChatMessage]) -> str:
 # 阈值先硬编码，按日志观察误报率后再考虑提升为配置项。
 # 编造危害大，阈值放低些；遗漏相对可容忍且判断模糊，要求高置信才动手
 _FABRICATION_THRESHOLD = 0.6
-_OMISSION_THRESHOLD = 0.85
+# 遗漏虽比编造可容忍，但「已确认约定/未完成事项被漏记」同样会持续误导后续
+# 回复（摘要每轮注入直到会话结束）。从 0.85 收紧到 0.7：仍比编造阈值宽，
+# 但不再放任高遗漏摘要进上下文。
+_OMISSION_THRESHOLD = 0.7
 # 最多生成 2 次：首次 + 带落选原因的重试
 _MAX_SUMMARY_ATTEMPTS = 2
 

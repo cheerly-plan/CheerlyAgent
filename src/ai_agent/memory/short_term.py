@@ -5,7 +5,12 @@ from threading import Event, Lock, Thread
 from time import monotonic
 
 from ai_agent.core.config import settings
-from ai_agent.llm.tokenizer import count_messages_tokens
+from ai_agent.llm import metrics
+from ai_agent.llm.tokenizer import (
+    clip_text_to_tokens,
+    count_messages_tokens,
+    count_tokens,
+)
 from ai_agent.llm.types import ChatMessage
 
 # 摘要伪装成一轮 user/assistant 对话注入上下文。两个常量迁到了
@@ -15,7 +20,7 @@ from ai_agent.llm.types import ChatMessage
 # 改一个字就会静默丢掉全部历史摘要。
 from ai_agent.prompts.memory import SUMMARY_ASSISTANT, SUMMARY_USER_PREFIX
 
-_CRUDE_SUMMARY_MAX_CHARS = 2000
+_CRUDE_SUMMARY_MAX_TOKENS = 1024
 
 
 def take_system(
@@ -106,6 +111,15 @@ def assemble(
     messages: list[ChatMessage] = [{"role": "system", "content": system}]
     text = summary.strip()
     if text:
+        # 摘要每轮注入直到会话结束，不设上限会在长会话里越滚越大，早期摘要
+        # 里的遗漏/错误持续污染后续回复。这里按 token 预算保头裁剪（摘要
+        # 由 LLM 精炼、重要信息靠前，保头丢尾是安全的确定性兜底）。
+        limit = settings.summary_max_tokens
+        if limit > 0 and count_tokens(text) > limit:
+            clipped = clip_text_to_tokens(text, limit, "…")
+            if clipped != text:
+                metrics.incr(metrics.SUMMARY_SHRINK)
+                text = clipped
         messages.append({"role": "user", "content": SUMMARY_USER_PREFIX + text})
         messages.append({"role": "assistant", "content": SUMMARY_ASSISTANT})
     messages.extend(recent)
@@ -123,7 +137,13 @@ def crude_summary(previous: str, overflow: list[ChatMessage]) -> str:
             continue
         label = "用户" if role == "user" else "助手"
         lines.append(f"{label}：{content}")
-    return "\n".join(lines)[:_CRUDE_SUMMARY_MAX_CHARS]
+    # 与正文预算统一走 Qwen tokenizer 口径：中文约 1 字/token、ASCII 约
+    # 4 字符/token，字符硬切会低估英文/数字的占用。保头 + 显式省略标记，
+    # 让降级摘录也不会静默丢尾。未超限时原样返回，不追加标记。
+    text = "\n".join(lines)
+    if count_tokens(text) > _CRUDE_SUMMARY_MAX_TOKENS:
+        return clip_text_to_tokens(text, _CRUDE_SUMMARY_MAX_TOKENS, "…")
+    return text
 
 
 def compress(

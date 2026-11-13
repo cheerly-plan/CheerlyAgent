@@ -1,5 +1,6 @@
 from time import monotonic, sleep
 
+from ai_agent.core.config import settings
 from ai_agent.memory.short_term import (
     SUMMARY_ASSISTANT,
     SUMMARY_USER_PREFIX,
@@ -268,3 +269,37 @@ def test_save_without_trim_keeps_full_window_for_background_finalize():
     loaded = memory.load("s1")
     assert loaded is not None
     assert [m["content"] for m in loaded.messages] == ["1", "a1", "2", "a2"]
+
+
+def test_crude_summary_truncates_by_tokens_not_chars(monkeypatch):
+    # ASCII 一段在 Qwen tokenizer 下约 4 字符/token，1024 token ≈ 4096 字符；
+    # 旧的 2000 字符硬切会在这里砍掉一半。断言输出远短于输入（被裁剪），
+    # 且保留了头部用户/助手内容与省略标记。
+    long_ascii = "word " * 3000  # ~15000 字符
+    overflow = [
+        {"role": "user", "content": "开头"},
+        {"role": "assistant", "content": long_ascii},
+    ]
+    text = crude_summary("", overflow)
+    assert len(text) < len(long_ascii)
+    assert "开头" in text
+    assert text.endswith("…")
+
+
+def test_assemble_clips_oversized_summary(monkeypatch):
+    monkeypatch.setattr(settings, "summary_max_tokens", 20)
+    big = "关键事实一。" * 100
+    messages = assemble("sys", big, [{"role": "user", "content": "现在呢"}])
+    injected = messages[1]["content"]
+    assert injected.startswith(SUMMARY_USER_PREFIX)
+    assert len(injected) < len(SUMMARY_USER_PREFIX + big)
+    # 保头：头部内容仍在，尾部被裁
+    assert "关键事实一" in injected
+    assert injected.endswith("…")
+
+
+def test_assemble_keeps_summary_under_limit(monkeypatch):
+    monkeypatch.setattr(settings, "summary_max_tokens", 800)
+    small = "用户在问天气"
+    messages = assemble("sys", small, [{"role": "user", "content": "现在呢"}])
+    assert messages[1]["content"] == SUMMARY_USER_PREFIX + small

@@ -2,7 +2,8 @@
 
 四条硬约束：
 
-1. 默认全关时候选/归档端点一律 409、零 DB 访问，工具列表与 prompt 不变；
+1. 候选晋升**恒定开启**（无总开关），安全性来自证据门槛本身：候选要跨会话
+   复现才产生、含数字/量化事实必须由人工补 source 才放行、归档永不进 system；
 2. 普通用户强制只看/审自己的记忆，管理员才能指定 user_id；
 3. 含数字/量化事实的候选**必须**由人工填 source 才能批准，服务端绝不
    用 LLM 补出处；人工批准仍过 evaluate_candidate + 画像去重门禁；
@@ -25,7 +26,6 @@ from ai_agent.api.schemas import MemoryApproveRequest, MemoryRejectRequest
 from ai_agent.core.config import settings
 from ai_agent.memory import archive, promotion
 from ai_agent.memory.archive import (
-    archive_enabled,
     distill_all_users,
     distill_memory,
     search_archive,
@@ -100,14 +100,10 @@ def _pending_row(**kwargs):
 
 
 def _enable_promotion(monkeypatch):
-    """渐进式记忆已无开关，恒开；保留这个空实现让既有用例的调用点不动。"""
+    """渐进式记忆已无开关、恒开；空实现仅为保持既有用例调用点不动。"""
 
 
-def _enable_archive(monkeypatch):
-    _enable_promotion(monkeypatch)
-
-
-# ---------- 审核端点：默认关闭 / 权限隔离 ----------
+# ---------- 审核端点：权限隔离 ----------
 
 
 def test_candidate_users_is_admin_only(monkeypatch):
@@ -328,7 +324,7 @@ def test_reject_candidate_ignores_already_decided(monkeypatch):
 
 
 def test_distill_archives_promoted_candidates_and_stable_episodes(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(
         store,
         "list_stable_candidates",
@@ -364,7 +360,6 @@ def test_distill_archives_promoted_candidates_and_stable_episodes(monkeypatch):
         "archived": 2,
         "scanned_candidates": 1,
         "scanned_episodes": 1,
-        "disabled": False,
     }
     kinds = {e["kind"] for e in written["entries"]}
     assert kinds == {"promoted", "episode"}
@@ -375,7 +370,7 @@ def test_distill_archives_promoted_candidates_and_stable_episodes(monkeypatch):
 
 
 def test_distill_fail_open_when_one_source_fails(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(
         store,
         "list_stable_candidates",
@@ -398,7 +393,7 @@ def test_distill_fail_open_when_one_source_fails(monkeypatch):
 
 
 def test_distill_write_failure_is_fail_open(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(store, "list_stable_candidates", lambda *a, **k: [])
     monkeypatch.setattr(store, "list_stable_episodes", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -408,7 +403,7 @@ def test_distill_write_failure_is_fail_open(monkeypatch):
 
 
 def test_search_archive_ranks_by_deterministic_relevance(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     rows = [
         dict(id="a1", kind="episode", text="喜欢简洁的中文回答", facet="other"),
         dict(
@@ -425,7 +420,7 @@ def test_search_archive_ranks_by_deterministic_relevance(monkeypatch):
 
 
 def test_search_archive_fail_open_on_db_error(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(
         store, "list_archive_rows", MagicMock(side_effect=RuntimeError("db down"))
     )
@@ -433,7 +428,7 @@ def test_search_archive_fail_open_on_db_error(monkeypatch):
 
 
 def test_distill_all_users_merges_and_deduplicates(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(store, "list_episode_users", lambda **k: ["u1", "u2"])
     monkeypatch.setattr(
         store, "list_candidate_users", lambda **k: ["u2", "u3"]
@@ -449,12 +444,12 @@ def test_distill_all_users_merges_and_deduplicates(monkeypatch):
 
 
 def test_archive_endpoints_return_payload(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(
         archive, "search_archive", lambda q, **k: [{"id": "a1", "text": "研报约定"}]
     )
     monkeypatch.setattr(
-        archive, "distill_memory", lambda **k: {"archived": 2, "disabled": False}
+        archive, "distill_memory", lambda **k: {"archived": 2}
     )
     out = memory_router.search_archive(
         query="研报", limit=5, user_id=None, user=_user()
@@ -468,7 +463,7 @@ def test_archive_endpoints_return_payload(monkeypatch):
 
 
 def test_expand_memory_appends_archive_when_enabled(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(
         archive,
         "search_archive",
@@ -484,7 +479,7 @@ def test_expand_memory_appends_archive_when_enabled(monkeypatch):
 
 
 def test_expand_memory_archive_failure_does_not_break_other_sections(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     monkeypatch.setattr(
         archive, "search_archive", MagicMock(side_effect=RuntimeError("db down"))
     )
@@ -505,7 +500,7 @@ def test_expand_memory_archive_failure_does_not_break_other_sections(monkeypatch
 
 
 def test_ensure_schema_creates_archive_table_and_review_columns(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     obj, sink = _fake_store(monkeypatch)
     obj.ensure_schema()
     sql = "\n".join(s for s, _ in sink)
@@ -567,7 +562,7 @@ def test_mark_candidate_records_reviewer_when_supplied(monkeypatch):
 
 
 def test_clear_long_term_scopes_optional_tables_by_user(monkeypatch):
-    _enable_archive(monkeypatch)
+    _enable_promotion(monkeypatch)
     # 假连接池让两次 to_regclass 都返回非空：两张可选表都存在时，
     # 删除必须都按 user_id 收敛，不能出现全表 DELETE。
     obj, sink = _fake_store(monkeypatch, rows=[{"t": "agent_memory_candidate"}])
