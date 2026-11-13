@@ -39,7 +39,7 @@ def test_compress_summarizes_overflow_turns():
         seen.append([m["content"] for m in overflow])
         return "旧轮次摘要"
 
-    recent, summary = compress(
+    recent, summary, _cursor = compress(
         messages, old_summary="", summarize=fake_summarize, max_tokens=30
     )
     assert seen == [["1", "a1"]]
@@ -54,7 +54,7 @@ def test_compress_does_not_summarize_within_window():
         {"role": "user", "content": "2"},
         {"role": "assistant", "content": "a2"},
     ]
-    recent, summary = compress(
+    recent, summary, _cursor = compress(
         messages, old_summary="", summarize=lambda *_: "不该调用", max_tokens=10000
     )
     assert summary == ""
@@ -74,7 +74,7 @@ def test_compress_strips_existing_summary_pair():
             {"role": "assistant", "content": "a3"},
         ],
     )
-    recent, summary = compress(
+    recent, summary, _cursor = compress(
         messages, old_summary="已有摘要", summarize=lambda *_: "新摘要", max_tokens=30
     )
     assert summary == "新摘要"
@@ -208,7 +208,7 @@ def test_compress_does_not_summarize_under_token_budget():
         {"role": "user", "content": "3"},
         {"role": "assistant", "content": "a3"},
     ]
-    recent, summary = compress(
+    recent, summary, _cursor = compress(
         messages,
         summarize=lambda *_: "不该调用",
         max_tokens=10000,
@@ -227,10 +227,44 @@ def test_compress_summarizes_when_over_token_budget():
         {"role": "user", "content": "现在呢"},
         {"role": "assistant", "content": "回答"},
     ]
-    recent, summary = compress(
+    recent, summary, _cursor = compress(
         messages,
         summarize=lambda old, overflow: "压缩摘要",
         max_tokens=200,
     )
     assert summary == "压缩摘要"
     assert "旧" * 300 not in [m["content"] for m in recent]
+
+
+def test_compress_returns_summary_cursor_from_dropped_messages():
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "1", "seq": 1},
+        {"role": "assistant", "content": "a1", "seq": 2},
+        {"role": "user", "content": "2", "seq": 3},
+        {"role": "assistant", "content": "a2", "seq": 4},
+        {"role": "user", "content": "3", "seq": 5},
+        {"role": "assistant", "content": "a3", "seq": 6},
+    ]
+    _recent, _summary, cursor = compress(
+        messages,
+        summarize=lambda *_: "s",
+        max_tokens=30,
+        old_cursor=1,
+    )
+    assert cursor >= 1
+    assert cursor in {2, 4}
+
+
+def test_save_without_trim_keeps_full_window_for_background_finalize():
+    memory = ShortTermMemory(max_tokens=10)
+    messages = [
+        {"role": "user", "content": "1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    memory.save("s1", messages, trim=False)
+    loaded = memory.load("s1")
+    assert loaded is not None
+    assert [m["content"] for m in loaded.messages] == ["1", "a1", "2", "a2"]

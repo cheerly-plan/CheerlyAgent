@@ -61,6 +61,14 @@ async def lifespan(app: FastAPI):
     # 先让 HTTP 对外就绪，再把中断文件退回 uploaded 队列；真正的解析由
     # ingest-worker 抢任务执行，避免 OCR 崩在 API 进程里。
     short_term_memory.start_cleanup()
+    # 上下文预算依赖 Qwen tokenizer；后台预热，避免首个请求承担加载/下载
+    # 延迟，也不让镜像不可达时的 30s 超时阻塞启动。不可用时 warmup 内部
+    # 会打 WARNING 并退回启发式计数。
+    from ai_agent.llm.tokenizer import warmup_tokenizer
+
+    threading.Thread(
+        target=warmup_tokenizer, name="tokenizer-warmup", daemon=True
+    ).start()
     maintenance_cleaner.start()
 
     def _recover_kb() -> None:

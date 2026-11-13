@@ -74,3 +74,50 @@ def test_aged_stub_points_to_location():
     stub = age_tool_results(messages, keep_turns=2)[2]["content"]
     assert "kb_read(location=" in stub
     assert "ref=" not in stub
+
+
+def test_target_aging_prefers_large_uncited_and_keeps_current_turn():
+    messages = [
+        {"role": "user", "content": "问1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "big", "name": "web_search", "arguments": {}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "big",
+            "name": "web_search",
+            "content": "大" * 2000,
+        },
+        {"role": "user", "content": "问2"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "cited", "name": "kb_search", "arguments": {}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "cited",
+            "name": "kb_search",
+            "content": "小" * 500,
+            "meta": {"citations": [{"filename": "a.pdf", "page": 1}]},
+        },
+        {"role": "user", "content": "问3"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "cur", "name": "web_search", "arguments": {}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "cur",
+            "name": "web_search",
+            "content": "当前" * 2000,
+        },
+    ]
+    total = messages_tokens(messages)
+    aged = age_tool_results(messages, target_tokens=total - 1000)
+    assert "原文已省略" in aged[2]["content"]      # 大且未被引用，先收
+    assert "小" * 500 in aged[5]["content"]          # 有 citation，保留
+    assert "当前" * 2000 in aged[8]["content"]       # 当前轮永不老化

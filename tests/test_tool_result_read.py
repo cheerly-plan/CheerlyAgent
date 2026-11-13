@@ -260,3 +260,21 @@ def test_aged_stub_uses_citations_from_meta():
     stub = age_tool_results(messages, keep_turns=1)[2]["content"]
     assert "绿的谐波2026Q3.pdf · 第12页" in stub
     assert "原文已省略" in stub
+
+
+def test_read_tool_result_falls_back_to_db(monkeypatch):
+    from ai_agent.storage.store import store
+
+    monkeypatch.setattr(
+        store,
+        "load_tool_result",
+        lambda user, session, call_id: {
+            "name": "web_search",
+            "content": "DB-FULL-TEXT",
+            "meta": {},
+        },
+    )
+    with tool_results_scope({}), user_scope("u1"), session_scope("s1"):
+        out = read_tool_result("db1")
+    assert "DB-FULL-TEXT" in out
+    assert "[web_search · db1]" in out

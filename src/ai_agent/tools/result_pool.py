@@ -87,6 +87,20 @@ class ToolResultPool:
             self._items.move_to_end(key)
             return dict(item)
 
+    def evict_calls(
+        self, user_id: str, chat_session_id: str, call_ids: set[str]
+    ) -> int:
+        """淘汰指定工具快照；DB 历史仍可由 read_tool_result 兜底。"""
+        if not call_ids:
+            return 0
+        with self._lock:
+            removed = 0
+            for call_id in call_ids:
+                key = (user_id or "", chat_session_id or "", call_id)
+                if self._items.pop(key, None) is not None:
+                    removed += 1
+            return removed
+
     def clear(
         self, user_id: str | None = None, chat_session_id: str | None = None
     ) -> int:

@@ -80,14 +80,23 @@ def fit_turns(
     system, rest = take_system(messages)
     summary, rest = take_summary(rest)
     turns = iter_turns(rest)
-    if max_tokens <= 0 or messages_tokens(messages) <= max_tokens:
+    if max_tokens <= 0:
         return turns, []
     sys_text = str(system[0].get("content") or "") if system else ""
+    # 预计算 system/摘要和每轮 token，丢弃时做减法；避免每丢一轮都重新
+    # tokenize 整段历史（O(n²) tokenizer 调用）。
+    base = messages_tokens(assemble(sys_text, summary, []))
+    if not sys_text:
+        # assemble 会补一个空 system；原 messages 没有 system 时扣掉它的开销
+        base -= 4
+    turn_tokens = [messages_tokens(turn) for turn in turns]
+    total = base + sum(turn_tokens)
+    if total <= max_tokens:
+        return turns, []
     overflow: list[ChatMessage] = []
-    while len(turns) > 1:
+    while len(turns) > 1 and total > max_tokens:
         overflow.extend(turns.pop(0))
-        if messages_tokens(assemble(sys_text, summary, flatten(turns))) <= max_tokens:
-            break
+        total -= turn_tokens.pop(0)
     return turns, overflow
 
 
@@ -122,7 +131,8 @@ def compress(
     old_summary: str = "",
     summarize: Callable[[str, list[ChatMessage]], str] | None = None,
     max_tokens: int = 0,
-) -> tuple[list[ChatMessage], str]:
+    old_cursor: int = 0,
+) -> tuple[list[ChatMessage], str, int]:
     """压缩出「送下一轮模型的窗口 + 覆盖全部被丢历史的摘要」。
 
     不按固定轮数触发；只有总 token 超过 ``max_tokens`` 时，才把最旧轮次
@@ -139,21 +149,29 @@ def compress(
             assemble(sys_text, summary, flatten(turns)), max_tokens
         )
     recent = flatten(turns)
+    cursor = old_cursor
+    if overflow:
+        seqs = [
+            int(msg["seq"]) for msg in overflow if msg.get("seq") is not None
+        ]
+        if seqs:
+            cursor = max(cursor, max(seqs))
     if not overflow:
-        return recent, summary
+        return recent, summary, cursor
     if summarize is None:
-        return recent, crude_summary(summary, overflow)
+        return recent, crude_summary(summary, overflow), cursor
     try:
         text = (summarize(summary, overflow) or "").strip()
     except Exception:
         text = ""
-    return recent, text or crude_summary(summary, overflow)
+    return recent, text or crude_summary(summary, overflow), cursor
 
 
 @dataclass(slots=True)
 class ShortTermState:
     messages: list[ChatMessage]
     summary: str
+    summary_until_seq: int = 0
 
 
 @dataclass(slots=True)
@@ -161,6 +179,7 @@ class _Entry:
     messages: list[ChatMessage]
     summary: str
     used_at: float
+    summary_until_seq: int = 0
 
 
 class ShortTermMemory:
@@ -191,7 +210,9 @@ class ShortTermMemory:
                 return None
             entry.used_at = self._clock()
             self._sessions.move_to_end(key)
-            return ShortTermState(list(entry.messages), entry.summary)
+            return ShortTermState(
+                list(entry.messages), entry.summary, entry.summary_until_seq
+            )
 
     def save(
         self,
@@ -199,13 +220,21 @@ class ShortTermMemory:
         messages: list[ChatMessage],
         user_id: str = "default",
         summary: str = "",
+        summary_until_seq: int = 0,
+        trim: bool = True,
     ) -> None:
         key = (user_id, chat_session_id)
-        # 与送模型前的裁剪同口径：只按 token 预算裁，不按轮数。
-        turns, _ = fit_turns(messages, self.max_tokens)
+        # trim=False 用于收尾快路径：先保留全量窗口，避免后台摘要还没跑完
+        # 时下一轮只看到「已从缓存裁掉、但尚未进摘要」的轮次。
+        turns, _ = fit_turns(messages, self.max_tokens if trim else 0)
         recent = flatten(turns)
         with self._lock:
-            self._sessions[key] = _Entry(recent, summary.strip(), self._clock())
+            self._sessions[key] = _Entry(
+                recent,
+                summary.strip(),
+                self._clock(),
+                max(0, int(summary_until_seq)),
+            )
             self._sessions.move_to_end(key)
             self._evict()
 

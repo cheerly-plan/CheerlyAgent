@@ -17,11 +17,14 @@ from ai_agent.prompts.tools import (
     READ_TOOL_RESULT_MAX_CHARS_DESC,
     READ_TOOL_RESULT_OFFSET_DESC,
 )
+from ai_agent.core.logging import get_logger
 from ai_agent.llm import metrics
 from ai_agent.storage.db import current_user_id
 from ai_agent.tools.base import Tool
 from ai_agent.tools.context import current_session_id, get_tool_result
 from ai_agent.tools.result_pool import tool_result_pool
+
+logger = get_logger(__name__)
 
 
 class ReadToolResultArgs(BaseModel):
@@ -60,11 +63,28 @@ def read_tool_result(
     else:
         ref = get_tool_result(call_id)
         if ref is None:
-            metrics.incr(metrics.TOOL_RESULT_POOL_MISS)
-            return (
-                f"没有找到 tool_call_id={call_id} 的工具结果；"
-                "它可能已被整轮裁剪，请重新调用原工具。"
-            )
+            # 池子淘汰/进程重启后，回落到持久化历史（内容可能已被单工具
+            # 输出上限裁剪，但仍是当时模型看过的版本）。
+            try:
+                from ai_agent.storage.store import store
+
+                db_row = store.load_tool_result(
+                    current_user_id(), current_session_id(), call_id
+                )
+            except Exception:
+                logger.exception("工具结果 DB 兜底查询失败 call_id=%s", call_id)
+                db_row = None
+            if db_row is None:
+                metrics.incr(metrics.TOOL_RESULT_POOL_MISS)
+                return (
+                    f"没有找到 tool_call_id={call_id} 的工具结果；"
+                    "它可能已被整轮裁剪，请重新调用原工具。"
+                )
+            metrics.incr(metrics.TOOL_RESULT_DB_HIT)
+            ref = {
+                "name": db_row.get("name") or "tool",
+                "content": db_row.get("content") or "",
+            }
 
     content = ref.get("content") or ""
     name = ref.get("name") or "tool"

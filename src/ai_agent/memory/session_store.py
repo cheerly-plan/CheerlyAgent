@@ -25,6 +25,9 @@ def _chat_message_from_row(row: dict) -> ChatMessage:
     meta = row.get("meta")
     if meta:
         msg["meta"] = meta
+    # seq 只在 load_all_turns 里取；给摘要游标用，_to_openai_messages 会忽略
+    if row.get("seq") is not None:
+        msg["seq"] = int(row["seq"])
     return msg
 
 
@@ -389,46 +392,98 @@ class SessionStore(Database):
         return [_chat_message_from_row(row) for row in rows]
 
     def load_all_turns(
-        self, user_id: str, chat_session_id: str
+        self, user_id: str, chat_session_id: str, after_seq: int = 0
     ) -> list[ChatMessage]:
-        """加载会话全部消息；预算模式不再按轮数截断历史。"""
+        """加载 ``after_seq`` 之后的消息；默认(0)加载全部历史。
+
+        摘要已经覆盖的 seq 由 ``agent_session.summary_until_seq`` 提供，
+        冷启动只取游标之后的部分，避免 summary 与原文重复进入上下文。
+        """
         with self._get_pool().connection() as conn:
             rows = conn.execute(
                 """
-                SELECT role, content, tool_calls, tool_call_id, name, meta
+                SELECT seq, role, content, tool_calls, tool_call_id, name, meta
                 FROM agent_chat_history
-                WHERE user_id = %s AND chat_session_id = %s
+                WHERE user_id = %s AND chat_session_id = %s AND seq > %s
                 ORDER BY seq
                 """,
-                (user_id, chat_session_id),
+                (user_id, chat_session_id, max(0, int(after_seq))),
             ).fetchall()
         return [_chat_message_from_row(row) for row in rows]
 
-    def get_session_summary(self, user_id: str, session_id: str) -> str:
+    def get_session_state(self, user_id: str, session_id: str) -> tuple[str, int]:
+        """返回 (summary, summary_until_seq)。"""
         with self._get_pool().connection() as conn:
             row = conn.execute(
                 """
-                SELECT summary
+                SELECT summary, summary_until_seq
                 FROM agent_session
                 WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
                 """,
                 (user_id, session_id),
             ).fetchone()
-        return (row["summary"] or "").strip() if row else ""
+        if not row:
+            return "", 0
+        return (row["summary"] or "").strip(), int(row.get("summary_until_seq") or 0)
+
+    def get_session_summary(self, user_id: str, session_id: str) -> str:
+        return self.get_session_state(user_id, session_id)[0]
 
     def update_session_summary(
-        self, user_id: str, session_id: str, summary: str
+        self,
+        user_id: str,
+        session_id: str,
+        summary: str,
+        summary_until_seq: int | None = None,
     ) -> None:
         with self._get_pool().connection() as conn:
-            conn.execute(
-                """
-                UPDATE agent_session
-                SET summary = %s
-                WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
-                """,
-                (summary, user_id, session_id),
-            )
+            if summary_until_seq is None:
+                conn.execute(
+                    """
+                    UPDATE agent_session
+                    SET summary = %s
+                    WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
+                    """,
+                    (summary, user_id, session_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE agent_session
+                    SET summary = %s,
+                        summary_until_seq = GREATEST(summary_until_seq, %s)
+                    WHERE user_id = %s AND id::text = %s AND deleted_at IS NULL
+                    """,
+                    (summary, int(summary_until_seq), user_id, session_id),
+                )
             conn.commit()
+
+    def load_tool_result(
+        self, user_id: str, chat_session_id: str, tool_call_id: str
+    ) -> dict | None:
+        """按 call_id 从持久化历史取回工具结果（池子淘汰/重启后的兜底）。"""
+        call_id = (tool_call_id or "").strip()
+        if not call_id:
+            return None
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT content, name, meta
+                FROM agent_chat_history
+                WHERE user_id = %s AND chat_session_id = %s
+                  AND tool_call_id = %s
+                ORDER BY seq DESC
+                LIMIT 1
+                """,
+                (user_id, chat_session_id, call_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "content": row["content"] or "",
+            "name": row["name"] or "tool",
+            "meta": row["meta"] or {},
+        }
 
     def clear_chat(self, user_id: str, chat_session_id: str | None = None) -> None:
         with self._get_pool().connection() as conn:
@@ -443,7 +498,7 @@ class SessionStore(Database):
                 conn.execute(
                     """
                     UPDATE agent_session
-                    SET summary = ''
+                    SET summary = '', summary_until_seq = 0
                     WHERE user_id = %s AND id::text = %s
                     """,
                     (user_id, chat_session_id),
@@ -454,7 +509,8 @@ class SessionStore(Database):
                     (user_id,),
                 )
                 conn.execute(
-                    "UPDATE agent_session SET summary = '' WHERE user_id = %s",
+                    "UPDATE agent_session "
+                    "SET summary = '', summary_until_seq = 0 WHERE user_id = %s",
                     (user_id,),
                 )
             conn.commit()

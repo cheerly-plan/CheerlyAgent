@@ -234,6 +234,13 @@ class Database:
             )
             conn.execute(
                 """
+                CREATE INDEX IF NOT EXISTS agent_chat_history_tool_result_idx
+                ON agent_chat_history (user_id, chat_session_id, tool_call_id)
+                WHERE tool_call_id IS NOT NULL
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS agent_session (
                     id UUID PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -264,6 +271,12 @@ class Database:
                 """
                 ALTER TABLE agent_session
                 ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE agent_session
+                ADD COLUMN IF NOT EXISTS summary_until_seq BIGINT NOT NULL DEFAULT 0
                 """
             )
             conn.execute(

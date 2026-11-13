@@ -65,7 +65,7 @@ def test_compress_folds_budget_overflow_into_summary():
         seen.append([str(m.get("content") or "") for m in overflow])
         return "含 ALPHA 的摘要"
 
-    recent, summary = compress(
+    recent, summary, _cursor = compress(
         messages, old_summary="", summarize=fake_summarize, max_tokens=500
     )
     assert seen and "关键事实：代号 ALPHA" in seen[0]
@@ -81,7 +81,7 @@ def test_compress_budget_does_not_change_short_conversations():
         {"role": "user", "content": "2"},
         {"role": "assistant", "content": "a2"},
     ]
-    recent, summary = compress(
+    recent, summary, _cursor = compress(
         messages,
         summarize=lambda *_: "不该调用",
         max_tokens=40000,
@@ -256,12 +256,15 @@ def test_context_limits_subtract_reserve_and_apply_soft_ratio(monkeypatch):
     assert settings.context_token_limits() == (9000, 7200)
 
 
-def test_soft_limit_ages_tool_results_more_aggressively(monkeypatch):
+def test_soft_limit_ages_or_prunes_old_tool_results(monkeypatch):
     from ai_agent.core.config import settings
 
     monkeypatch.setattr(settings, "tool_result_full_turns", 2)
     messages = _tool_turn(1) + _tool_turn(2) + _tool_turn(3)
     fitted = _fit_context(messages, 100000, soft_limit=1)
-    assert "原文已省略" in fitted[2]["content"]  # 第 1 轮被提前老化
-    assert "原文已省略" in fitted[5]["content"]  # 软水位下只保留当前轮
-    assert fitted[8]["content"].endswith("数" * 300)  # 当前轮完整
+    tool_msgs = [m for m in fitted if m.get("role") == "tool"]
+    # 旧轮次要么被老化成占位，要么被成对裁掉；当前轮必须完整
+    assert all("数" * 300 not in m["content"] for m in tool_msgs[:-1])
+    assert tool_msgs[-1]["content"].endswith("数" * 300)
+    calls = {c["id"] for m in fitted for c in (m.get("tool_calls") or [])}
+    assert all(m["tool_call_id"] in calls for m in tool_msgs)

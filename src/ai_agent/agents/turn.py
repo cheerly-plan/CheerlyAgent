@@ -11,7 +11,9 @@ from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.long_term import capture_long_term
+from ai_agent.memory.prune import prune_tool_pairs, removed_tool_call_ids
 from ai_agent.memory.short_term import compress, short_term_memory
+from ai_agent.tools.result_pool import tool_result_pool
 from ai_agent.storage.store import store
 from ai_agent.memory.summarize import summarize_session
 
@@ -61,17 +63,21 @@ def _checkpoint_finish(run_id: str, status: str) -> None:
         logger.exception("checkpoint 终态写入失败 run_id=%s status=%s", run_id, status)
 
 
-def _session_state(user_id: str, chat_session_id: str) -> tuple[list[ChatMessage], str]:
+def _session_state(
+    user_id: str, chat_session_id: str
+) -> tuple[list[ChatMessage], str, int]:
     cached = short_term_memory.load(chat_session_id, user_id=user_id)
     if cached is not None:
-        return cached.messages, cached.summary
+        return cached.messages, cached.summary, cached.summary_until_seq
     try:
-        summary = store.get_session_summary(user_id, chat_session_id)
-        recent = store.load_all_turns(user_id, chat_session_id)
+        summary, cursor = store.get_session_state(user_id, chat_session_id)
+        recent = store.load_all_turns(
+            user_id, chat_session_id, after_seq=cursor
+        )
     except Exception:
         logger.exception("会话记忆加载失败")
-        return [], ""
-    return recent, summary
+        return [], "", 0
+    return recent, summary, cursor
 
 
 def _persist_turn(user_id: str, chat_session_id: str, turn: list[ChatMessage]) -> None:
@@ -119,24 +125,43 @@ def _compress_and_cache(
     chat_session_id: str,
     messages: list[ChatMessage],
     summary: str,
+    summary_until_seq: int = 0,
 ) -> None:
-    window, new_summary = messages, summary
+    window, new_summary, new_cursor = messages, summary, summary_until_seq
     try:
-        window, new_summary = compress(
+        window, new_summary, new_cursor = compress(
             messages,
             old_summary=summary,
             summarize=summarize_session,
             # 与 _fit_context 同一个口径：被 token 预算挤掉的轮次也要进摘要，
             # 否则它们只存在于「送模型副本」的裁剪里，下一轮就彻底找不回。
             max_tokens=settings.context_message_token_budget(),
+            old_cursor=summary_until_seq,
         )
     except Exception:
         logger.exception("短期记忆压缩失败")
-    if new_summary != summary:
+    # 摘要/裁剪后不再进入活跃窗口的工具对，连同池快照一起淘汰；
+    # 原文仍在 agent_chat_history，read_tool_result 可 DB 兜底。
+    target = settings.context_message_token_budget()
+    window = prune_tool_pairs(window, target, consumed_only=True)
+    window = prune_tool_pairs(window, target)
+    removed_ids = removed_tool_call_ids(messages, window)
+    tool_result_pool.evict_calls(user_id, chat_session_id, removed_ids)
+
+    if new_summary != summary or new_cursor != summary_until_seq:
         try:
-            store.update_session_summary(user_id, chat_session_id, new_summary)
+            store.update_session_summary(
+                user_id,
+                chat_session_id,
+                new_summary,
+                summary_until_seq=new_cursor if new_cursor > 0 else None,
+            )
         except Exception:
             logger.exception("会话摘要保存失败")
     short_term_memory.save(
-        chat_session_id, window, user_id=user_id, summary=new_summary
+        chat_session_id,
+        window,
+        user_id=user_id,
+        summary=new_summary,
+        summary_until_seq=new_cursor,
     )

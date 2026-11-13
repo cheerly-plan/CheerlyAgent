@@ -470,6 +470,64 @@ def test_load_recent_turns_keeps_complete_tool_chain(mem_store):
     ]
 
 
+def test_session_cursor_loads_only_unsummarized_turns(mem_store):
+    session = mem_store.create_session("a", "cursor-1")
+    mem_store.append_chat(
+        "a",
+        session.id,
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "2"},
+            {"role": "assistant", "content": "a2"},
+        ],
+    )
+    mem_store.update_session_summary("a", session.id, "前两轮", summary_until_seq=2)
+    summary, cursor = mem_store.get_session_state("a", session.id)
+    assert summary == "前两轮"
+    assert cursor == 2
+    loaded = mem_store.load_all_turns("a", session.id, after_seq=cursor)
+    assert [m["content"] for m in loaded] == ["2", "a2"]
+    assert [m["seq"] for m in loaded] == [3, 4]
+
+
+def test_clear_chat_resets_summary_cursor(mem_store):
+    session = mem_store.create_session("a", "cursor-clear")
+    mem_store.append_chat("a", session.id, [{"role": "user", "content": "1"}])
+    mem_store.update_session_summary("a", session.id, "旧摘要", summary_until_seq=1)
+    mem_store.clear_chat("a", session.id)
+    assert mem_store.get_session_state("a", session.id) == ("", 0)
+
+
+def test_load_tool_result_by_call_id(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "查"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "name": "get_weather", "arguments": {}}
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "name": "get_weather",
+                "content": "20度",
+                "meta": {"tool": "get_weather"},
+            },
+        ],
+    )
+    row = mem_store.load_tool_result("a", "s1", "c1")
+    assert row is not None
+    assert row["content"] == "20度"
+    assert row["name"] == "get_weather"
+    assert mem_store.load_tool_result("a", "s1", "missing") is None
+
+
 def test_session_summary_roundtrip_and_clears_with_chat(mem_store):
     session = mem_store.create_session("a", "sum-1")
     assert mem_store.get_session_summary("a", session.id) == ""

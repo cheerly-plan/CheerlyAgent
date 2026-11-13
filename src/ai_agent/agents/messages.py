@@ -16,6 +16,7 @@ from ai_agent.core.text import clip_text
 from ai_agent.llm import metrics
 from ai_agent.llm.tokenizer import clip_text_to_tokens, count_tokens
 from ai_agent.llm.types import ChatMessage
+from ai_agent.memory.prune import prune_tool_pairs
 from ai_agent.memory.short_term import (
     assemble,
     fit_turns,
@@ -172,96 +173,145 @@ _AGED_MARK = (
 _KB_TOOLS = ("kb_search", "kg_search")
 
 
-def age_tool_results(
-    messages: list[ChatMessage], keep_turns: int | None = None
-) -> list[ChatMessage]:
-    """把**更早轮次**的工具原文换成一行引用，只留最近 ``keep_turns`` 轮原文。
-
-    当前这轮的工具结果必须完整：模型正在读它、要直接引用里面的数字。
-    真正该精简的是历史轮次——实测 5 轮窗口里工具输出占 96%，而越早的
-    检索结果与当前问题越远，却仍以原文占着位置。
-
-    换掉的只是送模型的那份副本：落库、checkpoint、前端引用都不动。省略行里
-    带上当时的调用参数，模型需要细节时照着再查一次即可（一次检索 0.3 秒，
-    比每轮背几万字便宜）。
-    """
-    from ai_agent.core.config import settings
-
-    keep = settings.tool_result_full_turns if keep_turns is None else keep_turns
-    if keep is None or keep < 0:
-        return messages
-    # 从后往前数 user 消息，定位「轮次」边界
-    user_positions = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-    if not user_positions:
-        return messages
-    # keep=0 的语义是「只保留当前轮」，边界要落在**最后一条 user 消息**上；
-    # 直接用 len(messages) 会把当前轮正在用的工具结果也压掉。
-    if keep and len(user_positions) <= keep:
-        return messages
-    boundary = user_positions[-keep] if keep else user_positions[-1]
+def _calls_brief(messages: list[ChatMessage]) -> dict[str, str]:
     calls: dict[str, str] = {}
     for msg in messages:
         for call in msg.get("tool_calls") or []:
             args = call.get("arguments") or {}
             brief = json.dumps(args, ensure_ascii=False)
             calls[call.get("id", "")] = f"{call.get('name')}({clip_text(brief, 60)})"
+    return calls
+
+
+def _aged_message(msg: ChatMessage, calls: dict[str, str]) -> ChatMessage:
+    content = str(msg.get("content") or "")
+    head = content.splitlines()[0].strip()
+    call_id = str(msg.get("tool_call_id") or "").strip()
+    raw_meta = msg.get("meta")
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    name = str(meta.get("tool") or msg.get("name") or "")
+    note = calls.get(call_id, "")
+    try:
+        chars = int(meta.get("raw_chars") or len(content))
+    except (TypeError, ValueError):
+        chars = len(content)
+    hint = ""
+    citations = meta.get("citations") or []
+    if citations:
+        first = citations[0] if isinstance(citations[0], dict) else {}
+        where = str(first.get("filename") or "").strip()
+        page = first.get("page")
+        if where and page is not None:
+            where = f"{where} · 第{page}页"
+        if where:
+            extra = f" 等{len(citations)}处" if len(citations) > 1 else ""
+            hint = f"；命中：{clip_text(where, 40)}{extra}"
+    elif meta.get("preview"):
+        hint = f"；开头：{clip_text(str(meta['preview']), 40)}"
+    ref_hint = (
+        f"；原文用 read_tool_result(tool_call_id=\"{call_id}\")"
+        if call_id
+        else ""
+    )
+    kb_hint = (
+        "；知识库也可用 kb_read(location=\"文件名 · 第N页\")"
+        if name in _KB_TOOLS
+        else ""
+    )
+    stub = _AGED_MARK.format(
+        chars=chars,
+        note=f"，检索：{note}" if note else "",
+        ref_hint=ref_hint,
+        kb_hint=kb_hint,
+    )
+    if hint:
+        stub = stub.replace("原文已省略", f"原文已省略{hint}", 1)
+    return {**msg, "content": f"{clip_text(head, 80)}\n{stub}"}
+
+
+def age_tool_results(
+    messages: list[ChatMessage],
+    keep_turns: int | None = None,
+    *,
+    target_tokens: int = 0,
+) -> list[ChatMessage]:
+    """按 token 成本/新旧/是否被引用，把历史工具原文换成元数据占位。
+
+    - ``target_tokens > 0``：预算模式。只在总量超过目标时，按「可省 token
+      数 × 新旧程度」从高到低收；有 citations 的结果降权（优先保留可溯源
+      的内容）。当前轮的工具结果永不老化。
+    - ``target_tokens == 0``：兼容旧调用，仍按 ``keep_turns`` 老化更早轮次；
+      生产路径已改用 target_tokens。
+
+    换掉的只是送模型副本：落库、checkpoint、前端引用都不动；原文在
+    ``tool_result_pool`` / messages 里，可用 ``read_tool_result`` 读回。
+    """
+    if target_tokens > 0:
+        total = messages_tokens(messages)
+        if total <= target_tokens:
+            return messages
+        last_user = -1
+        for index, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user = index
+        if last_user < 0:
+            return messages
+        calls = _calls_brief(messages)
+        candidates: list[tuple[float, int, ChatMessage, int]] = []
+        for index, msg in enumerate(messages):
+            if index > last_user or msg.get("role") != "tool":
+                continue
+            content = str(msg.get("content") or "")
+            if len(content) <= 200:
+                continue
+            stub = _aged_message(msg, calls)
+            savings = messages_tokens([msg]) - messages_tokens([stub])
+            if savings <= 0:
+                continue
+            later_users = sum(
+                1 for later in messages[index + 1 :] if later.get("role") == "user"
+            )
+            meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
+            cited = bool(meta.get("citations"))
+            score = savings * (1 + later_users * 0.25)
+            if cited:
+                score *= 0.5
+            candidates.append((score, index, stub, savings))
+        if not candidates:
+            return messages
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        out = list(messages)
+        for _score, index, stub, savings in candidates:
+            out[index] = stub
+            total -= savings
+            if total <= target_tokens:
+                break
+        return out
+
+    from ai_agent.core.config import settings
+
+    keep = settings.tool_result_full_turns if keep_turns is None else keep_turns
+    if keep is None or keep < 0:
+        return messages
+    user_positions = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    if not user_positions:
+        return messages
+    if keep and len(user_positions) <= keep:
+        return messages
+    boundary = user_positions[-keep] if keep else user_positions[-1]
+    calls = _calls_brief(messages)
     out: list[ChatMessage] = []
     changed = False
     for index, msg in enumerate(messages):
         if index >= boundary or msg.get("role") != "tool":
             out.append(msg)
             continue
-        content = str(msg.get("content") or "")
-        if len(content) <= 200:
-            out.append(msg)          # 短的没必要换，标记本身可能更长
+        if len(str(msg.get("content") or "")) <= 200:
+            out.append(msg)
             continue
-        head = content.splitlines()[0].strip()
-        call_id = str(msg.get("tool_call_id") or "").strip()
-        raw_meta = msg.get("meta")
-        meta = raw_meta if isinstance(raw_meta, dict) else {}
-        name = str(meta.get("tool") or msg.get("name") or "")
-        note = calls.get(call_id, "")
-        try:
-            chars = int(meta.get("raw_chars") or len(content))
-        except (TypeError, ValueError):
-            chars = len(content)
-        hint = ""
-        citations = meta.get("citations") or []
-        if citations:
-            first = citations[0] if isinstance(citations[0], dict) else {}
-            where = str(first.get("filename") or "").strip()
-            page = first.get("page")
-            if where and page is not None:
-                where = f"{where} · 第{page}页"
-            if where:
-                extra = f" 等{len(citations)}处" if len(citations) > 1 else ""
-                hint = f"；命中：{clip_text(where, 40)}{extra}"
-        elif meta.get("preview"):
-            hint = f"；开头：{clip_text(str(meta['preview']), 40)}"
-        ref_hint = (
-            f"；原文用 read_tool_result(tool_call_id=\"{call_id}\")"
-            if call_id
-            else ""
-        )
-        kb_hint = (
-            "；知识库也可用 kb_read(location=\"文件名 · 第N页\")"
-            if name in _KB_TOOLS
-            else ""
-        )
-        stub = _AGED_MARK.format(
-            chars=chars,
-            note=f"，检索：{note}" if note else "",
-            ref_hint=ref_hint,
-            kb_hint=kb_hint,
-        )
-        # 元数据提示插在省略说明后面，保持「原文已省略」这句在前
-        if hint:
-            stub = stub.replace("原文已省略", f"原文已省略{hint}", 1)
-        out.append({**msg, "content": f"{clip_text(head, 80)}\n{stub}"})
+        out.append(_aged_message(msg, calls))
         changed = True
-    # 没有可老化的内容时返回原对象：调用方依赖「预算充裕就原样返回」的语义
     return out if changed else messages
-
 
 def _fit_context(
     messages: list[ChatMessage],
@@ -276,27 +326,32 @@ def _fit_context(
     和它的 tool 结果永远成对，不会因裁剪出现孤儿 tool 消息（会被 API 400）。
     被丢的轮次由收尾的 compress() 用同一个预算并入会话摘要，不再静默蒸发。
 
-    ``soft_limit`` 是软水位：达到后先把工具结果的老化窗口收紧一轮，
-    避免「刚好没到硬上限」时还保留太多旧工具原文，下一轮突然撞墙。
+    ``soft_limit`` 是软水位：达到后先按「可省 token × 新旧 × 是否被引用」
+    收缩工具结果，避免「刚好没到硬上限」时还保留太多旧工具原文，下一轮
+    突然撞墙。
     """
     if max_tokens <= 0:
         return messages
     before = messages_tokens(messages)
-    if soft_limit > 0 and before >= soft_limit:
-        metrics.incr(metrics.CONTEXT_SOFT)
-        # 软水位下比常规多收一轮；当前轮由 age_tool_results 单独保留
-        from ai_agent.core.config import settings
-
-        keep = max(0, int(settings.tool_result_full_turns) - 1)
-        aged = age_tool_results(messages, keep_turns=keep)
-        logger.info(
-            "上下文达到软水位 tokens=%d soft=%d；工具结果老化窗口收紧到 %d",
-            before,
-            soft_limit,
-            keep,
-        )
+    # 预算压力才老化工具结果：超过硬上限按硬上限收，超过软水位按软水位收。
+    # 收哪些不再看固定轮数，而是按「可省 token × 新旧 × 是否被引用」排序。
+    target = max_tokens if before > max_tokens else 0
+    if target == 0 and soft_limit > 0 and before >= soft_limit:
+        target = soft_limit
+    if target > 0:
+        if before >= soft_limit > 0:
+            metrics.incr(metrics.CONTEXT_SOFT)
+            logger.info(
+                "上下文达到软水位 tokens=%d soft=%d；按工具结果成本开始收缩",
+                before,
+                soft_limit,
+            )
+        aged = age_tool_results(messages, target_tokens=target)
+        # 先删已消费的占位对，再按低价值 LRU 删工具对；只动送模型副本。
+        aged = prune_tool_pairs(aged, target, consumed_only=True)
+        aged = prune_tool_pairs(aged, target)
     else:
-        aged = age_tool_results(messages)
+        aged = messages
     if messages_tokens(aged) <= max_tokens:
         return aged
     messages = aged

@@ -495,9 +495,11 @@ def run_stream(
         use_kb = bool(claimed.get("use_kb", True))
         try:
             summary = store.get_session_summary(user_id, chat_session_id)
+            summary_until_seq = 0
         except Exception:
             logger.exception("会话摘要加载失败")
             summary = ""
+            summary_until_seq = 0
         messages = list(claimed["messages"])
         user_input = next(
             (
@@ -522,7 +524,9 @@ def run_stream(
         # turn 写进 agent_chat_history，成功后必须原子替换，失败则保留
         replacing = True
     else:
-        recent, summary = _session_state(user_id, chat_session_id)
+        recent, summary, summary_until_seq = _session_state(
+            user_id, chat_session_id
+        )
         if regenerate:
             # 重新生成最后一条回答：仅从内存上下文里剔除旧 assistant 消息后重问，
             # 数据库里的旧回答在生成成功前不动（失败不丢）
@@ -625,8 +629,15 @@ def run_stream(
             if finalize_background:
                 # 先同步完成快路径（落库 + 热缓存），保证下一轮上下文连续；
                 # 慢路径（记忆抽取、摘要压缩，含多次 LLM 调用）交给后台线程。
+                # 先存全量窗口，避免后台摘要还没跑完时下一轮只看到被裁掉
+                # 但尚未进摘要的轮次；_compress_and_cache 完成后再存压缩窗口。
                 short_term_memory.save(
-                    chat_session_id, messages, user_id=user_id, summary=summary
+                    chat_session_id,
+                    messages,
+                    user_id=user_id,
+                    summary=summary,
+                    summary_until_seq=summary_until_seq,
+                    trim=False,
                 )
                 if completed:
                     _turn_finalizer.submit(
@@ -639,7 +650,12 @@ def run_stream(
                         memory_enabled=memory_enabled,
                     )
                 _turn_finalizer.submit(
-                    _compress_and_cache, user_id, chat_session_id, messages, summary
+                    _compress_and_cache,
+                    user_id,
+                    chat_session_id,
+                    messages,
+                    summary,
+                    summary_until_seq,
                 )
             else:
                 if completed:
@@ -651,7 +667,13 @@ def run_stream(
                         chat_session_id,
                         memory_enabled=memory_enabled,
                     )
-                _compress_and_cache(user_id, chat_session_id, messages, summary)
+                _compress_and_cache(
+                    user_id,
+                    chat_session_id,
+                    messages,
+                    summary,
+                    summary_until_seq,
+                )
 
 
 def _latest_user_text(messages: list[ChatMessage]) -> str:

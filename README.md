@@ -260,15 +260,23 @@ L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 
 
 - 所有上下文预算按 token 计数：`LLM_CONTEXT_TOKEN_BUDGET` 是硬上限，先扣
   `CONTEXT_RESERVE_TOKENS`（输出/工具参数预留）和工具 schema 的 token，
-  得到实际输入预算；`CONTEXT_SOFT_LIMIT_RATIO` 是软水位，达到后先把工具
-  结果老化窗口收紧一轮。计数走 Qwen tokenizer（`QWEN_TOKENIZER_PATH`）。
-- 工具结果优先收缩：最近 `TOOL_RESULT_FULL_TURNS` 轮保留原文，更早的换成
-  元数据占位（工具名、命中文件/页码、参数、`tool_call_id`）。
+  得到实际输入预算；`CONTEXT_SOFT_LIMIT_RATIO` 是软水位，达到后按 token
+  成本优先收缩工具结果。计数走 Qwen tokenizer（`QWEN_TOKENIZER_PATH`）。
+- 工具结果优先收缩：按「可省 token × 新旧 × 是否被引用」排序，优先收
+  大而旧、未被引用的结果，换成元数据占位（工具名、命中文件/页码、参数、
+  `tool_call_id`）；当前轮永不老化。
 - 完整原文进入进程内 `tool_result_pool`（LRU + TTL + 单条上限），
   `read_tool_result` 优先从池里按 `tool_call_id` 读回，池子没有才回落到
   当前消息；池里的内容是裁剪前原文，不受单工具输出上限影响。
 - 软水位仍不够时整轮丢弃最旧对话；`assistant(tool_calls)` 与对应 `tool`
   消息始终成对，不产生孤儿 tool 消息。
+- 摘要和 `agent_session.summary_until_seq` 一起更新；冷启动只加载游标之后
+  的消息，避免已摘要的原文与摘要重复进入上下文。
+- `read_tool_result` 按 pool → 当前 messages → `agent_chat_history` 查找，
+  进程重启或池子淘汰后仍能按 `tool_call_id` 回读。
+- 已读过的占位、低价值旧工具对按整对（assistant(tool_calls)+tool）删除，
+  不产生孤儿 tool 消息；移出活跃窗口的快照同步从结果池淘汰。
+- 启动时预热 Qwen tokenizer；不可用时告警并退回启发式计数。
 
 ## 认证与隔离
 

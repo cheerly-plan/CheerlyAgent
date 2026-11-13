@@ -29,7 +29,7 @@ def _isolate_loop_memory():
     with (
         patch("ai_agent.agents.loop.store.list_profile", return_value=[]),
         patch("ai_agent.agents.loop.store.load_all_turns", return_value=[]),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch("ai_agent.agents.loop.store.update_session_summary"),
         patch("ai_agent.agents.loop.store.append_chat"),
         patch("ai_agent.agents.loop.store.create_checkpoint"),
@@ -298,7 +298,7 @@ def test_run_stream_hydrates_summary_conversation():
 
     with (
         patch("ai_agent.agents.loop.store.load_all_turns", return_value=history),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value="第一轮在问天气"),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("第一轮在问天气", 0)),
         patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
     ):
         run("第三句", user_id="u1", chat_session_id="s-sum")
@@ -375,7 +375,22 @@ def test_run_stream_requests_chat_window():
         patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
     ):
         run("hi", user_id="u1", chat_session_id="s-lim")
-    load_all_turns.assert_called_once_with("u1", "s-lim")
+    load_all_turns.assert_called_once_with("u1", "s-lim", after_seq=0)
+
+
+def test_run_stream_loads_after_summary_cursor():
+    with (
+        patch(
+            "ai_agent.agents.loop.store.get_session_state",
+            return_value=("旧摘要", 7),
+        ),
+        patch(
+            "ai_agent.agents.loop.store.load_all_turns", return_value=[]
+        ) as load_all_turns,
+        patch("ai_agent.agents.loop.stream_chat", side_effect=_ok_stream),
+    ):
+        run("hi", user_id="u1", chat_session_id="s-cursor")
+    load_all_turns.assert_called_once_with("u1", "s-cursor", after_seq=7)
 
 
 def test_loop_isolates_short_term_by_user():
@@ -689,7 +704,7 @@ def test_run_stream_resume_replaces_partial_history():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch(
             "ai_agent.agents.loop.store.replace_chat_after_last_user",
             side_effect=lambda *a: replaced.append(a),
@@ -743,7 +758,7 @@ def test_run_stream_resume_prefills_partial_assistant():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch("ai_agent.agents.loop.store.replace_chat_after_last_user"),
         patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
     ):
@@ -780,7 +795,7 @@ def test_run_stream_resume_continuation_merges_into_seed():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch(
             "ai_agent.agents.loop.store.replace_chat_after_last_user",
             side_effect=lambda *a: replaced.append(a[2]),
@@ -826,7 +841,7 @@ def test_run_stream_resume_interrupted_mid_continuation_stashes_into_seed():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch(
             "ai_agent.agents.loop.store.update_checkpoint",
             side_effect=lambda _rid, msgs, _step: snapshots.append(
@@ -877,7 +892,7 @@ def test_run_stream_resume_fallback_drops_incomplete_assistant():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch("ai_agent.agents.loop.store.replace_chat_after_last_user"),
         patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
         patch("ai_agent.agents.loop.settings.resume_prefill", False),
@@ -955,7 +970,7 @@ def test_run_stream_resume_replays_tail_and_keeps_tool_round():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch(
             "ai_agent.agents.loop.store.replace_chat_after_last_user",
             side_effect=lambda *a: replaced.append(a[2]),
@@ -1486,7 +1501,7 @@ def test_run_stream_resume_restores_use_kb_flag():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch(
             "ai_agent.agents.loop.store.replace_chat_after_last_user",
             side_effect=lambda *a: None,
@@ -1537,7 +1552,7 @@ def test_run_stream_resume_restores_use_web_search_flag():
             "ai_agent.agents.loop.store.claim_resumable_checkpoint",
             return_value=claimed,
         ),
-        patch("ai_agent.agents.loop.store.get_session_summary", return_value=""),
+        patch("ai_agent.agents.loop.store.get_session_state", return_value=("", 0)),
         patch(
             "ai_agent.agents.loop.store.replace_chat_after_last_user",
             side_effect=lambda *a: None,

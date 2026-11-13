@@ -400,9 +400,8 @@ class Settings(BaseSettings):
     # 确认可行再默认打开。关掉时 kb_search 行为与原来逐字一致。
     kb_search_list_only: bool = False
 
-    # 只保留最近 N 轮的工具结果原文，更早的换成一行引用（带当时的调用参数）。
-    # 当前这轮永远完整——模型正在读它；历史轮次的原文才是上下文大头。
-    # 设 0 表示除当前轮外全部省略，设负数关闭。
+    # 兼容旧调用/测试的轮数窗口；生产上下文已改为 token 预算驱动，按
+    # 「可省 token × 新旧 × 是否被引用」收缩，不再依赖这个值。
     tool_result_full_turns: int = 2
     # 工具结果池：read_tool_result 在消息被老化/裁掉后仍能按 call_id 回放。
     # 进程内 LRU + TTL；重启后回落到 checkpoint / 历史消息。
