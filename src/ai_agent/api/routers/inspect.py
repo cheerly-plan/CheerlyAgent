@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ai_agent.api.dependencies import require_admin
-from ai_agent.api.inspect_turns import turns_from_messages
+from ai_agent.api.inspect_turns import sum_tokens, turns_from_messages
 from ai_agent.api.schemas import (
     InspectSession,
     InspectSessionList,
@@ -100,9 +100,14 @@ def list_turns(
         raise AgentError("对话过程加载失败") from e
     if session is None or messages is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    turns = turns_from_messages(messages)
+    # prompt_tokens 每次请求都包含完整历史，按轮相加会成倍放大；但会话总量
+    # 的口径就是「网关实际计费的输入 token 之和」，与计费单一致，所以照加。
     return InspectTurns(
         user_id=user_id,
         session_id=session.id,
         title=session.title,
-        turns=turns_from_messages(messages),
+        turns=turns,
+        prompt_tokens=sum_tokens([t.prompt_tokens for t in turns]),
+        completion_tokens=sum_tokens([t.completion_tokens for t in turns]),
     )

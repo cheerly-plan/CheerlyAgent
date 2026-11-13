@@ -223,12 +223,18 @@ class InspectStep(BaseModel):
     tool_call_id: str = ""
     content: str = ""
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # 网关计费口径：llm 步骤是该次请求的输入/输出 token。
+    # None 表示这一步没有采集到（加列前的历史消息，或网关不返回 usage）。
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class InspectTurn(BaseModel):
     index: int
     question: str
     steps: list[InspectStep]
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class InspectTurns(BaseModel):
@@ -236,6 +242,10 @@ class InspectTurns(BaseModel):
     session_id: str
     title: str
     turns: list[InspectTurn]
+    # 整个会话的累计消耗；prompt 按轮相加会重复计历史，所以这里单独给
+    # 「输入合计」与「输出合计」，前端不要自学成才去把 turn 的 prompt 加起来
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class ResumeRequest(BaseModel):

@@ -963,6 +963,13 @@ def run_loop(
         assistant: ChatMessage = {"role": "assistant", "content": result["content"]}
         if result["tool_calls"]:
             assistant["tool_calls"] = result["tool_calls"]
+        # 网关 usage 跟消息走：管理面板按消息展示，会话总量由 SUM 聚合
+        prompt_tokens = result.get("prompt_tokens")
+        completion_tokens = result.get("completion_tokens")
+        if prompt_tokens is not None:
+            assistant["prompt_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            assistant["completion_tokens"] = completion_tokens
         last = messages[-1] if messages else None
         if (
             last
@@ -980,6 +987,14 @@ def run_loop(
             if result["tool_calls"]:
                 last["tool_calls"] = result["tool_calls"]
             last["content"] = str(last.get("content") or "") + merged
+            # 续写是两次请求：prompt 取后一次，completion 要累加，
+            # 否则面板上这一条会漏掉前半截的产出
+            if prompt_tokens is not None:
+                last["prompt_tokens"] = prompt_tokens
+            if completion_tokens is not None:
+                last["completion_tokens"] = (
+                    int(last.get("completion_tokens") or 0) + completion_tokens
+                )
         else:
             messages.append(assistant)
         if run_id:

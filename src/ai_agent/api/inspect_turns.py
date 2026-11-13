@@ -38,23 +38,48 @@ def _tool_calls(raw: object) -> list[dict[str, Any]]:
     return calls
 
 
+def _tokens(msg: Any) -> tuple[int | None, int | None]:
+    prompt = msg.get("prompt_tokens")
+    completion = msg.get("completion_tokens")
+    return (
+        int(prompt) if prompt is not None else None,
+        int(completion) if completion is not None else None,
+    )
+
+
+def sum_tokens(values: list[int | None]) -> int | None:
+    """只要有一条采集到就求和；全都没有返回 None（老数据不显示成 0）。"""
+    real = [v for v in values if v is not None]
+    return sum(real) if real else None
+
+
 def turns_from_messages(messages: list[Any]) -> list[InspectTurn]:
     """用户消息开一轮。其后的 assistant / tool 消息按发生顺序摊成步骤。"""
     turns: list[InspectTurn] = []
     steps: list[InspectStep] = []
     calls: dict[str, dict[str, Any]] = {}
+    turn_prompts: list[int | None] = []
+    turn_completions: list[int | None] = []
     question = ""
     opened = False
 
     def close() -> None:
-        nonlocal opened, steps, question, calls
+        nonlocal opened, steps, question, calls, turn_prompts, turn_completions
         if not opened:
             return
         turns.append(
-            InspectTurn(index=len(turns), question=question, steps=steps)
+            InspectTurn(
+                index=len(turns),
+                question=question,
+                steps=steps,
+                prompt_tokens=sum_tokens(turn_prompts),
+                completion_tokens=sum_tokens(turn_completions),
+            )
         )
         steps = []
         calls = {}
+        turn_prompts = []
+        turn_completions = []
         question = ""
         opened = False
 
@@ -69,8 +94,20 @@ def turns_from_messages(messages: list[Any]) -> list[InspectTurn]:
         if not opened:
             continue
         if role == "assistant":
+            prompt_tokens, completion_tokens = _tokens(msg)
+            if prompt_tokens is not None:
+                turn_prompts.append(prompt_tokens)
+            if completion_tokens is not None:
+                turn_completions.append(completion_tokens)
             if content.strip():
-                steps.append(InspectStep(kind="llm", content=content))
+                steps.append(
+                    InspectStep(
+                        kind="llm",
+                        content=content,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                )
             for call in _tool_calls(msg.get("tool_calls")):
                 if call["id"]:
                     calls[call["id"]] = call

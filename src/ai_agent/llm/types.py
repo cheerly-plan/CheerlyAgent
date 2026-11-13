@@ -30,11 +30,18 @@ class ChatMessage(TypedDict, total=False):
     # 消息级附属信息（目前只有 sources：这一轮回答引用的知识库切片）。
     # 只在落库/回放/SSE 用，_to_openai_messages 是白名单构造，不会漏给模型
     meta: dict[str, Any]
+    # 本消息对应的网关计费口径 token 数。生产侧 assistant 消息带这两个键，
+    # 历史数据为 None（当时没采集）。_to_openai_messages 同样不会下发。
+    prompt_tokens: int | None
+    completion_tokens: int | None
 
 
 class ChatResult(TypedDict):
     content: str
     tool_calls: list[ToolCall]
+    # 网关返回的 usage；网关不返回（本地小模型、部分代理）时缺省。
+    prompt_tokens: int | None
+    completion_tokens: int | None
 
 
 class ChatEvent(TypedDict, total=False):

@@ -146,7 +146,10 @@ def stream_chat(
             tools=tools,
             tool_choice=tool_choice,
             stream=True,
-            extra_body=_THINKING_OFF,
+            # 要求网关在最后一帧补 usage：OpenAI 兼容协议下流式默认不返回，
+            # 没有它整条主对话链路都拿不到 token 数（管理面板无从统计）。
+            # 不支持的网关会忽略该字段，不影响原有行为。
+            extra_body={**_THINKING_OFF, "stream_options": {"include_usage": True}},
         )
     except Exception as e:
         raise LLMError(str(e), status_code=_status_of(e)) from e
@@ -155,8 +158,19 @@ def stream_chat(
     tool_acc: dict[int, dict[str, str]] = {}
     leftover = ""
     reasoning_parts: list[str] = []
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
     for chunk in stream:
+        # usage 帧的 choices 为空，必须在这层判断之前取出，否则被跳过
+        usage = getattr(chunk, "usage", None)
+        if usage is not None:
+            value = getattr(usage, "prompt_tokens", None)
+            if isinstance(value, int):
+                prompt_tokens = value
+            value = getattr(usage, "completion_tokens", None)
+            if isinstance(value, int):
+                completion_tokens = value
         if not chunk.choices:
             continue
         choice = chunk.choices[0]
@@ -211,7 +225,12 @@ def stream_chat(
         logger.warning("stream_chat 空正文且无工具调用")
     yield (
         "result",
-        {"content": text, "tool_calls": tool_calls},
+        {
+            "content": text,
+            "tool_calls": tool_calls,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        },
     )
 
 

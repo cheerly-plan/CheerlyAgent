@@ -29,6 +29,11 @@ def _chat_message_from_row(row: dict) -> ChatMessage:
     # seq 只在 load_all_turns 里取；给摘要游标用，_to_openai_messages 会忽略
     if row.get("seq") is not None:
         msg["seq"] = int(row["seq"])
+    # 老行这两列是 NULL（加列前没采集），保持缺省，不要造出 0
+    if row.get("prompt_tokens") is not None:
+        msg["prompt_tokens"] = int(row["prompt_tokens"])
+    if row.get("completion_tokens") is not None:
+        msg["completion_tokens"] = int(row["completion_tokens"])
     return msg
 
 
@@ -60,6 +65,8 @@ class SessionStore(Database):
                 msg.get("tool_call_id"),
                 msg.get("name"),
                 Jsonb(msg["meta"]) if msg.get("meta") else None,
+                msg.get("prompt_tokens"),
+                msg.get("completion_tokens"),
             )
             for msg in rows
         ]
@@ -82,8 +89,9 @@ class SessionStore(Database):
                     """
                     INSERT INTO agent_chat_history
                         (id, user_id, chat_session_id, seq, role, content,
-                         tool_calls, tool_call_id, name, meta)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         tool_calls, tool_call_id, name, meta,
+                         prompt_tokens, completion_tokens)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
                         (
@@ -97,6 +105,8 @@ class SessionStore(Database):
                             tool_call_id,
                             name,
                             meta,
+                            prompt_tokens,
+                            completion_tokens,
                         )
                         for offset, (
                             mid,
@@ -108,6 +118,8 @@ class SessionStore(Database):
                             tool_call_id,
                             name,
                             meta,
+                            prompt_tokens,
+                            completion_tokens,
                         ) in enumerate(values, start=1)
                     ],
                 )
@@ -245,7 +257,8 @@ class SessionStore(Database):
             return []
         if limit is None:
             sql = """
-                SELECT role, content, tool_calls, tool_call_id, name, meta
+                SELECT role, content, tool_calls, tool_call_id, name, meta,
+                       prompt_tokens, completion_tokens
                 FROM agent_chat_history
                 WHERE user_id = %s AND chat_session_id = %s
                 ORDER BY seq
@@ -253,9 +266,11 @@ class SessionStore(Database):
             params: tuple = (user_id, chat_session_id)
         else:
             sql = """
-                SELECT role, content, tool_calls, tool_call_id, name, meta
+                SELECT role, content, tool_calls, tool_call_id, name, meta,
+                       prompt_tokens, completion_tokens
                 FROM (
-                    SELECT role, content, tool_calls, tool_call_id, name, meta, seq
+                    SELECT role, content, tool_calls, tool_call_id, name, meta,
+                           prompt_tokens, completion_tokens, seq
                     FROM agent_chat_history
                     WHERE user_id = %s AND chat_session_id = %s
                     ORDER BY seq DESC
