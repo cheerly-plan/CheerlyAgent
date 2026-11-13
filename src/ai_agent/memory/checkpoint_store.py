@@ -13,7 +13,7 @@ class CheckpointStore(Database):
         messages: list[ChatMessage],
         use_web_search: bool = True,
         use_kb: bool = True,
-        use_report: bool = True,
+        use_report: bool = False,
     ) -> bool:
         """返回 False 表示触发 DB 级互斥：同会话已有 running 的 checkpoint
         （部分唯一索引兜底，路由层预检后的并发竞态由这里裁决）。"""

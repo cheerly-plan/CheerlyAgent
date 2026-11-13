@@ -504,7 +504,7 @@ def run_stream(
     resume_run_id: str | None = None,
     use_web_search: bool = True,
     use_kb: bool = True,
-    use_report: bool = True,
+    use_report: bool = False,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> Iterator[ChatEvent]:
@@ -532,7 +532,7 @@ def run_stream(
         # 列表是什么样，续跑就是什么样，不受前端当前开关影响
         use_web_search = bool(claimed.get("use_web_search", True))
         use_kb = bool(claimed.get("use_kb", True))
-        use_report = bool(claimed.get("use_report", True))
+        use_report = bool(claimed.get("use_report", False))
         try:
             summary = store.get_session_summary(user_id, chat_session_id)
             summary_until_seq = 0
@@ -882,7 +882,7 @@ def run_loop(
     chat_session_id: str = "",
     use_web_search: bool = True,
     use_kb: bool = True,
-    use_report: bool = True,
+    use_report: bool = False,
     kb_file_ids: tuple[str, ...] = (),
     use_memory: bool = True,
     budget: Budget | None = None,

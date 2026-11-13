@@ -140,7 +140,7 @@ def chat_sse_events(
     content: str,
     use_web_search: bool = True,
     use_kb: bool = False,
-    use_report: bool = True,
+    use_report: bool = False,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> Iterator[str]:
@@ -175,7 +175,7 @@ def _stream(
     content: str,
     use_web_search: bool,
     use_kb: bool = False,
-    use_report: bool = True,
+    use_report: bool = False,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> StreamingResponse:
@@ -254,7 +254,7 @@ def _stream_regenerate(
     session_id: str,
     use_web_search: bool,
     use_kb: bool = False,
-    use_report: bool = True,
+    use_report: bool = False,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> StreamingResponse:

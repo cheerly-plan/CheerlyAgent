@@ -1078,7 +1078,7 @@ def test_run_loop_use_kb_false_excludes_kb_search():
 def test_run_loop_use_report_false_keeps_indicator_blocks():
     """「研报」开关关闭时只剔 generate_report + report_job_status（重流程），
     report_extract_indicators / report_compare / report_validate 是查业绩的
-    确定性积木，不是研报专属，保持挂载。"""
+    确定性积木，不是研报专属，保持挂载。默认（不传 use_report）即关闭。"""
     fake_schemas = [
         {"function": {"name": "get_weather"}},
         {"function": {"name": "generate_report"}},
@@ -1099,10 +1099,18 @@ def test_run_loop_use_report_false_keeps_indicator_blocks():
         patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
         patch("ai_agent.agents.loop.store.append_chat"),
     ):
+        list(run_loop([{"role": "user", "content": "你好"}]))  # 默认：无研报
         list(run_loop([{"role": "user", "content": "你好"}], use_report=True))
         list(run_loop([{"role": "user", "content": "你好"}], use_report=False))
 
+    # 默认与显式 False 等价：都不挂研报重流程，但保留三积木
     assert seen_tools[0] == [
+        "get_weather",
+        "report_extract_indicators",
+        "report_compare",
+        "report_validate",
+    ]
+    assert seen_tools[1] == [
         "get_weather",
         "generate_report",
         "report_job_status",
@@ -1110,12 +1118,7 @@ def test_run_loop_use_report_false_keeps_indicator_blocks():
         "report_compare",
         "report_validate",
     ]
-    assert seen_tools[1] == [
-        "get_weather",
-        "report_extract_indicators",
-        "report_compare",
-        "report_validate",
-    ]
+    assert seen_tools[2] == seen_tools[0]
 
 
 def test_run_loop_requires_kb_tool_when_question_names_subject():
