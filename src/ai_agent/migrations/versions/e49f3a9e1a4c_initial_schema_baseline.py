@@ -179,6 +179,7 @@ def upgrade() -> None:
             messages        JSONB NOT NULL,
             use_web_search  BOOLEAN NOT NULL DEFAULT TRUE,
             use_kb          BOOLEAN NOT NULL DEFAULT TRUE,
+            use_report      BOOLEAN NOT NULL DEFAULT TRUE,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
         )
@@ -189,6 +190,9 @@ def upgrade() -> None:
     )
     op.execute(
         "ALTER TABLE agent_checkpoint ADD COLUMN IF NOT EXISTS use_kb BOOLEAN NOT NULL DEFAULT TRUE"
+    )
+    op.execute(
+        "ALTER TABLE agent_checkpoint ADD COLUMN IF NOT EXISTS use_report BOOLEAN NOT NULL DEFAULT TRUE"
     )
     # 启动时残留 running 一律是上次进程异常退出的僵尸，标 interrupted
     op.execute(

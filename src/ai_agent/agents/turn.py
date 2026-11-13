@@ -28,6 +28,7 @@ def _checkpoint_create(
     messages: list[ChatMessage],
     use_web_search: bool = True,
     use_kb: bool = True,
+    use_report: bool = True,
 ) -> bool:
     """返回 False 表示 DB 级互斥冲突（同会话已有进行中的 run）；
     其他异常不阻断对话，只失去断点续跑能力。"""
@@ -35,7 +36,7 @@ def _checkpoint_create(
         # 旧测试桩可能返回 None（无返回值），视为写入成功
         return (
             store.create_checkpoint(
-                run_id, user_id, chat_session_id, messages, use_web_search, use_kb
+                run_id, user_id, chat_session_id, messages, use_web_search, use_kb, use_report
             )
             is not False
         )

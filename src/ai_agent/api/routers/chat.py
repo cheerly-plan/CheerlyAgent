@@ -140,6 +140,7 @@ def chat_sse_events(
     content: str,
     use_web_search: bool = True,
     use_kb: bool = False,
+    use_report: bool = True,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> Iterator[str]:
@@ -153,6 +154,7 @@ def chat_sse_events(
             finalize_background=True,
             use_web_search=use_web_search,
             use_kb=use_kb,
+            use_report=use_report,
             kb_file_ids=kb_file_ids,
             memory_enabled=memory_enabled,
         ):
@@ -173,6 +175,7 @@ def _stream(
     content: str,
     use_web_search: bool,
     use_kb: bool = False,
+    use_report: bool = True,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> StreamingResponse:
@@ -183,6 +186,7 @@ def _stream(
             content,
             use_web_search,
             use_kb,
+            use_report,
             kb_file_ids,
             memory_enabled,
         )
@@ -229,6 +233,7 @@ def chat(
             req.chat_session_id,
             req.web_search,
             req.use_kb,
+            req.use_report,
             tuple(req.kb_file_ids),
             memory_enabled=user.memory_enabled,
         )
@@ -238,6 +243,7 @@ def chat(
         req.message,
         req.web_search,
         req.use_kb,
+        req.use_report,
         tuple(req.kb_file_ids),
         memory_enabled=user.memory_enabled,
     )
@@ -248,6 +254,7 @@ def _stream_regenerate(
     session_id: str,
     use_web_search: bool,
     use_kb: bool = False,
+    use_report: bool = True,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> StreamingResponse:
@@ -264,6 +271,7 @@ def _stream_regenerate(
                 regenerate=True,
                 use_web_search=use_web_search,
                 use_kb=use_kb,
+                use_report=use_report,
                 kb_file_ids=kb_file_ids,
                 memory_enabled=memory_enabled,
             ):

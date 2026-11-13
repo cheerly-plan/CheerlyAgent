@@ -1075,6 +1075,49 @@ def test_run_loop_use_kb_false_excludes_kb_search():
     assert seen_tools[2] == ["get_weather"]
 
 
+def test_run_loop_use_report_false_keeps_indicator_blocks():
+    """「研报」开关关闭时只剔 generate_report + report_job_status（重流程），
+    report_extract_indicators / report_compare / report_validate 是查业绩的
+    确定性积木，不是研报专属，保持挂载。"""
+    fake_schemas = [
+        {"function": {"name": "get_weather"}},
+        {"function": {"name": "generate_report"}},
+        {"function": {"name": "report_job_status"}},
+        {"function": {"name": "report_extract_indicators"}},
+        {"function": {"name": "report_compare"}},
+        {"function": {"name": "report_validate"}},
+    ]
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.store.append_chat"),
+    ):
+        list(run_loop([{"role": "user", "content": "你好"}], use_report=True))
+        list(run_loop([{"role": "user", "content": "你好"}], use_report=False))
+
+    assert seen_tools[0] == [
+        "get_weather",
+        "generate_report",
+        "report_job_status",
+        "report_extract_indicators",
+        "report_compare",
+        "report_validate",
+    ]
+    assert seen_tools[1] == [
+        "get_weather",
+        "report_extract_indicators",
+        "report_compare",
+        "report_validate",
+    ]
+
+
 def test_run_loop_requires_kb_tool_when_question_names_subject():
     """问句点名库内主体时，第一步只留知识库工具并强制调用；查完再放开。"""
     fake_schemas = [

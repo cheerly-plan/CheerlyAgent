@@ -352,6 +352,7 @@ class Database:
                     messages        JSONB NOT NULL,
                     use_web_search  BOOLEAN NOT NULL DEFAULT TRUE,
                     use_kb          BOOLEAN NOT NULL DEFAULT TRUE,
+                    use_report      BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
@@ -369,6 +370,13 @@ class Database:
                 """
                 ALTER TABLE agent_checkpoint
                 ADD COLUMN IF NOT EXISTS use_kb BOOLEAN NOT NULL DEFAULT TRUE
+                """
+            )
+            # 同上：研报工具开关（内置技能），断点续跑时沿用原 run 的开关状态
+            conn.execute(
+                """
+                ALTER TABLE agent_checkpoint
+                ADD COLUMN IF NOT EXISTS use_report BOOLEAN NOT NULL DEFAULT TRUE
                 """
             )
             # 启动时不存在本进程的进行中 run（单进程部署）：残留的 running

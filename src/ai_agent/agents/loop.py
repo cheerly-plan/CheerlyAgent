@@ -504,6 +504,7 @@ def run_stream(
     resume_run_id: str | None = None,
     use_web_search: bool = True,
     use_kb: bool = True,
+    use_report: bool = True,
     kb_file_ids: tuple[str, ...] = (),
     memory_enabled: bool = True,
 ) -> Iterator[ChatEvent]:
@@ -527,10 +528,11 @@ def run_stream(
             yield {"type": "error", "message": "对话无法恢复，请重新发送消息"}
             return
         chat_session_id = claimed["chat_session_id"]
-        # 断点续跑沿用原 run 的开关状态（智能搜索/知识库）：中断时工具
+        # 断点续跑沿用原 run 的开关状态（智能搜索/知识库/研报）：中断时工具
         # 列表是什么样，续跑就是什么样，不受前端当前开关影响
         use_web_search = bool(claimed.get("use_web_search", True))
         use_kb = bool(claimed.get("use_kb", True))
+        use_report = bool(claimed.get("use_report", True))
         try:
             summary = store.get_session_summary(user_id, chat_session_id)
             summary_until_seq = 0
@@ -602,7 +604,7 @@ def run_stream(
             turn_anchor = {"role": "user", "content": user_input}
             messages.append(turn_anchor)
     if not _checkpoint_create(
-        run_id, user_id, chat_session_id, messages, use_web_search, use_kb
+        run_id, user_id, chat_session_id, messages, use_web_search, use_kb, use_report
     ):
         # DB 级互斥兜底：路由层预检之后另一条并发请求抢先开跑了
         yield {"type": "error", "message": "该会话有正在进行的回复"}
@@ -626,6 +628,7 @@ def run_stream(
             chat_session_id=chat_session_id,
             use_web_search=use_web_search,
             use_kb=use_kb,
+            use_report=use_report,
             kb_file_ids=kb_file_ids,
             use_memory=memory_enabled,
         ):
@@ -879,6 +882,7 @@ def run_loop(
     chat_session_id: str = "",
     use_web_search: bool = True,
     use_kb: bool = True,
+    use_report: bool = True,
     kb_file_ids: tuple[str, ...] = (),
     use_memory: bool = True,
     budget: Budget | None = None,
@@ -887,6 +891,9 @@ def run_loop(
         budget = Budget.from_settings()
     # 开关直接决定工具列表：智能搜索关闭 → 剔除 web_search；
     # 知识库关闭 → 剔除 kb_search 和 kg_search（图谱检索同属知识库能力）。
+    # 研报关闭 → 只剔除 generate_report + report_job_status（生成研报重流程），
+    # report_extract_indicators / report_compare / report_validate 是「查业绩/
+    # 算数」的确定性积木，不是研报专属，保持可用。
     # 模型这轮就没有对应能力，而不是靠 prompt 约定「别用」
     excluded: set[str] = set()
     if not use_web_search:
@@ -895,6 +902,8 @@ def run_loop(
         # 研报积木与入口都依赖知识库表格抽取，知识库关掉时一起下线。
         # report_compare / report_validate 是纯计算与校验，不触知识库，保留。
         excluded.update({"kb_search", "kg_search", "generate_report", "report_extract_indicators"})
+    if not use_report:
+        excluded.update({"generate_report", "report_job_status"})
     if not use_memory:
         excluded.update({"search_memory", "write_memory", "expand_memory"})
     tools = [s for s in tool_schemas() if s["function"]["name"] not in excluded]

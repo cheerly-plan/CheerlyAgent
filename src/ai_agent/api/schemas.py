@@ -105,6 +105,10 @@ class ChatRequest(BaseModel):
     web_search: bool = False
     # 前端「知识库」开关：True 时本轮提供 kb_search 工具（默认关闭，不挂载）
     use_kb: bool = False
+    # 前端「研报」内置技能开关：True 时本轮提供 generate_report 与
+    # report_job_status（生成研报重流程）。关闭时不影响 report_extract_indicators /
+    # report_compare / report_validate 三个查业绩积木。
+    use_report: bool = True
     # 会话级知识库范围：用户在输入框里选定只看这几份文件；
     # 为空 = 全库。约束的是 kb_search 工具的默认检索范围
     kb_file_ids: list[str] = Field(default_factory=list, max_length=20)
