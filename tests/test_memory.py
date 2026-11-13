@@ -528,6 +528,52 @@ def test_load_tool_result_by_call_id(mem_store):
     assert mem_store.load_tool_result("a", "s1", "missing") is None
 
 
+def test_raw_tool_result_roundtrip_and_clear(mem_store):
+    mem_store.save_raw_tool_result(
+        "a", "s1", "call-raw", "web_search", "完整原文", {"tool": "web_search"}
+    )
+    row = mem_store.load_raw_tool_result("a", "s1", "call-raw")
+    assert row is not None
+    assert row["content"] == "完整原文"
+    assert row["name"] == "web_search"
+    assert mem_store.delete_raw_tool_results("a", "s1") == 1
+    assert mem_store.load_raw_tool_result("a", "s1", "call-raw") is None
+
+
+def test_search_chat_history_scopes_by_user_and_keyword(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "合同负债是多少"},
+            {"role": "assistant", "content": "合同负债 100 万"},
+            {"role": "user", "content": "无关问题"},
+        ],
+    )
+    mem_store.append_chat("b", "s1", [{"role": "user", "content": "合同负债 别人"}])
+    rows = mem_store.search_chat_history("a", "s1", "合同负债")
+    assert [row["seq"] for row in rows] == [1, 2]
+    assert all("别人" not in row["content"] for row in rows)
+
+
+def test_load_chat_around_window(mem_store):
+    mem_store.append_chat(
+        "a",
+        "s1",
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "3"},
+            {"role": "assistant", "content": "a3"},
+        ],
+    )
+    rows = mem_store.load_chat_around("a", "s1", 4, before=1, after=1)
+    assert [row["seq"] for row in rows] == [3, 4, 5]
+    assert mem_store.load_chat_around("a", "s1", 999) == []
+
+
 def test_session_summary_roundtrip_and_clears_with_chat(mem_store):
     session = mem_store.create_session("a", "sum-1")
     assert mem_store.get_session_summary("a", session.id) == ""

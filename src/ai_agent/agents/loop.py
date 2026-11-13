@@ -453,6 +453,19 @@ def _remember_tool_result(
         raw,
         meta,
     )
+    # 持久化裁剪前原文：池子淘汰/换 worker/重启后 read_tool_result 仍能读到。
+    # 写失败不影响工具结果返回，池子仍可服务当前进程。
+    try:
+        store.save_raw_tool_result(
+            user_id,
+            chat_session_id,
+            call_id,
+            name,
+            raw,
+            meta,
+        )
+    except Exception:
+        logger.warning("工具原文持久化失败 call_id=%s", call_id, exc_info=True)
     return meta
 
 

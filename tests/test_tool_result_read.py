@@ -214,14 +214,21 @@ def test_run_loop_puts_raw_output_in_pool():
     loop.stream_chat = fake_stream
     loop.execute_tool = fake_execute
     try:
-        list(
-            run_loop(
-                [{"role": "user", "content": "查一下"}],
-                "u1",
-                chat_session_id="s1",
-                use_kb=False,
+        from unittest.mock import patch
+
+        from ai_agent.storage.store import store
+
+        with patch.object(store, "save_raw_tool_result") as save_raw:
+            list(
+                run_loop(
+                    [{"role": "user", "content": "查一下"}],
+                    "u1",
+                    chat_session_id="s1",
+                    use_kb=False,
+                )
             )
-        )
+        save_raw.assert_called_once()
+        assert save_raw.call_args.args[4] == "FULL-RAW-CONTENT"
     finally:
         loop.stream_chat = original_stream
         loop.execute_tool = original_execute
@@ -278,3 +285,29 @@ def test_read_tool_result_falls_back_to_db(monkeypatch):
         out = read_tool_result("db1")
     assert "DB-FULL-TEXT" in out
     assert "[web_search · db1]" in out
+
+
+def test_read_tool_result_prefers_raw_table_over_history(monkeypatch):
+    from ai_agent.storage.store import store
+
+    monkeypatch.setattr(
+        store,
+        "load_raw_tool_result",
+        lambda user, session, call_id: {
+            "name": "web_search",
+            "content": "RAW-TABLE-FULL",
+            "truncated": False,
+        },
+    )
+    monkeypatch.setattr(
+        store,
+        "load_tool_result",
+        lambda user, session, call_id: {
+            "name": "web_search",
+            "content": "CLIPPED-HISTORY",
+        },
+    )
+    with tool_results_scope({}), user_scope("u1"), session_scope("s1"):
+        out = read_tool_result("raw1")
+    assert "RAW-TABLE-FULL" in out
+    assert "CLIPPED-HISTORY" not in out

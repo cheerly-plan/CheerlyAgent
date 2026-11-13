@@ -290,3 +290,22 @@ READ_TOOL_RESULT_OFFSET_DESC = "从第几个字符开始读，默认 0；用于�
 READ_TOOL_RESULT_MAX_CHARS_DESC = (
     "本次最多返回多少字符，默认 4000；范围 200–6000。"
 )
+
+# ——— 当前会话历史检索 ———
+SEARCH_HISTORY_DESC = (
+    "按关键词检索当前会话的历史对话原文。"
+    "系统注入的摘要只是索引，可能丢失细节；用户追问之前具体说过什么、"
+    "某个数字/约定/结论的原文时，用它找回，不要凭摘要或记忆编造。"
+    "返回带 seq 的用户/助手消息，可用 seq 继续核对上下文。"
+)
+SEARCH_HISTORY_QUERY_DESC = "检索关键词，尽量用具体名词、数字或短语。"
+SEARCH_HISTORY_LIMIT_DESC = "最多返回多少条，默认 8，范围 1–20。"
+READ_HISTORY_DESC = (
+    "按 seq 读取当前会话某一处的上下文原文。"
+    "search_history 返回的每条带 [seq=N]，需要看这句话前后还说了什么时用它。"
+    "默认读 seq 前后各 2 条；返回内容可能是已被单工具上限裁剪的版本，"
+    "工具原始输出请用 read_tool_result。"
+)
+READ_HISTORY_SEQ_DESC = "历史消息的 seq，从 search_history 结果里的 [seq=N] 抄。"
+READ_HISTORY_BEFORE_DESC = "往前读几条，默认 2，范围 0–20。"
+READ_HISTORY_AFTER_DESC = "往后读几条，默认 2，范围 0–20。"

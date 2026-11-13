@@ -47,6 +47,8 @@ _MEMORY_SQL_MARKERS = (
     "agent_memory_setting",
     "summary_until_seq",
     "agent_chat_history_tool_result_idx",
+    "agent_tool_result",
+    "agent_tool_result_user_session_idx",
 )
 
 
@@ -153,6 +155,11 @@ def test_upgrade_head_on_empty_database_creates_memory_schema():
                 conn, "agent_memory_setting"
             )
             assert "summary_until_seq" in _columns(conn, "agent_session")
+            assert {
+                "tool_call_id",
+                "content",
+                "expires_at",
+            } <= _columns(conn, "agent_tool_result")
             indexes = {
                 str(row[0])
                 for row in conn.execute(
@@ -164,6 +171,7 @@ def test_upgrade_head_on_empty_database_creates_memory_schema():
                 "agent_memory_candidate_user_status_idx",
                 "agent_memory_archive_user_idx",
                 "agent_chat_history_tool_result_idx",
+                "agent_tool_result_user_session_idx",
             } <= indexes
     finally:
         _drop_database(name)

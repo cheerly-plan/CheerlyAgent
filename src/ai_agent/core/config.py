@@ -30,17 +30,18 @@ class Settings(BaseSettings):
     # （重试会从断点重复 yield 已发内容），彻底失败走断点续跑兜底。
     llm_stream_timeout_seconds: float = 120
     # 送模型的上下文 token 预算（0 = 不限制）：超过时从最旧的完整轮次开始
-    # 整轮丢弃（摘要对与当前回合保留）。计数统一走 Qwen tokenizer，不再按
-    # 字符估算；28000 对 32k 窗口留出输出/tool schema 的余量。
-    llm_context_token_budget: int = 28000
+    # 整轮丢弃（摘要对与当前回合保留）。计数统一走 Qwen tokenizer；40000
+    # 是总预算，输出与工具 schema 的预留从里面扣。
+    llm_context_token_budget: int = 40000
     # 软水位：达到「可用预算 × 比例」就先做更激进的工具结果老化，避免一轮
     # 直接撞到硬上限。0 表示关闭软触发；软水位不会超过可用预算。
     context_soft_limit_ratio: float = 0.85
     # 给本轮输出和工具参数预留的 token 数；实际输入预算 = 硬上限 - 预留。
     context_reserve_tokens: int = 4000
-    # 工具 schema 的固定预留（默认全量工具约 5k token）。loop 会按本轮
-    # 实际 step_tools 精确扣；摘要/短期缓存用这个固定值保持同一量级。
-    context_tool_schema_reserve_tokens: int = 5000
+    # 工具 schema 预留：0 = 启动时按真实工具 schema 自动测量（推荐）。
+    # 非 0 时按这个值硬算，用于压测/隔离 tokenizer 失败等特殊场景。
+    # 启动测量完成前用 8000 的保守兜底；loop 每次还会按本轮 step_tools 精确扣。
+    context_tool_schema_reserve_tokens: int = 0
     # Qwen tokenizer 文件；留空则依次查本地缓存/下载到 ~/.cache/cheely。
     qwen_tokenizer_path: str = ""
     qwen_tokenizer_url: str = (
@@ -410,6 +411,9 @@ class Settings(BaseSettings):
     # 单条结果入池前的上限：防止一次 OCR/大表把进程内存撑爆。超过则截断，
     # read_tool_result 会标注「池中已截断」，仍可回读大部分内容。
     tool_result_pool_max_content_chars: int = 200_000
+    # 原始工具结果在 DB 的保留期；0 = 不自动过期（仍随会话删除清理）。
+    # 进程池淘汰/重启后，read_tool_result 从这张表读裁剪前全文。
+    tool_result_db_ttl_seconds: int = 604800
 
 
     kb_doc_route_top_k: int = 6
@@ -503,16 +507,21 @@ class Settings(BaseSettings):
         usable = max(1, hard - max(0, int(self.context_reserve_tokens)))
         ratio = min(max(float(self.context_soft_limit_ratio), 0.0), 1.0)
         # 软水位按「扣掉输出预留后的可用预算」算，而不是按硬上限算：
-        # 否则 0.85 × 28000 只比可用 24000 低 200，软硬几乎同时触发。
+        # 否则 0.85 × 40000 只比可用 36000 低 200，软硬几乎同时触发。
         soft = min(usable, int(usable * ratio))
         return usable, soft
 
     def context_message_token_budget(self) -> int:
-        """消息正文可用的 token 预算（再扣掉工具 schema 预留）。"""
+        """消息正文可用的 token 预算（再扣掉工具 schema）。
+
+        schema 预留为 0 时按真实工具 schema 测量，避免「新增工具后摘要阈值
+        被低估」——硬编码的 5k 在 17 个工具时实际已接近 14k。
+        """
         usable, _ = self.context_token_limits()
         if usable <= 0:
             return 0
-        return max(1, usable - max(0, int(self.context_tool_schema_reserve_tokens)))
+        return max(1, usable - tool_schema_reserve_tokens())
+
 
     def resolve_llm(self, business_model: str = "") -> str:
         """轻量任务的模型名。网关由 llm.client.lightweight_llm 决定，不要只拿这个名字去打主网关。"""
@@ -540,5 +549,45 @@ class Settings(BaseSettings):
     session_cleanup_interval_seconds: int = 300
     session_empty_max_age_seconds: int = 3600
 
+# 工具 schema 预留 token：0 表示启动时按真实工具 schema 测量。
+# 这里是「惰性兜底」——不能在 import 期反向 import tools.registry，
+# 否则 config → registry → tools → store → short_term → config 成环
+# （ShortTermMemory 的默认参数在类定义时求值）。
+_FALLBACK_SCHEMA_TOKENS = 8000
+_measured_schema_tokens: int | None = None
+
+
+def measure_tool_schema_tokens() -> int:
+    """启动时调用一次：按真实工具 schema 测量并缓存 token 数。"""
+    global _measured_schema_tokens
+    from ai_agent.llm.tokenizer import count_json_tokens
+    from ai_agent.tools.registry import tool_schemas
+
+    try:
+        _measured_schema_tokens = count_json_tokens(tool_schemas())
+    except Exception:
+        _measured_schema_tokens = None
+    return _measured_schema_tokens or 0
+
+
+def set_measured_tool_schema_tokens(value: int) -> None:
+    """测试/宿主注入测量值，避免依赖工具注册表。"""
+    global _measured_schema_tokens
+    _measured_schema_tokens = max(0, int(value))
+
+
+def tool_schema_reserve_tokens() -> int:
+    """工具 schema 预留 token：显式配置优先，否则用测量值/保守兜底。
+
+    不在这里主动 import tools.registry：该函数可能被 short_term 的默认参数
+    在 import 期调用，主动测量会成环。真实的测量在服务启动时由
+    ``api.app.lifespan`` 调 ``measure_tool_schema_tokens()`` 完成。
+    """
+    configured = max(0, int(settings.context_tool_schema_reserve_tokens))
+    if configured > 0:
+        return configured
+    if _measured_schema_tokens is None:
+        return _FALLBACK_SCHEMA_TOKENS
+    return _measured_schema_tokens
 
 settings = Settings()

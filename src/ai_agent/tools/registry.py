@@ -18,7 +18,9 @@ from ai_agent.tools.memory import (
     memory_write_tool,
 )
 from ai_agent.tools.misc import (
+    read_history_tool,
     read_tool_result_tool,
+    search_history_tool,
     weather_tool,
     web_search_tool,
 )
@@ -40,6 +42,8 @@ TOOLS = [
     weather_tool,
     web_search_tool,
     read_tool_result_tool,
+    search_history_tool,
+    read_history_tool,
     memory_search_tool,
     memory_write_tool,
     kb_list_files_tool,
@@ -79,6 +83,8 @@ TOOL_OUTPUT_LIMITS: dict[str, int] = {
     # 展开的是全量画像 + 情景原文，截断会让「未列出的条目」再次消失
     "expand_memory": 4000,
     "read_tool_result": 6000,
+    "search_history": 4000,
+    "read_history": 6000,
 }
 
 

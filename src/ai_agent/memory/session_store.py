@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+from ai_agent.core.config import settings
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.short_term import short_term_memory
 from ai_agent.storage.db import (
@@ -485,12 +486,199 @@ class SessionStore(Database):
             "meta": row["meta"] or {},
         }
 
+    def save_raw_tool_result(
+        self,
+        user_id: str,
+        chat_session_id: str,
+        tool_call_id: str,
+        name: str,
+        content: str,
+        meta: dict | None = None,
+    ) -> None:
+        """保存裁剪前工具全文；进程池淘汰/重启后 read_tool_result 用。"""
+        call_id = (tool_call_id or "").strip()
+        if not call_id:
+            return
+        body = str(content or "")
+        cap = max(1, int(settings.tool_result_pool_max_content_chars))
+        truncated = len(body) > cap
+        if truncated:
+            body = body[:cap]
+        payload = dict(meta or {})
+        payload["raw_truncated"] = truncated
+        with self._get_pool().connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_tool_result
+                    (id, user_id, chat_session_id, tool_call_id, name,
+                     content, meta, created_at, expires_at)
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, now(),
+                    CASE WHEN %s > 0
+                         THEN now() + (%s * interval '1 second')
+                         ELSE NULL END
+                )
+                ON CONFLICT (user_id, chat_session_id, tool_call_id)
+                DO UPDATE SET
+                    name = EXCLUDED.name,
+                    content = EXCLUDED.content,
+                    meta = EXCLUDED.meta,
+                    created_at = now(),
+                    expires_at = EXCLUDED.expires_at
+                """,
+                (
+                    str(uuid.uuid4()),
+                    user_id,
+                    chat_session_id,
+                    call_id,
+                    name or "tool",
+                    body,
+                    Jsonb(payload),
+                    int(settings.tool_result_db_ttl_seconds),
+                    int(settings.tool_result_db_ttl_seconds),
+                ),
+            )
+            conn.commit()
+
+    def load_raw_tool_result(
+        self, user_id: str, chat_session_id: str, tool_call_id: str
+    ) -> dict | None:
+        call_id = (tool_call_id or "").strip()
+        if not call_id:
+            return None
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT content, name, meta
+                FROM agent_tool_result
+                WHERE user_id = %s AND chat_session_id = %s
+                  AND tool_call_id = %s
+                  AND (expires_at IS NULL OR expires_at >= now())
+                LIMIT 1
+                """,
+                (user_id, chat_session_id, call_id),
+            ).fetchone()
+        if not row:
+            return None
+        meta = row["meta"] if isinstance(row["meta"], dict) else {}
+        return {
+            "content": row["content"] or "",
+            "name": row["name"] or "tool",
+            "meta": meta,
+            "truncated": bool(meta.get("raw_truncated")),
+        }
+
+    def delete_raw_tool_results(
+        self, user_id: str, chat_session_id: str | None = None
+    ) -> int:
+        with self._get_pool().connection() as conn:
+            if chat_session_id is None:
+                cur = conn.execute(
+                    "DELETE FROM agent_tool_result WHERE user_id = %s",
+                    (user_id,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    DELETE FROM agent_tool_result
+                    WHERE user_id = %s AND chat_session_id = %s
+                    """,
+                    (user_id, chat_session_id),
+                )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    def cleanup_expired_tool_results(self) -> int:
+        with self._get_pool().connection() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM agent_tool_result
+                WHERE expires_at IS NOT NULL AND expires_at < now()
+                """
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    def search_chat_history(
+        self,
+        user_id: str,
+        chat_session_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> list[dict]:
+        """当前会话全文关键词检索；摘要之外的旧对话细节用它找回。"""
+        text = (query or "").strip()
+        if not text:
+            return []
+        escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT seq, role, content
+                FROM agent_chat_history
+                WHERE user_id = %s AND chat_session_id = %s
+                  AND role IN ('user', 'assistant')
+                  AND content ILIKE %s ESCAPE '\\'
+                ORDER BY seq DESC
+                LIMIT %s
+                """,
+                (user_id, chat_session_id, f"%{escaped}%", max(1, min(limit, 20))),
+            ).fetchall()
+        return [
+            {
+                "seq": int(row["seq"]),
+                "role": row["role"],
+                "content": row["content"] or "",
+            }
+            for row in reversed(rows)
+        ]
+
+    def load_chat_around(
+        self,
+        user_id: str,
+        chat_session_id: str,
+        seq: int,
+        before: int = 2,
+        after: int = 2,
+    ) -> list[dict]:
+        """按 seq 读一段历史上下文，用于 search_history 命中后回看前后文。"""
+        anchor = max(0, int(seq))
+        back = max(0, min(int(before), 20))
+        forward = max(0, min(int(after), 20))
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT seq, role, content
+                FROM agent_chat_history
+                WHERE user_id = %s AND chat_session_id = %s
+                  AND seq BETWEEN %s AND %s
+                  AND role IN ('user', 'assistant')
+                ORDER BY seq
+                """,
+                (user_id, chat_session_id, anchor - back, anchor + forward),
+            ).fetchall()
+        return [
+            {
+                "seq": int(row["seq"]),
+                "role": row["role"],
+                "content": row["content"] or "",
+            }
+            for row in rows
+        ]
+
     def clear_chat(self, user_id: str, chat_session_id: str | None = None) -> None:
         with self._get_pool().connection() as conn:
             if chat_session_id:
                 conn.execute(
                     """
                     DELETE FROM agent_chat_history
+                    WHERE user_id = %s AND chat_session_id = %s
+                    """,
+                    (user_id, chat_session_id),
+                )
+                conn.execute(
+                    """
+                    DELETE FROM agent_tool_result
                     WHERE user_id = %s AND chat_session_id = %s
                     """,
                     (user_id, chat_session_id),
@@ -506,6 +694,10 @@ class SessionStore(Database):
             else:
                 conn.execute(
                     "DELETE FROM agent_chat_history WHERE user_id = %s",
+                    (user_id,),
+                )
+                conn.execute(
+                    "DELETE FROM agent_tool_result WHERE user_id = %s",
                     (user_id,),
                 )
                 conn.execute(
@@ -663,6 +855,13 @@ class SessionStore(Database):
             conn.execute(
                 """
                 DELETE FROM agent_checkpoint
+                WHERE user_id = %s AND chat_session_id = %s
+                """,
+                (user_id, session_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM agent_tool_result
                 WHERE user_id = %s AND chat_session_id = %s
                 """,
                 (user_id, session_id),

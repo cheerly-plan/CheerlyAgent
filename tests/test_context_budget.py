@@ -268,3 +268,37 @@ def test_soft_limit_ages_or_prunes_old_tool_results(monkeypatch):
     assert tool_msgs[-1]["content"].endswith("数" * 300)
     calls = {c["id"] for m in fitted for c in (m.get("tool_calls") or [])}
     assert all(m["tool_call_id"] in calls for m in tool_msgs)
+
+
+def test_message_budget_uses_measured_schema_reserve():
+    """工具 schema 预留按启动测量值生效，不再硬编码。"""
+    from ai_agent.core.config import (
+        settings as cfg,
+        set_measured_tool_schema_tokens,
+        tool_schema_reserve_tokens,
+    )
+
+    usable, _soft = cfg.context_token_limits()
+    try:
+        set_measured_tool_schema_tokens(14207)
+        assert tool_schema_reserve_tokens() == 14207
+        assert cfg.context_message_token_budget() == usable - 14207
+        set_measured_tool_schema_tokens(8000)
+        assert cfg.context_message_token_budget() == usable - 8000
+    finally:
+        set_measured_tool_schema_tokens(5000)
+
+
+def test_explicit_schema_reserve_overrides_measurement(monkeypatch):
+    from ai_agent.core.config import (
+        set_measured_tool_schema_tokens,
+        settings as cfg,
+        tool_schema_reserve_tokens,
+    )
+
+    try:
+        set_measured_tool_schema_tokens(14207)
+        monkeypatch.setattr(cfg, "context_tool_schema_reserve_tokens", 9000)
+        assert tool_schema_reserve_tokens() == 9000
+    finally:
+        set_measured_tool_schema_tokens(5000)

@@ -149,6 +149,8 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `kb_list_files` | `tools/kb/kb_list.py` | 列出库内文件清单（替代「目录注入」，模型需要时才主动查） |
 | `kb_read` | `tools/kb/kb_search.py` | 按「文件名 · 第N页」读回知识库原文与上下文 |
 | `read_tool_result` | `tools/misc/tool_result.py` | 按 `tool_call_id` 读回任意历史工具结果全文，支持 offset 分页 |
+| `search_history` | `tools/misc/history.py` | 按关键词检索当前会话旧对话原文，摘要之外的细节回读 |
+| `read_history` | `tools/misc/history.py` | 按 seq 读取命中处前后上下文 |
 | `search_memory` / `write_memory` | `tools/memory/memory.py` | 长期/情景记忆的检索与写入 |
 | `web_search` | `tools/misc/web_search.py` | 联网搜索（`ddgs`） |
 | `get_weather` | `tools/misc/weather.py` | 天气查询 |
@@ -258,8 +260,9 @@ L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 
 
 ### 上下文管理
 
-- 所有上下文预算按 token 计数：`LLM_CONTEXT_TOKEN_BUDGET` 是硬上限，先扣
-  `CONTEXT_RESERVE_TOKENS`（输出/工具参数预留）和工具 schema 的 token，
+- 所有上下文预算按 token 计数：`LLM_CONTEXT_TOKEN_BUDGET` 是硬上限（默认 40000 token），先扣
+  `CONTEXT_RESERVE_TOKENS`（输出/工具参数预留）和工具 schema 的 token
+  （启动时按真实 schema 测量，见 `CONTEXT_TOOL_SCHEMA_RESERVE_TOKENS`）
   得到实际输入预算；`CONTEXT_SOFT_LIMIT_RATIO` 是软水位，达到后按 token
   成本优先收缩工具结果。计数走 Qwen tokenizer（`QWEN_TOKENIZER_PATH`）。
 - 工具结果优先收缩：按「可省 token × 新旧 × 是否被引用」排序，优先收
@@ -272,8 +275,10 @@ L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 
   消息始终成对，不产生孤儿 tool 消息。
 - 摘要和 `agent_session.summary_until_seq` 一起更新；冷启动只加载游标之后
   的消息，避免已摘要的原文与摘要重复进入上下文。
-- `read_tool_result` 按 pool → 当前 messages → `agent_chat_history` 查找，
-  进程重启或池子淘汰后仍能按 `tool_call_id` 回读。
+- 工具结果按 pool → `agent_tool_result`（裁剪前全文）→ 当前 messages →
+  `agent_chat_history` 查找；进程重启或池子淘汰后仍能回读完整原文。
+- 摘要只作索引；旧对话细节用 `search_history` 按关键词回原文，再用
+  `read_history` 按 seq 看前后文，数字/条款不直接引用摘要。
 - 已读过的占位、低价值旧工具对按整对（assistant(tool_calls)+tool）删除，
   不产生孤儿 tool 消息；移出活跃窗口的快照同步从结果池淘汰。
 - 启动时预热 Qwen tokenizer；不可用时告警并退回启发式计数。

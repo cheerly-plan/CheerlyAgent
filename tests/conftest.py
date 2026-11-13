@@ -23,3 +23,11 @@ class _TestTokenCounter:
 
 
 configure_token_counter(_TestTokenCounter())
+
+# 单测不加载真实工具注册表去测 schema token：用一个固定值代替，
+# 真实测量在服务启动时由 api.app.lifespan 完成。
+from ai_agent.core.config import (  # noqa: E402
+    set_measured_tool_schema_tokens,
+)
+
+set_measured_tool_schema_tokens(int(os.environ.get("TEST_SCHEMA_TOKENS", "5000")))

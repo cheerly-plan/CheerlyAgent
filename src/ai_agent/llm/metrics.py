@@ -38,6 +38,7 @@ CONTEXT_HARD: Final = "context.shrink.hard"
 TOOL_RESULT_POOL_HIT: Final = "tool_result.pool.hit"
 TOOL_RESULT_POOL_MISS: Final = "tool_result.pool.miss"
 TOOL_RESULT_DB_HIT: Final = "tool_result.db.hit"
+TOOL_RESULT_RAW_HIT: Final = "tool_result.raw.hit"
 
 
 def incr(name: str, count: int = 1) -> None:

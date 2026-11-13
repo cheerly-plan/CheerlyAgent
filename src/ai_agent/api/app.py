@@ -66,8 +66,17 @@ async def lifespan(app: FastAPI):
     # 会打 WARNING 并退回启发式计数。
     from ai_agent.llm.tokenizer import warmup_tokenizer
 
+    def _warm_context_budget() -> None:
+        # 先加载 tokenizer，再按真实工具 schema 测一次预留：新增工具后
+        # 摘要/缓存阈值不会被硬编码的旧值低估。
+        warmup_tokenizer()
+        from ai_agent.core.config import measure_tool_schema_tokens
+
+        tokens = measure_tool_schema_tokens()
+        _logger.info("工具 schema 预留 tokens=%d", tokens)
+
     threading.Thread(
-        target=warmup_tokenizer, name="tokenizer-warmup", daemon=True
+        target=_warm_context_budget, name="tokenizer-warmup", daemon=True
     ).start()
     maintenance_cleaner.start()
 

@@ -47,12 +47,13 @@ def read_tool_result(
     if not call_id:
         return "请提供 tool_call_id，例如 read_tool_result(tool_call_id=\"call_abc\")。"
 
-    # 池子里是裁剪前全文，优先于消息里的已裁剪副本；池子没有（重启/已淘汰）
-    # 再回落到当前 messages 的 tool_result_scope。
+    # 查找顺序：进程池 → raw 工具结果表 → 当前 messages → 历史消息。
+    # raw 表保存裁剪前全文；历史消息里的 content 可能已被单工具上限裁剪。
     pooled = tool_result_pool.get(
         current_user_id(), current_session_id(), call_id
     )
     from_pool = pooled is not None
+    from_raw = False
     if pooled is not None:
         metrics.incr(metrics.TOOL_RESULT_POOL_HIT)
         ref = {
@@ -61,30 +62,49 @@ def read_tool_result(
             "truncated": bool(pooled.get("truncated")),
         }
     else:
-        ref = get_tool_result(call_id)
-        if ref is None:
-            # 池子淘汰/进程重启后，回落到持久化历史（内容可能已被单工具
-            # 输出上限裁剪，但仍是当时模型看过的版本）。
-            try:
-                from ai_agent.storage.store import store
+        try:
+            from ai_agent.storage.store import store
 
-                db_row = store.load_tool_result(
-                    current_user_id(), current_session_id(), call_id
-                )
-            except Exception:
-                logger.exception("工具结果 DB 兜底查询失败 call_id=%s", call_id)
-                db_row = None
-            if db_row is None:
-                metrics.incr(metrics.TOOL_RESULT_POOL_MISS)
-                return (
-                    f"没有找到 tool_call_id={call_id} 的工具结果；"
-                    "它可能已被整轮裁剪，请重新调用原工具。"
-                )
-            metrics.incr(metrics.TOOL_RESULT_DB_HIT)
+            raw_row = store.load_raw_tool_result(
+                current_user_id(), current_session_id(), call_id
+            )
+        except Exception:
+            logger.exception("工具原文表查询失败 call_id=%s", call_id)
+            raw_row = None
+        if raw_row is not None:
+            metrics.incr(metrics.TOOL_RESULT_RAW_HIT)
+            from_raw = True
             ref = {
-                "name": db_row.get("name") or "tool",
-                "content": db_row.get("content") or "",
+                "name": raw_row.get("name") or "tool",
+                "content": raw_row.get("content") or "",
+                "truncated": bool(raw_row.get("truncated")),
             }
+        else:
+            ref = get_tool_result(call_id)
+            if ref is None:
+                # 最后才回落到历史消息（模型当时看到的裁剪版）
+                try:
+                    from ai_agent.storage.store import store
+
+                    db_row = store.load_tool_result(
+                        current_user_id(), current_session_id(), call_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "工具结果历史兜底查询失败 call_id=%s", call_id
+                    )
+                    db_row = None
+                if db_row is None:
+                    metrics.incr(metrics.TOOL_RESULT_POOL_MISS)
+                    return (
+                        f"没有找到 tool_call_id={call_id} 的工具结果；"
+                        "它可能已被整轮裁剪，请重新调用原工具。"
+                    )
+                metrics.incr(metrics.TOOL_RESULT_DB_HIT)
+                ref = {
+                    "name": db_row.get("name") or "tool",
+                    "content": db_row.get("content") or "",
+                }
 
     content = ref.get("content") or ""
     name = ref.get("name") or "tool"
@@ -108,8 +128,8 @@ def read_tool_result(
             f"\n\n[已读 {end}/{total} 字符；继续读用 "
             f"read_tool_result(tool_call_id=\"{call_id}\", offset={end})]"
         )
-    if from_pool and ref.get("truncated"):
-        body += "\n[池中快照已超过单条上限并截断]"
+    if (from_pool or from_raw) and ref.get("truncated"):
+        body += "\n[快照已超过单条上限并截断]"
     return body
 
 

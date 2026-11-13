@@ -241,6 +241,35 @@ class Database:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS agent_tool_result (
+                    id UUID PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    chat_session_id TEXT NOT NULL,
+                    tool_call_id TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT 'tool',
+                    content TEXT NOT NULL DEFAULT '',
+                    meta JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    expires_at TIMESTAMPTZ,
+                    UNIQUE (user_id, chat_session_id, tool_call_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_tool_result_user_session_idx
+                ON agent_tool_result (user_id, chat_session_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS agent_tool_result_expires_idx
+                ON agent_tool_result (expires_at)
+                WHERE expires_at IS NOT NULL
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS agent_session (
                     id UUID PRIMARY KEY,
                     user_id TEXT NOT NULL,

@@ -64,6 +64,12 @@ class MaintenanceCleaner:
             except Exception:
                 logger.exception("清理过期情景记忆失败")
             try:
+                expired_tools = store.cleanup_expired_tool_results()
+                if expired_tools:
+                    logger.info("清理过期工具原文 %s 条", expired_tools)
+            except Exception:
+                logger.exception("清理过期工具原文失败")
+            try:
                 # 第 4 步：L3 候选审核——证据够就自动晋升（不再需要人工逐条批准）
                 from ai_agent.memory.promotion import review_all_pending_candidates
 
