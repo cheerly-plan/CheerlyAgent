@@ -7,7 +7,7 @@ from ai_agent.tools.progress import emit_event, emit_progress
 
 
 def test_structured_event_is_forwarded_as_its_own_sse_event(monkeypatch):
-    def fake_execute(_name: str, _arguments: dict) -> str:
+    def fake_execute(_name: str, _arguments: dict, **_kwargs) -> str:
         emit_progress("正在提交研报任务…")
         emit_event({"type": "report_job", "job_id": "abc12345", "poll_url": "/v1/report/jobs/abc12345"})
         return "工具正文"

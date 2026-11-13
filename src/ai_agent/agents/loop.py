@@ -1,5 +1,6 @@
 import queue
 import re
+import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,7 @@ from ai_agent.prompts.chat import (
     RUNTIME_DUP_CALL,
     RUNTIME_DUP_OUTPUT,
     RUNTIME_EMPTY_ANSWER,
+    RUNTIME_TOOL_TIMEOUT,
     build_system_prompt,
 )
 # 报告类型清单是业务数据，由编排层注入系统提示词（prompts 层不反向依赖
@@ -153,7 +155,9 @@ def _run_tool_with_progress(
                 with session_scope(chat_session_id):
                     with collect_citations() as cited:
                         with user_scope(user_id):
-                            output = execute_tool(name, arguments)
+                            # 进度型长任务：本次不设总时长，交给下面的看门狗
+                            # 按「多久没进度」判活，别被 60 秒短预算打断
+                            output = execute_tool(name, arguments, timeout=0)
             return output, list(cited)
         finally:
             reset_event_emitter(event_token)
@@ -164,13 +168,34 @@ def _run_tool_with_progress(
             progress_q.put(None)
 
     future = _tool_progress_pool.submit(_worker)
+    # 长任务看门狗：有进度就算活着，长时间一句进度都没有才判超时。
+    # execute_tool 内部已有总时长兜底，这里补的是「工具迟迟不返回时
+    # 前端有个明确交代」，不让 SSE 一直空转。
+    progress_budget = max(
+        0.0, float(settings.tool_execute_progress_timeout_seconds)
+    )
+    last_progress = time.monotonic()
     while True:
         try:
             item = progress_q.get(timeout=0.4)
         except queue.Empty:
             if future.done():
                 break
+            if progress_budget > 0 and time.monotonic() - last_progress > progress_budget:
+                logger.warning(
+                    "工具长时间无进度 name=%s budget=%.0fs，按超时收尾",
+                    name,
+                    progress_budget,
+                )
+                # 线程收不回来（挂死的调用），只放弃等待；daemon 线程不阻塞退出
+                yield {
+                    "type": "_tool_result",
+                    "content": RUNTIME_TOOL_TIMEOUT.format(seconds=progress_budget),
+                    "sources": [],
+                }
+                return
             continue
+        last_progress = time.monotonic()
         if item is None:
             break
         if isinstance(item, dict):

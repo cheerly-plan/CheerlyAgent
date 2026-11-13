@@ -401,6 +401,15 @@ class Settings(BaseSettings):
     # 确认可行再默认打开。关掉时 kb_search 行为与原来逐字一致。
     kb_search_list_only: bool = False
 
+    # 单次工具执行的总时长上限（墙钟秒）。工具是同步阻塞调用，DNS 卡死、
+    # 上游 hang 住时 execute_tool 会无限期不返回，整个 run 跟着挂死——
+    # 前端只看到转圈，checkpoint 停在 running。超时后把「超时」当作工具结果
+    # 交回模型继续作答。<=0 关闭（不建议）。
+    tool_execute_timeout_seconds: float = 60.0
+    # 已经推过 tool_progress 的工具（generate_report 这类长任务）另给一档：
+    # 它们本来就会跑几分钟，但只要有进度就不算失控。<=0 关闭。
+    tool_execute_progress_timeout_seconds: float = 1800.0
+
     # 兼容旧调用/测试的轮数窗口；生产上下文已改为 token 预算驱动，按
     # 「可省 token × 新旧 × 是否被引用」收缩，不再依赖这个值。
     tool_result_full_turns: int = 2

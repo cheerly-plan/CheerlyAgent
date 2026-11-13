@@ -1,11 +1,15 @@
+import contextvars
 import json
+import threading
 from types import UnionType
-from typing import Union, get_args, get_origin
+from typing import Callable, TypeVar, Union, get_args, get_origin
 
 from pydantic import ValidationError
 
+from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
 from ai_agent.core.text import clip_text
+from ai_agent.prompts.chat import RUNTIME_TOOL_TIMEOUT
 from ai_agent.tools.kb import (
     kb_list_files_tool,
     kb_read_tool,
@@ -191,18 +195,95 @@ def _coerce_stringified_lists(args_model: type, arguments: dict) -> dict:
     return coerced
 
 
-def execute_tool(name: str, arguments: dict) -> str:
+def _timeout_result(name: str, seconds: float, arguments: dict) -> str:
+    """工具挂死时的兜底结果：当作「本次没查到」交回模型，让 run 继续。
+
+    不能抛异常：异常路径同样要等工具返回（线程仍被占着）。这里直接返回
+    文案，主循环立刻拿到 tool 消息，模型还有机会换工具或如实说明。
+    """
+    logger.warning(
+        "工具执行超时 name=%s seconds=%.0f args=%s",
+        name,
+        seconds,
+        clip_text(json.dumps(arguments, ensure_ascii=False, default=str), 300),
+    )
+    return RUNTIME_TOOL_TIMEOUT.format(seconds=seconds)
+
+
+_T = TypeVar("_T")
+
+# 超时哨兵：工具本身可能合法返回 None，不能用 None 表示超时
+_TIMED_OUT = object()
+
+
+def _call_with_timeout(fn: Callable[[], _T], seconds: float) -> _T | object:
+    """同步在独立线程执行，最多等 seconds；超时返回 _TIMED_OUT。
+
+    用一次性线程而不是共享池：挂死的线程收不回来，共享池会被逐个占满。
+    调用方必须用 `is _TIMED_OUT` 判断。
+
+    线程不继承调用方的 ContextVar（tool_results_scope / user_scope /
+    session_scope / 进度回调都在里面），必须显式 copy_context() 过去，
+    否则工具在新线程里读不到本轮上下文。
+    """
+    if seconds <= 0:
+        return fn()
+    box: list[_T] = []
+    error: list[BaseException] = []
+    context = contextvars.copy_context()
+
+    def _target() -> None:
+        try:
+            box.append(context.run(fn))
+        except BaseException as e:  # noqa: BLE001 - 原样回抛给调用方
+            error.append(e)
+
+    worker = threading.Thread(target=_target, name="tool-exec", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        # 线程留在后台跑完/挂死，daemon 不阻塞进程退出
+        return _TIMED_OUT
+    if error:
+        raise error[0]
+    return box[0]
+
+
+def execute_tool(
+    name: str, arguments: dict, *, timeout: float | None = None
+) -> str:
+    """执行一个工具，带总时长兜底。
+
+    ``timeout`` 显式指定本次预算（秒）；None 用 ``tool_execute_timeout_seconds``，
+    传 0 表示本次不做超时限制——长时间任务（generate_report）自己在工作线程里
+    推进度，由 loop 的看门狗按「无进度时长」判活，不该被这里的短预算打断。
+    """
     tool = TOOLS_MAP.get(name)
     if tool is None:
         return f"ERROR: 未知工具 {name}"
     arguments = _coerce_stringified_lists(tool.args_model, arguments)
+    seconds = (
+        max(0.0, float(settings.tool_execute_timeout_seconds))
+        if timeout is None
+        else max(0.0, float(timeout))
+    )
     try:
-        return _tool_output(tool, tool.run(**arguments), arguments)
+        output = _call_with_timeout(
+            lambda: _tool_output(tool, tool.run(**arguments), arguments), seconds
+        )
+        if output is _TIMED_OUT:
+            return _timeout_result(name, seconds, arguments)
+        return output  # type: ignore[return-value]
     except ValidationError:
         # 模型传的参数越界（depth=3 超过 le=2 之类）：夹回边界重试一次，别白费一轮
         try:
             clamped = _clamp_out_of_range_args(tool.args_model, arguments)
-            return _tool_output(tool, tool.run(**clamped), clamped)
+            output = _call_with_timeout(
+                lambda: _tool_output(tool, tool.run(**clamped), clamped), seconds
+            )
+            if output is _TIMED_OUT:
+                return _timeout_result(name, seconds, arguments)
+            return output  # type: ignore[return-value]
         except Exception as e:
             logger.warning("工具参数越界后夹取仍失败 name=%s: %s", name, e)
             return f"ERROR: 工具执行失败（{type(e).__name__}）"

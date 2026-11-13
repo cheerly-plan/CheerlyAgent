@@ -2035,7 +2035,7 @@ def test_report_job_id_lands_on_final_assistant_message():
         yield ("text", "已提交，稍后回来看结果")
         yield ("result", {"content": "已提交，稍后回来看结果", "tool_calls": []})
 
-    def fake_execute(_name, _arguments):
+    def fake_execute(_name, _arguments, **_kwargs):
         emit_event(
             {
                 "type": "report_job",
