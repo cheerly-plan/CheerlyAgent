@@ -24,10 +24,6 @@ from ai_agent.tools.context import session_scope, tool_result_index, tool_result
 
 from ai_agent.core.logging import get_logger
 
-from ai_agent.agents._loop.followup import (
-    _KB_RETRIEVAL_TOOLS,
-)
-
 from ai_agent.agents._loop.state import (
     _tool_progress_pool,
 )
@@ -353,11 +349,10 @@ def run_loop(
         step_tools = tools
         # 点名了库内主体、而这句还没查过：这一步必须调 kb_search 或 kg_search。
         # 工具返回后的下一步不再强制，模型可以继续查，也可以写答案。
-        if _public()._must_call_kb_tool(messages, tools, kb_file_ids):
+        forced = _public()._forced_kb_tools(messages, tools, kb_file_ids)
+        if forced:
             tool_choice = "required"
-            step_tools = [
-                s for s in tools if s["function"]["name"] in _KB_RETRIEVAL_TOOLS
-            ]
+            step_tools = [s for s in tools if s["function"]["name"] in forced]
         try:
             # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
             context = _public()._fitted_context(messages, step_tools)

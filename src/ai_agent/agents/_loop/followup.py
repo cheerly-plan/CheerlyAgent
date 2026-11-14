@@ -117,6 +117,28 @@ def _attach_kg_prefetch(
     _public().logger.info("图谱预检索已注入 chars=%d", len(block))
     messages.append({"role": "system", "content": block})
 
+def _forced_kb_tools(
+    messages: list[ChatMessage],
+    tools: list[dict],
+    kb_file_ids: tuple[str, ...] = (),
+) -> frozenset[str] | None:
+    """返回本轮必须调用的工具名集合；返回 None 表示不强制。
+
+    在「是否要强制查库」的基础上再细分一句：问业绩/财务数字时强制
+    ``report_extract_indicators``（确定性抽取，带口径与出处），其余照旧强制
+    检索工具。``kb_search`` 返回的是原文切片，模型还得自己找数字，正是要
+    避免的那条路。
+    """
+    if not _must_call_kb_tool(messages, tools, kb_file_ids):
+        return None
+    names = {t.get("function", {}).get("name") for t in tools}
+    text = _public()._latest_user_text(messages).strip()
+    if _METRIC_TOOL in names and _METRIC_WORDS.search(text):
+        # 工具不在本轮可用列表里（知识库/研报关闭）时退回检索工具
+        return _FORCE_TOOL_SETS["metric"]
+    return _FORCE_TOOL_SETS["retrieval"]
+
+
 def _must_call_kb_tool(
     messages: list[ChatMessage],
     tools: list[dict],
@@ -172,9 +194,24 @@ def _must_call_kb_tool(
         )
     return bool(subjects or entities)
 
-# 问句点名了库内主体或图谱实体时，第一步只留这两个工具并强制调用。
+# 问句点名了库内主体或图谱实体时，第一步只留这些工具并强制调用。
 # 天气、记忆、联网留在后面的轮次，避免模型用它们应付「必须调一个工具」。
 _KB_RETRIEVAL_TOOLS = frozenset({"kb_search", "kg_search", "kb_read"})
+# 问业绩/财务数字时强制走确定性抽取：kb_search 只给原文切片，模型仍需自己
+# 找数字；report_extract_indicators 直接返回带口径与出处的结构化原值。
+_METRIC_TOOL = "report_extract_indicators"
+_FORCE_TOOL_SETS: dict[str, frozenset[str]] = {
+    "metric": frozenset({_METRIC_TOOL}),
+    "retrieval": _KB_RETRIEVAL_TOOLS,
+}
+
+# 业绩/财务类问法。命中即认为用户在问具体数字，而不是问那段原文。
+# 刻意收窄到「指标名 + 涨跌词」，避免「这家公司怎么样」这种泛问也被强制抽数。
+_METRIC_WORDS = re.compile(
+    r"业绩|营业收入|营收|收入|利润|净利|归母|毛利|毛利率|净利率|净息差|"
+    r"总资产|净资产|负债|负债率|现金流|研发费用|销售费用|管理费用|"
+    r"每股收益|EPS|ROE|ROA|同比|环比|增长|下滑|增速|增减"
+)
 
 _KG_PREFETCH_MARK = "【图谱邻域】"
 

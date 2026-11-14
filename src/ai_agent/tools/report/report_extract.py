@@ -43,14 +43,46 @@ class ReportExtractArgs(BaseModel):
             "留空时按公司细类型路由默认指标集（银行／Fabless／制造等）"
         ),
     )
+    compare_to: str = Field(
+        default="",
+        description=(
+            "可选：要一起抽的对比期（如 2026Q2）。填了就同时返回两期的原值，"
+            "模型可直接传给 report_compare 算环比；不填只抽 period 一期"
+        ),
+    )
 
 
-def _report_extract(subjects: list[str], period: str, indicators: list[str]) -> str:
+def _report_extract(
+    subjects: list[str],
+    period: str,
+    indicators: list[str],
+    compare_to: str = "",
+) -> str:
     wanted = [item for item in (indicators or []) if item and item.strip()]
     if not wanted:
         # 指标留空 → 按公司细类型模板（bank/fabless/foundry…），禁止跨行业通吃。
         wanted = default_indicators(company_type_of(subjects))
     result = extract_indicators(subjects, period, wanted)
+    base = _render(result)
+    other = (compare_to or "").strip()
+    if not other or other == (period or "").strip():
+        return base
+    # 再抽一期：环比需要上一期的原值，工具层补齐比让模型多调一次更省轮次。
+    previous = extract_indicators(subjects, other, wanted)
+    prev_text = _render(previous)
+    from ai_agent.report.compare import compare_measures, format_compare
+
+    # 用 to_measure() 而不是手工构造：口径字段（basis / cumulative /
+    # coverage_months / scope）由 extract 统一给出，手抄容易漂移。
+    points = [fact.to_measure() for fact in [*previous.facts, *result.facts]]
+    compare_text = format_compare(compare_measures(points)) if points else ""
+    parts = [base, f"对比期 {other}：", prev_text]
+    if compare_text:
+        parts.extend(["两次抽取的增减（可直接转述，不要口算）：", compare_text])
+    return "\n".join(parts)
+
+
+def _render(result) -> str:
     lines: list[str] = []
     if not result.facts:
         lines.append("没有抽到任何指标。以下缺口如实转述，不要用通用知识补数：")
