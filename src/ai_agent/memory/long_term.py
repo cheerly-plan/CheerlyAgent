@@ -287,7 +287,11 @@ _RECAP_HEAD = re.compile(
     r"|讨论了|近期讨论)"
 )
 _COMPANY_MARK = re.compile(r"股份有限公司|有限责任公司")
-_DOC_QA = ("kb_search", "kg_search", "招股", "年报披露", "助手")
+# 工具名是通用的：任何「检索/查询工具」的输出都不该写成用户事实。
+_TOOL_MARK = ("kb_search", "kg_search", "search_history", "read_tool_result", "助手")
+# 行业专用词（默认金融）。换业务时由 MEMORY_DOMAIN_NOISE_ENABLED 关闭，
+# 通用规则（_ONGOING / _JOB_STATE / _TEMPORAL / _RECAP_HEAD）仍然生效。
+_DOC_QA = ("招股", "年报披露")
 _TOPIC_PREF = ("关注公司", "财务数据", "股东信息", "重大工程")
 
 # 本轮动作 / 任务状态：都是「这一次在做什么」，不是用户长期事实。
@@ -302,8 +306,23 @@ _ONGOING = re.compile(
 _JOB_STATE = re.compile(
     r"job_id|后台任务|预计\s*\d+\s*[-~至到]\s*\d+\s*分钟|任务已提交|进度"
 )
-# 股票代码 / 交易日这类一次性标识。
-_MARKET_CODE = re.compile(r"\b\d{6}\b|融资融券|涨停|领涨|板块走势")
+# 股票代码 / 行情这类一次性标识（行业专用，可关）。
+_MARKET_CODE = re.compile(
+    r"\b\d{6}\b|融资融券|涨停|领涨|板块走势|成交量|换手率|总市值"
+)
+# 任务对象的「主语句」：句子以被处理对象开头时，几乎一定是任务纪要。
+# 「患者于…入院」「该案已…开庭」「订单…已发货」都不含「用户」二字，
+# 之前只能靠「用户正在…」拦，换个领域就漏。
+_OBJECT_SUBJECT = re.compile(
+    r"^(患者|病人|该患者|该案|本案|该单|订单|该订单|工单|客户|该客户|"
+    r"该公司|本文件|该文件|此文件|该合同|本合同|该商品|该产品|该词条)"
+)
+
+
+def _domain_noise_enabled() -> bool:
+    from ai_agent.core.config import settings
+
+    return bool(getattr(settings, "memory_domain_noise_enabled", True))
 # 短期行程：下周/明天出差这类不能当居住地。
 _TEMPORAL = re.compile(
     r"^(用户)?(我)?(下周|本周|这周|明天|后天|今天|月底|下个月|近期)"
@@ -364,11 +383,15 @@ def is_transient_text(text: str) -> bool:
         return True
     if _ONGOING.search(body) or _JOB_STATE.search(body):
         return True
-    if _MARKET_CODE.search(body):
+    if _domain_noise_enabled() and _MARKET_CODE.search(body):
         return True
     if _RECAP_HEAD.match(body) or _TEMPORAL.match(body):
         return True
-    return any(mark in body for mark in _DOC_QA)
+    if _OBJECT_SUBJECT.match(body):
+        return True
+    if any(mark in body for mark in _TOOL_MARK):
+        return True
+    return _domain_noise_enabled() and any(mark in body for mark in _DOC_QA)
 
 
 def _keep_extracted(item: ExtractedMemory) -> bool:
@@ -378,23 +401,14 @@ def _keep_extracted(item: ExtractedMemory) -> bool:
     宁可在抽取阶段多丢一条，也不让「用户正在查询…」变成长期事实。
     """
     text = item.content.strip()
-    if _ONGOING.search(text) or _JOB_STATE.search(text):
-        return False
-    if _MARKET_CODE.search(text):
-        return False
-    if item.kind == "episode":
-        if _RECAP_HEAD.match(text):
-            return False
-        if _TEMPORAL.match(text):
-            return False
-        if any(mark in text for mark in _DOC_QA):
-            return False
-        return True
     if item.op == "delete":
         # delete 是「撤回」意图：内容常为空或不完整，不做事实性过滤，
         # 否则用户说「别再记深圳」会被前置规则吞掉，旧记忆清不掉。
         return not _JOB_STATE.search(text)
-    if _RECAP_HEAD.match(text):
+    # 与召回层共用同一套判定：任务状态 / 本轮动作 / 任务对象主语句 /
+    # 短期安排 / 工具输出 / 行业一次性信息。统一入口避免两处规则漂移
+    # （曾经就因为这里少了一条，医疗、法律类的任务纪要能混进记忆）。
+    if is_transient_text(text):
         return False
     if item.facet == "language" and text.strip(" 。.") in _DEFAULT_LANGUAGE:
         return False

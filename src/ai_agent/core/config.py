@@ -455,6 +455,10 @@ class Settings(BaseSettings):
     # 由 MEMORY_TRANSIENT_PENALTY 在融合完成之后统一处理。
     memory_fusion_weight_vector: float = 1.0
     memory_fusion_weight_keyword: float = 0.8
+    # 行业专用噪声词（金融：股票代码、涨跌停、板块走势、招股/年报披露）。
+    # 通用模式（任务状态、本轮动作、短期安排）另有硬编码规则；
+    # 换业务场景时把这个关掉即可，不必改代码。
+    memory_domain_noise_enabled: bool = True
     memory_merge_timeout_seconds: float = 30
     memory_model: str = ""
     # 情景记忆存活时间（秒）。episode 是「当前阶段近况」，不是画像：过期后
