@@ -174,12 +174,30 @@ def recency_score(item: MemoryItem, *, now: float | None = None) -> float:
 
 
 def importance_score(item: MemoryItem) -> float:
-    """0~1 的重要性：facet 权重 + 长期指令措辞 + 命中热度。"""
+    """0~1 的重要性：facet 权重 + 长期指令措辞 + 命中热度。
+
+    热度放大上限由 ``memory_heat_boost_max`` 控制：噪声行往往 hit 很高，
+    固定 0.3 的热度加权会把「用户正在查询…」顶到前排，形成越用越强的正反馈。
+    """
+    from ai_agent.core.config import settings
+
     base = _FACET_IMPORTANCE.get(item.facet or "other", 0.4)
     if _DIRECTIVE.search(item.text or ""):
         base += 0.3
-    base += min(item.hits / 5, 1.0) * 0.3
+    boost = min(max(0.0, float(settings.memory_heat_boost_max)), 1.0)
+    base += min(item.hits / 5, 1.0) * boost
     return min(1.0, base)
+
+
+def is_transient(item: MemoryItem) -> bool:
+    """这条记忆是不是「这一次」的内容（查询、任务状态、行情、短期行程）。
+
+    写入侧已经拦截新噪声；这里管的是历史库里已经存在的行——它们不该和
+    常青事实同权参与召回排序。
+    """
+    from ai_agent.memory.long_term import is_transient_text
+
+    return is_transient_text(item.text or "")
 
 
 def rank_score(item: MemoryItem, relevance_value: float) -> float:
@@ -191,11 +209,16 @@ def rank_score(item: MemoryItem, relevance_value: float) -> float:
     """
     from ai_agent.core.config import settings
 
-    return (
+    score = (
         settings.memory_rank_weight_relevance * relevance_value
         + settings.memory_rank_weight_recency * recency_score(item)
         + settings.memory_rank_weight_importance * importance_score(item)
     )
+    if is_transient(item):
+        # 一次性内容降权：同等相关性下排在常青事实之后，而不是靠 hit 热度霸榜
+        penalty = min(max(float(settings.memory_transient_penalty), 0.0), 1.0)
+        score *= penalty
+    return score
 
 
 def rerank_items(

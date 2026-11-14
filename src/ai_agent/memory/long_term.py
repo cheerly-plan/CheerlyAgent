@@ -353,6 +353,24 @@ def _is_own_occupation(text: str) -> bool:
     return bool(_JOB_NOUN.search(text)) and len(text) <= 20
 
 
+def is_transient_text(text: str) -> bool:
+    """句子是否是「这一次」的内容（查询、任务状态、行情、短期行程）。
+
+    抽取阶段用它决定是否入库；召回阶段也用它给陈旧噪声降权——历史库里
+    已经写进去的行，不能只在写入侧拦住。
+    """
+    body = (text or "").strip()
+    if not body:
+        return True
+    if _ONGOING.search(body) or _JOB_STATE.search(body):
+        return True
+    if _MARKET_CODE.search(body):
+        return True
+    if _RECAP_HEAD.match(body) or _TEMPORAL.match(body):
+        return True
+    return any(mark in body for mark in _DOC_QA)
+
+
 def _keep_extracted(item: ExtractedMemory) -> bool:
     """小模型常把招股书问答写成记忆，这里挡一层确定性噪声。
 

@@ -74,3 +74,59 @@ def test_delete_intent_is_still_allowed():
     assert _keep_extracted(
         ExtractedMemory(kind="profile", content="深圳", op="delete", facet="locale")
     )
+
+
+def test_transient_text_classifier_matches_filters():
+    from ai_agent.memory.long_term import is_transient_text
+
+    assert is_transient_text("用户正在确认中国银行的股东信息")
+    assert is_transient_text("job_id=32b54af91a4e，预计5-8分钟完成")
+    assert is_transient_text("下周去深圳出差")
+    assert not is_transient_text("我在做一个 A 股通信板块的研报系列")
+    assert not is_transient_text("财报数字以亿元为单位")
+
+
+def test_transient_memory_is_demoted_in_recall(monkeypatch):
+    """历史库里的噪声行不能靠 hit 热度霸榜：同等相关性下排在常青事实后面。"""
+    from ai_agent.core.config import settings
+    from ai_agent.memory.progressive import rerank_items
+    from ai_agent.storage.db import MemoryItem
+
+    def item(id_: str, text: str, hits: int) -> MemoryItem:
+        return MemoryItem(
+            id=id_,
+            user_id="u1",
+            text=text,
+            created_at="2026-11-14T00:00:00+00:00",
+            last_seen="2026-11-14T00:00:00+00:00",
+            hits=hits,
+        )
+
+    noisy = item("noisy", "用户正在确认中大力德的财务数据", 55)
+    evergreen = item("stable", "财报数字以亿元为单位", 1)
+
+    monkeypatch.setattr(settings, "memory_transient_penalty", 0.3)
+    ranked = rerank_items([noisy, evergreen], "财报数字")
+    assert ranked[0].id == "stable"
+
+
+def test_transient_penalty_zero_keeps_heat_ordering(monkeypatch):
+    from ai_agent.core.config import settings
+    from ai_agent.memory.progressive import rank_score
+    from ai_agent.storage.db import MemoryItem
+
+    def item(id_: str, text: str, hits: int) -> MemoryItem:
+        return MemoryItem(
+            id=id_,
+            user_id="u1",
+            text=text,
+            created_at="2026-11-14T00:00:00+00:00",
+            last_seen="2026-11-14T00:00:00+00:00",
+            hits=hits,
+        )
+
+    noisy = item("noisy", "用户正在确认中大力德的财务数据", 55)
+    monkeypatch.setattr(settings, "memory_transient_penalty", 0.0)
+    assert rank_score(noisy, 1.0) == 0.0
+    monkeypatch.setattr(settings, "memory_transient_penalty", 1.0)
+    assert rank_score(noisy, 1.0) > 0.0

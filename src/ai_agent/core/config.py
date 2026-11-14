@@ -461,6 +461,13 @@ class Settings(BaseSettings):
     memory_rank_weight_importance: float = 0.2
     # 新鲜度半衰期：30 天前的记忆权重降到一半
     memory_recency_half_life_days: int = 30
+    # 一次性内容（查询/任务状态/行情/短期行程）在召回时的降权系数。
+    # 历史库里已经写坏的噪声行不能只靠写入侧拦截；0.3 表示同等相关性下
+    # 它的排序分只有常青事实的三成，自然排到后面或被挤出 top_k。
+    memory_transient_penalty: float = 0.3
+    # 命中热度对重要性的放大上限（原实现固定 0.3）。噪声行往往 hit 很高，
+    # 热度不能反过来把噪声顶到前排，这里上限收窄到 0.15。
+    memory_heat_boost_max: float = 0.15
     memory_index_top_k: int = 8
     memory_index_max_chars: int = 800
     memory_trace_enabled: bool = True
