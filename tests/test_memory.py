@@ -304,12 +304,15 @@ def test_profile_write_dedup(mem_store):
 
 
 def test_write_profile_replaces_same_facet(mem_store):
+    """互斥 facet 新值取代旧值；旧行保留为历史，只有一条当前生效。"""
     first = mem_store.write_profile("我是画家", user_id="a", facet="occupation")
     second = mem_store.write_profile("我是后端工程师", user_id="a", facet="occupation")
-    assert first.id == second.id
+    assert first.id != second.id          # 历史行不再被原地覆盖
     profile = mem_store.list_profile("a")
     assert [item.text for item in profile] == ["我是后端工程师"]
     assert profile[0].facet == "occupation"
+    history = mem_store.list_profile("a", include_inactive=True)
+    assert {"我是画家", "我是后端工程师"} <= {item.text for item in history}
 
 
 def test_write_profile_keeps_different_facets(mem_store):

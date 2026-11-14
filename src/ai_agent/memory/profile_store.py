@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from ai_agent.core.logging import get_logger
@@ -17,15 +18,18 @@ class ProfileStore(Database):
         *,
         facet: str = "other",
         expires_at: str | None = None,
+        valid_from: str | None = None,
     ) -> MemoryItem:
         uid = user_id or current_user_id()
         text = text.strip()
         facet = facet.strip() or "other"
         mutex = is_mutex_facet(facet)
-        # 互斥 facet 一个值一行（id 按 facet 确定性生成，天然 upsert）；
-        # 累积 facet 每条独立事实一行（id 按文本确定性生成，同文本幂等去重）
+        # 互斥 facet 现在保留历史行（旧值不删除），行 id 必须每次唯一，
+        # 不能再按 facet 确定性生成——否则插入第二条历史行会主键冲突。
+        # 唯一性改由部分索引 agent_user_profile_mutex_active_uidx 保证。
+        # 累积 facet 仍按文本确定性生成，同文本写入幂等去重。
         if mutex:
-            item_id = str(self._point_id("agent_user_profile", uid, facet))
+            item_id = str(uuid.uuid4())
         else:
             item_id = str(self._point_id("agent_user_profile", uid, f"{facet}:{text}"))
         item = MemoryItem(
@@ -37,34 +41,58 @@ class ProfileStore(Database):
         )
         with self._get_pool().connection() as conn:
             if mutex:
+                # 互斥 facet 不再原地覆盖：先把「当前生效」的旧行标成失效并
+                # 记录 valid_to，再插入新行。历史值因此能被按时间点查回。
+                conn.execute(
+                    """
+                    UPDATE agent_user_profile
+                    SET superseded_at = now(),
+                        valid_to = COALESCE(%s::timestamptz, now())
+                    WHERE user_id = %s AND facet = %s
+                      AND superseded_at IS NULL
+                    """,
+                    (valid_from, item.user_id, item.facet),
+                )
                 row = conn.execute(
                     """
                     INSERT INTO agent_user_profile
-                        (id, user_id, text, facet, created_at, expires_at, superseded_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, NULL)
-                    ON CONFLICT (user_id, facet) WHERE facet IN
-                        ('name', 'language', 'locale', 'occupation')
-                    DO UPDATE SET
-                        text = EXCLUDED.text,
-                        created_at = EXCLUDED.created_at,
-                        expires_at = EXCLUDED.expires_at,
-                        superseded_at = NULL
+                        (id, user_id, text, facet, created_at, expires_at,
+                         superseded_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, NULL,
+                            COALESCE(%s::timestamptz, now()), NULL)
                     RETURNING id::text AS id
                     """,
-                    (item.id, item.user_id, item.text, item.facet, item.created_at, expires_at),
+                    (
+                        item.id,
+                        item.user_id,
+                        item.text,
+                        item.facet,
+                        item.created_at,
+                        expires_at,
+                        valid_from,
+                    ),
                 ).fetchone()
             else:
                 row = conn.execute(
                     """
                     INSERT INTO agent_user_profile
-                        (id, user_id, text, facet, created_at, expires_at, superseded_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, NULL)
+                        (id, user_id, text, facet, created_at, expires_at,
+                         superseded_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, NULL, COALESCE(%s::timestamptz, now()), NULL)
                     ON CONFLICT (id) DO UPDATE SET
                         expires_at = EXCLUDED.expires_at,
                         superseded_at = NULL
                     RETURNING id::text AS id
                     """,
-                    (item.id, item.user_id, item.text, item.facet, item.created_at, expires_at),
+                    (
+                        item.id,
+                        item.user_id,
+                        item.text,
+                        item.facet,
+                        item.created_at,
+                        expires_at,
+                        valid_from,
+                    ),
                 ).fetchone()
                 if row is None:
                     # 同文本已存在：取回原行，保持写入幂等
@@ -92,7 +120,11 @@ class ProfileStore(Database):
         return item
 
     def supersede_profile_items(
-        self, item_ids: list[str], user_id: str | None = None
+        self,
+        item_ids: list[str],
+        user_id: str | None = None,
+        *,
+        valid_to: str | None = None,
     ) -> int:
         """把若干画像条目标为「已被覆盖」。
 
@@ -107,10 +139,11 @@ class ProfileStore(Database):
             result = conn.execute(
                 """
                 UPDATE agent_user_profile
-                SET superseded_at = now()
+                SET superseded_at = now(),
+                    valid_to = COALESCE(%s::timestamptz, now())
                 WHERE user_id = %s AND id::text = ANY(%s) AND superseded_at IS NULL
                 """,
-                (uid, ids),
+                (valid_to, uid, ids),
             )
             conn.commit()
             return result.rowcount or 0
@@ -170,6 +203,7 @@ class ProfileStore(Database):
         limit: int = 20,
         *,
         include_inactive: bool = False,
+        as_of: str | None = None,
     ) -> list[MemoryItem]:
         """当前有效的画像条目。
 
@@ -179,7 +213,13 @@ class ProfileStore(Database):
         """
         uid = user_id or current_user_id()
         where = "user_id = %s"
-        if not include_inactive:
+        if as_of:
+            # 时间点查询：取「当时生效」的事实。valid_to 为空表示仍然生效。
+            where += (
+                " AND valid_from <= %s::timestamptz"
+                " AND (valid_to IS NULL OR valid_to > %s::timestamptz)"
+            )
+        elif not include_inactive:
             where += " AND superseded_at IS NULL"
             where += " AND (expires_at IS NULL OR expires_at > now())"
         with self._get_pool().connection() as conn:
@@ -196,7 +236,7 @@ class ProfileStore(Database):
                 ORDER BY created_at DESC
                 LIMIT %s
                 """,
-                (uid, limit),
+                (uid, as_of, as_of, limit) if as_of else (uid, limit),
             ).fetchall()
         return [
             MemoryItem(

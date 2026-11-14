@@ -23,6 +23,7 @@ facet 行为：
   * 已完成（已经转行 / 现在做 X / 刚换到 X 岗位）→ 更新现状。已有「画家」、新事实「已经转行做前端」→ occupation 写成「曾是画家，现为前端开发工程师」
   * 只是意向（打算 / 计划 / 准备 / 想 / 考虑 转行做 X）→ 这不是事实，occupation 保持当前职业不变，严禁写成「现为 X」；意向可写入 other，如「计划转行做 Agent 开发」
 - preference / constraint：可同时成立多条独立偏好/约束，每条单独输出一个 add，不要合并成一段、也不要覆盖已有条目；只有用户明确否定某条（「我不再…」「其实我不喜欢…」）才 delete 那一条，delete 时 content 写被否定条目的原文
+- directive：用户对回答方式的长期要求（「以后都先给结论」「不要用表格」「每次都附出处」）。这是交互规则，不是内容偏好——凡是「以后/以后都/每次/一律/不要/必须 + 怎么回答」，一律写 directive，不要写 preference
 - other：其他稳定事实；姓名、职业、地区、语言不要写进 other
 转行（已发生的）、工种、职业身份一律 occupation。「想学后端 / 准备考证」这类学习或意向不是 occupation。
 已有 occupation 已覆盖该转行/工种时 skip，不要再写 other。
@@ -34,11 +35,12 @@ facet 行为：
 EXTRACT_TEMPLATE = """
 你是用户长期记忆抽取器。只记「关于用户本人、且下一场对话还用得上」的事实。
 只输出 JSON，不要解释。格式：
-{"memories":[{"kind":"episode","content":"..."},{"kind":"profile","op":"add"|"update"|"delete","facet":"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}]}
+{"memories":[{"kind":"episode","content":"..."},{"kind":"profile","op":"add"|"update"|"delete","facet":"directive"|"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}]}
 没有可记内容时必须输出 {"memories":[]}。拿不准就空数组。
 
 kind:
-- profile: 用户用第一人称说清的姓名、职业、居住地、语言、长期偏好、约束
+- profile: 用户用第一人称说清的姓名、职业、居住地、语言、长期偏好、约束、长期指令
+- directive: 用户要求「以后怎么回答我」的交互规则（如「回答先给结论」「不要用表格」「每次都要附出处」）
 - episode: 用户自己正在做、会跨会话延续的任务（项目、已确认的技术方案、明确要求记住的进展）
 
 严禁写入：
@@ -88,9 +90,10 @@ GATE_INSTRUCTIONS = (
 RESOLVE_TEMPLATE = """
 你是用户画像写入器。根据已有画像和新事实，决定如何更新。
 只输出 JSON，不要解释。格式：
-{"actions":[{"op":"add"|"update"|"delete"|"skip","facet":"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}]}
+{"actions":[{"op":"add"|"update"|"delete"|"skip","facet":"directive"|"name"|"occupation"|"locale"|"language"|"preference"|"constraint"|"other","content":"..."}]}
 
 facet:
+- directive: 用户对回答方式的长期要求（先给结论、不要用表格、都要附出处等）
 - name: 姓名
 - occupation: 职业或长期身份
 - locale: 地区或居住地

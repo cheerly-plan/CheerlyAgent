@@ -76,6 +76,31 @@ def ensure_user_profile(conn, *, dim: int) -> None:
         WHERE superseded_at IS NULL
         """
     )
+    conn.execute(
+        """
+        ALTER TABLE agent_user_profile
+        ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ
+        """
+    )
+    conn.execute(
+        """
+        ALTER TABLE agent_user_profile
+        ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ
+        """
+    )
+    conn.execute(
+        """
+        UPDATE agent_user_profile
+        SET valid_from = created_at
+        WHERE valid_from IS NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS agent_user_profile_valid_idx
+        ON agent_user_profile (user_id, facet, valid_from, valid_to)
+        """
+    )
     # 历史遗留：全 facet 唯一索引会把多条独立偏好挤成一行，
     # 只保留互斥型 facet 的单行约束，其余 facet 允许多条共存
     conn.execute(
@@ -93,11 +118,17 @@ def ensure_user_profile(conn, *, dim: int) -> None:
         )
         """
     )
+    # 互斥 facet 的唯一性只约束「当前生效」的行：被覆盖的旧值作为历史保留，
+    # 带 valid_from / valid_to，支持按时间点回查。
+    conn.execute(
+        "DROP INDEX IF EXISTS agent_user_profile_mutex_uidx"
+    )
     conn.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS agent_user_profile_mutex_uidx
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_user_profile_mutex_active_uidx
         ON agent_user_profile (user_id, facet)
         WHERE facet IN ('name', 'language', 'locale', 'occupation')
+          AND superseded_at IS NULL
         """
     )
     conn.execute(

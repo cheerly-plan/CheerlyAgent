@@ -234,7 +234,13 @@ def apply_profile_action(
         expires_at=_profile_expires_at(facet),
     )
     if superseded:
-        store.supersede_profile_items([item.id for item in superseded], user_id=uid)
+        # 事件时间：新值生效的那一刻，旧值即失效。两者都记 valid 区间，
+        # 之后可以按时间点回查「当时是什么」，而不是只有最后一条。
+        store.supersede_profile_items(
+            [item.id for item in superseded],
+            user_id=uid,
+            valid_to=written.created_at,
+        )
         logger.info(
             "profile_superseded facet=%s new=%s old=%s",
             facet,

@@ -49,6 +49,8 @@ logger = get_logger(__name__)
 _INDEX_CLIP_MARK = "\n[记忆索引已省略 {n} 字符，未列出的画像不代表不存在]\n"
 _RECALL_CLIP_MARK = "\n[情景记忆摘要已省略 {n} 字符]\n"
 _RECALL_ITEM_MAX_CHARS = 120
+# 长期指令块：与画像索引分开，避免被 top_k / 字符预算挤掉
+_DIRECTIVE_HEADER = "【长期指令（用户要求的回答方式，优先级等同系统纪律）】"
 
 # 索引说明行的保守长度预留。先按这个额度给条目留位置，最后再用 clip_text
 # 兜一次底，保证任何输入下块长都不超过 max_chars。
@@ -140,6 +142,7 @@ def relevance(query: str, item: MemoryItem) -> float:
 # 重要性：按 facet 的固定权重 + 文本里的「长期指令」信号 + episode 命中热度。
 # 不做 LLM 打分——记忆排序必须可复现，同一份输入两次跑必须给同一个顺序。
 _FACET_IMPORTANCE = {
+    "directive": 1.0,
     "constraint": 1.0,
     "preference": 0.8,
     "name": 0.7,
@@ -280,10 +283,20 @@ def build_memory_index(
                 str(pair[0].id),
             ),
         )
-    limit = len(ranked) if top_k <= 0 else max(0, top_k)
+    # 长期指令（directive）单独成段、不参与 top_k 截断：它是「以后怎么回答我」
+    # 的要求，一旦被索引截掉就等于没记。与普通偏好混排时，问句相关性低就会
+    # 把它挤出窗口。
+    directives = [item for item, _ in ranked if (item.facet or "") == "directive"]
+    rest = [(item, score) for item, score in ranked if (item.facet or "") != "directive"]
+    limit = len(rest) if top_k <= 0 else max(0, top_k)
+    ranked = rest
 
-    lines = [PROFILE_BLOCK_HEADER]
-    chosen: list[MemoryItem] = []
+    lines: list[str] = []
+    if directives:
+        lines.append(_DIRECTIVE_HEADER)
+        lines.extend(f"- {item.text}" for item in directives)
+    lines.append(PROFILE_BLOCK_HEADER)
+    chosen: list[MemoryItem] = list(directives)
     clipped = False
     room = max(0, budget - _NOTE_RESERVE) if budget else 0
     for item, _score in ranked[:limit]:

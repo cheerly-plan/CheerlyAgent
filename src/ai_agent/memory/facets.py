@@ -12,6 +12,9 @@ logger = get_logger(__name__)
 T = TypeVar("T")
 
 FACETS = (
+    # directive 排在最前：它是「以后怎么回答我」的交互指令，
+    # 与偏好/约束不同，注入时要单独成段、优先级最高。
+    "directive",
     "name",
     "occupation",
     "locale",
@@ -32,6 +35,7 @@ MUTEX_FACETS = ("name", "language", "locale", "occupation")
 def is_mutex_facet(facet: str) -> bool:
     return facet in MUTEX_FACETS
 FACET_LABELS = {
+    "directive": "长期指令",
     "name": "姓名",
     "occupation": "职业",
     "locale": "地区",
@@ -41,6 +45,10 @@ FACET_LABELS = {
     "other": "其他",
 }
 _FACET_ALIASES = {
+    "directive": "directive",
+    "长期指令": "directive",
+    "指令": "directive",
+    "回答要求": "directive",
     "name": "name",
     "姓名": "name",
     "occupation": "occupation",

@@ -79,10 +79,12 @@ def test_new_fact_supersedes_old_one(mem_store):
     ],
 )
 def test_mutex_facet_update_keeps_new_value_active(mem_store, facet, old, new):
-    """互斥 facet 用同一 id 覆盖，不能再把覆盖后的同一行标成 superseded。
+    """互斥 facet 更新后，新值必须是唯一生效行，旧值降级为历史。
 
     回归：曾经 occupation「前端开发」→「资深前端开发」写入成功后，
     list_profile 立刻返回空——新旧行是同一个 id，supersede 把新值也标掉了。
+    现在互斥 facet 不再原地覆盖：旧行标 superseded 并写 valid_to，
+    新行独立插入，所以 `superseded_at IS NULL` 的行必须正好是 [new]。
     """
     apply_profile_action(ProfileAction("add", facet, old))
     apply_profile_action(ProfileAction("update", facet, new))
@@ -90,16 +92,20 @@ def test_mutex_facet_update_keeps_new_value_active(mem_store, facet, old, new):
     active = mem_store.list_profile(UID)
     assert [item.text for item in active] == [new]
     with mem_store._get_pool().connection() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             """
-            SELECT superseded_at
+            SELECT text, superseded_at
             FROM agent_user_profile
             WHERE user_id = %s AND facet = %s
+            ORDER BY created_at
             """,
             (UID, facet),
-        ).fetchone()
-    assert row is not None
-    assert row["superseded_at"] is None
+        ).fetchall()
+    live = [row["text"] for row in rows if row["superseded_at"] is None]
+    assert live == [new]
+    assert all(
+        row["superseded_at"] is not None for row in rows if row["text"] == old
+    )
 
 
 def test_unrelated_preference_coexists(mem_store):
