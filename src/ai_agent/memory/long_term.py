@@ -120,11 +120,29 @@ def extract_turn_memories(
             return []
         logger.warning("JSON 模式抽取失败（网关可能不支持），回退 prompt 约束: %s", e)
         try:
-            raw = complete_memory_chat(messages, max_tokens=768)
+            # 回退只是「不用网关的 response_format」，本地 Ollama 仍要
+            # format=json + think=False：否则会退到开思考的自由文本分支，
+            # 推理把预算烧光、正文空串，抽取静默返回空（曾导致用户自报姓名丢失）。
+            raw = complete_memory_chat(messages, max_tokens=768, force_json=True)
         except LLMError as e2:
             logger.warning("抽取长期记忆失败: %s", e2)
             return []
     items = _parse_memories(raw)
+    if not items and not (raw or "").strip():
+        # 空正文：思考型模型把 num_predict 全用在 reasoning 上。
+        # 单独计数——它和「本轮确实没有可记内容」是两回事。
+        metrics.incr(metrics.MEMORY_EMPTY_REPLY)
+        logger.warning("长期记忆抽取返回空正文（可能是思考耗尽预算）")
+    self_intro = _self_intro_claim(turn)
+    if self_intro and not any(
+        item.kind == "profile" and item.facet in {"name", "occupation"} for item in items
+    ):
+        metrics.incr(metrics.MEMORY_MISSED_SELF_INTRO)
+        logger.warning(
+            "用户自报身份但未入库 self_intro=%s extracted=%s",
+            self_intro[:40],
+            [(item.kind, item.facet) for item in items],
+        )
     if items:
         metrics.incr(metrics.MEMORY_OK)
         logger.info("长期记忆已抽取 count=%s", len(items))
@@ -245,6 +263,23 @@ def _build_user_content(
         parts.append(LABEL_EXISTING_EPISODES_EMPTY)
     parts.append(f"{LABEL_CURRENT_TURN}\n{source}")
     return "\n\n".join(parts)
+
+
+# 用户自报姓名/身份的说法。用来在抽取结果为「空」时留下可排查的告警，
+# 而不是静默丢弃。
+_SELF_INTRO = re.compile(
+    r"我叫|我是(?!指|说|在问)|我的名字|叫我|我是做|我从事|我做的是|我的职业"
+)
+
+
+def _self_intro_claim(turn: list[ChatMessage]) -> str:
+    for msg in turn:
+        if msg.get("role") != "user":
+            continue
+        text = str(msg.get("content") or "").strip()
+        if text and _SELF_INTRO.search(text):
+            return text
+    return ""
 
 
 def _format_turn(turn: list[ChatMessage]) -> str:

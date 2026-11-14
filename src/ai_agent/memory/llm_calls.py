@@ -25,7 +25,15 @@ def complete_memory_chat(
     *,
     max_tokens: int,
     response_format: dict[str, Any] | None = None,
+    force_json: bool = False,
 ) -> str:
+    """记忆链路的补全。
+
+    ``force_json``：调用方要的是结构化输出，但网关不一定接受
+    ``response_format``。置 True 时对本地 Ollama 仍走
+    ``format="json" + think=False``，避免回退成「开思考的自由文本」——
+    那种模式推理会把 num_predict 烧光，正文返回空串。
+    """
     model, client = lightweight_llm(settings.memory_model)
     return complete_chat(
         messages,
@@ -36,4 +44,5 @@ def complete_memory_chat(
         client=client,
         extra_body=_MEMORY_EXTRA_BODY,
         response_format=response_format,
+        force_json=force_json,
     )

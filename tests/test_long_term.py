@@ -395,3 +395,69 @@ def test_filtered_item_does_not_create_fake_conflict(caplog):
         ExtractedMemory(kind="profile", content="", op="delete", facet="locale")
     ]
     assert "conflict" not in caplog.text
+
+
+def test_empty_reply_is_counted_separately(monkeypatch):
+    """空正文（思考耗尽预算）要和「本轮确实没有可记内容」分开计数。"""
+    from ai_agent.llm import metrics
+
+    before = metrics.snapshot().get(metrics.MEMORY_EMPTY_REPLY, 0)
+    with patch("ai_agent.memory.long_term.complete_memory_chat", return_value=""):
+        assert extract_turn_memories(TURN) == []
+    assert metrics.snapshot().get(metrics.MEMORY_EMPTY_REPLY, 0) == before + 1
+
+
+def test_missed_self_intro_is_reported(caplog):
+    """用户自报姓名却没抽到，必须留告警，不能静默。"""
+    import logging
+
+    turn = [
+        {"role": "user", "content": "hello，我叫小魏"},
+        {"role": "assistant", "content": "你好小魏！"},
+    ]
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "ai_agent.memory.long_term.complete_memory_chat",
+            return_value='{"memories":[]}',
+        ),
+    ):
+        items = extract_turn_memories(turn)
+    assert items == []
+    assert "自报身份但未入库" in caplog.text
+
+
+def test_self_intro_captured_does_not_warn(caplog):
+    import logging
+
+    turn = [
+        {"role": "user", "content": "我叫小魏"},
+        {"role": "assistant", "content": "你好"},
+    ]
+    raw = '{"memories":[{"kind":"profile","op":"add","facet":"name","content":"小魏"}]}'
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("ai_agent.memory.long_term.complete_memory_chat", return_value=raw),
+    ):
+        items = extract_turn_memories(turn)
+    assert [(i.kind, i.facet) for i in items] == [("profile", "name")]
+    assert "自报身份但未入库" not in caplog.text
+
+
+def test_extraction_fallback_keeps_json_mode():
+    """回退路径必须仍带 force_json，否则会退成「开思考的自由文本」。"""
+    from ai_agent.core.exceptions import LLMError
+
+    calls: list[dict] = []
+
+    def fake(messages, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise LLMError("gateway rejects response_format")
+        return '{"memories":[]}'
+
+    with patch("ai_agent.memory.long_term.complete_memory_chat", side_effect=fake):
+        extract_turn_memories(TURN)
+    assert len(calls) == 2
+    assert calls[0].get("response_format") is not None
+    assert calls[1].get("force_json") is True

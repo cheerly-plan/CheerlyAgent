@@ -25,6 +25,11 @@ _COUNTERS: dict[str, int] = {}
 # 只导出这几个固定名字，避免各处随手拼字符串导致 /health 里长出一堆一次性 key
 OK: Final = "ok"
 MEMORY_ZERO: Final = "memory.extract.zero"
+# 模型返回空正文（思考吃掉了输出预算）。和「本轮确实没东西可记」区分开：
+# 这个数一直涨说明抽取链路在空转，用户说了却记不住。
+MEMORY_EMPTY_REPLY: Final = "memory.extract.empty_reply"
+# 用户明显自报了姓名/身份，但抽取结果里没有对应条目
+MEMORY_MISSED_SELF_INTRO: Final = "memory.extract.missed_self_intro"
 MEMORY_OK: Final = "memory.extract.ok"
 SUMMARY_CRUDE: Final = "summary.crude"
 SUMMARY_OK: Final = "summary.ok"

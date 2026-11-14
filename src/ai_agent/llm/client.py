@@ -297,6 +297,7 @@ def complete_chat(
     client: OpenAI | None = None,
     response_format: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    force_json: bool = False,
 ) -> str:
     """非流式补全。温度默认不传 → 服务端默认（OpenAI 系为 1.0）。
 
@@ -331,7 +332,11 @@ def complete_chat(
                 timeout=timeout,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                json_mode=_wants_json(response_format),
+                # force_json：调用方明确要求结构化输出，但网关不一定认
+                # response_format。对本地 Ollama 来说 format=json + think=False
+                # 才是真正的约束路径，回退那次也必须带上，否则会退回
+                # 「开思考的自由文本」分支，推理烧满预算是拿不到正文的。
+                json_mode=_wants_json(response_format) or force_json,
             )
         except Exception as e:  # 原生失败就回退，不让链路挂掉
             logger.warning("Ollama 原生接口失败，回退 OpenAI 兼容口：%s", e)
