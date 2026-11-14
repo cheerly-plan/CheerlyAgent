@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from ai_agent.core.config import settings
+from ai_agent.core.logging import get_logger
 from ai_agent.llm.types import ChatMessage
 from ai_agent.memory.short_term import short_term_memory
 from ai_agent.storage.db import (
@@ -12,6 +13,8 @@ from ai_agent.storage.db import (
     SessionRecord,
 )
 from psycopg.types.json import Jsonb
+
+logger = get_logger(__name__)
 
 
 def _chat_message_from_row(row: dict) -> ChatMessage:
@@ -583,6 +586,26 @@ class SessionStore(Database):
             "truncated": bool(meta.get("raw_truncated")),
         }
 
+    def delete_chat_embeddings(
+        self, user_id: str, chat_session_id: str | None = None
+    ) -> int:
+        with self._get_pool().connection() as conn:
+            if chat_session_id is None:
+                cur = conn.execute(
+                    "DELETE FROM agent_chat_embedding WHERE user_id = %s",
+                    (user_id,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    DELETE FROM agent_chat_embedding
+                    WHERE user_id = %s AND chat_session_id = %s
+                    """,
+                    (user_id, chat_session_id),
+                )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     def delete_raw_tool_results(
         self, user_id: str, chat_session_id: str | None = None
     ) -> int:
@@ -700,6 +723,13 @@ class SessionStore(Database):
                 )
                 conn.execute(
                     """
+                    DELETE FROM agent_chat_embedding
+                    WHERE user_id = %s AND chat_session_id = %s
+                    """,
+                    (user_id, chat_session_id),
+                )
+                conn.execute(
+                    """
                     UPDATE agent_session
                     SET summary = '', summary_until_seq = 0
                     WHERE user_id = %s AND id::text = %s
@@ -713,6 +743,10 @@ class SessionStore(Database):
                 )
                 conn.execute(
                     "DELETE FROM agent_tool_result WHERE user_id = %s",
+                    (user_id,),
+                )
+                conn.execute(
+                    "DELETE FROM agent_chat_embedding WHERE user_id = %s",
                     (user_id,),
                 )
                 conn.execute(
@@ -881,6 +915,13 @@ class SessionStore(Database):
                 """,
                 (user_id, session_id),
             )
+            conn.execute(
+                """
+                DELETE FROM agent_chat_embedding
+                WHERE user_id = %s AND chat_session_id = %s
+                """,
+                (user_id, session_id),
+            )
             conn.commit()
         short_term_memory.invalidate(user_id, session_id)
         try:
@@ -925,3 +966,202 @@ class SessionStore(Database):
             conn.execute("DELETE FROM agent_session WHERE user_id = %s", (user_id,))
             conn.execute("DELETE FROM agent_checkpoint WHERE user_id = %s", (user_id,))
             conn.commit()
+
+
+class ChatEmbeddingStore(Database):
+    """历史对话向量索引：语义检索旧对话原文。
+
+    与关键词检索的分工：``search_chat_history`` 精确命中、零依赖；
+    这里补「换个说法」的场景（原文说「预收账款」，用户问「合同负债」）。
+    正文仍在 ``agent_chat_history``，本表只存向量与展示用文本副本。
+    """
+
+    def save_chat_embeddings(
+        self, user_id: str, chat_session_id: str, rows: list[dict]
+    ) -> int:
+        """批量写入/更新向量；同一 (会话, seq) 幂等覆盖。"""
+        if not rows:
+            return 0
+        from pgvector import Vector
+
+        values = [
+            (
+                str(uuid.uuid4()),
+                user_id,
+                chat_session_id,
+                int(row["seq"]),
+                str(row.get("role") or "user"),
+                str(row.get("content") or ""),
+                Vector(row["embedding"]),
+            )
+            for row in rows
+            if row.get("embedding")
+        ]
+        if not values:
+            return 0
+        with self._get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO agent_chat_embedding
+                        (id, user_id, chat_session_id, seq, role, content,
+                         embedding, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (user_id, chat_session_id, seq) DO UPDATE SET
+                        content = EXCLUDED.content,
+                        role = EXCLUDED.role,
+                        embedding = EXCLUDED.embedding,
+                        created_at = now()
+                    """,
+                    values,
+                )
+            conn.commit()
+        return len(values)
+
+    def missing_chat_embeddings(
+        self, user_id: str, chat_session_id: str, limit: int = 100
+    ) -> list[dict]:
+        """找出还没建索引的 user/assistant 消息（用于回填）。"""
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT h.seq, h.role, h.content
+                FROM agent_chat_history h
+                LEFT JOIN agent_chat_embedding e
+                  ON e.user_id = h.user_id
+                 AND e.chat_session_id = h.chat_session_id
+                 AND e.seq = h.seq
+                WHERE h.user_id = %s AND h.chat_session_id = %s
+                  AND h.role IN ('user', 'assistant')
+                  AND h.content <> ''
+                  AND e.id IS NULL
+                ORDER BY h.seq
+                LIMIT %s
+                """,
+                (user_id, chat_session_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [
+            {"seq": int(row["seq"]), "role": row["role"], "content": row["content"]}
+            for row in rows
+        ]
+
+    def search_chat_semantic(
+        self,
+        user_id: str,
+        chat_session_id: str,
+        embedding: list[float],
+        limit: int = 10,
+        threshold: float = 0.0,
+    ) -> list[dict]:
+        """按语义相似度召回旧对话。"""
+        from pgvector import Vector
+
+        with self._get_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT seq, role, content, 1 - (embedding <=> %s) AS score
+                FROM agent_chat_embedding
+                WHERE user_id = %s AND chat_session_id = %s
+                  AND 1 - (embedding <=> %s) >= %s
+                ORDER BY embedding <=> %s
+                LIMIT %s
+                """,
+                (
+                    Vector(embedding),
+                    user_id,
+                    chat_session_id,
+                    Vector(embedding),
+                    float(threshold),
+                    Vector(embedding),
+                    max(1, min(int(limit), 20)),
+                ),
+            ).fetchall()
+        return [
+            {
+                "seq": int(row["seq"]),
+                "role": row["role"],
+                "content": row["content"] or "",
+                "score": float(row["score"]),
+            }
+            for row in rows
+        ]
+
+
+def index_chat_turn(
+    user_id: str, chat_session_id: str, turn: list[ChatMessage]
+) -> int:
+    """为刚落库的一轮对话建向量索引；失败只记日志，不影响对话。
+
+    只在 ``append_chat`` 之后调用：seq 由 append_chat 分配，这里按落库结果
+    重新读一遍再向量化，避免自己猜 seq。
+    """
+    rows = [
+        {"role": msg.get("role"), "content": str(msg.get("content") or "").strip()}
+        for msg in turn
+        if msg.get("role") in ("user", "assistant")
+        and str(msg.get("content") or "").strip()
+    ]
+    if not rows:
+        return 0
+    try:
+        from ai_agent.storage.embeddings import embed_texts
+        from ai_agent.storage.store import store as _store
+
+        pending = _store.missing_chat_embeddings(
+            user_id, chat_session_id, limit=len(rows) + 10
+        )
+        if not pending:
+            return 0
+        vectors = embed_texts([row["content"] for row in pending])
+        payload = [
+            {**row, "embedding": vector}
+            for row, vector in zip(pending, vectors, strict=False)
+        ]
+        return _store.save_chat_embeddings(user_id, chat_session_id, payload)
+    except Exception:
+        logger.warning(
+            "对话向量索引失败 user_id=%s session=%s", user_id, chat_session_id,
+            exc_info=True,
+        )
+        return 0
+
+
+def backfill_chat_embeddings(limit: int = 200) -> int:
+    """为历史对话补向量索引（维护线程定期跑，按会话粒度增量）。"""
+    from ai_agent.storage.embeddings import embed_texts
+    from ai_agent.storage.store import store as _store
+
+    with _store._get_pool().connection() as conn:
+        sessions = conn.execute(
+            """
+            SELECT DISTINCT h.user_id, h.chat_session_id
+            FROM agent_chat_history h
+            LEFT JOIN agent_chat_embedding e
+              ON e.user_id = h.user_id
+             AND e.chat_session_id = h.chat_session_id
+             AND e.seq = h.seq
+            WHERE h.role IN ('user', 'assistant')
+              AND h.content <> ''
+              AND e.id IS NULL
+            LIMIT 20
+            """
+        ).fetchall()
+    total = 0
+    for row in sessions:
+        uid, sid = row["user_id"], row["chat_session_id"]
+        pending = _store.missing_chat_embeddings(uid, sid, limit=min(limit, 200))
+        if not pending:
+            continue
+        try:
+            vectors = embed_texts([item["content"] for item in pending])
+            total += _store.save_chat_embeddings(
+                uid,
+                sid,
+                [
+                    {**item, "embedding": vector}
+                    for item, vector in zip(pending, vectors, strict=False)
+                ],
+            )
+        except Exception:
+            logger.warning("历史对话向量回填失败 session=%s", sid, exc_info=True)
+    return total

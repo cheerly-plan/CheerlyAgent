@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from ai_agent.core.config import settings
 from ai_agent.core.text import clip_text
 from ai_agent.prompts.tools import (
     READ_HISTORY_AFTER_DESC,
@@ -39,6 +40,11 @@ def search_history(query: str, limit: int = 8) -> str:
         )
     except Exception:
         return "检索会话历史失败，请稍后重试或换一个关键词。"
+
+    # 关键词命中不足时补一次语义召回：原文说「预收账款」、用户问「合同负债」
+    # 这类换词场景只在向量上才连得上。语义结果按 seq 去重后追加。
+    if len(rows) < limit:
+        rows = _merge_semantic(rows, text, session_id, limit)
     if not rows:
         return f"没有找到包含「{text}」的历史对话。"
 
@@ -98,3 +104,38 @@ read_history_tool = Tool(
     args_model=ReadHistoryArgs,
     max_output_chars=6000,
 )
+
+
+def _merge_semantic(
+    keyword_rows: list[dict], query: str, session_id: str, limit: int
+) -> list[dict]:
+    """把语义召回结果并进关键词结果；失败一律 fail-open 返回原结果。"""
+    top_k = int(settings.history_semantic_top_k)
+    if top_k <= 0:
+        return keyword_rows
+    try:
+        from ai_agent.storage.embeddings import embed_query
+        from ai_agent.storage.store import store
+
+        vector = embed_query(query)
+        semantic = store.search_chat_semantic(
+            current_user_id(),
+            session_id,
+            vector,
+            limit=top_k,
+            threshold=settings.history_semantic_threshold,
+        )
+    except Exception:
+        return keyword_rows
+    if not semantic:
+        return keyword_rows
+    seen = {int(row.get("seq") or 0) for row in keyword_rows}
+    merged = list(keyword_rows)
+    for row in semantic:
+        seq = int(row.get("seq") or 0)
+        if seq in seen:
+            continue
+        seen.add(seq)
+        merged.append(row)
+    merged.sort(key=lambda row: int(row.get("seq") or 0))
+    return merged[: max(1, limit)]

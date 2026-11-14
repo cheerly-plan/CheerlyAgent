@@ -14,6 +14,7 @@ from ai_agent.memory.long_term import capture_long_term
 from ai_agent.memory.prune import prune_tool_pairs, removed_tool_call_ids
 from ai_agent.memory.short_term import compress, short_term_memory
 from ai_agent.tools.result_pool import tool_result_pool
+from ai_agent.memory.session_store import index_chat_turn
 from ai_agent.storage.store import store
 from ai_agent.memory.summarize import summarize_session
 
@@ -86,6 +87,9 @@ def _persist_turn(user_id: str, chat_session_id: str, turn: list[ChatMessage]) -
         store.append_chat(user_id, chat_session_id, turn)
     except Exception:
         logger.exception("会话记忆保存失败")
+        return
+    # 语义索引失败不影响落库；历史遗留消息由维护线程 backfill 补齐
+    index_chat_turn(user_id, chat_session_id, turn)
 
 
 def _replace_last_turn(
@@ -96,6 +100,8 @@ def _replace_last_turn(
         store.replace_chat_after_last_user(user_id, chat_session_id, turn)
     except Exception:
         logger.exception("重新生成结果保存失败")
+        return
+    index_chat_turn(user_id, chat_session_id, turn)
 
 
 def _capture_turn(

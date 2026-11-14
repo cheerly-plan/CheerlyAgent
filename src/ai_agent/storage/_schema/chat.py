@@ -43,6 +43,41 @@ def ensure_chat_history(conn, *, dim: int) -> None:
     )
 
 
+def ensure_chat_embedding(conn, *, dim: int) -> None:
+    """对话历史向量索引：支持「换个说法也能找回旧对话」的语义检索。
+
+    与 agent_chat_history 分表而不是加列：向量只服务检索，正文回放走原表；
+    回填只需要覆盖 user/assistant 两种角色，工具结果另有原文池。
+    """
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS agent_chat_embedding (
+            id UUID PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            chat_session_id TEXT NOT NULL,
+            seq INT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            embedding vector({dim}) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (user_id, chat_session_id, seq)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS agent_chat_embedding_session_idx
+        ON agent_chat_embedding (user_id, chat_session_id, seq)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS agent_chat_embedding_hnsw
+        ON agent_chat_embedding USING hnsw (embedding vector_cosine_ops)
+        """
+    )
+
+
 def ensure_tool_result(conn, *, dim: int) -> None:
     """工具结果原文池。"""
     conn.execute(

@@ -12,6 +12,7 @@ from ai_agent.storage._schema.auth import (
     ensure_auth_token,
 )
 from ai_agent.storage._schema.chat import (
+    ensure_chat_embedding,
     ensure_chat_history,
     ensure_tool_result,
     ensure_session,
@@ -159,6 +160,7 @@ class Database:
             ensure_episode(conn, dim=dim)
             ensure_user_profile(conn, dim=dim)
             ensure_chat_history(conn, dim=dim)
+            ensure_chat_embedding(conn, dim=dim)
             ensure_tool_result(conn, dim=dim)
             ensure_session(conn, dim=dim)
             ensure_user(conn, dim=dim)

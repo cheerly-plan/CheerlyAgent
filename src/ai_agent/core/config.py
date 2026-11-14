@@ -468,6 +468,11 @@ class Settings(BaseSettings):
     # 命中热度对重要性的放大上限（原实现固定 0.3）。噪声行往往 hit 很高，
     # 热度不能反过来把噪声顶到前排，这里上限收窄到 0.15。
     memory_heat_boost_max: float = 0.15
+    # 历史对话语义检索：关键词零命中时用向量补召回（换个说法也能找回）。
+    # 0 = 只做关键词检索，退回旧行为。
+    history_semantic_top_k: int = 5
+    # 语义召回的最低相似度，低于它的不进结果（避免把不相干旧对话塞给模型）
+    history_semantic_threshold: float = 0.35
     memory_index_top_k: int = 8
     memory_index_max_chars: int = 800
     memory_trace_enabled: bool = True

@@ -557,6 +557,50 @@ def test_search_chat_history_scopes_by_user_and_keyword(mem_store):
     assert all("别人" not in row["content"] for row in rows)
 
 
+def test_chat_embedding_roundtrip_and_semantic_search(mem_store, monkeypatch):
+    # 用独立 user/session：向量表不会被其它用例的清理钩子清掉
+    uid, sid = "emb-user", "emb-s1"
+    mem_store.clear_chat(uid, sid)  # seq 从库内最大值续，先清掉历史残留
+    mem_store.append_chat(
+        uid,
+        sid,
+        [
+            {"role": "user", "content": "预收账款有多少"},
+            {"role": "assistant", "content": "预收账款 3.2 亿"},
+        ],
+    )
+    missing = mem_store.missing_chat_embeddings(uid, sid)
+    assert [row["seq"] for row in missing] == [1, 2]
+
+    saved = mem_store.save_chat_embeddings(
+        uid,
+        sid,
+        [
+            {**row, "embedding": [0.1] * settings.embedding_dim}
+            for row in missing
+        ],
+    )
+    assert saved == 2
+    assert mem_store.missing_chat_embeddings(uid, sid) == []
+
+    hits = mem_store.search_chat_semantic(
+        uid, sid, [0.1] * settings.embedding_dim, limit=5, threshold=0.1
+    )
+    assert [hit["seq"] for hit in hits] == [1, 2]
+    assert all(hit["score"] > 0 for hit in hits)
+
+
+def test_chat_embedding_is_idempotent(mem_store):
+    uid, sid = "emb-user-2", "emb-s2"
+    mem_store.clear_chat(uid, sid)
+    mem_store.append_chat(uid, sid, [{"role": "user", "content": "你好"}])
+    row = {"seq": 1, "role": "user", "content": "你好"}
+    vec = [0.2] * settings.embedding_dim
+    mem_store.save_chat_embeddings(uid, sid, [{**row, "embedding": vec}])
+    mem_store.save_chat_embeddings(uid, sid, [{**row, "embedding": vec}])
+    assert mem_store.missing_chat_embeddings(uid, sid) == []
+
+
 def test_load_chat_around_window(mem_store):
     mem_store.append_chat(
         "a",

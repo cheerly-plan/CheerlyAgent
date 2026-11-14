@@ -49,6 +49,8 @@ _MEMORY_SQL_MARKERS = (
     "agent_chat_history_tool_result_idx",
     "agent_tool_result",
     "agent_tool_result_user_session_idx",
+    "agent_chat_embedding",
+    "agent_chat_embedding_hnsw",
 )
 
 
@@ -160,6 +162,12 @@ def test_upgrade_head_on_empty_database_creates_memory_schema():
                 "content",
                 "expires_at",
             } <= _columns(conn, "agent_tool_result")
+            assert {
+                "seq",
+                "role",
+                "content",
+                "embedding",
+            } <= _columns(conn, "agent_chat_embedding")
             indexes = {
                 str(row[0])
                 for row in conn.execute(
@@ -172,6 +180,7 @@ def test_upgrade_head_on_empty_database_creates_memory_schema():
                 "agent_memory_archive_user_idx",
                 "agent_chat_history_tool_result_idx",
                 "agent_tool_result_user_session_idx",
+                "agent_chat_embedding_hnsw",
             } <= indexes
     finally:
         _drop_database(name)

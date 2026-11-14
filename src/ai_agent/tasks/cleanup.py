@@ -94,6 +94,15 @@ class MaintenanceCleaner:
             except Exception:
                 logger.exception("L4 记忆归档失败")
             try:
+                # 历史对话语义索引：老消息可能是在本功能上线前写的，增量补
+                from ai_agent.memory.session_store import backfill_chat_embeddings
+
+                indexed = backfill_chat_embeddings()
+                if indexed:
+                    logger.info("对话向量索引回填 %s 条", indexed)
+            except Exception:
+                logger.exception("对话向量索引回填失败")
+            try:
                 from ai_agent.report.cleanup import cleanup_reports
 
                 reports = cleanup_reports()
