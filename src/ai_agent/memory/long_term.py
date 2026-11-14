@@ -334,10 +334,6 @@ _TOOL_MARK = ("kb_search", "kg_search", "search_history", "read_tool_result")
 # 是用户对助手的长期要求，必须保留——之前把裸的「助手」当噪声，
 # 误杀了「希望助手协助解读 JD」这类合法 directive。
 _ASSISTANT_RECAP = re.compile(r"助手(建议|回答|决定|通过|告知|回复|提到|说)")
-# 行业专用词（默认金融）。换业务时由 MEMORY_DOMAIN_NOISE_ENABLED 关闭，
-# 通用规则（_ONGOING / _JOB_STATE / _TEMPORAL / _RECAP_HEAD）仍然生效。
-_DOC_QA = ("招股", "年报披露")
-_TOPIC_PREF = ("关注公司", "财务数据", "股东信息", "重大工程")
 
 # 本轮动作 / 任务状态：都是「这一次在做什么」，不是用户长期事实。
 # 一次性查询/任务动作。注意「用户正在用 X 做 Y」是自己持续的工作，不能算，
@@ -370,10 +366,6 @@ _ONGOING = re.compile(
 _JOB_STATE = re.compile(
     r"job_id|后台任务|预计\s*\d+\s*[-~至到]\s*\d+\s*分钟|任务已提交|进度"
 )
-# 股票代码 / 行情这类一次性标识（行业专用，可关）。
-_MARKET_CODE = re.compile(
-    r"\b\d{6}\b|融资融券|涨停|领涨|板块走势|成交量|换手率|总市值"
-)
 # 任务对象的「主语句」：句子以被处理对象开头时，几乎一定是任务纪要。
 # 「患者于…入院」「该案已…开庭」「订单…已发货」都不含「用户」二字，
 # 之前只能靠「用户正在…」拦，换个领域就漏。
@@ -386,10 +378,24 @@ _OBJECT_SUBJECT = re.compile(
 )
 
 
-def _domain_noise_enabled() -> bool:
-    from ai_agent.core.config import settings
+# 文档事实陈述：主语是「文档/公告/报告」本身，讲的是文件内容而非用户本人。
+# 这条替代了原先硬编码的行业词（招股、年报披露）：医疗的「病历记载」、
+# 法律的「判决书载明」、客服的「工单显示」是同一类，不必逐领域加词。
+_DOC_FACT = re.compile(
+    r"^(招股|年报|财报|季报|公告|报告|文件|文档|病历|判决书|合同|工单|订单|"
+    r"记录|表格|附件|协议|说明|章程|条例|规范)"
+    r".{0,10}(里|中|上|内|提到|记载|载明|披露|显示|列出|说明|约定|规定)"
+)
+# 主题清单类偏好（「关注公司：A、B」）是查询对象的清单，不是用户偏好。
+# 用结构特征判定，不绑具体行业名词。
+# 两种形态：带冒号的清单（「关注公司：A、B」），以及「关注 X 和 Y 的 Z」
+# 这种并列宾语。共同点是讲「关注哪些对象/哪些数据」，属于任务对象清单。
+_LIST_OF_OBJECTS = re.compile(
+    r"^(关注|关心|查看|跟踪|监测)"
+    r"(?:[^，。]{0,4}[：:][^。]{3,}$"
+    r"|.{0,20}(和|与|、|及).{0,20}(状况|情况|变化|数据|信息|进展))"
+)
 
-    return bool(getattr(settings, "memory_domain_noise_enabled", True))
 # 短期行程：下周/明天出差这类不能当居住地。
 _TEMPORAL = re.compile(
     r"^(用户)?(我)?(下周|本周|这周|明天|后天|今天|月底|下个月|近期)"
@@ -482,8 +488,6 @@ def is_transient_text(text: str) -> bool:
         return True
     if _ONGOING.search(body) or _JOB_STATE.search(body):
         return True
-    if _domain_noise_enabled() and _MARKET_CODE.search(body):
-        return True
     if _RECAP_HEAD.match(body) or _TEMPORAL.match(body):
         return True
     if _OBJECT_SUBJECT.match(body):
@@ -496,7 +500,9 @@ def is_transient_text(text: str) -> bool:
         return True
     if _ASSISTANT_RECAP.search(body):
         return True
-    return _domain_noise_enabled() and any(mark in body for mark in _DOC_QA)
+    if _DOC_FACT.match(body):
+        return True
+    return False
 
 
 def _keep_extracted(item: ExtractedMemory, user_text: str = "") -> bool:
@@ -535,7 +541,7 @@ def _keep_extracted(item: ExtractedMemory, user_text: str = "") -> bool:
         if not _is_own_occupation(text):
             return False
     if item.facet in {"preference", "other", "constraint"}:
-        if any(mark in text for mark in _TOPIC_PREF):
+        if _LIST_OF_OBJECTS.match(text):
             return False
         if any(mark in text for mark in ("招股", "kb_search", "kg_search")):
             return False

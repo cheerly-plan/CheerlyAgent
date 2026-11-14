@@ -1,15 +1,13 @@
 """记忆抽取的领域中立性：换业务场景不能失效。
 
 背景：早期禁止清单是按金融+知识库写的（股东、招股书、年报、股票代码），
-换到医疗/法律/电商客服这些场景一条都对不上。现在规则分成两层：
-
-- 通用模式：本轮动作、任务状态、短期安排、工具输出、对话纪要
-- 行业词：股票代码/行情/招股披露（MEMORY_DOMAIN_NOISE_ENABLED 可关）
+换到医疗/法律/电商客服这些场景一条都对不上。现在规则只用结构特征：
+本轮动作、任务对象主语句、文档事实、祈使任务、工具输出——不含任何行业词，
+医疗/法律/教育/客服与金融走同一套规则。
 """
 
 import pytest
 
-from ai_agent.core.config import settings
 from ai_agent.memory.long_term import (
     ExtractedMemory,
     _keep_extracted,
@@ -58,21 +56,39 @@ def test_user_own_projects_are_kept_in_any_domain(text):
     assert _keep_extracted(_episode(text))
 
 
-# ——— 行业词开关 ———
+# ——— 文档事实：通用规则，不再绑行业词 ———
 
-def test_generic_rules_work_even_with_domain_noise_off(monkeypatch):
-    """关掉行业词后，通用规则（本轮动作）依然要拦住。"""
-    monkeypatch.setattr(settings, "memory_domain_noise_enabled", False)
-    assert is_transient_text("用户正在确认证券代码为688361")
-    assert is_transient_text("患者在2026年10月入院，诊断为急性阑尾炎")
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 金融
+        "招股书里提到的主要客户",
+        "年报披露的应收账款",
+        # 医疗
+        "病历记载患者既往有高血压史",
+        # 法律
+        "判决书载明合同已于2025年解除",
+        # 客服
+        "工单显示客户已申请退款",
+    ],
+)
+def test_document_facts_are_noise_across_domains(text):
+    """主语是文档本身时，讲的是文件内容而非用户本人——任何领域同理。
+
+    这条规则替代了原先硬编码的「招股」「年报披露」行业词。
+    """
+    assert is_transient_text(text)
 
 
-def test_domain_noise_off_lets_pure_domain_text_through(monkeypatch):
-    """纯行业特征（无通用噪声信号）关掉行业词后应当放行。"""
-    pure_domain = "融资融券余额 688361"
-    assert is_transient_text(pure_domain)          # 默认开着 → 拦
-    monkeypatch.setattr(settings, "memory_domain_noise_enabled", False)
-    assert not is_transient_text(pure_domain)      # 关掉 → 放行
+def test_topic_object_lists_are_not_preferences():
+    """「关注公司：A、B」是查询对象清单，不是用户偏好。"""
+    from ai_agent.memory.long_term import ExtractedMemory, _keep_extracted
+
+    for text in ("关注公司：绿的谐波、中大力德", "关注公司财务数据和业务状况"):
+        item = ExtractedMemory(
+            kind="profile", facet="preference", content=text, op="add"
+        )
+        assert _keep_extracted(item) is False, text
 
 
 def test_tool_markers_are_domain_neutral():

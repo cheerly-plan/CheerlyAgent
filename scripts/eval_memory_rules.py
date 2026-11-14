@@ -48,8 +48,6 @@ def _rules_hit(text: str) -> list[str]:
         hits.append("_ONGOING")
     if lt._JOB_STATE.search(body):
         hits.append("_JOB_STATE")
-    if lt._MARKET_CODE.search(body) and lt._domain_noise_enabled():
-        hits.append("_MARKET_CODE")
     if lt._RECAP_HEAD.match(body):
         hits.append("_RECAP_HEAD")
     if lt._TEMPORAL.match(body):
@@ -62,11 +60,10 @@ def _rules_hit(text: str) -> list[str]:
             break
     if lt._ASSISTANT_RECAP.search(body):
         hits.append("_ASSISTANT_RECAP")
-    if lt._domain_noise_enabled():
-        for mark in lt._DOC_QA:
-            if mark in body:
-                hits.append(f"_DOC_QA({mark})")
-                break
+    if lt._DOC_FACT.match(body):
+        hits.append("_DOC_FACT")
+    if lt._LIST_OF_OBJECTS.match(body):
+        hits.append("_LIST_OF_OBJECTS")
     return hits
 
 

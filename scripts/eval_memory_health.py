@@ -60,19 +60,24 @@ def run_noise(cases: list[dict]) -> dict:
             {
                 "id": case.get("id") or "",
                 "kind": case.get("kind") or "",
+                # owner=model 的用例只含行业术语、没有通用结构特征，
+                # 规则层本来就不该拦（交给抽取模型判断），不计入拦截率
+                "owner": case.get("owner") or "rule",
                 "blocked_by_rule": blocked_by_rule,
                 "text": text[:60],
                 "turn": turn,
             }
         )
-    total = len(rows)
-    blocked = sum(1 for row in rows if row["blocked_by_rule"])
+    rule_rows = [row for row in rows if row["owner"] == "rule"]
+    total = len(rule_rows)
+    blocked = sum(1 for row in rule_rows if row["blocked_by_rule"])
     return {
         "total": total,
         "blocked_by_rule": blocked,
         "rule_rate": (blocked / total) if total else 0.0,
+        "model_owned": [row["id"] for row in rows if row["owner"] == "model"],
         # 模型层的漏网率由调用方按需跑（成本高），这里只给出规则层结论
-        "leaks": [row["id"] for row in rows if not row["blocked_by_rule"]],
+        "leaks": [row["id"] for row in rule_rows if not row["blocked_by_rule"]],
     }
 
 
