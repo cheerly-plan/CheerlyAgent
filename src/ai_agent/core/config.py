@@ -450,10 +450,11 @@ class Settings(BaseSettings):
     # 多路召回融合：rrf = 按名次融合（默认，推荐）；三因子 = 旧的线性加权。
     # 向量相似度 / 关键词命中 / 语义历史 三路分数量纲不同，RRF 只看相对顺序。
     memory_fusion: str = "rrf"
-    # RRF 各路权重（向量 / 关键词 / 语义历史），按名次加权的相对强弱
+    # RRF 两路权重：向量路 / 词面路，按名次加权的相对强弱。
+    # 一次性内容的降权不走这里——它不是一路召回，而是条目属性，
+    # 由 MEMORY_TRANSIENT_PENALTY 在融合完成之后统一处理。
     memory_fusion_weight_vector: float = 1.0
     memory_fusion_weight_keyword: float = 0.8
-    memory_fusion_weight_transient: float = 0.5
     memory_merge_timeout_seconds: float = 30
     memory_model: str = ""
     # 情景记忆存活时间（秒）。episode 是「当前阶段近况」，不是画像：过期后
