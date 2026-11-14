@@ -20,7 +20,7 @@
 | 事实层底稿 | `<stem>.pdf` + Markdown + 溯源 | 正文数字白名单；可自动定稿 |
 | 深度推断层 | `<stem>.deep.pdf` | 独立审核记录；未定稿可 `?preview=1` 预览，下载仍走门禁 |
 
-深度层方案见 `docs/financial-deep-analysis-upgrade.md`，结构化事实契约见 `docs/deep-facts-schema.md`。
+深度层的分章模型策略／收敛门禁／双 PDF 门禁细节见 `report/deep/` 源码与 `report/deep/` 下 SKILL 说明，结构化事实契约见 `docs/deep-facts-schema.md`。
 
 ## 流水线
 

@@ -129,7 +129,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 
 赛道底稿已含：组内对比表、结构梯队、利润—现金流—合同负债交叉、同比／不可比说明、有出处原文引述、下期外部数据源清单。不含估值／买卖建议；景气宏观未接数据源前不推断。
 
-默认可交付**双 PDF**：事实层底稿（纯数字／原文，可自动定稿）+ 深度层 `<stem>.deep.pdf`（推断结论，独立审核记录，下载走门禁）。深度层设计说明见 [`docs/financial-deep-analysis-upgrade.md`](docs/financial-deep-analysis-upgrade.md)，事实契约见 [`docs/deep-facts-schema.md`](docs/deep-facts-schema.md)。
+默认可交付**双 PDF**：事实层底稿（纯数字／原文，可自动定稿）+ 深度层 `<stem>.deep.pdf`（推断结论，独立审核记录，下载走门禁）。深度层现状见 [`next.md`](next.md)，事实契约见 [`docs/deep-facts-schema.md`](docs/deep-facts-schema.md)。
 
 聊天入口的 `generate_report` 是**异步**的：只提交后台任务并返回 `job_id`（深度层约 5–8 分钟），结果用 `report_job_status(job_id)` 查，也可用同一 `job_id` 轮询 `GET /v1/report/jobs/{id}`；聊天断线不会中断生成。同步入口 `POST /v1/report` 契约不变。审核队列读接口限管理员；批准／驳回／定稿对**生成者本人 + 管理员**开放。
 
