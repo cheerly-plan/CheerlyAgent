@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "created_at": "71b715d-20261114T135107Z",
-  "git_sha": "71b715d",
+  "created_at": "dc1c92e-20261114T202143Z",
+  "git_sha": "dc1c92e",
   "env_fingerprint": {
-    "cases_sha256": "1237f0dd806f28fe",
-    "eval_scripts_sha256": "872ac856b9bd8692",
-    "selftests_sha256": "da42bdb78abd53ad"
+    "cases_sha256": "3a07f34c9ad223ef",
+    "eval_scripts_sha256": "f9ceb8b3a398e512",
+    "selftests_sha256": "aa67aaa1063cce1d"
   },
   "suites": {
     "pytest_eval_selftest": {
@@ -249,6 +249,62 @@
       "metrics": {
         "total": 181,
         "passed": 181,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "eval_retrieval": {
+      "cases": {
+        "eval_retrieval::exit": "pass"
+      },
+      "metrics": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "eval_graph_retrieval_validate": {
+      "cases": {},
+      "metrics": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 0.0
+      }
+    },
+    "eval_graph": {
+      "cases": {},
+      "metrics": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 0.0
+      }
+    },
+    "eval_memory_rules": {
+      "cases": {
+        "eval_memory_rules::exit": "pass"
+      },
+      "metrics": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "memory_health": {
+      "cases": {
+        "memory_health::exit": "pass"
+      },
+      "metrics": {
+        "total": 1,
+        "passed": 1,
         "failed": 0,
         "skipped": 0,
         "pass_rate": 1.0

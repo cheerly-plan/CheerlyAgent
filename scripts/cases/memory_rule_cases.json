@@ -1,0 +1,830 @@
+[
+  {
+    "id": 1,
+    "expect": "remember",
+    "user": "我叫魏佳楠，英文名叫 Mike",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "name",
+        "content": "魏佳楠，英文名 Mike"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "expect": "remember",
+    "user": "我是一名5年前端开发，主攻Vue3、TS、UniApp，也会Node.js和Python做AI Agent",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "我是一名5年前端开发，主攻 Vue3、TS、UniApp，也会 Node.js 和 Python 做 AI Agent"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "expect": "remember",
+    "user": "我长期在深圳工作，常住蛇口这边",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "locale",
+        "content": "我长期在深圳工作，常住蛇口这边"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "expect": "remember",
+    "user": "我求职目标是绿联HomeAgent、华盛通、CVTE的资深前端或者前端小组长岗位",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "求职目标是绿联HomeAgent、华盛通、CVTE的资深前端或前端小组长岗位"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "expect": "remember",
+    "user": "我的笔记本是R7 7735H + RTX4060 8G，内存16G，用来本地跑Ollama大模型",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "笔记本是 R7 7735H + RTX4060 8G、内存16G，用于本地跑 Ollama"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "expect": "remember",
+    "user": "我做的项目名叫 CheerlyAgent，还有一个 Harness 版本叫 CheerlyHarnessAgent",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "正在做 CheerlyAgent 项目，另有 Harness 版本 CheerlyHarnessAgent"
+      }
+    ]
+  },
+  {
+    "id": 7,
+    "expect": "remember",
+    "user": "我偏好极简风格回复，不要多余废话，结论前置",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "回复保持极简风格，不要多余废话，结论前置"
+      }
+    ]
+  },
+  {
+    "id": 8,
+    "expect": "remember",
+    "user": "我看行情喜欢结构化复盘，每天想要固定时点的科技板块复盘",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "看行情偏好结构化复盘，希望每天固定时点的科技板块复盘"
+      }
+    ]
+  },
+  {
+    "id": 9,
+    "expect": "remember",
+    "user": "我不想要冗长解释，面试题给我适合口述、条理清晰的答案",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "回答不要冗长解释，面试题给适合口述、条理清晰的答案"
+      }
+    ]
+  },
+  {
+    "id": 10,
+    "expect": "remember",
+    "user": "我写代码严格遵守分支命名规范：feat/xxx，commit message也要规范",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "写代码严格遵守分支命名规范 feat/xxx，commit message 也要规范"
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "expect": "remember",
+    "user": "做图片生成，我要求白底、无水印，主色调淡蓝，橙色点缀",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做图片生成要求白底、无水印，主色调淡蓝、橙色点缀"
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "expect": "remember",
+    "user": "我不看科创板，不参与科创板交易",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "不看科创板，不参与科创板交易"
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "expect": "remember",
+    "user": "我研究硬科技、存储、半导体、贵金属板块，不喜欢炒小票",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "研究硬科技、存储、半导体、贵金属板块，不喜欢炒小票"
+      }
+    ]
+  },
+  {
+    "id": 14,
+    "expect": "remember",
+    "user": "我学Agent的时候优先看Harness框架、Router-Skill架构",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "学 Agent 时优先看 Harness 框架、Router-Skill 架构"
+      }
+    ]
+  },
+  {
+    "id": 15,
+    "expect": "remember",
+    "user": "我用Cursor写代码，喜欢让它优先生成可直接运行的完整片段，不要伪代码",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "用 Cursor 写代码，喜欢优先生成可直接运行的完整片段，不要伪代码"
+      }
+    ]
+  },
+  {
+    "id": 16,
+    "expect": "remember",
+    "user": "我的GitHub昵称是 almost",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "GitHub 昵称是 almost"
+      }
+    ]
+  },
+  {
+    "id": 17,
+    "expect": "remember",
+    "user": "我本科是广东技术师范大学",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "本科是广东技术师范大学"
+      }
+    ]
+  },
+  {
+    "id": 18,
+    "expect": "remember",
+    "user": "我调试Ollama时，优先排查端口占用、GPU显存、Docker挂载问题",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "调试 Ollama 时优先排查端口占用、GPU 显存、Docker 挂载问题"
+      }
+    ]
+  },
+  {
+    "id": 19,
+    "expect": "remember",
+    "user": "我面试反问环节，倾向问团队分工、技术迭代节奏、线上故障流程",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "面试反问环节倾向问团队分工、技术迭代节奏、线上故障流程"
+      }
+    ]
+  },
+  {
+    "id": 20,
+    "expect": "remember",
+    "user": "我不喜欢对话里加emoji，除非我主动说要",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "聊天里不要加 emoji，除非本人主动要求"
+      }
+    ]
+  },
+  {
+    "id": 21,
+    "expect": "remember",
+    "user": "我做RAG优先选Pgvector向量库，PostgreSQL做存储",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做 RAG 优先选 Pgvector 向量库，PostgreSQL 做存储"
+      }
+    ]
+  },
+  {
+    "id": 22,
+    "expect": "remember",
+    "user": "我看财报喜欢深度拆解估值逻辑，不要简单罗列营收数字",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "看财报喜欢深度拆解估值逻辑，不要简单罗列营收数字"
+      }
+    ]
+  },
+  {
+    "id": 23,
+    "expect": "remember",
+    "user": "我的长期方向是全栈AI Agent，BFF层、多智能体编排是重点",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "长期方向是全栈 AI Agent，重点是 BFF 层和多智能体编排"
+      }
+    ]
+  },
+  {
+    "id": 24,
+    "expect": "remember",
+    "user": "我画图不要卡通厚涂，偏好干净科技插画",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "画图不要卡通厚涂，偏好干净科技插画"
+      }
+    ]
+  },
+  {
+    "id": 25,
+    "expect": "remember",
+    "user": "我写项目文档习惯用YAML做配置驱动",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "写项目文档习惯用 YAML 做配置驱动"
+      }
+    ]
+  },
+  {
+    "id": 26,
+    "expect": "remember",
+    "user": "我希望你帮我刷题时，采用【模拟出题+标准答案】闭环模式",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "刷题时采用【模拟出题+标准答案】闭环模式"
+      }
+    ]
+  },
+  {
+    "id": 27,
+    "expect": "remember",
+    "user": "我做简历优化优先量化项目成果，弱化外包经历",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做简历优化优先量化项目成果，弱化外包经历"
+      }
+    ]
+  },
+  {
+    "id": 28,
+    "expect": "remember",
+    "user": "我在分析行情时，优先看美联储政策、产业链景气度",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "分析行情优先看美联储政策、产业链景气度"
+      }
+    ]
+  },
+  {
+    "id": 29,
+    "expect": "remember",
+    "user": "我部署模型会优先控制显存，限制上下文到40k token做摘要checkpoint",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "部署模型优先控制显存，限制上下文到 40k token 做摘要 checkpoint"
+      }
+    ]
+  },
+  {
+    "id": 30,
+    "expect": "remember",
+    "user": "我拒绝在技术方案里引入不稳定的小众实验库",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "拒绝在技术方案里引入不稳定的小众实验库"
+      }
+    ]
+  },
+  {
+    "id": 31,
+    "expect": "remember",
+    "user": "我沟通离职谈判，想要委婉合规、符合劳动法的话术",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "沟通离职谈判要委婉合规、符合劳动法的话术"
+      }
+    ]
+  },
+  {
+    "id": 32,
+    "expect": "remember",
+    "user": "我调试前端优先看控制台报错、网络请求、组件生命周期",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "调试前端优先看控制台报错、网络请求、组件生命周期"
+      }
+    ]
+  },
+  {
+    "id": 33,
+    "expect": "remember",
+    "user": "我研究存储芯片，重点看兆易创新这类标的",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "研究存储芯片，重点看兆易创新这类标的"
+      }
+    ]
+  },
+  {
+    "id": 34,
+    "expect": "remember",
+    "user": "我不喜欢大段文字，能用列表就不要段落",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "不要大段文字，能用列表就不要段落"
+      }
+    ]
+  },
+  {
+    "id": 35,
+    "expect": "remember",
+    "user": "我做Agent路由设计，希望skill和router解耦",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做 Agent 路由设计希望 skill 和 router 解耦"
+      }
+    ]
+  },
+  {
+    "id": 36,
+    "expect": "remember",
+    "user": "我玩游戏主要玩鸣潮，会折腾4060显卡的DLSS和卡顿优化",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "玩游戏主要玩鸣潮，会折腾 4060 显卡的 DLSS 和卡顿优化"
+      }
+    ]
+  },
+  {
+    "id": 37,
+    "expect": "remember",
+    "user": "我去面试，希望你帮我解读JD、提炼匹配亮点",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "面试时希望帮忙解读 JD、提炼匹配亮点"
+      }
+    ]
+  },
+  {
+    "id": 38,
+    "expect": "remember",
+    "user": "我排查Git问题优先看SSH密钥、http2、认证超时问题",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "排查 Git 问题优先看 SSH 密钥、http2、认证超时问题"
+      }
+    ]
+  },
+  {
+    "id": 39,
+    "expect": "remember",
+    "user": "我做图片Logo名字叫雀灵Cheerly",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "在做一个叫雀灵 Cheerly 的图片 Logo"
+      }
+    ]
+  },
+  {
+    "id": 40,
+    "expect": "remember",
+    "user": "我看个股会对比同板块估值，不爱听消息面炒作逻辑",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "看个股会对比同板块估值，不爱听消息面炒作逻辑"
+      }
+    ]
+  },
+  {
+    "id": 41,
+    "expect": "forget",
+    "user": "今天帮我查一下兆易创新昨天收盘价",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询兆易创新昨日收盘价"
+      }
+    ],
+    "note": "一次性行情查询（收盘价）"
+  },
+  {
+    "id": 43,
+    "expect": "forget",
+    "user": "帮我写一条今天下午3点发给HR的跟进消息",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写今天下午3点给HR的跟进消息"
+      }
+    ],
+    "note": "任务动作：帮写一条消息"
+  },
+  {
+    "id": 45,
+    "expect": "forget",
+    "user": "我等下18点要去牙科挂号",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户等下18点要去牙科挂号"
+      }
+    ],
+    "note": "短期时间：等下18点要去挂号"
+  },
+  {
+    "id": 46,
+    "expect": "forget",
+    "user": "帮我排查当前这条报错：SyntaxError Unexpected token",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在排查一条SyntaxError报错"
+      }
+    ],
+    "note": "任务动作：帮排查报错"
+  },
+  {
+    "id": 47,
+    "expect": "forget",
+    "user": "刚刚这个接口返回502，帮我分析原因",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在分析接口返回502的原因"
+      }
+    ],
+    "note": "任务动作：帮分析接口报错"
+  },
+  {
+    "id": 48,
+    "expect": "forget",
+    "user": "帮我整理今天和HR沟通的纪要",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在整理今天和HR沟通的纪要"
+      }
+    ],
+    "note": "任务动作：帮整理纪要"
+  },
+  {
+    "id": 49,
+    "expect": "forget",
+    "user": "帮我算一下离职补偿金，月薪25k，工龄3年",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在计算离职补偿金，月薪25k、工龄3年"
+      }
+    ],
+    "note": "任务动作：帮算离职补偿金"
+  },
+  {
+    "id": 50,
+    "expect": "forget",
+    "user": "查一下深圳今天天气",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询深圳今天的天气"
+      }
+    ],
+    "note": "一次性查询：天气"
+  },
+  {
+    "id": 52,
+    "expect": "forget",
+    "user": "帮我翻译这一段英文技术文档",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在翻译一段英文技术文档"
+      }
+    ],
+    "note": "任务动作：帮翻译文档"
+  },
+  {
+    "id": 53,
+    "expect": "forget",
+    "user": "现在Ollama服务在11434端口被占用了，帮我找占用进程",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在排查Ollama 11434端口占用"
+      }
+    ],
+    "note": "任务动作：帮找端口占用进程"
+  },
+  {
+    "id": 54,
+    "expect": "forget",
+    "user": "帮我生成今天的行情复盘，截止14:30",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在生成今天截至14:30的行情复盘"
+      }
+    ],
+    "note": "任务动作：帮生成行情复盘+时间点"
+  },
+  {
+    "id": 55,
+    "expect": "forget",
+    "user": "这道前端面试题，我现在答不出来，给标准答案",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在做一道前端面试题并要标准答案"
+      }
+    ],
+    "note": "任务动作：给标准答案"
+  },
+  {
+    "id": 56,
+    "expect": "forget",
+    "user": "帮我把这个PPT转成H5课件",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在把PPT转成H5课件"
+      }
+    ],
+    "note": "任务动作：帮把PPT转H5"
+  },
+  {
+    "id": 58,
+    "expect": "forget",
+    "user": "查一下安克创新最新一季的营收",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询安克创新最新一季营收"
+      }
+    ],
+    "note": "一次性查询：某公司某季营收"
+  },
+  {
+    "id": 59,
+    "expect": "forget",
+    "user": "帮我写一段git cherry-pick的命令",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写git cherry-pick命令"
+      }
+    ],
+    "note": "任务动作：帮写git命令"
+  },
+  {
+    "id": 60,
+    "expect": "forget",
+    "user": "我刚刚提交了一份简历给华盛通，等通知",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户刚刚提交了一份简历给华盛通，在等通知"
+      }
+    ],
+    "note": "短期状态：刚提交简历在等通知"
+  },
+  {
+    "id": 61,
+    "expect": "forget",
+    "user": "帮我对比一下这两只储能BESS标的估值",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在对比两只储能BESS标的的估值"
+      }
+    ],
+    "note": "任务动作：帮对比估值"
+  },
+  {
+    "id": 63,
+    "expect": "forget",
+    "user": "帮我生成一个今天晚上8点的待办清单",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在生成今天晚上8点的待办清单"
+      }
+    ],
+    "note": "任务动作：帮生成待办清单"
+  },
+  {
+    "id": 65,
+    "expect": "forget",
+    "user": "我现在正在跑Qwen2.5 7B本地模型",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在跑Qwen2.5 7B本地模型"
+      }
+    ],
+    "note": "当前动作：正在跑本地模型"
+  },
+  {
+    "id": 67,
+    "expect": "forget",
+    "user": "查一下对乙酰氨基酚的单次用量",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询对乙酰氨基酚的单次用量"
+      }
+    ],
+    "note": "一次性查询：药品用量"
+  },
+  {
+    "id": 69,
+    "expect": "forget",
+    "user": "我刚才看到大盘翻红了，帮我简单解读",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在解读大盘翻红"
+      }
+    ],
+    "note": "当前观测：刚才看到大盘翻红"
+  },
+  {
+    "id": 70,
+    "expect": "forget",
+    "user": "把这段README翻译成中文",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在把README翻译成中文"
+      }
+    ],
+    "note": "任务动作：翻译README"
+  },
+  {
+    "id": 72,
+    "expect": "forget",
+    "user": "帮我写一个发给面试官的感谢信",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写发给面试官的感谢信"
+      }
+    ],
+    "note": "任务动作：帮写感谢信"
+  },
+  {
+    "id": 73,
+    "expect": "forget",
+    "user": "查一下黄金现在的现货价格",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询黄金现货价格"
+      }
+    ],
+    "note": "一次性查询：黄金现货价格"
+  },
+  {
+    "id": 76,
+    "expect": "forget",
+    "user": "帮我统计这份表格里的成交数据",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在统计表格里的成交数据"
+      }
+    ],
+    "note": "任务动作：帮统计表格数据"
+  },
+  {
+    "id": 77,
+    "expect": "forget",
+    "user": "我今天下午要去医院复查手背胎记术后伤口",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户今天下午要去医院复查手背胎记术后伤口"
+      }
+    ],
+    "note": "短期时间：今天下午去医院"
+  },
+  {
+    "id": 78,
+    "expect": "forget",
+    "user": "帮我写一段commit message，本次修复接口超时bug",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写本次修复接口超时bug的commit message"
+      }
+    ],
+    "note": "任务动作：帮写commit message"
+  },
+  {
+    "id": 82,
+    "expect": "forget",
+    "user": "帮我生成一个curl请求测试这个BFF接口",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在用curl测试BFF接口"
+      }
+    ],
+    "note": "任务动作：帮生成curl请求"
+  },
+  {
+    "id": 83,
+    "expect": "forget",
+    "user": "查一下中国银行最新股息率",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询中国银行最新股息率"
+      }
+    ],
+    "note": "一次性查询：某银行股息率"
+  }
+]

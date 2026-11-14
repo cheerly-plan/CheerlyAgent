@@ -1,0 +1,1443 @@
+[
+  {
+    "id": 1,
+    "user": "我叫魏佳楠，英文名叫 Mike",
+    "model_output": "好的，我记下了，你叫魏佳楠，英文名Mike",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "name",
+        "content": "魏佳楠，英文名 Mike"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 2,
+    "user": "我是一名5年前端开发，主攻Vue3、TS、UniApp，也会Node.js和Python做AI Agent",
+    "model_output": "收到，我会记住你的技术背景",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "我是一名5年前端开发，主攻 Vue3、TS、UniApp，也会 Node.js 和 Python 做 AI Agent"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 3,
+    "user": "我长期在深圳工作，常住蛇口这边",
+    "model_output": "好，记下你常住深圳蛇口",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "locale",
+        "content": "我长期在深圳工作，常住蛇口这边"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 4,
+    "user": "我求职目标是绿联HomeAgent、华盛通、CVTE的资深前端或者前端小组长岗位",
+    "model_output": "我记下你的求职目标岗位",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "求职目标是绿联HomeAgent、华盛通、CVTE的资深前端或前端小组长岗位"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 5,
+    "user": "我的笔记本是R7 7735H + RTX4060 8G，内存16G，用来本地跑Ollama大模型",
+    "model_output": "了解，我记住你的开发设备配置",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "笔记本是 R7 7735H + RTX4060 8G、内存16G，用于本地跑 Ollama"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 6,
+    "user": "我做的项目名叫 CheerlyAgent，还有一个 Harness 版本叫 CheerlyHarnessAgent",
+    "model_output": "收到，记下这两个项目名称",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "正在做 CheerlyAgent 项目，另有 Harness 版本 CheerlyHarnessAgent"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 7,
+    "user": "我偏好极简风格回复，不要多余废话，结论前置",
+    "model_output": "好，后续回复我保持极简、结论前置",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "回复保持极简风格，不要多余废话，结论前置"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 8,
+    "user": "我看行情喜欢结构化复盘，每天想要固定时点的科技板块复盘",
+    "model_output": "记住你的偏好：每日定时结构化行情复盘",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "看行情偏好结构化复盘，希望每天固定时点的科技板块复盘"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 9,
+    "user": "我不想要冗长解释，面试题给我适合口述、条理清晰的答案",
+    "model_output": "明白，面试答案精简适合口述",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "回答不要冗长解释，面试题给适合口述、条理清晰的答案"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 10,
+    "user": "我写代码严格遵守分支命名规范：feat/xxx，commit message也要规范",
+    "model_output": "记下你的Git命名规范偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "写代码严格遵守分支命名规范 feat/xxx，commit message 也要规范"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 11,
+    "user": "做图片生成，我要求白底、无水印，主色调淡蓝，橙色点缀",
+    "model_output": "收到，记住你的绘图色彩与格式约束",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做图片生成要求白底、无水印，主色调淡蓝、橙色点缀"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 12,
+    "user": "我不看科创板，不参与科创板交易",
+    "model_output": "记下：你不交易科创板",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "不看科创板，不参与科创板交易"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 13,
+    "user": "我研究硬科技、存储、半导体、贵金属板块，不喜欢炒小票",
+    "model_output": "记住你偏好的研究板块",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "研究硬科技、存储、半导体、贵金属板块，不喜欢炒小票"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 14,
+    "user": "我学Agent的时候优先看Harness框架、Router-Skill架构",
+    "model_output": "记下你的技术学习偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "学 Agent 时优先看 Harness 框架、Router-Skill 架构"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 15,
+    "user": "我用Cursor写代码，喜欢让它优先生成可直接运行的完整片段，不要伪代码",
+    "model_output": "好，记住你在Cursor上的编码偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "用 Cursor 写代码，喜欢优先生成可直接运行的完整片段，不要伪代码"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 16,
+    "user": "我的GitHub昵称是 almost",
+    "model_output": "记下你的GitHub昵称almost",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "GitHub 昵称是 almost"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 17,
+    "user": "我本科是广东技术师范大学",
+    "model_output": "记下你的本科院校",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "本科是广东技术师范大学"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 18,
+    "user": "我调试Ollama时，优先排查端口占用、GPU显存、Docker挂载问题",
+    "model_output": "记住你本地LLM调试关注点",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "调试 Ollama 时优先排查端口占用、GPU 显存、Docker 挂载问题"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 19,
+    "user": "我面试反问环节，倾向问团队分工、技术迭代节奏、线上故障流程",
+    "model_output": "记下你面试反问偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "面试反问环节倾向问团队分工、技术迭代节奏、线上故障流程"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 20,
+    "user": "我不喜欢对话里加emoji，除非我主动说要",
+    "model_output": "收到，默认不加emoji",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "聊天里不要加 emoji，除非本人主动要求"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 21,
+    "user": "我做RAG优先选Pgvector向量库，PostgreSQL做存储",
+    "model_output": "记下你的RAG技术栈偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做 RAG 优先选 Pgvector 向量库，PostgreSQL 做存储"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 22,
+    "user": "我看财报喜欢深度拆解估值逻辑，不要简单罗列营收数字",
+    "model_output": "记住财报分析偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "看财报喜欢深度拆解估值逻辑，不要简单罗列营收数字"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 23,
+    "user": "我的长期方向是全栈AI Agent，BFF层、多智能体编排是重点",
+    "model_output": "记下你的长期技术方向",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "长期方向是全栈 AI Agent，重点是 BFF 层和多智能体编排"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 24,
+    "user": "我画图不要卡通厚涂，偏好干净科技插画",
+    "model_output": "记下绘图风格偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "画图不要卡通厚涂，偏好干净科技插画"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 25,
+    "user": "我写项目文档习惯用YAML做配置驱动",
+    "model_output": "记下文档与架构偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "写项目文档习惯用 YAML 做配置驱动"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 26,
+    "user": "我希望你帮我刷题时，采用【模拟出题+标准答案】闭环模式",
+    "model_output": "记住刷题训练模式要求",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "刷题时采用【模拟出题+标准答案】闭环模式"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 27,
+    "user": "我做简历优化优先量化项目成果，弱化外包经历",
+    "model_output": "记下简历优化偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做简历优化优先量化项目成果，弱化外包经历"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 28,
+    "user": "我在分析行情时，优先看美联储政策、产业链景气度",
+    "model_output": "记下宏观分析关注点",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "分析行情优先看美联储政策、产业链景气度"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 29,
+    "user": "我部署模型会优先控制显存，限制上下文到40k token做摘要checkpoint",
+    "model_output": "记住上下文裁剪策略偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "部署模型优先控制显存，限制上下文到 40k token 做摘要 checkpoint"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 30,
+    "user": "我拒绝在技术方案里引入不稳定的小众实验库",
+    "model_output": "记下依赖选型偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "拒绝在技术方案里引入不稳定的小众实验库"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 31,
+    "user": "我沟通离职谈判，想要委婉合规、符合劳动法的话术",
+    "model_output": "记下离职沟通风格偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "沟通离职谈判要委婉合规、符合劳动法的话术"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 32,
+    "user": "我调试前端优先看控制台报错、网络请求、组件生命周期",
+    "model_output": "记下前端排障习惯",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "调试前端优先看控制台报错、网络请求、组件生命周期"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 33,
+    "user": "我研究存储芯片，重点看兆易创新这类标的",
+    "model_output": "记下你持续跟踪的标的偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "研究存储芯片，重点看兆易创新这类标的"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 34,
+    "user": "我不喜欢大段文字，能用列表就不要段落",
+    "model_output": "记住排版偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "不要大段文字，能用列表就不要段落"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 35,
+    "user": "我做Agent路由设计，希望skill和router解耦",
+    "model_output": "记下架构设计偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "做 Agent 路由设计希望 skill 和 router 解耦"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 36,
+    "user": "我玩游戏主要玩鸣潮，会折腾4060显卡的DLSS和卡顿优化",
+    "model_output": "记下你的游戏和显卡优化偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "玩游戏主要玩鸣潮，会折腾 4060 显卡的 DLSS 和卡顿优化"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 37,
+    "user": "我去面试，希望你帮我解读JD、提炼匹配亮点",
+    "model_output": "记下面试辅助需求偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "面试时希望帮忙解读 JD、提炼匹配亮点"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 38,
+    "user": "我排查Git问题优先看SSH密钥、http2、认证超时问题",
+    "model_output": "记下Git排障关注点",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "排查 Git 问题优先看 SSH 密钥、http2、认证超时问题"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 39,
+    "user": "我做图片Logo名字叫雀灵Cheerly",
+    "model_output": "记下Logo项目名称雀灵Cheerly",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "在做一个叫雀灵 Cheerly 的图片 Logo"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 40,
+    "user": "我看个股会对比同板块估值，不爱听消息面炒作逻辑",
+    "model_output": "记下个股分析偏好",
+    "expect": "remember",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "看个股会对比同板块估值，不爱听消息面炒作逻辑"
+      }
+    ],
+    "owner": "rule"
+  },
+  {
+    "id": 41,
+    "user": "今天帮我查一下兆易创新昨天收盘价",
+    "model_output": "兆易创新昨日收盘价xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询兆易创新昨日收盘价"
+      }
+    ],
+    "owner": "rule",
+    "note": "一次性行情查询（收盘价）"
+  },
+  {
+    "id": 42,
+    "user": "帮我算一下Nvidia最新财报的毛利率",
+    "model_output": "毛利率为xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在计算Nvidia最新财报的毛利率"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 43,
+    "user": "帮我写一条今天下午3点发给HR的跟进消息",
+    "model_output": "给你写好了跟进话术",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写今天下午3点给HR的跟进消息"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮写一条消息"
+  },
+  {
+    "id": 44,
+    "user": "这一段PDF里写了2025存储行业出货数据，帮我提取出来",
+    "model_output": "提取结果：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在从PDF中提取2025存储行业出货数据"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 45,
+    "user": "我等下18点要去牙科挂号",
+    "model_output": "收到，18点牙科挂号",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户等下18点要去牙科挂号"
+      }
+    ],
+    "owner": "rule",
+    "note": "短期时间：等下18点要去挂号"
+  },
+  {
+    "id": 46,
+    "user": "帮我排查当前这条报错：SyntaxError Unexpected token",
+    "model_output": "报错原因xxx，修复代码xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在排查一条SyntaxError报错"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮排查报错"
+  },
+  {
+    "id": 47,
+    "user": "刚刚这个接口返回502，帮我分析原因",
+    "model_output": "502常见原因：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在分析接口返回502的原因"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮分析接口报错"
+  },
+  {
+    "id": 48,
+    "user": "帮我整理今天和HR沟通的纪要",
+    "model_output": "沟通纪要：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在整理今天和HR沟通的纪要"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮整理纪要"
+  },
+  {
+    "id": 49,
+    "user": "帮我算一下离职补偿金，月薪25k，工龄3年",
+    "model_output": "补偿金计算结果xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在计算离职补偿金，月薪25k、工龄3年"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮算离职补偿金"
+  },
+  {
+    "id": 50,
+    "user": "查一下深圳今天天气",
+    "model_output": "深圳今日晴，26-31度",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询深圳今天的天气"
+      }
+    ],
+    "owner": "rule",
+    "note": "一次性查询：天气"
+  },
+  {
+    "id": 51,
+    "user": "这个Vue3组件props校验怎么写",
+    "model_output": "示例代码：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在询问Vue3组件props校验的写法"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 52,
+    "user": "帮我翻译这一段英文技术文档",
+    "model_output": "译文：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在翻译一段英文技术文档"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮翻译文档"
+  },
+  {
+    "id": 53,
+    "user": "现在Ollama服务在11434端口被占用了，帮我找占用进程",
+    "model_output": "查找命令xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在排查Ollama 11434端口占用"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮找端口占用进程"
+  },
+  {
+    "id": 54,
+    "user": "帮我生成今天的行情复盘，截止14:30",
+    "model_output": "今日复盘内容：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在生成今天截至14:30的行情复盘"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮生成行情复盘+时间点"
+  },
+  {
+    "id": 55,
+    "user": "这道前端面试题，我现在答不出来，给标准答案",
+    "model_output": "参考答案：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在做一道前端面试题并要标准答案"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：给标准答案"
+  },
+  {
+    "id": 56,
+    "user": "帮我把这个PPT转成H5课件",
+    "model_output": "转换方案xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在把PPT转成H5课件"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮把PPT转H5"
+  },
+  {
+    "id": 57,
+    "user": "我现在要调试这个Pgvector向量召回准确率问题",
+    "model_output": "调参思路xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在调试Pgvector向量召回准确率问题"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 58,
+    "user": "查一下安克创新最新一季的营收",
+    "model_output": "营收xxx亿",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询安克创新最新一季营收"
+      }
+    ],
+    "owner": "rule",
+    "note": "一次性查询：某公司某季营收"
+  },
+  {
+    "id": 59,
+    "user": "帮我写一段git cherry-pick的命令",
+    "model_output": "git cherry-pick commitHash",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写git cherry-pick命令"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮写git命令"
+  },
+  {
+    "id": 60,
+    "user": "我刚刚提交了一份简历给华盛通，等通知",
+    "model_output": "祝你面试顺利",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户刚刚提交了一份简历给华盛通，在等通知"
+      }
+    ],
+    "owner": "rule",
+    "note": "短期状态：刚提交简历在等通知"
+  },
+  {
+    "id": 61,
+    "user": "帮我对比一下这两只储能BESS标的估值",
+    "model_output": "对比表xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在对比两只储能BESS标的的估值"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮对比估值"
+  },
+  {
+    "id": 62,
+    "user": "这个报错是Harness框架的状态图错误，帮我修",
+    "model_output": "修复方案xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在修复Harness框架的状态图错误"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 63,
+    "user": "帮我生成一个今天晚上8点的待办清单",
+    "model_output": "待办：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在生成今天晚上8点的待办清单"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮生成待办清单"
+  },
+  {
+    "id": 64,
+    "user": "文档第3页写了向量库召回topk=10，帮我改成topk=5",
+    "model_output": "修改后参数topk:5",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在把文档第3页的向量库召回topk从10改成5"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 65,
+    "user": "我现在正在跑Qwen2.5 7B本地模型",
+    "model_output": "Qwen2.5-7B加载提示xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在跑Qwen2.5 7B本地模型"
+      }
+    ],
+    "owner": "rule",
+    "note": "当前动作：正在跑本地模型"
+  },
+  {
+    "id": 66,
+    "user": "帮我算一下这个基金的回撤",
+    "model_output": "最大回撤xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在计算某只基金的回撤"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 67,
+    "user": "查一下对乙酰氨基酚的单次用量",
+    "model_output": "成人单次xxxmg",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询对乙酰氨基酚的单次用量"
+      }
+    ],
+    "owner": "rule",
+    "note": "一次性查询：药品用量"
+  },
+  {
+    "id": 68,
+    "user": "帮我写一个Sourcetree rebase操作步骤",
+    "model_output": "rebase步骤：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写Sourcetree rebase操作步骤"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 69,
+    "user": "我刚才看到大盘翻红了，帮我简单解读",
+    "model_output": "盘面解读xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在解读大盘翻红"
+      }
+    ],
+    "owner": "rule",
+    "note": "当前观测：刚才看到大盘翻红"
+  },
+  {
+    "id": 70,
+    "user": "把这段README翻译成中文",
+    "model_output": "中文翻译xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在把README翻译成中文"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：翻译README"
+  },
+  {
+    "id": 71,
+    "user": "这个Docker volume冲突了，怎么清理",
+    "model_output": "清理命令xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在清理Docker volume冲突"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 72,
+    "user": "帮我写一个发给面试官的感谢信",
+    "model_output": "感谢信文案xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写发给面试官的感谢信"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮写感谢信"
+  },
+  {
+    "id": 73,
+    "user": "查一下黄金现在的现货价格",
+    "model_output": "现货黄金价格xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询黄金现货价格"
+      }
+    ],
+    "owner": "rule",
+    "note": "一次性查询：黄金现货价格"
+  },
+  {
+    "id": 74,
+    "user": "我现在在看这篇LangGraph多智能体论文，帮我总结",
+    "model_output": "论文摘要xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在总结LangGraph多智能体论文"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 75,
+    "user": "这个UniApp页面在安卓8上白屏，帮我定位",
+    "model_output": "兼容修复方案xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在定位UniApp页面在安卓8上的白屏问题"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 76,
+    "user": "帮我统计这份表格里的成交数据",
+    "model_output": "统计结果xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在统计表格里的成交数据"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮统计表格数据"
+  },
+  {
+    "id": 77,
+    "user": "我今天下午要去医院复查手背胎记术后伤口",
+    "model_output": "注意护理，祝你恢复顺利",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户今天下午要去医院复查手背胎记术后伤口"
+      }
+    ],
+    "owner": "rule",
+    "note": "短期时间：今天下午去医院"
+  },
+  {
+    "id": 78,
+    "user": "帮我写一段commit message，本次修复接口超时bug",
+    "model_output": "commit: fix: api timeout",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在写本次修复接口超时bug的commit message"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮写commit message"
+  },
+  {
+    "id": 79,
+    "user": "这个SQL向量查询语句为什么召回不准",
+    "model_output": "排查方向xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在排查SQL向量查询召回不准的原因"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 80,
+    "user": "帮我看一下这个Boss岗位JD是不是外包",
+    "model_output": "判断：该岗位属于xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在判断Boss上的岗位JD是不是外包"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 81,
+    "user": "鸣潮这个任务卡关了，告诉我解谜步骤",
+    "model_output": "解谜步骤xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查鸣潮游戏的解谜步骤"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 82,
+    "user": "帮我生成一个curl请求测试这个BFF接口",
+    "model_output": "curl命令：xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在用curl测试BFF接口"
+      }
+    ],
+    "owner": "rule",
+    "note": "任务动作：帮生成curl请求"
+  },
+  {
+    "id": 83,
+    "user": "查一下中国银行最新股息率",
+    "model_output": "股息率xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询中国银行最新股息率"
+      }
+    ],
+    "owner": "rule",
+    "note": "一次性查询：某银行股息率"
+  },
+  {
+    "id": 84,
+    "user": "我刚刚改完router逻辑，现在测试路由跳转",
+    "model_output": "测试建议xxx",
+    "expect": "forget",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户刚刚改完router逻辑，正在测试路由跳转"
+      }
+    ],
+    "owner": "model"
+  },
+  {
+    "id": 85,
+    "user": "我最近这段时间优先刷Agent架构面试题",
+    "model_output": "好，我们多练Agent架构题",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "近期优先刷 Agent 架构面试题"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 86,
+    "user": "我接下来一段时间打算重点研究Graph RAG",
+    "model_output": "收到，Graph RAG相关问题我可以配合你",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "接下来打算重点研究 Graph RAG"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 87,
+    "user": "我这周看盘会重点盯贵金属板块",
+    "model_output": "贵金属板块信息我帮你留意",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "这周看盘重点盯贵金属板块"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 88,
+    "user": "我近期面试，想要多练离职谈判、薪资谈判话术",
+    "model_output": "好，准备谈判类话术",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "近期面试想多练离职谈判、薪资谈判话术"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 89,
+    "user": "我最近跑模型，优先用Bonsai2试一试",
+    "model_output": "Bonsai2的部署要点xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "最近跑模型优先用 Bonsai2 试一试"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 90,
+    "user": "我这几天写代码习惯先写单元测试再写业务",
+    "model_output": "好，TDD模式配合你",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "这几天写代码习惯先写单元测试再写业务"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 91,
+    "user": "我最近看财报优先看储能BESS产业链",
+    "model_output": "储能BESS相关财报我帮你拆解",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "最近看财报优先看储能BESS产业链"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 92,
+    "user": "我接下来一个月想把CheerlyAgent的路由模块重构完",
+    "model_output": "重构方案我们可以逐步梳理",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "接下来一个月想重构 CheerlyAgent 的路由模块"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 93,
+    "user": "我最近画图偏向国潮风格试试",
+    "model_output": "国潮插画提示词xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "最近画图偏向国潮风格"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 94,
+    "user": "我这几天排查问题优先怀疑网络代理",
+    "model_output": "代理排查命令xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "这几天排查问题优先怀疑网络代理"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 95,
+    "user": "我近期不想看小票，只看大盘蓝筹和硬科技龙头",
+    "model_output": "筛选龙头标的思路xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "近期不想看小票，只看大盘蓝筹和硬科技龙头"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 96,
+    "user": "我这周刷题主攻PostgreSQL和向量库相关面试题",
+    "model_output": "向量库题目安排给你",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "这周刷题主攻 PostgreSQL 和向量库面试题"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 97,
+    "user": "我最近面试不想谈薪资，先聊技术",
+    "model_output": "面试沟通策略xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "最近面试不想谈薪资，先聊技术"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 98,
+    "user": "我这几天本地模型都开2倍速推理",
+    "model_output": "推理加速配置xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "这几天本地模型都开 2 倍速推理"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 99,
+    "user": "我接下来两周重点准备CVTE的面试",
+    "model_output": "CVTE岗位相关内容我们练习",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "接下来两周重点准备 CVTE 的面试"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 100,
+    "user": "我最近写文档习惯先画Mermaid流程图",
+    "model_output": "Mermaid模板给你",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "最近写文档习惯先画 Mermaid 流程图"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 101,
+    "user": "我近期做RAG，打算试一下混合检索（关键词+向量）",
+    "model_output": "混合检索方案xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "近期做 RAG 打算试混合检索（关键词+向量）"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 102,
+    "user": "我这几天行情复盘只看收盘后版本，盘中不看",
+    "model_output": "只给收盘复盘",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "这几天行情复盘只看收盘后版本，盘中不看"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 103,
+    "user": "我最近调试前端，优先用Chrome DevTools Performance面板",
+    "model_output": "Performance排查技巧xxx",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "最近调试前端优先用 Chrome DevTools Performance 面板"
+      }
+    ],
+    "owner": "either"
+  },
+  {
+    "id": 104,
+    "user": "我接下来一段时间不想聊游戏，专注求职准备",
+    "model_output": "明白，聚焦求职相关内容",
+    "expect": "either",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "接下来一段时间不想聊游戏，专注求职准备"
+      }
+    ],
+    "owner": "either"
+  }
+]

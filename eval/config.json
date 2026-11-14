@@ -85,6 +85,18 @@
       "note": "要调模型、结果有抖动，失败只记趋势不阻断发布；通过线见 thresholds"
     },
     {
+      "name": "eval_memory_rules",
+      "tier": 1,
+      "command": "uv run python scripts/eval_memory_rules.py",
+      "exit_map": {
+        "0": "pass",
+        "1": "regression",
+        "2": "invalid_cases"
+      },
+      "policy": "blocking",
+      "note": "记忆规则层离线评测：不调模型、不连库，量化「该记未记」与「不该记记了」；退出码 1 = 低于 --min-remember/--min-forget 通过线"
+    },
+    {
       "name": "eval_memory",
       "tier": 2,
       "command": "uv run python scripts/eval_memory.py",
