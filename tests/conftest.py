@@ -10,6 +10,10 @@ os.environ.setdefault("KB_OCR_MODEL", "")
 os.environ.setdefault("REPORT_ANALYSIS_ENABLED", "false")
 # 巨潮自动补齐默认关：回归不打外网；专用用例再 monkeypatch 打开
 os.environ.setdefault("ENABLE_CNINFO_FETCH", "false")
+# Jev 门控默认无 key：本地 .env 若配了真实 key，单测会真实打到外网决策
+# 模型，门控概率随输入波动会把「测写入链」的用例拦截成 called 0 times。
+# 这里统一清空让它 fail-open（放行），门控本身由 test_gate.py 单独覆盖。
+os.environ.setdefault("JEV_API_KEY", "")
 
 # 单测不依赖 Qwen tokenizer 文件/网络：注入一个确定性的计数器。
 # 语义：1 个字符 ≈ 1 token，足够验证预算裁剪逻辑；tokenizer 本身由

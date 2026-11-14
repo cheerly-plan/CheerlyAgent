@@ -179,6 +179,7 @@ def test_capture_long_term_writes_extracted_episode():
         content="用户正在用 Node.js + Koa 做 BFF，把多个后端接口聚合成一层给前端。",
     )
     with (
+        patch("ai_agent.memory.long_term._gate_blocks", return_value=False),
         patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
         patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
         patch("ai_agent.memory.long_term.extract_turn_memories", return_value=[item]),
@@ -198,6 +199,7 @@ def test_capture_long_term_applies_profile_update():
         facet="occupation",
     )
     with (
+        patch("ai_agent.memory.long_term._gate_blocks", return_value=False),
         patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
         patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
         patch("ai_agent.memory.long_term.extract_turn_memories", return_value=[item]),
@@ -311,6 +313,7 @@ def test_capture_numeric_profile_without_source_downgrades_to_episode():
         facet="other",
     )
     with (
+        patch("ai_agent.memory.long_term._gate_blocks", return_value=False),
         patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
         patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
         patch("ai_agent.memory.long_term.extract_turn_memories", return_value=[item]),
@@ -338,6 +341,7 @@ def test_capture_non_numeric_profile_still_writes_directly():
         facet="occupation",
     )
     with (
+        patch("ai_agent.memory.long_term._gate_blocks", return_value=False),
         patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
         patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
         patch("ai_agent.memory.long_term.extract_turn_memories", return_value=[item]),
