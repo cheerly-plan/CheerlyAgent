@@ -35,6 +35,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
+from collections.abc import Callable
+
 from ai_agent.core.logging import get_logger
 from ai_agent.core.text import clip_text
 from ai_agent.memory.facets import FACETS, FACET_LABELS, format_profile_line
@@ -227,11 +229,126 @@ def rank_score(item: MemoryItem, relevance_value: float) -> float:
 def rerank_items(
     items: list[MemoryItem], query: str, *, top_k: int | None = None
 ) -> list[MemoryItem]:
-    """按三因子重排（episode 召回用：向量先取宽一点，再按综合分收窄）。"""
-    scored = [(item, relevance(query, item)) for item in items]
-    ranked = sorted(scored, key=lambda pair: -rank_score(pair[0], pair[1]))
-    picked = [item for item, _ in ranked]
-    return picked[:top_k] if top_k else picked
+    """episode 召回重排：默认 RRF 融合，可配回三因子线性加权。
+
+    RRF 模式下两路输入：
+    - 向量路：``items`` 原始顺序（store.search_episode 已按余弦距离排序）
+    - 词面路：确定性 bigram 相关性排序，保证「字面命中」的条目不被
+      向量分数淹没
+
+    融合后再按一次性内容降权——降权是业务规则，不该混进名次融合里。
+    """
+    from ai_agent.core.config import settings
+
+    weights = [
+        float(settings.memory_fusion_weight_vector),
+        float(settings.memory_fusion_weight_keyword),
+    ]
+    if (settings.memory_fusion or "").strip().lower() == "rrf":
+        lexical = sorted(
+            items, key=lambda item: -relevance(query, item)
+        )
+        # 平局用词面相关性打破：否则向量路第一名的无关条会压过字面强命中
+        fused = fuse_rrf(
+            [items, lexical],
+            weights=weights,
+            tiebreak=lambda item: relevance(query, item),
+        )
+    else:
+        scored = [(item, relevance(query, item)) for item in items]
+        fused = [
+            item
+            for item, _ in sorted(scored, key=lambda pair: -rank_score(pair[0], pair[1]))
+        ]
+    if not fused:
+        return []
+    penalty = min(max(float(settings.memory_transient_penalty), 0.0), 1.0)
+    if penalty < 1.0 and any(is_transient(item) for item in fused):
+        # 只对一次性内容降权，常青条目保持原顺序：整表重新乘系数会破坏
+        # RRF 已经算好的相对名次（无噪声时系数恒为 1，等于原序遍历）。
+        stable = [item for item in fused if not is_transient(item)]
+        noisy = sorted(
+            (item for item in fused if is_transient(item)),
+            key=lambda item: -item.score * penalty,
+        )
+        # 噪声项按「降权后分数」插到常青项之间
+        merged: list[MemoryItem] = []
+        noisy_iter = iter(noisy)
+        pending = next(noisy_iter, None)
+        for item in stable:
+            while pending is not None and pending.score * penalty >= item.score:
+                merged.append(pending)
+                pending = next(noisy_iter, None)
+            merged.append(item)
+        if pending is not None:
+            merged.append(pending)
+            merged.extend(noisy_iter)
+        fused = merged
+    return fused[:top_k] if top_k else fused
+
+
+# RRF（Reciprocal Rank Fusion）：多路召回按「名次」融合，不依赖分数量纲。
+# 向量相似度、bigram 相关性、关键词命中数各自的数值不可比，直接加权相加
+# 会让某一路的分制主导排序；按 1/(k+rank) 累加则只看相对顺序。
+RRF_K = 60
+
+
+def fuse_rrf(
+    ranked_lists: list[list[MemoryItem]],
+    *,
+    weights: list[float] | None = None,
+    top_k: int | None = None,
+    tiebreak: Callable[[MemoryItem], float] | None = None,
+) -> list[MemoryItem]:
+    """把多路召回结果按 RRF 融合成一个有序列表。
+
+    ``ranked_lists`` 每路各自已排好序（第 0 个是最优）。同一 item 在多路
+    出现会累加分数，因此「向量近 + 关键词也命中」的条目自然排更前。
+    返回的 MemoryItem 保留首位出现时的字段，``score`` 换成 RRF 分。
+
+    ``tiebreak`` 处理 RRF 平局：路径少时不同名次组合容易算出同一个分数，
+    此时不能由插入顺序决定胜负，交给调用方给一个业务上合理的二级排序。
+    """
+    if not ranked_lists:
+        return []
+    if weights is None:
+        weights = [1.0] * len(ranked_lists)
+    scores: dict[str, float] = {}
+    seen: dict[str, MemoryItem] = {}
+    for path_rank, items in enumerate(ranked_lists):
+        weight = weights[path_rank] if path_rank < len(weights) else 1.0
+        if weight <= 0:
+            continue
+        for position, item in enumerate(items):
+            if item.id not in seen:
+                seen[item.id] = item
+            scores[item.id] = scores.get(item.id, 0.0) + weight / (
+                RRF_K + position + 1
+            )
+    ordered = sorted(
+        scores.items(),
+        key=lambda pair: (
+            -pair[1],
+            -(tiebreak(seen[pair[0]]) if tiebreak else 0.0),
+        ),
+    )
+    fused: list[MemoryItem] = []
+    for item_id, score in ordered:
+        item = seen[item_id]
+        fused.append(
+            MemoryItem(
+                id=item.id,
+                user_id=item.user_id,
+                text=item.text,
+                created_at=item.created_at,
+                score=score,
+                facet=item.facet,
+                last_seen=item.last_seen,
+                hits=item.hits,
+                related=item.related,
+            )
+        )
+    return fused[:top_k] if top_k else fused
 
 
 def _facet_counts(items: list[MemoryItem]) -> str:

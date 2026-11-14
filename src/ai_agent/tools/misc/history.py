@@ -109,7 +109,12 @@ read_history_tool = Tool(
 def _merge_semantic(
     keyword_rows: list[dict], query: str, session_id: str, limit: int
 ) -> list[dict]:
-    """把语义召回结果并进关键词结果；失败一律 fail-open 返回原结果。"""
+    """关键词 + 语义两路按 RRF 融合；任一路失败都退回另一路。
+
+    关键词语料和向量语料的分数量纲不可比（ILIKE 只有「中/不中」，
+    余弦相似度是连续值），所以按名次融合而不是加权求和：
+    两路都排前的条目自然最靠前。
+    """
     top_k = int(settings.history_semantic_top_k)
     if top_k <= 0:
         return keyword_rows
@@ -129,13 +134,39 @@ def _merge_semantic(
         return keyword_rows
     if not semantic:
         return keyword_rows
-    seen = {int(row.get("seq") or 0) for row in keyword_rows}
-    merged = list(keyword_rows)
-    for row in semantic:
-        seq = int(row.get("seq") or 0)
-        if seq in seen:
-            continue
-        seen.add(seq)
-        merged.append(row)
+
+    merged = _rrf_rows(
+        [keyword_rows, semantic],
+        weights=[
+            float(settings.memory_fusion_weight_keyword),
+            float(settings.memory_fusion_weight_vector),
+        ],
+        limit=limit,
+    )
     merged.sort(key=lambda row: int(row.get("seq") or 0))
     return merged[: max(1, limit)]
+
+
+def _rrf_rows(
+    ranked_lists: list[list[dict]], *, weights: list[float], limit: int
+) -> list[dict]:
+    """按 seq 融合多路历史检索结果（与 progressive.fuse_rrf 同一公式）。"""
+    from ai_agent.memory.progressive import RRF_K
+
+    scores: dict[int, float] = {}
+    rows: dict[int, dict] = {}
+    for path_rank, items in enumerate(ranked_lists):
+        weight = weights[path_rank] if path_rank < len(weights) else 1.0
+        if weight <= 0:
+            continue
+        for position, row in enumerate(items):
+            seq = int(row.get("seq") or 0)
+            if seq <= 0:
+                continue
+            rows.setdefault(seq, row)
+            scores[seq] = scores.get(seq, 0.0) + weight / (RRF_K + position + 1)
+    ordered = sorted(scores.items(), key=lambda pair: -pair[1])
+    out: list[dict] = []
+    for seq, score in ordered[: max(1, limit)]:
+        out.append({**rows[seq], "score": score})
+    return out

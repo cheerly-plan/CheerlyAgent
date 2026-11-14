@@ -279,6 +279,8 @@ L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 
   的消息，避免已摘要的原文与摘要重复进入上下文。
 - 工具结果按 pool → `agent_tool_result`（裁剪前全文）→ 当前 messages →
   `agent_chat_history` 查找；进程重启或池子淘汰后仍能回读完整原文。
+- 多路召回按 RRF 融合（`MEMORY_FUSION=rrf`）：向量 / 词面 / 语义历史按名次
+  累加，不依赖分数量纲；一次性内容融合后再降权。
 - 摘要只作索引；旧对话细节用 `search_history` 回原文（关键词 + 语义双路），
   再用 `read_history` 按 seq 看前后文，数字/条款不直接引用摘要。
 - 历史对话向量存在 `agent_chat_embedding`：新消息落库后异步建索引，
