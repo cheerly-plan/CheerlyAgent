@@ -48,7 +48,8 @@ def mem_store(monkeypatch):
         "ai_agent.memory.episode_store.embed_query", lambda q: _fake_embed([q])[0]
     )
     monkeypatch.setattr(
-        "ai_agent.memory.episode_store.compact_episode_texts", merge_episode_texts
+        "ai_agent.memory.episode_store.compact_episode_texts",
+        lambda parts, keeper="": merge_episode_texts(parts),
     )
     s = MemoryStore()
     try:

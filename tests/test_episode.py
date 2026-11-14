@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
-from ai_agent.memory.episode_merge import compact_episode_texts
+from ai_agent.memory.episode_merge import compact_episode_texts, merge_episode_texts
 
 RELATED = [
     "最近在学习nodejs bff",
@@ -56,20 +56,32 @@ def test_compact_episode_texts_uses_small_model():
     assert "数据聚合" in user
 
 
-def test_compact_episode_texts_falls_back_on_llm_error():
+def test_compact_episode_texts_keeps_keeper_on_llm_error():
+    """合并失败不能拼成「A；B；C」——那会把同一条近况叠三遍。"""
+    with patch(
+        "ai_agent.memory.episode_merge.complete_memory_chat",
+        side_effect=LLMError("timeout"),
+    ):
+        text = compact_episode_texts(RELATED, keeper="最近在学习nodejs bff")
+    assert text == "最近在学习nodejs bff"
+    assert "；" not in text
+
+
+def test_compact_episode_texts_keeps_keeper_on_empty_result():
+    with patch("ai_agent.memory.episode_merge.complete_memory_chat", return_value=""):
+        text = compact_episode_texts(RELATED, keeper="最近在学习nodejs bff")
+    assert text == "最近在学习nodejs bff"
+    assert "；" not in text
+
+
+def test_compact_episode_texts_without_keeper_keeps_single_text():
+    """没有 keeper（新建场景）时也不能拼；取最有信息量的一条。"""
     with patch(
         "ai_agent.memory.episode_merge.complete_memory_chat",
         side_effect=LLMError("timeout"),
     ):
         text = compact_episode_texts(RELATED)
-    assert "；" in text
-    assert "数据聚合" in text
-
-
-def test_compact_episode_texts_falls_back_on_empty_result():
-    with patch("ai_agent.memory.episode_merge.complete_memory_chat", return_value=""):
-        text = compact_episode_texts(RELATED)
-    assert "；" in text
+    assert text == merge_episode_texts(RELATED)
 
 
 def test_compact_episode_texts_skips_llm_when_contained():

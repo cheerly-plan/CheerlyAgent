@@ -50,7 +50,9 @@ class EpisodeStore(Database):
         keeper = hits[0]
         stale_ids = [uuid.UUID(hit.id) for hit in hits[1:]]
         # 网络/LLM 调用在锁外执行
-        merged_text = compact_episode_texts([*(hit.text for hit in hits), text])
+        merged_text = compact_episode_texts(
+            [*(hit.text for hit in hits), text], keeper=keeper.text
+        )
         merged_vector = (
             Vector(embed_texts([merged_text])[0])
             if merged_text != text

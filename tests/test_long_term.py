@@ -109,10 +109,12 @@ def test_extract_turn_memories_coalesces_same_facet():
 
 
 def test_extract_turn_memories_warns_on_facet_op_conflict(caplog):
+    """两条都合规时，update 与 delete 冲突要留日志，不能被静默吞掉。"""
     raw = (
         '{"memories":['
-        '{"kind":"profile","op":"update","facet":"locale","content":"上海"},'
-        '{"kind":"profile","op":"delete","facet":"locale"}'
+        '{"kind":"profile","op":"update","facet":"occupation",'
+        '"content":"用户是后端工程师"},'
+        '{"kind":"profile","op":"delete","facet":"occupation"}'
         "]}"
     )
     with (
@@ -121,7 +123,7 @@ def test_extract_turn_memories_warns_on_facet_op_conflict(caplog):
     ):
         items = extract_turn_memories(TURN)
     assert items == [
-        ExtractedMemory(kind="profile", content="", op="delete", facet="locale")
+        ExtractedMemory(kind="profile", content="", op="delete", facet="occupation")
     ]
     assert "conflict" in caplog.text
 
@@ -351,3 +353,45 @@ def test_capture_non_numeric_profile_still_writes_directly():
         capture_long_term("u1", TURN, "", "我是后端工程师")
     write_episode.assert_not_called()
     apply_profile.assert_called_once()
+
+
+def test_tool_output_is_not_fed_to_extraction():
+    """工具结果不是用户事实；喂进抽取器会把检索结论写成记忆。"""
+    from ai_agent.memory.long_term import _format_turn
+
+    turn = [
+        {"role": "user", "content": "中行总资产多少"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "kb_search", "arguments": {}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "name": "kb_search",
+            "content": "中国银行截至2026年9月30日总资产为411,084.49亿元",
+        },
+    ]
+    text = _format_turn(turn)
+    assert "411,084.49" not in text
+    assert "kb_search" in text
+
+
+def test_filtered_item_does_not_create_fake_conflict(caplog):
+    """被噪声规则挡掉的条目不算冲突：它压根不会入库。"""
+    raw = (
+        '{"memories":['
+        '{"kind":"profile","op":"update","facet":"locale","content":"上海"},'
+        '{"kind":"profile","op":"delete","facet":"locale"}'
+        "]}"
+    )
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("ai_agent.memory.long_term.complete_memory_chat", return_value=raw),
+    ):
+        items = extract_turn_memories(TURN)
+    assert items == [
+        ExtractedMemory(kind="profile", content="", op="delete", facet="locale")
+    ]
+    assert "conflict" not in caplog.text

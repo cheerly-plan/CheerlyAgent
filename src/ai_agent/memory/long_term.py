@@ -271,9 +271,11 @@ def _line(msg: ChatMessage) -> str:
             return f"助手：调用工具 {names}"
         return f"助手：{body}" if body else ""
     if role == "tool":
+        # 工具结果不是用户事实。以前把前 400 字喂给抽取器，模型会把
+        # 「已确认中国银行总资产 411,084.49 亿元」这类检索结论写成用户记忆。
+        # 这里只留工具名，用来判断「本轮查了库」，不给正文。
         name = msg.get("name") or "tool"
-        snippet = content[:400]
-        return f"工具[{name}]：{snippet}" if snippet else ""
+        return f"工具[{name}]：已调用（结果不写入记忆）"
     return ""
 
 
@@ -288,20 +290,105 @@ _COMPANY_MARK = re.compile(r"股份有限公司|有限责任公司")
 _DOC_QA = ("kb_search", "kg_search", "招股", "年报披露", "助手")
 _TOPIC_PREF = ("关注公司", "财务数据", "股东信息", "重大工程")
 
+# 本轮动作 / 任务状态：都是「这一次在做什么」，不是用户长期事实。
+# 一次性查询/任务动作。注意「用户正在用 X 做 Y」是自己持续的工作，不能算，
+# 所以「正在」后面必须跟观察/查询动词，而不是任意动词。
+_ONGOING = re.compile(
+    r"用户(已确认|确认了|对比|查询|查了|生成|想了解)"
+    r"|(正在|已)(分析|对比|查询|确认|整理)(了|该|其|中)"
+    r"|用户正在(确认|查询|对比|分析|生成|查看|寻找|了解)"
+)
+# 后台任务状态：job_id、预计耗时、进度。
+_JOB_STATE = re.compile(
+    r"job_id|后台任务|预计\s*\d+\s*[-~至到]\s*\d+\s*分钟|任务已提交|进度"
+)
+# 股票代码 / 交易日这类一次性标识。
+_MARKET_CODE = re.compile(r"\b\d{6}\b|融资融券|涨停|领涨|板块走势")
+# 短期行程：下周/明天出差这类不能当居住地。
+_TEMPORAL = re.compile(
+    r"^(用户)?(我)?(下周|本周|这周|明天|后天|今天|月底|下个月|近期)"
+    r"|(下周|明天|后天|本周).{0,6}(出差|开会|出发|回)"
+)
+# 抽取器输出常把第一人称转述成「用户…」，两种写法都算本人陈述。
+_OWNER = r"(?:我|用户)"
+
+# 用户明确陈述居住地的句式；只有命中才允许写 locale。
+_LOCALE_STATEMENT = re.compile(
+    _OWNER + r"(住在|住|常驻|长期在|在.{0,10}(工作|生活)|是.{0,10}人)"
+)
+# 用户明确陈述职业的句式；只有命中才允许写 occupation。
+_OCCUPATION_STATEMENT = re.compile(
+    _OWNER
+    + r"(是|做|的职业|的工作|的岗位|身份)|"
+    + _OWNER
+    + r"在.{0,15}(工作|任职|上班)|职业是|岗位是"
+)
+# 系统默认值：写进去没有信息量。
+_DEFAULT_LANGUAGE = {"中文", "汉语", "简体中文", "普通话", "简体"}
+# 职业变更的历史→现在转述（「曾是X，现为Y」「之前是X，现在是Y」）
+_OCCUPATION_TRANSITION = re.compile(
+    r"(曾|以前|之前|原来)(是|为|做).{0,20}(现|现在|目前|如今)(是|为|做)"
+)
+# 「中大力德财务分析师」这类：公司简称 + 职业名词 = 由查询推断的身份
+_IN_COMPANY_AS_ROLE = re.compile(
+    r"[\u4e00-\u9fa5]{2,8}(财务|数据|行业|投资|证券)?(分析师|研究员|经理|总监)"
+)
+# 职业名词兜底：句子里出现职业名，且没有把公司写成身份
+_JOB_NOUN = re.compile(
+    r"工程师|分析师|研究员|产品经理|设计师|运营|销售|律师|医生|教师|学生|"
+    r"高管|总监|经理|程序员|开发者|架构师|顾问|会计|审计"
+)
+
+
+def _is_own_occupation(text: str) -> bool:
+    """职业是否来自用户本人的陈述（而非问过哪家公司）。"""
+    if _OCCUPATION_STATEMENT.search(text):
+        return True
+    if _OCCUPATION_TRANSITION.search(text):
+        return True
+    # 「前端开发工程师」这类裸职业名词也接受，但必须简短、不含公司名，
+    # 且不是「在某公司做…分析师」这种由查询推断的身份。
+    if _COMPANY_MARK.search(text) or _IN_COMPANY_AS_ROLE.search(text):
+        return False
+    return bool(_JOB_NOUN.search(text)) and len(text) <= 20
+
 
 def _keep_extracted(item: ExtractedMemory) -> bool:
-    """小模型常把招股书问答写成记忆，这里挡一层确定性噪声。"""
+    """小模型常把招股书问答写成记忆，这里挡一层确定性噪声。
+
+    规则都写成确定性正则，不做语义判断：记忆一旦写错会跟着画像长期注入，
+    宁可在抽取阶段多丢一条，也不让「用户正在查询…」变成长期事实。
+    """
     text = item.content.strip()
+    if _ONGOING.search(text) or _JOB_STATE.search(text):
+        return False
+    if _MARKET_CODE.search(text):
+        return False
     if item.kind == "episode":
         if _RECAP_HEAD.match(text):
+            return False
+        if _TEMPORAL.match(text):
             return False
         if any(mark in text for mark in _DOC_QA):
             return False
         return True
     if item.op == "delete":
-        return True
+        # delete 是「撤回」意图：内容常为空或不完整，不做事实性过滤，
+        # 否则用户说「别再记深圳」会被前置规则吞掉，旧记忆清不掉。
+        return not _JOB_STATE.search(text)
     if _RECAP_HEAD.match(text):
         return False
+    if item.facet == "language" and text.strip(" 。.") in _DEFAULT_LANGUAGE:
+        return False
+    if item.facet == "locale" and not _LOCALE_STATEMENT.search(text):
+        # 居住地必须来自用户明确陈述；「下周去深圳出差」不是 locale
+        return False
+    if item.facet == "occupation" and not _OCCUPATION_STATEMENT.search(text):
+        # 职业必须来自第一人称陈述；问过某公司 ≠ 用户是该公司分析师。
+        # 但「曾是画家，现为前端工程师」这类历史→现在的转述是合法更新，
+        # 由 is_own_occupation_statement 一并放行。
+        if not _is_own_occupation(text):
+            return False
     if item.facet in {"preference", "other", "constraint"}:
         if any(mark in text for mark in _TOPIC_PREF):
             return False

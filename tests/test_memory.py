@@ -67,7 +67,8 @@ def mem_store(monkeypatch):
         "ai_agent.memory.episode_store.embed_query", lambda q: fake_embed([q])[0]
     )
     monkeypatch.setattr(
-        "ai_agent.memory.episode_store.compact_episode_texts", merge_episode_texts
+        "ai_agent.memory.episode_store.compact_episode_texts",
+        lambda parts, keeper="": merge_episode_texts(parts),
     )
     store = MemoryStore()
     try:
@@ -190,7 +191,7 @@ def test_write_episode_merge_aggregates_evidence(mem_store, monkeypatch):
 def test_write_episode_stores_compacted_sentence(mem_store, monkeypatch):
     monkeypatch.setattr(
         "ai_agent.memory.episode_store.compact_episode_texts",
-        lambda parts: "learning nodejs bff with koa aggregation",
+        lambda parts, keeper="": "learning nodejs bff with koa aggregation",
     )
     first = mem_store.write_episode("learning nodejs bff koa", user_id="a")
     second = mem_store.write_episode("learning nodejs bff aggregation", user_id="a")

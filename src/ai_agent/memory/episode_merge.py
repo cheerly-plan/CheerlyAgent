@@ -50,14 +50,22 @@ def unique_episode_texts(parts: list[str]) -> list[str]:
     return unique
 
 
-def compact_episode_texts(parts: list[str]) -> str:
+def compact_episode_texts(parts: list[str], keeper: str = "") -> str:
+    """把相近情景记忆合并成一条；合并不了就保留 ``keeper`` 原文。
+
+    ``keeper`` 是库里已存在的那条（hits[0]）。LLM 合并失败/返回不可用时**不能**
+    退化成拼接：拼接会把「用户下周要去深圳出差」重复成
+    「A；A；A」，还会把互相矛盾的旧近况叠在一起。宁可只留 keeper，
+    新证据由 hit_count / sessions_seen 累加，交给晋升逻辑判断。
+    """
     unique = unique_episode_texts(parts)
     if not unique:
-        return ""
+        return keeper.strip()
     if len(unique) == 1:
         return unique[0]
-    fallback = merge_episode_texts(unique)
+    fallback = keeper.strip() or merge_episode_texts(unique)
     if fallback in unique:
+        # 一条完整覆盖其余（「A 使用 Koa」包含「A」）：不必调 LLM
         return fallback
     numbered = "\n".join(f"- {item}" for item in unique)
     try:
@@ -69,11 +77,11 @@ def compact_episode_texts(parts: list[str]) -> str:
             max_tokens=256,
         )
     except LLMError as e:
-        logger.warning("合并情景记忆失败，回退为拼接: %s", e)
+        logger.warning("合并情景记忆失败，保留原条目: %s", e)
         return fallback
     text = _clean_merged(raw)
     if not text or len(text) > 200:
-        logger.warning("合并情景记忆结果不可用，回退为拼接")
+        logger.warning("合并情景记忆结果不可用，保留原条目")
         return fallback
     logger.info("情景记忆已合并 chars=%s", len(text))
     return text
