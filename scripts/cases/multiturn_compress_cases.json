@@ -1,0 +1,1003 @@
+[
+  {
+    "id": "langgraph-ckpt",
+    "topic": "长上下文 checkpoint",
+    "setup": [
+      {
+        "role": "user",
+        "content": "这个 LangGraph 状态截断老是丢上下文，你那边 40k token 的 checkpoint 是怎么做的？"
+      },
+      {
+        "role": "assistant",
+        "content": "我是先摘要长历史，只保留关键节点，摘要单独存在 meta 字段里，原始消息超过阈值就裁剪，不是直接删。"
+      },
+      {
+        "role": "user",
+        "content": "那摘要和原文信息冲突怎么办？"
+      },
+      {
+        "role": "assistant",
+        "content": "检索时同时带上最近 3 轮原始消息，摘要只用来做路由。"
+      },
+      {
+        "role": "user",
+        "content": "顺带问下，这个补丁怎么记到 changelog？"
+      },
+      {
+        "role": "assistant",
+        "content": "写在 unreleased 段落下即可。"
+      }
+    ],
+    "followup": "我之前问你长上下文怎么处理，你提到的两个关键做法是什么？",
+    "must": [
+      "meta",
+      "裁剪"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "git-http2",
+    "topic": "git push 失败",
+    "setup": [
+      {
+        "role": "user",
+        "content": "git push 报 HTTP2 framing layer error，ssh 密钥权限都 700 了还是不行"
+      },
+      {
+        "role": "assistant",
+        "content": "关掉 git 的 http2，改用 http/1.1。很多公司代理会截 http2 帧。命令是 git config --global http.version HTTP/1.1。"
+      },
+      {
+        "role": "user",
+        "content": "那本地测试怎么验证生效？"
+      },
+      {
+        "role": "assistant",
+        "content": "先 git config --get http.version 看配置，再 push 一次。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，提交信息怎么写规范？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 feat/fix/chore 前缀。"
+      }
+    ],
+    "followup": "刚才那个代理把帧截断的问题，你给的具体配置项是什么？",
+    "must": [
+      "http.version",
+      "HTTP/1.1"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "pgvector-index",
+    "topic": "HNSW vs IVFFlat",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Pgvector 建索引，100 万条向量用 HNSW 还是 IVFFlat？"
+      },
+      {
+        "role": "assistant",
+        "content": "查询优先选 HNSW；写入量大、频繁新增就 IVFFlat，因为 HNSW 插入很慢。"
+      },
+      {
+        "role": "user",
+        "content": "那百万级查询延迟大概多少？"
+      },
+      {
+        "role": "assistant",
+        "content": "正常单索引是几十 ms，过滤条件多会退化。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，这个库怎么迁移？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 alembic。"
+      }
+    ],
+    "followup": "我上次问的索引选型，你给的两个判断依据分别是什么？",
+    "must": [
+      "插入",
+      "查询"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "router-skill",
+    "topic": "skill 注册方式",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Harness 的 router-skill 架构，skill 是动态注册还是写死配置？"
+      },
+      {
+        "role": "assistant",
+        "content": "YAML 配置驱动，服务启动扫描目录自动注册，新增技能不用改路由代码。"
+      },
+      {
+        "role": "user",
+        "content": "那权限怎么控制？"
+      },
+      {
+        "role": "assistant",
+        "content": "每个 skill 带 scope 标签，路由分发前过滤，不匹配直接跳过。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，日志怎么打？"
+      },
+      {
+        "role": "assistant",
+        "content": "结构化 JSON 打点。"
+      }
+    ],
+    "followup": "新增一个 skill 要不要改路由代码？权限靠什么过滤？",
+    "must": [
+      "YAML",
+      "scope"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "optimistic-lock",
+    "topic": "checkpoint 并发",
+    "setup": [
+      {
+        "role": "user",
+        "content": "LangGraph 里 checkpoint 存 PostgreSQL，并发多了会不会锁状态？"
+      },
+      {
+        "role": "assistant",
+        "content": "会。我加了版本号乐观锁，更新时带上 ts，冲突直接重试，不阻塞别的会话。"
+      },
+      {
+        "role": "user",
+        "content": "那断线重连状态能续上吗？"
+      },
+      {
+        "role": "assistant",
+        "content": "checkpoint 落库了就用同一个 thread_id 拉回来。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，这个用什么监控？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 pg_stat_activity。"
+      }
+    ],
+    "followup": "并发冲突和断线重连这两件事，你分别说的是靠什么标识和机制？",
+    "must": [
+      "版本号",
+      "thread_id"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "tracking",
+    "topic": "Vue3 批量埋点",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Vue3 组件批量埋点，不想每个页面手动写 onMounted 怎么办？"
+      },
+      {
+        "role": "assistant",
+        "content": "全局路由守卫加自定义指令，组件 name 或 meta 配置埋点参数自动上报。"
+      },
+      {
+        "role": "user",
+        "content": "那组件销毁之后还上报的脏数据怎么办？"
+      },
+      {
+        "role": "assistant",
+        "content": "指令绑定 onUnmounted 清除定时器，路由离开时取消 pending 请求。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，这个怎么测？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 jest 加 vue-test-utils。"
+      }
+    ],
+    "followup": "批量埋点用什么机制实现？脏数据怎么避免？",
+    "must": [
+      "路由守卫",
+      "onUnmounted"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "ollama-quant",
+    "topic": "本地量化选型",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Ollama 本地部署 Qwen3，4060 8G 开量化选哪个？"
+      },
+      {
+        "role": "assistant",
+        "content": "4bit AWQ。别用 GGUF 的 q4_k_m，GPU 显存吃不满，速度差一截。"
+      },
+      {
+        "role": "user",
+        "content": "那 32k 上下文会爆显存吗？"
+      },
+      {
+        "role": "assistant",
+        "content": "会，最好做滑动窗口，超过长度自动摘要压缩。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，模型放哪块盘？"
+      },
+      {
+        "role": "assistant",
+        "content": "放本机 nvme。"
+      }
+    ],
+    "followup": "你上次推荐的量化格式是什么？为什么不用另一个？",
+    "must": [
+      "AWQ",
+      "q4_k_m"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "cherry-abort",
+    "topic": "cherry-pick 中断",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Cherry-pick 之后代码冲突一堆，怎么快速看是谁改的？"
+      },
+      {
+        "role": "assistant",
+        "content": "git blame 冲突块，或者用 Sourcetree 可视化对比，优先确认业务逻辑。"
+      },
+      {
+        "role": "user",
+        "content": "cherry-pick 多个 commit 中间失败了怎么退出？"
+      },
+      {
+        "role": "assistant",
+        "content": "git cherry-pick --abort，回到操作之前。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，标签怎么打？"
+      },
+      {
+        "role": "assistant",
+        "content": "git tag -a v1.0 -m 说明。"
+      }
+    ],
+    "followup": "多个 commit 逐个 cherry-pick 时中断了，退出靠哪条命令？",
+    "must": [
+      "--abort"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "hallucination",
+    "topic": "Agent 幻觉手段",
+    "setup": [
+      {
+        "role": "user",
+        "content": "面试被问 Agent 的幻觉怎么降，除了 RAG 还有别的手段吗？"
+      },
+      {
+        "role": "assistant",
+        "content": "工具校验、结果二次反问、限定输出格式 JSON、引用检索原文片段，还要加拒绝回答分支。"
+      },
+      {
+        "role": "user",
+        "content": "那知识库本身有错怎么办？"
+      },
+      {
+        "role": "assistant",
+        "content": "要做资料入库校验，加来源可信度打分。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，面试穿什么？"
+      },
+      {
+        "role": "assistant",
+        "content": "正装即可。"
+      }
+    ],
+    "followup": "除了 RAG，你列的降幻觉手段里，输出侧和兜底侧各有哪些？",
+    "must": [
+      "JSON",
+      "拒绝回答"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "hnsw-bulk",
+    "topic": "HNSW 批量导入",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Pgvector HNSW 索引新增向量，是不是每次插入都更新索引？"
+      },
+      {
+        "role": "assistant",
+        "content": "HNSW 是增量构建。但大批量导入时建议先关索引，导完再重建，快很多。"
+      },
+      {
+        "role": "user",
+        "content": "那百万向量查询延迟多少？"
+      },
+      {
+        "role": "assistant",
+        "content": "单索引几十 ms，过滤多会退化。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，这个用什么部署？"
+      },
+      {
+        "role": "assistant",
+        "content": "docker compose。"
+      }
+    ],
+    "followup": "大批量导入的时候，索引该怎么处理？",
+    "must": [
+      "关索引",
+      "重建"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "docker-volume",
+    "topic": "容器重启丢索引",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Docker 跑 pgvector，容器重启向量索引会丢吗？"
+      },
+      {
+        "role": "assistant",
+        "content": "只要 volume 挂载数据目录就不会丢；只挂载容器内部目录不持久化就没了。"
+      },
+      {
+        "role": "user",
+        "content": "那备份用 pg_dump 还是直接拷 volume？"
+      },
+      {
+        "role": "assistant",
+        "content": "线上优先 pg_dump，拷贝 volume 容易文件损坏。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，镜像怎么瘦身？"
+      },
+      {
+        "role": "assistant",
+        "content": "多阶段构建。"
+      }
+    ],
+    "followup": "持久化和备份这两件事，你分别给的结论是什么？",
+    "must": [
+      "volume",
+      "pg_dump"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "bff-circuit",
+    "topic": "BFF 熔断",
+    "setup": [
+      {
+        "role": "user",
+        "content": "BFF 层 Node 接口，上游微服务超时雪崩怎么防护？"
+      },
+      {
+        "role": "assistant",
+        "content": "熔断器、超时控制、降级缓存、并发限流。"
+      },
+      {
+        "role": "user",
+        "content": "用什么库？"
+      },
+      {
+        "role": "assistant",
+        "content": "opossum 做熔断，axios 封装超时和重试，重试要加退避。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，日志怎么落？"
+      },
+      {
+        "role": "assistant",
+        "content": "elk。"
+      }
+    ],
+    "followup": "雪崩防护你列了哪几个手段？熔断用的哪个库？",
+    "must": [
+      "降级",
+      "opossum"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "agent-mq",
+    "topic": "多 Agent 通信",
+    "setup": [
+      {
+        "role": "user",
+        "content": "多 Agent 之间通信，是共享状态还是消息队列？"
+      },
+      {
+        "role": "assistant",
+        "content": "简单场景共享状态 checkpoint；解耦、异步任务用消息队列，比如 Redis stream。"
+      },
+      {
+        "role": "user",
+        "content": "消息丢了怎么保证可靠？"
+      },
+      {
+        "role": "assistant",
+        "content": "ack 机制加重试，消息持久化。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，怎么观测？"
+      },
+      {
+        "role": "assistant",
+        "content": "链路追踪。"
+      }
+    ],
+    "followup": "异步任务那套通信，可靠投递靠什么机制？",
+    "must": [
+      "ack"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "resign",
+    "topic": "离职沟通",
+    "setup": [
+      {
+        "role": "user",
+        "content": "提离职的时候，领导挽留，怎么得体回应？"
+      },
+      {
+        "role": "assistant",
+        "content": "感谢认可，说明已经做好决定，交接会配合到位，不吐槽公司和同事。"
+      },
+      {
+        "role": "user",
+        "content": "如果领导拿加薪留，怎么权衡？"
+      },
+      {
+        "role": "assistant",
+        "content": "看核心原因是钱还是发展；如果是技术空间问题，加薪解决不了根本问题。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，离职证明怎么开？"
+      },
+      {
+        "role": "assistant",
+        "content": "HR 开具即可。"
+      }
+    ],
+    "followup": "加薪挽留的时候，判断该不该留的标准是什么？",
+    "must": [
+      "核心原因"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "vh-keyboard",
+    "topic": "软键盘 vh 错乱",
+    "setup": [
+      {
+        "role": "user",
+        "content": "H5 页面在微信内置浏览器，ios 和安卓渲染差异头疼"
+      },
+      {
+        "role": "assistant",
+        "content": "css 加前缀，避免冷门属性。ios webview 对 fixed、vh 坑最多，优先测。"
+      },
+      {
+        "role": "user",
+        "content": "vh 在软键盘弹出的时候错乱怎么修？"
+      },
+      {
+        "role": "assistant",
+        "content": "监听 resize，改用 js 计算可视高度。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，怎么调试？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 vconsole。"
+      }
+    ],
+    "followup": "软键盘导致 vh 错乱，修复思路是什么？",
+    "must": [
+      "resize",
+      "可视高度"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "storage-cycle",
+    "topic": "存储股判断",
+    "setup": [
+      {
+        "role": "user",
+        "content": "存储芯片周期现在适合看存储股吗？"
+      },
+      {
+        "role": "assistant",
+        "content": "供需错位，涨价传导到财报有滞后，风险是新增产能释放，只能看长期逻辑。"
+      },
+      {
+        "role": "user",
+        "content": "那怎么看财报里的库存？"
+      },
+      {
+        "role": "assistant",
+        "content": "看存货周转天数。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，这个用什么软件看？"
+      },
+      {
+        "role": "assistant",
+        "content": "同花顺。"
+      }
+    ],
+    "followup": "你提到的这个板块的风险点具体是什么？",
+    "must": [
+      "新增产能"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "vscroll",
+    "topic": "大列表渲染",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Vue3 + TS，大列表渲染卡顿，除了虚拟滚动还有别的办法？"
+      },
+      {
+        "role": "assistant",
+        "content": "分页、分片渲染、减少响应式数据，非响应数据用 shallowRef 避免全量依赖收集。"
+      },
+      {
+        "role": "user",
+        "content": "虚拟滚动遇到高度不固定的内容怎么处理？"
+      },
+      {
+        "role": "assistant",
+        "content": "预估高度加渲染后校准，或者用支持动态高度的虚拟列表库。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，这个怎么测？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 lighthouse。"
+      }
+    ],
+    "followup": "高度不固定的列表，虚拟滚动怎么处理？",
+    "must": [
+      "预估高度",
+      "校准"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "fncall",
+    "topic": "本地模型 function call",
+    "setup": [
+      {
+        "role": "user",
+        "content": "本地大模型做 Function Call，经常参数输出不对，怎么办？"
+      },
+      {
+        "role": "assistant",
+        "content": "强约束 JSON schema，开启结构化输出，prompt 里加错误重试，工具返回失败交给模型重新解析。"
+      },
+      {
+        "role": "user",
+        "content": "有些模型对 function call 支持很差，怎么兜底？"
+      },
+      {
+        "role": "assistant",
+        "content": "写正则提取参数，不依赖模型严格输出。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，怎么评估效果？"
+      },
+      {
+        "role": "assistant",
+        "content": "跑评测集打分。"
+      }
+    ],
+    "followup": "模型不按 schema 输出时，兜底方案是什么？",
+    "must": [
+      "正则"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "review",
+    "topic": "评审话术",
+    "setup": [
+      {
+        "role": "user",
+        "content": "代码评审，别人写的方案有明显漏洞，怎么说不尴尬？"
+      },
+      {
+        "role": "assistant",
+        "content": "先说优点，再提场景：我担心某个场景下会出现某个问题，有没有考虑这种情况？"
+      },
+      {
+        "role": "user",
+        "content": "对方坚持自己方案，怎么处理？"
+      },
+      {
+        "role": "assistant",
+        "content": "找架构或组长一起评估，拿测试 case 验证，不私下争执。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，评审要写模板吗？"
+      },
+      {
+        "role": "assistant",
+        "content": "要，统一模板。"
+      }
+    ],
+    "followup": "对方坚持不改的时候，你的处理方式是什么？",
+    "must": [
+      "架构",
+      "测试 case"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "graphrag-cost",
+    "topic": "图谱构建成本",
+    "setup": [
+      {
+        "role": "user",
+        "content": "Graph RAG 和普通向量 RAG 差别在哪？"
+      },
+      {
+        "role": "assistant",
+        "content": "向量是相似度匹配，图谱是实体关系，可以做多跳推理，适合有依赖关系的知识库。"
+      },
+      {
+        "role": "user",
+        "content": "构建图谱成本是不是很高？"
+      },
+      {
+        "role": "assistant",
+        "content": "实体抽取、关系标注很重，小业务普通 RAG 够用，没必要硬上图谱。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，图谱用什么存？"
+      },
+      {
+        "role": "assistant",
+        "content": "neo4j。"
+      }
+    ],
+    "followup": "小业务有必要上图谱吗？成本卡在哪？",
+    "must": [
+      "实体抽取",
+      "关系标注"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "harness-cons",
+    "topic": "Harness vs LangGraph",
+    "setup": [
+      {
+        "role": "user",
+        "content": "DeepSeek Harness 和原生 LangGraph 对比，优势在哪？"
+      },
+      {
+        "role": "assistant",
+        "content": "路由编排、技能隔离、配置化做得更好，不用写大量状态流转代码。"
+      },
+      {
+        "role": "user",
+        "content": "缺点呢？"
+      },
+      {
+        "role": "assistant",
+        "content": "自定义状态扩展不如原生 LangGraph 灵活，深度定制要改框架源码。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，怎么升级？"
+      },
+      {
+        "role": "assistant",
+        "content": "按版本发布说明升级。"
+      }
+    ],
+    "followup": "这个框架的短板具体是什么？",
+    "must": [
+      "状态扩展",
+      "源码"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "proxy-pull",
+    "topic": "代理环境拉模型",
+    "setup": [
+      {
+        "role": "user",
+        "content": "代理环境下 ollama 拉模型超时，怎么配置？"
+      },
+      {
+        "role": "assistant",
+        "content": "设置 HTTP_PROXY 环境变量，或者下载 gguf 文件本地导入，绕过拉取接口。"
+      },
+      {
+        "role": "user",
+        "content": "模型放在外置硬盘读取会不会慢？"
+      },
+      {
+        "role": "assistant",
+        "content": "机械盘会很卡，固态还好，尽量放本机 nvme。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，显存怎么看？"
+      },
+      {
+        "role": "assistant",
+        "content": "nvidia-smi。"
+      }
+    ],
+    "followup": "不想走网络拉取的话，有什么替代做法？",
+    "must": [
+      "gguf",
+      "本地导入"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "resume",
+    "topic": "简历项目描述",
+    "setup": [
+      {
+        "role": "user",
+        "content": "简历项目量化怎么写，AI Agent 这个项目？"
+      },
+      {
+        "role": "assistant",
+        "content": "别写实现了智能问答。改成：设计基于 Router-Skill 的多 Agent 系统，长上下文摘要裁剪，幻觉率降低多少，响应缩短多少。"
+      },
+      {
+        "role": "user",
+        "content": "HR 会不会看不懂技术名词？"
+      },
+      {
+        "role": "assistant",
+        "content": "分两段，一段业务价值，一段技术栈，面试官看技术那段。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，简历几页合适？"
+      },
+      {
+        "role": "assistant",
+        "content": "一到两页。"
+      }
+    ],
+    "followup": "HR 看不懂技术词的话，简历该怎么分段？",
+    "must": [
+      "业务价值",
+      "技术栈"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "rebase-reset",
+    "topic": "rebase 回滚",
+    "setup": [
+      {
+        "role": "user",
+        "content": "git rebase 把提交顺序搞乱了，想回到 rebase 之前"
+      },
+      {
+        "role": "assistant",
+        "content": "git reflog 找到 rebase 前的 HEAD，git reset --hard 那个 hash。"
+      },
+      {
+        "role": "user",
+        "content": "rebase 推远程之前要注意什么？"
+      },
+      {
+        "role": "assistant",
+        "content": "公共分支绝对不要 rebase，别人拉了之后全乱。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，分支怎么清理？"
+      },
+      {
+        "role": "assistant",
+        "content": "git branch -d。"
+      }
+    ],
+    "followup": "怎么找回 rebase 之前的状态？",
+    "must": [
+      "reflog"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "retry-backoff",
+    "topic": "重试退避",
+    "setup": [
+      {
+        "role": "user",
+        "content": "BFF 层 Node 接口，上游超时雪崩怎么防护？"
+      },
+      {
+        "role": "assistant",
+        "content": "熔断器、超时控制、降级缓存、并发限流。"
+      },
+      {
+        "role": "user",
+        "content": "用什么库？"
+      },
+      {
+        "role": "assistant",
+        "content": "opossum 做熔断，axios 封装超时和重试，重试要加退避，不能疯狂重试。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，压测怎么做？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 autocannon。"
+      }
+    ],
+    "followup": "重试这块要注意什么？",
+    "must": [
+      "退避"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "team-manage",
+    "topic": "前端组长",
+    "setup": [
+      {
+        "role": "user",
+        "content": "前端小组组长日常和组员对齐，一般怎么排任务？"
+      },
+      {
+        "role": "assistant",
+        "content": "按迭代拆 story，预估工时，早会同步阻塞点，每周一次技术复盘。"
+      },
+      {
+        "role": "user",
+        "content": "组员代码质量差，直接打回会不会抵触？"
+      },
+      {
+        "role": "assistant",
+        "content": "先在评审里说清楚规范，给示例，复杂模块先做技术方案评审再动手。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，绩效怎么打？"
+      },
+      {
+        "role": "assistant",
+        "content": "按 OKR 对齐。"
+      }
+    ],
+    "followup": "代码质量差的情况，处理步骤是什么？",
+    "must": [
+      "规范",
+      "示例",
+      "技术方案"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "uniapp-tap",
+    "topic": "老机型点击",
+    "setup": [
+      {
+        "role": "user",
+        "content": "UniApp 打包安卓，部分 vivo 老机型点击事件偶现不触发？"
+      },
+      {
+        "role": "assistant",
+        "content": "老安卓 8 的机型，注意冒泡和 fastclick，有的 webview 对 touch 事件兼容坑很多。"
+      },
+      {
+        "role": "user",
+        "content": "要不要自己封装 touch 代替 click？"
+      },
+      {
+        "role": "assistant",
+        "content": "优先用 uni 的 tap，尽量不要自己手写 touchstart，容易多点冲突。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，怎么抓包？"
+      },
+      {
+        "role": "assistant",
+        "content": "用 charles。"
+      }
+    ],
+    "followup": "不建议自己手写哪个事件？为什么？",
+    "must": [
+      "touchstart"
+    ],
+    "kind": "referential"
+  },
+  {
+    "id": "interview-ask",
+    "topic": "面试反问",
+    "setup": [
+      {
+        "role": "user",
+        "content": "面试反问环节，问面试官哪些问题比较加分？"
+      },
+      {
+        "role": "assistant",
+        "content": "团队迭代节奏、技术债务怎么处理、这个岗位接下来重点项目、技术选型决策流程。"
+      },
+      {
+        "role": "user",
+        "content": "不能问什么？"
+      },
+      {
+        "role": "assistant",
+        "content": "不要一上来就问加班、年终奖、涨薪，放到 HR 面。"
+      },
+      {
+        "role": "user",
+        "content": "顺便问下，怎么结束面试？"
+      },
+      {
+        "role": "assistant",
+        "content": "表达感谢并询问后续流程。"
+      }
+    ],
+    "followup": "哪些问题不适合在技术面问？",
+    "must": [
+      "加班",
+      "年终奖"
+    ],
+    "kind": "state"
+  }
+]

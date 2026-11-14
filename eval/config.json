@@ -121,6 +121,18 @@
       "note": "抽取会调模型，只在 nightly / 显式 --allow-external 时跑。通过率跌破 thresholds 会阻断发布；刻意不跑 --recall（会写库）"
     },
     {
+      "name": "multiturn_compress",
+      "tier": 1,
+      "command": "uv run python scripts/eval_multiturn_compress.py --keep-last 1 --min-rate 0.95",
+      "exit_map": {
+        "0": "pass",
+        "1": "regression",
+        "2": "invalid_cases"
+      },
+      "policy": "blocking",
+      "note": "多轮压缩：确定性摘要下追问事实必须无损（不调模型）；LLM 摘要模式用 --summarize llm 本地跑"
+    },
+    {
       "name": "memory_health",
       "tier": 1,
       "command": "uv run python scripts/eval_memory_health.py",
