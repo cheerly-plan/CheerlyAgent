@@ -89,15 +89,22 @@ def test_system_prompt_keeps_core_constraints():
     assert "不寒暄、不复读" in prompt
 
 
-def test_report_discipline_is_injected_only_when_kb_is_on():
-    """报告工具和它的提示词必须同开同关，否则模型会追一个不存在的工具。"""
+def test_report_discipline_is_injected_only_when_report_is_on():
+    """报告工具和它的提示词必须同开同关（随 use_report），否则模型会追一个
+    不存在的工具。研报抽数走服务端流水线直读知识库，不依赖 use_kb。"""
     catalog = _rendered_prompts()[2]  # 研报纪律节
-    with_kb = chat.build_system_prompt(use_kb=True, report_catalog=catalog)
-    without_kb = chat.build_system_prompt(use_kb=False)
-    assert "generate_report" in with_kb
-    assert "不要说「无法生成 PDF」" in with_kb
-    assert "generate_report" not in without_kb
-    assert catalog in with_kb
+    with_report = chat.build_system_prompt(use_report=True, report_catalog=catalog)
+    without_report = chat.build_system_prompt(use_report=False, report_catalog=catalog)
+    assert "generate_report" in with_report
+    assert "不要说「无法生成 PDF」" in with_report
+    assert "generate_report" not in without_report
+    assert catalog in with_report
+    # 研报纪律节与知识库开关解耦：只开研报不开知识库时也注入
+    report_without_kb = chat.build_system_prompt(
+        use_report=True, use_kb=False, report_catalog=catalog
+    )
+    assert "generate_report" in report_without_kb
+    assert "不要说「无法生成 PDF」" in report_without_kb
 
 
 def test_system_prompt_has_no_document_specific_words():

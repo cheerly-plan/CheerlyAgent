@@ -386,15 +386,19 @@ def _system_prompt(
     *,
     use_kb: bool = True,
     use_memory: bool = True,
+    use_report: bool = False,
     kb_file_ids: tuple[str, ...] = (),
     user_input: str = "",
 ) -> str:
     # 提示词里的检索纪律/引用规范按本轮是否挂了知识库同步裁剪：工具列表
     # 已经在下面按开关剔掉了 kb_search/kg_search，提示词再讲一遍「必须先
     # 调用 kb_search」只会让模型去调一个不存在的工具。
+    # 研报纪律节随 use_report 开关（研报抽数走服务端流水线直读知识库，不
+    # 依赖模型调用 kb_search），与 use_kb 无关。
     core = build_system_prompt(
         use_kb=use_kb,
         use_memory=use_memory,
+        use_report=use_report,
         report_catalog=skill_catalog(),
     )
     # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
@@ -581,6 +585,7 @@ def run_stream(
                     user_id,
                     use_kb=use_kb,
                     use_memory=memory_enabled,
+                    use_report=use_report,
                     kb_file_ids=kb_file_ids,
                     user_input=user_input,
                 ),
@@ -594,6 +599,7 @@ def run_stream(
                     user_id,
                     use_kb=use_kb,
                     use_memory=memory_enabled,
+                    use_report=use_report,
                     kb_file_ids=kb_file_ids,
                     user_input=user_input,
                 ),
@@ -894,14 +900,16 @@ def run_loop(
     # 研报关闭 → 只剔除 generate_report + report_job_status（生成研报重流程），
     # report_extract_indicators / report_compare / report_validate 是「查业绩/
     # 算数」的确定性积木，不是研报专属，保持可用。
+    # 研报生成与知识检索是两个独立开关：generate_report / report_extract_indicators
+    # 的抽数由服务端流水线直读知识库（不经过模型调用 kb_search），所以不受
+    # use_kb 影响；知识库开关只控制模型能否自主 kb_search/kg_search 检索原文。
     # 模型这轮就没有对应能力，而不是靠 prompt 约定「别用」
     excluded: set[str] = set()
     if not use_web_search:
         excluded.add("web_search")
     if not use_kb:
-        # 研报积木与入口都依赖知识库表格抽取，知识库关掉时一起下线。
-        # report_compare / report_validate 是纯计算与校验，不触知识库，保留。
-        excluded.update({"kb_search", "kg_search", "generate_report", "report_extract_indicators"})
+        # 只下线模型自主检索知识库的能力；研报抽数走服务端流水线，不受影响。
+        excluded.update({"kb_search", "kg_search"})
     if not use_report:
         excluded.update({"generate_report", "report_job_status"})
     if not use_memory:

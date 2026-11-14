@@ -85,6 +85,7 @@ def build_system_prompt(
     *,
     use_kb: bool = True,
     use_memory: bool = True,
+    use_report: bool = False,
     report_catalog: str = "",
 ) -> str:
     """按本轮实际挂载的能力组装 system prompt。
@@ -96,6 +97,10 @@ def build_system_prompt(
     ``report_catalog`` 由调用方（agents/loop.py）传
     ``report.skills.skill_catalog()``：报告类型清单是业务数据，prompts 层
     不反向 import report；留空时清单位置为空串，纪律节其余内容照常注入。
+
+    研报纪律节随 ``use_report`` 而非 ``use_kb`` 开关：研报生成的抽数由服务端
+    流水线直读知识库（不经过模型调用 kb_search），与「知识检索」开关无关。
+    用户只点「研报生成」没开「知识检索」时，研报工具与提示词照常注入。
     """
     return (
         PromptBuilder()
@@ -104,7 +109,7 @@ def build_system_prompt(
         .section("format", OUTPUT_FORMAT)
         .section("citation", CITATION, when=use_kb)
         .section("kb", KB_DISCIPLINE, when=use_kb)
-        .section("report", build_report_discipline(report_catalog), when=use_kb)
+        .section("report", build_report_discipline(report_catalog), when=use_report)
         .section("memory", MEMORY_DISCIPLINE, when=use_memory)
         .section("truth", TRUTHFULNESS)
         .build()
@@ -112,9 +117,10 @@ def build_system_prompt(
 
 
 # 全能力默认版：保持向后兼容 —— 旧代码直接 import SYSTEM_PROMPT 的行为不变。
-# 新代码应优先用 build_system_prompt(use_kb=..., use_memory=..., report_catalog=...)
-# （catalog 由组装方传 report.skills.skill_catalog()，留空则类型清单为空）。
-SYSTEM_PROMPT = build_system_prompt()
+# 新代码应优先用 build_system_prompt(use_kb=..., use_memory=..., use_report=...,
+# report_catalog=...)（catalog 由组装方传 report.skills.skill_catalog()，
+# 留空则类型清单为空）。全能力版显式开 use_report，保证研报纪律节仍在。
+SYSTEM_PROMPT = build_system_prompt(use_report=True)
 
 
 # ——— 运行时纠偏文本（文案冻结，只搬位置不改字） ———

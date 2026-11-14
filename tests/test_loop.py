@@ -1034,12 +1034,17 @@ def test_run_loop_use_web_search_false_excludes_tool():
 
 
 def test_run_loop_use_kb_false_excludes_kb_search():
-    """「知识库」开关关闭时 kb_search 不挂载；打开则恢复。两者互不干扰。"""
+    """「知识库」开关关闭时 kb_search 不挂载；打开则恢复。两者互不干扰。
+    研报工具（generate_report / report_extract_indicators）不受 use_kb 影响——
+    它们的抽数由服务端流水线直读知识库，不依赖模型调用 kb_search。"""
     fake_schemas = [
         {"function": {"name": "get_weather"}},
         {"function": {"name": "kb_search"}},
         {"function": {"name": "kg_search"}},
         {"function": {"name": "web_search"}},
+        {"function": {"name": "generate_report"}},
+        {"function": {"name": "report_job_status"}},
+        {"function": {"name": "report_extract_indicators"}},
     ]
     seen_tools = []
 
@@ -1064,15 +1069,26 @@ def test_run_loop_use_kb_false_excludes_kb_search():
             )
         )
 
-    # kg_search（图谱检索）同属知识库能力，随 kb_search 一起摘掉
-    assert seen_tools[0] == ["get_weather", "web_search"]
+    # kg_search（图谱检索）同属知识库能力，随 kb_search 一起摘掉；
+    # 研报工具（generate_report / report_extract_indicators）不受 use_kb 影响，
+    # 默认 use_report=False 时只剔 generate_report + report_job_status，
+    # report_extract_indicators 是查业绩的确定性积木，保持挂载。
+    assert seen_tools[0] == [
+        "get_weather",
+        "web_search",
+        "report_extract_indicators",
+    ]
     assert seen_tools[1] == [
         "get_weather",
         "kb_search",
         "kg_search",
         "web_search",
+        "report_extract_indicators",
     ]
-    assert seen_tools[2] == ["get_weather"]
+    assert seen_tools[2] == [
+        "get_weather",
+        "report_extract_indicators",
+    ]
 
 
 def test_run_loop_use_report_false_keeps_indicator_blocks():
@@ -1119,6 +1135,67 @@ def test_run_loop_use_report_false_keeps_indicator_blocks():
         "report_validate",
     ]
     assert seen_tools[2] == seen_tools[0]
+
+
+def test_run_loop_use_report_without_kb_keeps_generate_report():
+    """只开「研报生成」不开「知识检索」时，generate_report 仍挂载。
+
+    这是前端卡片的根因场景：generate_report 的抽数由服务端流水线直读知识库，
+    不依赖模型调用 kb_search；知识库开关只控制模型能否自主检索原文（kb_search/
+    kg_search）。两者是独立开关，工具列表天然去重，不会重复挂载。"""
+    fake_schemas = [
+        {"function": {"name": "get_weather"}},
+        {"function": {"name": "kb_search"}},
+        {"function": {"name": "kg_search"}},
+        {"function": {"name": "generate_report"}},
+        {"function": {"name": "report_job_status"}},
+        {"function": {"name": "report_extract_indicators"}},
+    ]
+    seen_tools = []
+
+    def capture(messages, tools, **kwargs):
+        seen_tools.append([t["function"]["name"] for t in tools])
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=fake_schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=capture),
+        patch("ai_agent.agents.loop.store.append_chat"),
+    ):
+        # 根因场景：只开研报、不开知识库 → generate_report 必须在场
+        list(
+            run_loop(
+                [{"role": "user", "content": "生成研报"}],
+                use_report=True,
+                use_kb=False,
+            )
+        )
+        # 两个都开：去重后仍只有一份，不重复
+        list(
+            run_loop(
+                [{"role": "user", "content": "生成研报"}],
+                use_report=True,
+                use_kb=True,
+            )
+        )
+
+    # 只开研报不开知识库：kb_search/kg_search 下线，但研报入口+查业绩积木都在
+    assert seen_tools[0] == [
+        "get_weather",
+        "generate_report",
+        "report_job_status",
+        "report_extract_indicators",
+    ]
+    # 两个都开：kb_search/kg_search 恢复，研报工具不重复（天然去重）
+    assert seen_tools[1] == [
+        "get_weather",
+        "kb_search",
+        "kg_search",
+        "generate_report",
+        "report_job_status",
+        "report_extract_indicators",
+    ]
 
 
 def test_run_loop_requires_kb_tool_when_question_names_subject():
