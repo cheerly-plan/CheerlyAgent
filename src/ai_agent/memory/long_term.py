@@ -328,7 +328,12 @@ _RECAP_HEAD = re.compile(
 )
 _COMPANY_MARK = re.compile(r"股份有限公司|有限责任公司")
 # 工具名是通用的：任何「检索/查询工具」的输出都不该写成用户事实。
-_TOOL_MARK = ("kb_search", "kg_search", "search_history", "read_tool_result", "助手")
+# 工具名本身：出现即说明这句在描述「查来的」内容。
+_TOOL_MARK = ("kb_search", "kg_search", "search_history", "read_tool_result")
+# 「助手建议/助手回答/助手告知」是对话纪要；而「希望助手协助」「让助手」
+# 是用户对助手的长期要求，必须保留——之前把裸的「助手」当噪声，
+# 误杀了「希望助手协助解读 JD」这类合法 directive。
+_ASSISTANT_RECAP = re.compile(r"助手(建议|回答|决定|通过|告知|回复|提到|说)")
 # 行业专用词（默认金融）。换业务时由 MEMORY_DOMAIN_NOISE_ENABLED 关闭，
 # 通用规则（_ONGOING / _JOB_STATE / _TEMPORAL / _RECAP_HEAD）仍然生效。
 _DOC_QA = ("招股", "年报披露")
@@ -351,11 +356,13 @@ _ONGOING = re.compile(
     # 「在做/正在做一个…项目」是用户自己的长期项目，属于该记的 episode；
     # 「正在做一道题」仍是任务动作
     r"(?!做(?:一个|一[个套])?(?!一道))"
+    # 允许「正在本地运行」「正在线上部署」这类方位/方式副词
+    r"(?:本地|线上|后台|手动|自动)?"
     # 动词表只收「单次任务」类动作。刻意不收「做/用/搭/建」——那些多数是
     # 用户自己的长期项目（「正在用 Koa 做 BFF」），收进来会误杀。
     r"(查询|查|查看|查了|确认|对比|分析|生成|想了解|了解|寻找|找|写|翻译|整理|"
     r"统计|排查|算|计算|定位|修改|改|转|提取|转换|解读|总结|搜索|搜|画|检查|"
-    r"提交|测试|调试|阅读|看|跑)"
+    r"提交|测试|调试|阅读|看|跑|运行|执行|启动|部署|安装)"
     r"|(正在|在)把.{0,40}?(翻译|转成|改成|提取|整理|统计)"
 )
 # 后台任务状态：job_id、预计耗时、进度。
@@ -481,6 +488,8 @@ def is_transient_text(text: str) -> bool:
         return True
     if any(mark in body for mark in _TOOL_MARK):
         return True
+    if _ASSISTANT_RECAP.search(body):
+        return True
     return _domain_noise_enabled() and any(mark in body for mark in _DOC_QA)
 
 
@@ -546,6 +555,11 @@ def _parse_memories(raw: str, user_text: str = "") -> list[ExtractedMemory]:
         return []
     if isinstance(data, dict):
         rows = data.get("memories")
+        if rows is None and ("kind" in data or "content" in data):
+            # 模型返回裸数组 ``[{...}]`` 时 load_llm_json 会剥掉外层，
+            # 解成单个对象。之前这里直接 return []，整条记忆静默丢失——
+            # 实测这是「该记没记」波动的主要来源之一。
+            rows = [data]
     else:
         rows = data
     if not isinstance(rows, list):

@@ -60,6 +60,8 @@ def _rules_hit(text: str) -> list[str]:
         if mark in body:
             hits.append(f"_TOOL_MARK({mark})")
             break
+    if lt._ASSISTANT_RECAP.search(body):
+        hits.append("_ASSISTANT_RECAP")
     if lt._domain_noise_enabled():
         for mark in lt._DOC_QA:
             if mark in body:

@@ -585,3 +585,63 @@ def test_unknown_kind_still_rejected():
 
     assert _memory_from_row({"kind": "bogus", "op": "add", "content": "随便写点"}) is None
     assert _memory_from_row({"kind": "episode", "content": "短"}) is None
+
+
+def test_bare_array_response_is_parsed():
+    """模型偶尔返回裸数组 ``[{...}]``，load_llm_json 会剥掉外层解成单对象。
+
+    以前这里直接 return []，整条记忆静默丢失——实测是「该记没记」波动
+    的主要来源之一。
+    """
+    from ai_agent.memory.long_term import _parse_memories
+
+    raw = (
+        '[{"kind":"profile","op":"add","facet":"preference",'
+        '"content":"面试反问环节倾向询问团队分工"}]'
+    )
+    items = _parse_memories(raw)
+    assert len(items) == 1
+    assert items[0].facet == "preference"
+    assert "面试反问" in items[0].content
+
+
+def test_wrapped_and_bare_object_both_parse():
+    from ai_agent.memory.long_term import _parse_memories
+
+    wrapped = '{"memories":[{"kind":"profile","op":"add","facet":"name","content":"魏佳楠"}]}'
+    bare = '{"kind":"profile","op":"add","facet":"name","content":"魏佳楠"}'
+    for raw in (wrapped, bare):
+        items = _parse_memories(raw)
+        assert len(items) == 1 and items[0].facet == "name", raw
+
+
+def test_assistant_recap_is_dropped_but_request_is_kept():
+    """「助手建议/回答」是纪要；「希望助手协助」是用户的长期要求。"""
+    from ai_agent.memory.long_term import ExtractedMemory, _keep_extracted
+
+    recap = ExtractedMemory(
+        kind="episode", content="助手建议用户先看财报，用户表示同意。"
+    )
+    assert _keep_extracted(recap) is False
+
+    request = ExtractedMemory(
+        kind="episode",
+        content="当用户准备面试时，希望助手协助解读职位描述（JD）并提炼匹配亮点。",
+    )
+    assert _keep_extracted(request) is True
+
+
+def test_run_verbs_are_transient_but_projects_are_not():
+    from ai_agent.memory.long_term import ExtractedMemory, _keep_extracted
+
+    for text in (
+        "用户正在本地运行 Qwen2.5 7B 模型。",
+        "用户正在部署这个服务。",
+    ):
+        assert _keep_extracted(ExtractedMemory(kind="episode", content=text)) is False, text
+
+    for text in (
+        "用户正在做一家社区诊所的慢病管理系统。",
+        "用户正在用 Node.js + Koa 做 BFF，把多个接口聚合。",
+    ):
+        assert _keep_extracted(ExtractedMemory(kind="episode", content=text)) is True, text
