@@ -127,7 +127,7 @@ def extract_turn_memories(
         except LLMError as e2:
             logger.warning("抽取长期记忆失败: %s", e2)
             return []
-    items = _parse_memories(raw)
+    items = _parse_memories(raw, _user_text_of(turn))
     if not items and not (raw or "").strip():
         # 空正文：思考型模型把 num_predict 全用在 reasoning 上。
         # 单独计数——它和「本轮确实没有可记内容」是两回事。
@@ -479,11 +479,16 @@ def is_transient_text(text: str) -> bool:
     return _domain_noise_enabled() and any(mark in body for mark in _DOC_QA)
 
 
-def _keep_extracted(item: ExtractedMemory) -> bool:
+def _keep_extracted(item: ExtractedMemory, user_text: str = "") -> bool:
     """小模型常把招股书问答写成记忆，这里挡一层确定性噪声。
 
     规则都写成确定性正则，不做语义判断：记忆一旦写错会跟着画像长期注入，
     宁可在抽取阶段多丢一条，也不让「用户正在查询…」变成长期事实。
+
+    ``user_text`` 是本轮用户原话。locale / occupation 的「必须第一人称陈述」
+    检查**看原话，不看抽出值**：抽取器正常输出的是规范化后的值
+    （``locale="深圳"``、``occupation="5年前端开发…"``），要求抽出值里带
+    「我住在」「我是」等于把合格输出判成噪声——实测线上就是这么丢的。
     """
     text = item.content.strip()
     if item.op == "delete":
@@ -497,10 +502,13 @@ def _keep_extracted(item: ExtractedMemory) -> bool:
         return False
     if item.facet == "language" and text.strip(" 。.") in _DEFAULT_LANGUAGE:
         return False
-    if item.facet == "locale" and not _LOCALE_STATEMENT.search(text):
+    # 归因文本：有原话就看原话（抽取器的输出是规范化值，不是原话转述），
+    # 没有原话才退回看抽出值本身。
+    claim = (user_text or "").strip() or text
+    if item.facet == "locale" and not _LOCALE_STATEMENT.search(claim):
         # 居住地必须来自用户明确陈述；「下周去深圳出差」不是 locale
         return False
-    if item.facet == "occupation" and not _OCCUPATION_STATEMENT.search(text):
+    if item.facet == "occupation" and not _OCCUPATION_STATEMENT.search(claim):
         # 职业必须来自第一人称陈述；问过某公司 ≠ 用户是该公司分析师。
         # 但「曾是画家，现为前端工程师」这类历史→现在的转述是合法更新，
         # 由 is_own_occupation_statement 一并放行。
@@ -516,7 +524,17 @@ def _keep_extracted(item: ExtractedMemory) -> bool:
     return True
 
 
-def _parse_memories(raw: str) -> list[ExtractedMemory]:
+def _user_text_of(turn: list[ChatMessage]) -> str:
+    """本轮用户原话（多条用户消息拼起来），供 facet 陈述校验回看。"""
+    parts = [
+        str(msg.get("content") or "").strip()
+        for msg in turn
+        if msg.get("role") == "user"
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _parse_memories(raw: str, user_text: str = "") -> list[ExtractedMemory]:
     data = load_llm_json(raw)
     if data is None:
         logger.warning("抽取长期记忆 JSON 无法解析")
@@ -532,7 +550,7 @@ def _parse_memories(raw: str) -> list[ExtractedMemory]:
         item = _memory_from_row(row)
         if item is None:
             continue
-        if not _keep_extracted(item):
+        if not _keep_extracted(item, user_text):
             logger.info(
                 "丢弃非跨会话记忆 kind=%s facet=%s text=%s",
                 item.kind,

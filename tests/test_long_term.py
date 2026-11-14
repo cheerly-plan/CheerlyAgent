@@ -484,3 +484,40 @@ def test_summary_extra_body_avoids_restricted_enable_thinking():
     assert '"enable_thinking": False' not in source.replace(
         '"chat_template_kwargs": {"enable_thinking": False}', ""
     )
+
+
+def test_locale_and_occupation_check_user_text_not_extracted_value():
+    """抽取器输出的是规范化值（locale="深圳"），不是原话转述。
+
+    校验「是否第一人称陈述」必须看用户原话，否则合格输出会被判成噪声——
+    线上正是这么丢的：用户说「我长期在深圳工作」，抽出 locale="深圳" 被拦。
+    """
+    from ai_agent.memory.long_term import ExtractedMemory, _keep_extracted
+
+    locale = ExtractedMemory(
+        kind="profile", facet="locale", content="深圳", op="add"
+    )
+    assert _keep_extracted(locale, "我长期在深圳工作，常住蛇口这边") is True
+    # 没有原话、抽出值里也没有第一人称陈述 → 仍要拦住
+    assert _keep_extracted(locale) is False
+
+    occupation = ExtractedMemory(
+        kind="profile",
+        facet="occupation",
+        content="5年前端开发，主攻Vue3",
+        op="add",
+    )
+    assert _keep_extracted(occupation, "我是一名5年前端开发，主攻Vue3") is True
+    # 问公司 ≠ 用户是该公司的人
+    assert _keep_extracted(occupation, "中大力德是做什么的") is False
+
+
+def test_user_text_of_collects_all_user_turns():
+    from ai_agent.memory.long_term import _user_text_of
+
+    turn = [
+        {"role": "user", "content": "我住在杭州"},
+        {"role": "assistant", "content": "好的"},
+        {"role": "user", "content": "我做前端"},
+    ]
+    assert _user_text_of(turn) == "我住在杭州\n我做前端"
