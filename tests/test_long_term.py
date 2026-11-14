@@ -5,6 +5,7 @@ from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.memory.long_term import (
     ExtractedMemory,
+    _gate_blocks,
     capture_long_term,
     extract_turn_memories,
 )
@@ -219,6 +220,10 @@ def test_capture_long_term_applies_profile_update():
 
 def test_capture_long_term_gate_blocks_low_probability(monkeypatch):
     """Jev 判定低概率时整轮跳过，连向量检索和抽取都不发生。"""
+    # 门控默认关闭，本用例显式打开
+    from ai_agent.core.config import settings
+
+    monkeypatch.setattr(settings, "memory_gate_enabled", True)
     with (
         patch("ai_agent.memory.long_term.jev_noul", return_value=0.05),
         patch("ai_agent.memory.long_term.store.search_episode") as search,
@@ -521,3 +526,62 @@ def test_user_text_of_collects_all_user_turns():
         {"role": "user", "content": "我做前端"},
     ]
     assert _user_text_of(turn) == "我住在杭州\n我做前端"
+
+
+def test_memory_gate_is_disabled_by_default():
+    """门控默认关闭：端到端评测显示它是净负收益（放行正例 36/40 vs 40/40）。"""
+    from ai_agent.core.config import settings
+
+    assert settings.memory_gate_enabled is False
+    turn = [
+        {"role": "user", "content": "我叫魏佳楠"},
+        {"role": "assistant", "content": "好的"},
+    ]
+    # 关闭时不发任何 Jev 请求，直接放行
+    with patch("ai_agent.memory.long_term.jev_noul") as jev:
+        assert _gate_blocks(turn, "") is False
+    jev.assert_not_called()
+
+
+def test_memory_gate_respects_enabled_flag(monkeypatch):
+    from ai_agent.core.config import settings
+
+    monkeypatch.setattr(settings, "memory_gate_enabled", True)
+    turn = [
+        {"role": "user", "content": "我叫魏佳楠"},
+        {"role": "assistant", "content": "好的"},
+    ]
+    with patch("ai_agent.memory.long_term.jev_noul", return_value=0.05):
+        assert _gate_blocks(turn, "") is True
+    with patch("ai_agent.memory.long_term.jev_noul", return_value=0.9):
+        assert _gate_blocks(turn, "") is False
+
+
+def test_kind_confused_with_facet_is_recovered():
+    """模型偶尔把 facet 写进 kind：prompt 里两个清单挨着，容易混。
+
+    ``{"kind":"directive","facet":"directive",...}`` 以前被整条丢弃，
+    实测就是这样偶发丢掉 preference/directive 类记忆。
+    """
+    from ai_agent.memory.long_term import _memory_from_row
+
+    item = _memory_from_row(
+        {"kind": "directive", "op": "add", "facet": "directive", "content": "结论前置"}
+    )
+    assert item is not None
+    assert item.kind == "profile"
+    assert item.facet == "directive"
+
+    # kind 位置写 facet 名、且没给 facet → 用 kind 当 facet
+    item = _memory_from_row(
+        {"kind": "preference", "op": "add", "content": "调试前端先看控制台"}
+    )
+    assert item is not None
+    assert item.facet == "preference"
+
+
+def test_unknown_kind_still_rejected():
+    from ai_agent.memory.long_term import _memory_from_row
+
+    assert _memory_from_row({"kind": "bogus", "op": "add", "content": "随便写点"}) is None
+    assert _memory_from_row({"kind": "episode", "content": "短"}) is None

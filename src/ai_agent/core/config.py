@@ -515,8 +515,20 @@ class Settings(BaseSettings):
 
     # Jev 门控（System One 决策模型）：长期记忆抽取的前置判断——Noul 概率
     # 低于 memory_gate_threshold 时跳过本轮抽取，省掉一次小模型调用。
-    # 未配 key 时门控关闭，行为退化为每轮直接抽取；门控任何失败都
-    # fail-open 放行，不影响记忆链路。阈值偏高：错记一轮问答比漏记更糟。
+    #
+    # **默认关闭**（memory_gate_enabled=False）。端到端评测
+    # （scripts/eval_memory_golden.py，104 条黄金集）实测：
+    #
+    #   开（阈值 0.65，原措辞）  放行正例 1/40，负例几乎全拦
+    #   开（最佳措辞 + 阈值 0.10） 放行正例 36/40，拦截负例 29/44
+    #   关                       放行正例 40/40，拦截负例 43/44
+    #
+    # 「放行正例」= 该记的没被门控拦掉。门控在这个任务上是净负收益：
+    # 它省下一次抽取调用，却把大部分真实记忆挡在抽取之前（用户报「我是谁
+    # 都没被记住」即由此而来），而抽取模型本身已能拒掉 43/44 的噪声。
+    # 保留代码与开关：换业务、换决策模型后可用 EVAL_DOTENV 重测再决定。
+    # 门控任何失败都 fail-open 放行，不影响记忆链路。
+    memory_gate_enabled: bool = False
     #
     # 默认走阿里云百炼决策模型（decision-model-preview）：与 Jev 的
     # System One 协议逐字段兼容，且国内直连、免代理、预览期免费。
@@ -529,7 +541,7 @@ class Settings(BaseSettings):
         "https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1/systemone"
     )
     jev_model: str = "decision-model-preview"
-    memory_gate_threshold: float = 0.65
+    memory_gate_threshold: float = 0.10
     jev_timeout_seconds: float = 4
     # 长期记忆抽取是否要求模型输出 JSON（response_format）。
     # off = 不下发该字段，靠 prompt 里的格式约定 + parse.load_llm_json 兜底，

@@ -207,10 +207,15 @@ def _write_extracted(
 def _gate_blocks(turn: list[ChatMessage], summary: str) -> bool:
     """Jev 门控：True = 本轮不值得抽取，直接跳过。
 
+    默认不启用（settings.memory_gate_enabled=False）：端到端评测显示门控
+    放行正例只有 36/40（最佳措辞 + 低阈值），而不启用是 40/40；抽取模型
+    本身已能拒掉 43/44 的噪声，门控是净负收益。
+
     fail-open——门控不可用（未配 key / 调用失败）时返回 False 放行，
-    行为退化为旧的「每轮都调小模型抽取」。阈值刻意偏低：
-    门控漏判 = 静默丢记忆，比多花一次抽取调用严重。
+    行为退化为「每轮都调小模型抽取」。
     """
+    if not settings.memory_gate_enabled:
+        return False
     state = _build_gate_state(turn, summary)
     if not state:
         return False
@@ -575,6 +580,12 @@ def _coalesce_memories(items: list[ExtractedMemory]) -> list[ExtractedMemory]:
     )
 
 
+# kind 位置被写成 facet 名时，仍然按 profile 收下（见 _memory_from_row）
+_PROFILE_KIND_ALIASES = frozenset(
+    {"directive", "name", "occupation", "locale", "language", "preference", "constraint", "other"}
+)
+
+
 def _memory_from_row(row: object) -> ExtractedMemory | None:
     if not isinstance(row, dict):
         return None
@@ -592,7 +603,14 @@ def _memory_from_row(row: object) -> ExtractedMemory | None:
             facet="" if facet == "other" else facet,
         )
     if kind != "profile":
-        return None
+        # 模型偶尔把 facet 写进 kind（``{"kind":"directive","facet":"directive"}``）：
+        # prompt 里 facet 清单和 kind 清单挨着，它把两者混了。这种情况不丢，
+        # 按 profile + 对应 facet 收下——实测这条容错救回了 preference/
+        # directive 类记忆的偶发丢失。
+        if kind in _PROFILE_KIND_ALIASES:
+            row = {**row, "kind": "profile", "facet": row.get("facet") or kind}
+        else:
+            return None
     op = str(row.get("op") or "add").strip()
     if op not in ("add", "update", "delete"):
         return None
