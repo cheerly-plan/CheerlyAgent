@@ -1,8 +1,10 @@
 name: 评测门禁
 
-# PR / push：T0 静态门禁 + memory-e2e（确定性、零模型密钥、带 pgvector 服务）。
+# PR / push：T0 静态门禁 + 独立的 memory-e2e job（确定性、零模型密钥、带 pgvector）。
 # nightly / 手动触发：配置了 EVAL_DOTENV secret 时跑 T0+T1+T2，其中
-# memory_e2e 与 eval_memory 都是 blocking；未配置时自动降级为只跑 T0。
+# eval_memory 是 blocking；未配置时自动降级为只跑 T0。
+# 记忆 E2E 只在下面的独立 job 跑一次：eval/config.json 不再重复注册该 suite，
+# 否则 nightly 会在两个 job 里各跑一遍。
 on:
   pull_request:
   push:
@@ -22,9 +24,6 @@ jobs:
   eval:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # 记忆 E2E 在 eval runner 里是 T1 blocking：不允许因为库不可用而 skip
-      MEMORY_E2E_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -54,7 +53,7 @@ jobs:
             echo "EVAL_ENV_READY=true" >> "$GITHUB_ENV"
             echo "使用仓库 secret EVAL_DOTENV，T1/T2 可用"
           else
-            # config.py 在模块级执行 settings = Settings()，10 个字段无默认值；
+            # config.py 在模块级执行 settings = Settings()，9 个字段无默认值；
             # 缺任一都会让 tests/test_eval_retrieval.py 在 import 阶段直接崩掉。
             # 这里只填占位值让 T0 能 import：T0 不连库、不调模型。
             # 值本身不是凭据；真凭据走上面的 EVAL_DOTENV。
@@ -67,7 +66,6 @@ jobs:
               'EMBEDDING_DIM=8' \
               'MEMORY_TOP_K=5' \
               'MEMORY_SCORE_THRESHOLD=0.5' \
-              'SHORT_TERM_MEMORY_MAX_TURNS=10' \
               'SHORT_TERM_MEMORY_MAX_TOKENS=2000' > .env
             echo "EVAL_ENV_READY=false" >> "$GITHUB_ENV"
             echo "::warning::未配置 EVAL_DOTENV，本次只跑 T0 静态门禁"
@@ -137,7 +135,6 @@ jobs:
             'EMBEDDING_DIM=8' \
             'MEMORY_TOP_K=5' \
             'MEMORY_SCORE_THRESHOLD=0.5' \
-            'SHORT_TERM_MEMORY_MAX_TURNS=10' \
             'SHORT_TERM_MEMORY_MAX_TOKENS=2000' > .env
           chmod 600 .env
 

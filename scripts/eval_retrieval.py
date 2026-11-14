@@ -273,6 +273,7 @@ def evaluate(
     top_k: int,
     rerank: bool,
     filters_on: bool = False,
+    threshold: float = HIT3_THRESHOLD,
 ) -> int:
     # 延迟导入：--validate / --dump 不需要碰 embedding/LLM
     metrics, detail = run_evaluation(
@@ -302,8 +303,8 @@ def evaluate(
     print(f"MRR@10 {metrics['mrr']:.3f}")
     if failures:
         print(f"hit@3 未通过：{'、'.join(failures)}")
-    ok = metrics["hit3"] >= HIT3_THRESHOLD
-    print(f"阈值 hit@3 ≥ {HIT3_THRESHOLD:.0%}：{'通过' if ok else '未通过'}")
+    ok = metrics["hit3"] >= threshold
+    print(f"阈值 hit@3 ≥ {threshold:.0%}：{'通过' if ok else '未通过'}")
     return 0 if ok else 1
 
 
@@ -473,6 +474,12 @@ def main() -> int:
     parser.add_argument("--rerank", action="store_true", help="启用 LLM 重排（默认关闭）")
     parser.add_argument("--top-k", type=int, default=5, help="观察窗口大小（默认 5）")
     parser.add_argument(
+        "--threshold",
+        type=float,
+        default=HIT3_THRESHOLD,
+        help=f"hit@3 通过线，默认 {HIT3_THRESHOLD}；CI 由 eval/config.json 统一注入",
+    )
+    parser.add_argument(
         "--cases",
         type=str,
         default=str(CASES_PATH),
@@ -533,7 +540,7 @@ def main() -> int:
         return evaluate_stability(cases, args.top_k, args.rerank, args.runs, args.no_cache)
 
     return evaluate(
-        cases, args.top_k, args.rerank, filters_on=args.filters
+        cases, args.top_k, args.rerank, filters_on=args.filters, threshold=args.threshold
     )
 
 

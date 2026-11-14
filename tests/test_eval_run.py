@@ -429,3 +429,31 @@ def test_append_trend_records_only_t2_suites():
         lines = trend.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 2
         assert list(json.loads(lines[0])["suites"]) == ["t2_eval"]
+
+
+# ——— 公共依赖与集中阈值（eval/config.json 的 base_env / thresholds）———
+
+def test_base_env_is_merged_with_suite_requires_env():
+    cfg = {"timeouts_s": {"demo_eval": 10}, "base_env": ["BASE_URL", "MODEL"]}
+    # 缺公共依赖就 skip，即使 suite 自己的 DATABASE_URL 在
+    suite = collect_external_suite(_item(), cfg, {"DATABASE_URL"})
+    assert suite.infra == "skipped"
+    assert "BASE_URL" in suite.message
+
+    with patch("scripts.eval_run._run", return_value=CmdResult("ok", "", 0)) as run:
+        suite = collect_external_suite(
+            _item(), cfg, {"BASE_URL", "MODEL", "DATABASE_URL"}
+        )
+    assert suite.infra == "ok"
+    assert run.call_args.args[0] == ["uv", "run", "python", "scripts/demo_eval.py"]
+
+
+def test_threshold_is_injected_only_when_configured():
+    with patch("scripts.eval_run._run", return_value=CmdResult("ok", "", 0)) as run:
+        collect_external_suite(_item(), EXT_CFG, {"DATABASE_URL"})
+    assert "--threshold" not in run.call_args.args[0]
+
+    cfg = {"timeouts_s": {"demo_eval": 10}, "thresholds": {"demo_eval": 0.9}}
+    with patch("scripts.eval_run._run", return_value=CmdResult("ok", "", 0)) as run:
+        collect_external_suite(_item(), cfg, {"DATABASE_URL"})
+    assert run.call_args.args[0][-2:] == ["--threshold", "0.9"]

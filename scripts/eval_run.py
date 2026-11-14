@@ -425,13 +425,21 @@ def collect_external_suite(item: dict, cfg: dict, available: set[str]) -> SuiteR
     name = item["name"]
     suite = SuiteResult(name, tier=int(item["tier"]))
     started = time.monotonic()
-    missing = [key for key in item.get("requires_env", []) if key not in available]
+    # 公共依赖写在 config.base_env，suite 只声明自己额外需要的键；
+    # 旧格式（全部写在 suite.requires_env）仍然可用。
+    required = list(dict.fromkeys([*cfg.get("base_env", []), *item.get("requires_env", [])]))
+    missing = [key for key in required if key not in available]
     if missing:
         suite.infra = "skipped"
         suite.message = f"缺少依赖配置：{', '.join(missing)}"
         return suite.finish(started)
 
     command = item["command"].split()
+    # 通过线集中在 config.thresholds：脚本只保留同名默认值，CI 一定走注入值，
+    # 避免「改了 config 里的阈值但脚本常量没动」这类漂移。
+    threshold = cfg.get("thresholds", {}).get(name)
+    if threshold is not None:
+        command += ["--threshold", str(threshold)]
     result = _run(command, cfg["timeouts_s"].get(name, 300))
     if result.error:
         suite.infra = "env_error"
