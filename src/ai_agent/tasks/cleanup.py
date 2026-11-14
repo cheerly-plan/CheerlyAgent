@@ -71,8 +71,14 @@ class MaintenanceCleaner:
                 logger.exception("清理过期工具原文失败")
             try:
                 # 第 4 步：L3 候选审核——证据够就自动晋升（不再需要人工逐条批准）
-                from ai_agent.memory.promotion import review_all_pending_candidates
+                from ai_agent.memory.promotion import (
+                    refresh_all_candidate_evidence,
+                    review_all_pending_candidates,
+                )
 
+                # 审核前先把 episode 上后续累积的命中 / 跨会话证据回填到候选
+                # 快照，否则「反复被召回」的记忆永远停在写入时的旧证据。
+                refresh_all_candidate_evidence()
                 promoted = review_all_pending_candidates()
                 if promoted:
                     logger.info("候选记忆晋升画像 %s 条", promoted)

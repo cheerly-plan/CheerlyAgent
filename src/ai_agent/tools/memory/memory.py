@@ -71,11 +71,26 @@ def expand_memory(query: str, kind: str = "all") -> str:
         except Exception:
             parts.append("用户画像读取暂不可用")
         else:
+            # 未触及 list_profile 的 20 条上限时输出逐字不变（此时「完整」
+            # 确实成立）；只有可能截断才数一次库内总数并如实标注上限。
+            total: int | None = None
+            if len(ranked) >= 20:
+                try:
+                    total = store.count_active_profile()
+                except Exception:
+                    total = None
             if ranked:
                 body = "\n".join(
                     f"- [{item.id}] {item.text}" for item in ranked
                 )
-                parts.append(f"完整用户画像条目（按相关性排序，共 {len(ranked)} 条）：\n{body}")
+                if isinstance(total, int) and total > len(ranked):
+                    head = (
+                        f"用户画像条目（按相关性排序，本次返回 {len(ranked)} 条，"
+                        f"库中共 {total} 条；单次上限 {len(ranked)} 条）："
+                    )
+                else:
+                    head = f"完整用户画像条目（按相关性排序，共 {len(ranked)} 条）："
+                parts.append(f"{head}\n{body}")
     if kind in ("episode", "all"):
         try:
             hits = store.search_episode(query)

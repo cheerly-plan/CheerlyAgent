@@ -163,6 +163,7 @@ class EpisodeStore(Database):
         k: int | None = None,
         user_id: str | None = None,
         threshold: float | None = None,
+        chat_session_id: str = "",
     ) -> list[MemoryItem]:
         uid = user_id or current_user_id()
         vector = Vector(embed_query(query))
@@ -178,6 +179,18 @@ class EpisodeStore(Database):
                 self.record_episode_hits([hit.id for hit in hits], user_id=uid)
             except Exception:
                 logger.exception("情景记忆命中计数失败 user_id=%s", uid)
+            # 自动召回发生在某个具体会话里：把这个会话登记进 episode 的去重
+            # 会话集合，反复被用到的记忆才能积累「跨会话复现」证据。
+            # touch_episode_session 按 session_id 去重，同一会话多轮命中只算
+            # 一次；不传 chat_session_id 的调用方行为与改动前逐字一致。
+            if chat_session_id:
+                try:
+                    for hit in hits:
+                        self.touch_episode_session(
+                            hit.id, chat_session_id, user_id=uid
+                        )
+                except Exception:
+                    logger.exception("情景记忆会话证据登记失败 user_id=%s", uid)
         return hits
 
     def _similar_episodes(

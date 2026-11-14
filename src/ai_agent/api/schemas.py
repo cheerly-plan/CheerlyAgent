@@ -362,3 +362,18 @@ class MemorySettingsRequest(BaseModel):
     """用户级记忆开关：false = 不写、不注入、不挂记忆工具；数据保留。"""
 
     enabled: bool
+
+
+class MemoryProfileWriteRequest(BaseModel):
+    """设置页用自然语言管理 L1 画像（新增 / 修改 / 删除）。
+
+    与对话里的 ``write_memory`` 工具同一条写入链：
+    ``apply_profile_text`` → ``resolve_profile_write`` → ``apply_profile_action``，
+    facet 归一化、冗余/语义去重、冲突消解、TTL、delete 连带清候选全部生效。
+    这里不接受 facet，也不直接改某一行——由写入链判断该怎么写、能不能写。
+
+    用户本人陈述不经过 L3 候选晋升，也不受 ``needs_source`` 出处门禁约束
+    （那道门禁只拦模型抽取出来的候选）；前端对含数字内容仍给出提示。
+    """
+
+    text: str = Field(min_length=1, max_length=500, description="要记的事 / 要改的事")

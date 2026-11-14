@@ -415,3 +415,116 @@ def test_extracted_episode_without_facet_leaves_it_for_inference():
     item = _memory_from_row({"kind": "episode", "content": "在做 BFF"})
     assert item is not None
     assert item.facet == ""
+
+
+# ---------- 设置页「用自然语言管理画像」----------
+
+
+def test_profile_write_routes_registered():
+    from ai_agent.api.app import create_app
+
+    # 新版 FastAPI 的 app.routes 里是延迟展开的 _IncludedRouter，扁平路由
+    # 要从 OpenAPI schema 取；这同时验证了 router 确实挂进了 app。
+    paths = create_app().openapi()["paths"]
+    assert "post" in paths["/v1/memory/profile"]
+    assert "delete" in paths["/v1/memory/profile/{item_id}"]
+    # 不再提供「按 id 直接改某一行」的入口，编辑统一走写入链
+    assert "patch" not in paths["/v1/memory/profile/{item_id}"]
+
+
+def test_write_profile_route_uses_full_write_chain(monkeypatch):
+    from ai_agent.api.schemas import MemoryProfileWriteRequest
+
+    seen: dict = {}
+
+    def fake_apply(text, user_id=None):
+        seen.update(text=text, user_id=user_id)
+        return "已写入用户画像: 以后财报都用亿元"
+
+    monkeypatch.setattr(memory_router, "apply_profile_text", fake_apply)
+    out = memory_router.write_profile_from_text(
+        MemoryProfileWriteRequest(text="  以后财报都用亿元  "),
+        user_id=None,
+        user=_user(),
+    )
+    assert seen == {"text": "以后财报都用亿元", "user_id": UID}
+    assert out == {
+        "user_id": UID,
+        "message": "已写入用户画像: 以后财报都用亿元",
+    }
+
+
+def test_write_profile_route_rejects_other_users():
+    from ai_agent.api.schemas import MemoryProfileWriteRequest
+
+    with pytest.raises(HTTPException) as exc:
+        memory_router.write_profile_from_text(
+            MemoryProfileWriteRequest(text="x"),
+            user_id="someone-else",
+            user=_user(),
+        )
+    assert exc.value.status_code == 403
+
+
+def test_write_profile_route_rejects_blank_text():
+    from ai_agent.api.schemas import MemoryProfileWriteRequest
+
+    with pytest.raises(HTTPException) as exc:
+        memory_router.write_profile_from_text(
+            MemoryProfileWriteRequest(text="   "), user_id=None, user=_user()
+        )
+    assert exc.value.status_code == 422
+
+
+def test_write_profile_route_maps_chain_error_to_502(monkeypatch):
+    from ai_agent.api.schemas import MemoryProfileWriteRequest
+
+    def boom(*a, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(memory_router, "apply_profile_text", boom)
+    with pytest.raises(HTTPException) as exc:
+        memory_router.write_profile_from_text(
+            MemoryProfileWriteRequest(text="x"), user_id=None, user=_user()
+        )
+    assert exc.value.status_code == 502
+
+
+def test_write_chain_delete_clears_profile_and_candidate(monkeypatch, mem_store):
+    """自然语言「我不喝咖啡了」经写入链解析为 delete：删行且连带清候选。"""
+    from ai_agent.memory.profile import ProfileAction, apply_profile_text
+
+    mem_store.write_profile("喜欢咖啡", user_id=UID, facet="preference")
+    mem_store.upsert_candidate(
+        text="喜欢咖啡", facet="preference", hit_count=5, session_seen=4, user_id=UID
+    )
+    monkeypatch.setattr(
+        "ai_agent.memory.profile.resolve_profile_write",
+        lambda content, existing: [
+            ProfileAction(op="delete", facet="preference", content="喜欢咖啡")
+        ],
+    )
+    message = apply_profile_text("我不喝咖啡了", user_id=UID)
+    assert "已删除" in message
+    assert not [
+        r for r in mem_store.list_profile_page(UID)[0] if r["text"] == "喜欢咖啡"
+    ]
+    assert not [
+        r
+        for r in mem_store.list_candidates(UID, status="pending")
+        if r["text"] == "喜欢咖啡"
+    ]
+
+
+def test_write_chain_skip_leaves_rows_untouched(monkeypatch, mem_store):
+    """写入链判断为 skip 时不碰任何一行——「不直接改行」的核心保证。"""
+    from ai_agent.memory.profile import ProfileAction, apply_profile_text
+
+    mem_store.write_profile("喜欢咖啡", user_id=UID, facet="preference")
+    monkeypatch.setattr(
+        "ai_agent.memory.profile.resolve_profile_write",
+        lambda content, existing: [ProfileAction(op="skip")],
+    )
+    message = apply_profile_text("喜欢咖啡", user_id=UID)
+    assert message == "用户画像无需更新"
+    assert [r["text"] for r in mem_store.list_profile_page(UID)[0]] == ["喜欢咖啡"]

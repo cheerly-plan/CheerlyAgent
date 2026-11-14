@@ -226,6 +226,7 @@ def build_memory_index(
     top_k: int = 8,
     max_chars: int = 800,
     expand_hint: bool = False,
+    total: int | None = None,
 ) -> tuple[str, MemoryTrace]:
     """产出「索引 + 相关条目」块，以及本轮注入 trace。
 
@@ -271,16 +272,35 @@ def build_memory_index(
         lines.append(line)
         chosen.append(item)
 
-    note = (
-        f"【记忆索引】画像共 {len(items)} 条（按类别：{_facet_counts(items)}）；"
-        f"本轮按当前问句相关性注入 {len(chosen)} 条。"
-        "这是相关条目而非全量清单，未列出的画像不代表不存在，"
-        "不要据此断言用户没有某项偏好或约束。"
-    )
+    # list_profile 默认只载入 20 条。载入已满时 len(items) 不是库内总数，
+    # 直接说「画像共 N 条」会低报，还会让 expand_memory 的「完整」承诺落空。
+    # 只有调用方查到真实总数且确实超限时才换诚实文案；total=None（默认）
+    # 时输出与改动前逐字一致。
+    truncated = isinstance(total, int) and total > len(items)
+    if truncated:
+        note = (
+            f"【记忆索引】画像共 {total} 条，本次只载入 {len(items)} 条"
+            f"（按类别：{_facet_counts(items)}）；"
+            f"本轮注入 {len(chosen)} 条。未列出的画像不代表不存在，"
+            "不要据此断言用户没有某项偏好或约束。"
+        )
+    else:
+        note = (
+            f"【记忆索引】画像共 {len(items)} 条（按类别：{_facet_counts(items)}）；"
+            f"本轮按当前问句相关性注入 {len(chosen)} 条。"
+            "这是相关条目而非全量清单，未列出的画像不代表不存在，"
+            "不要据此断言用户没有某项偏好或约束。"
+        )
     # 第 2 步这里一度写「其余用 search_memory 查询」是错的：那个工具只查
     # episode。第 3 步注册了 expand_memory 后才能给出真实可用的展开入口。
     if expand_hint:
-        note += "需要完整条目时调用 expand_memory(query)。"
+        if truncated:
+            note += (
+                f"需要更多条目时调用 expand_memory(query)，"
+                f"单次最多返回 {len(items)} 条。"
+            )
+        else:
+            note += "需要完整条目时调用 expand_memory(query)。"
     lines.append(note)
     block = "\n".join(lines)
     if budget and len(block) > budget:

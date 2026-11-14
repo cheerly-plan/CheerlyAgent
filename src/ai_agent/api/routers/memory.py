@@ -24,10 +24,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ai_agent.api.dependencies import get_current_user
 from ai_agent.api.schemas import (
     MemoryApproveRequest,
+    MemoryProfileWriteRequest,
     MemoryRejectRequest,
     MemorySettingsRequest,
 )
 from ai_agent.core.config import settings
+from ai_agent.memory.profile import apply_profile_text
 from ai_agent.memory.promotion import has_source, needs_source
 from ai_agent.storage.db import UserRecord
 from ai_agent.storage.store import store
@@ -213,6 +215,33 @@ def list_profile(
         "has_more": has_more,
         "next_offset": offset + len(items) if has_more else None,
     }
+
+
+@router.post("/profile")
+def write_profile_from_text(
+    req: MemoryProfileWriteRequest,
+    user_id: str | None = Query(default=None),
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """设置页用自然语言管理 L1 画像：新增、修改、删除都走同一条写入链。
+
+    复用对话里 ``write_memory`` 工具的 ``apply_profile_text``：
+    ``resolve_profile_write`` 把一句话解析成 add/update/delete/skip actions，
+    ``apply_profile_action`` 再逐条过 facet 归一化、冗余与 Jev 语义去重、
+    冲突消解（旧值标覆盖而非物理删）、软过期 TTL；delete 还会连带清掉
+    同文 pending 候选。判断为「不该写」时返回说明，不碰任何一行。
+
+    这里刻意不提供「按 id 直接改某一行」的入口——那会绕开上述判断。
+    """
+    owner = _owner(user, user_id)
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="记忆内容不能为空")
+    try:
+        message = apply_profile_text(text, user_id=owner)
+    except Exception:
+        raise HTTPException(status_code=502, detail="记忆更新失败")
+    return {"user_id": owner, "message": message}
 
 
 @router.delete("/profile/{item_id}")

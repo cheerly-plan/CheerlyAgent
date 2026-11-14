@@ -144,6 +144,26 @@ class ProfileStore(Database):
             conn.commit()
         return row is not None
 
+    def count_active_profile(self, user_id: str | None = None) -> int:
+        """库内有效画像总条数，过滤口径与 ``list_profile`` 一致但不受 limit 截断。
+
+        只在载入条数触及上限时调用，用来让索引说明区分「本次载入」与
+        「库内实有」；常规路径零额外查询。
+        """
+        uid = user_id or current_user_id()
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*)::int AS n
+                FROM agent_user_profile
+                WHERE user_id = %s
+                  AND superseded_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > now())
+                """,
+                (uid,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
     def list_profile(
         self,
         user_id: str | None = None,
@@ -228,6 +248,9 @@ class ProfileStore(Database):
             ).fetchall()
         items = [dict(row) for row in rows[:page]]
         return items, len(rows) > page
+
+    # 画像编辑统一走 apply_profile_text → apply_profile_action 写入链，
+    # 不再提供「按 id 直接改某一行」的方法，避免绕过去重/冲突消解/TTL。
 
     def delete_profile_item(
         self, item_id: str, user_id: str | None = None

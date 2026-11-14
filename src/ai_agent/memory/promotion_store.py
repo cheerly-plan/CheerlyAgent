@@ -139,6 +139,48 @@ class PromotionStore(Database):
             conn.commit()
         return item_id
 
+    def refresh_candidate_evidence(self, user_id: str | None = None) -> int:
+        """把 episode 上的实时证据单调回填到同文本的 pending 候选快照。
+
+        候选表存的是 ``observe_episode`` 当时的证据快照，之后召回命中写在
+        episode 上，快照不会自己变。只做 GREATEST 单调更新，绝不把证据改小。
+        文本精确匹配是保守口径：合并改写过文本的 episode 匹配不上就不动，
+        交给下次抽取重新登记，不猜测关联。
+        """
+        uid = user_id or current_user_id()
+        with self._get_pool().connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE agent_memory_candidate c
+                SET hit_count = GREATEST(COALESCE(c.hit_count, 0), e.hits),
+                    session_seen = GREATEST(
+                        COALESCE(c.session_seen, 0), e.sessions
+                    ),
+                    updated_at = now()
+                FROM (
+                    SELECT user_id, text,
+                           MAX(COALESCE(hit_count, 0))::int AS hits,
+                           MAX(cardinality(
+                               COALESCE(sessions_seen, '{}'::text[])
+                           ))::int AS sessions
+                    FROM agent_episode
+                    WHERE user_id = %s
+                    GROUP BY user_id, text
+                ) e
+                WHERE c.user_id = e.user_id
+                  AND c.text = e.text
+                  AND c.user_id = %s
+                  AND c.status = 'pending'
+                  AND (
+                      COALESCE(c.hit_count, 0) < e.hits
+                      OR COALESCE(c.session_seen, 0) < e.sessions
+                  )
+                """,
+                (uid, uid),
+            )
+            conn.commit()
+            return result.rowcount or 0
+
     def list_candidates(
         self,
         user_id: str | None = None,

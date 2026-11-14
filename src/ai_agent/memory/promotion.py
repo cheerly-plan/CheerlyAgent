@@ -389,6 +389,26 @@ def reject_candidate(
         return False
 
 
+def refresh_all_candidate_evidence() -> int:
+    """后台入口：审核前把 episode 累积的证据同步到候选快照。
+
+    与 ``review_all_pending_candidates`` 用同一批用户口径（pending 且开启了
+    记忆）。单用户失败只记日志并继续，绝不让一个坏用户阻断整轮审核。
+    """
+    try:
+        users = store.list_candidate_users(status="pending", enabled_only=True)
+    except Exception:
+        logger.exception("候选记忆用户列表读取失败")
+        return 0
+    refreshed = 0
+    for uid in users:
+        try:
+            refreshed += store.refresh_candidate_evidence(uid)
+        except Exception:
+            logger.exception("候选记忆证据回填失败 user_id=%s", uid)
+    return refreshed
+
+
 def review_all_pending_candidates(*, limit_per_user: int = 20) -> int:
     """后台线程入口：按用户遍历待审候选。"""
     try:
