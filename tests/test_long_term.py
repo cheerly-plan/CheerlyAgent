@@ -461,3 +461,26 @@ def test_extraction_fallback_keeps_json_mode():
     assert len(calls) == 2
     assert calls[0].get("response_format") is not None
     assert calls[1].get("force_json") is True
+
+
+def test_memory_extra_body_avoids_restricted_enable_thinking():
+    """部分网关把顶层 enable_thinking 限制为 True，传 False 会 400。
+
+    记忆链路必须只下发 chat_template_kwargs / think。
+    """
+    from ai_agent.memory.llm_calls import _MEMORY_EXTRA_BODY
+
+    assert "enable_thinking" not in _MEMORY_EXTRA_BODY
+    assert _MEMORY_EXTRA_BODY["chat_template_kwargs"] == {"enable_thinking": False}
+    assert _MEMORY_EXTRA_BODY["think"] is False
+
+
+def test_summary_extra_body_avoids_restricted_enable_thinking():
+    import inspect
+
+    from ai_agent.memory import summarize
+
+    source = inspect.getsource(summarize.summarize_session)
+    assert '"enable_thinking": False' not in source.replace(
+        '"chat_template_kwargs": {"enable_thinking": False}', ""
+    )

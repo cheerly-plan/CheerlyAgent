@@ -13,8 +13,12 @@ from ai_agent.core.config import settings
 from ai_agent.llm.client import complete_chat, lightweight_llm
 from ai_agent.llm.types import ChatMessage
 
+# 关思考的厂商差异：
+# - DashScope 兼容口认顶层 ``enable_thinking``；
+# - 部分网关（如 auto 路由）把该字段限制为 True，传 False 直接 400；
+# - ``chat_template_kwargs`` 与 ``think`` 在两类网关上都可用。
+# 因此只下发后两者：关思考的效果一样，且不会被网关拒绝。
 _MEMORY_EXTRA_BODY: dict[str, Any] = {
-    "enable_thinking": False,
     "chat_template_kwargs": {"enable_thinking": False},
     "think": False,
 }

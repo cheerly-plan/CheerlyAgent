@@ -72,8 +72,10 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
                 max_tokens=512,
                 client=client,
                 response_format={"type": "json_object"},
+                # 顶层 enable_thinking 在部分网关（如 auto 路由）被限制为
+                # True，传 False 直接 400；chat_template_kwargs / think
+                # 在两类网关上都可用，关思考效果相同。
                 extra_body={
-                    "enable_thinking": False,
                     "chat_template_kwargs": {"enable_thinking": False},
                     "think": False,
                 },

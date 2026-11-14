@@ -376,6 +376,9 @@ _OCCUPATION_STATEMENT = re.compile(
     + r"(是|做|的职业|的工作|的岗位|身份)|"
     + _OWNER
     + r"在.{0,15}(工作|任职|上班)|职业是|岗位是"
+    # 「从事半导体行业研究」「做后端开发」这类动词结构同样是职业陈述：
+    # 抽取器常把「我是做 X 的」压缩成「从事 X」，之前会被误判为非本人陈述
+    + r"|^(从事|做|负责|担任)"
 )
 # 系统默认值：写进去没有信息量。
 _DEFAULT_LANGUAGE = {"中文", "汉语", "简体中文", "普通话", "简体"}
@@ -383,9 +386,14 @@ _DEFAULT_LANGUAGE = {"中文", "汉语", "简体中文", "普通话", "简体"}
 _OCCUPATION_TRANSITION = re.compile(
     r"(曾|以前|之前|原来)(是|为|做).{0,20}(现|现在|目前|如今)(是|为|做)"
 )
-# 「中大力德财务分析师」这类：公司简称 + 职业名词 = 由查询推断的身份
+# 「中大力德财务分析师」这类：公司简称 + 职业名词 = 由查询推断的身份。
+# 必须排除行业名修饰（「半导体行业研究员」是正当职业描述，不是某家公司
+# 的职位）：行业词与通用修饰词出现在职业名词前时不算公司名。
+_INDUSTRY_WORD = re.compile(
+    r"(行业|领域|方向|业务|产业|板块)"
+)
 _IN_COMPANY_AS_ROLE = re.compile(
-    r"[\u4e00-\u9fa5]{2,8}(财务|数据|行业|投资|证券)?(分析师|研究员|经理|总监)"
+    r"[\u4e00-\u9fa5]{2,8}(财务|数据|投资|证券)(分析师|研究员|经理|总监)"
 )
 # 职业名词兜底：句子里出现职业名，且没有把公司写成身份
 _JOB_NOUN = re.compile(
@@ -404,6 +412,9 @@ def _is_own_occupation(text: str) -> bool:
     # 且不是「在某公司做…分析师」这种由查询推断的身份。
     if _COMPANY_MARK.search(text) or _IN_COMPANY_AS_ROLE.search(text):
         return False
+    # 行业名修饰的职业描述是合法的：「半导体行业研究员」不等于「某公司的分析师」
+    if _INDUSTRY_WORD.search(text):
+        return True
     return bool(_JOB_NOUN.search(text)) and len(text) <= 20
 
 
