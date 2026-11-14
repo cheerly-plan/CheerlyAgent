@@ -341,8 +341,6 @@ indicators:
   总资产:
     flags:
       stock_name: true
-      balance_year_end_row: true
-      year_end_reason_row: true
   所有者权益合计:
     flags:
       stock_name: true
@@ -352,45 +350,24 @@ indicators:
   归属于上市公司股东的净资产:
     flags:
       stock_name: true
-      balance_year_end_row: true
   不良贷款总额:
     flags:
       stock_name: true
   归属于上市公司股东的所有者权益:
     flags:
       stock_name: true
-      balance_year_end_row: true
-      year_end_reason_row: true
   其他综合收益:
-    flags:
-      equity_composition: true
-      balance_move_name: true
-      balance_search_keyword: true
+    flags: {}
   未分配利润:
-    flags:
-      equity_composition: true
-      balance_move_name: true
-      balance_search_keyword: true
+    flags: {}
   资本公积:
-    flags:
-      equity_composition: true
-      balance_move_name: true
-      balance_search_keyword: true
+    flags: {}
   其他权益工具投资:
-    flags:
-      asset_driver: true
-      balance_move_name: true
-      balance_search_keyword: true
-      year_end_reason_keyword: true
+    flags: {}
   其他非流动金融资产:
-    flags:
-      asset_driver: true
-      balance_move_name: true
+    flags: {}
   货币资金:
-    flags:
-      asset_driver: true
-      balance_move_name: true
-      balance_search_keyword: true
+    flags: {}
   归属于母公司所有者的净利润:
     flags:
       profit_name: true
@@ -398,20 +375,15 @@ indicators:
     flags:
       profit_name: true
   实收资本（或股本）:
-    flags:
-      balance_move_name: true
+    flags: {}
   实收资本(或股本):
-    flags:
-      balance_move_name: true
+    flags: {}
   合并资产负债表:
-    flags:
-      balance_search_keyword: true
+    flags: {}
   公允价值:
-    flags:
-      year_end_reason_keyword: true
+    flags: {}
   比上年度末:
-    flags:
-      year_end_reason_keyword: true
+    flags: {}
 ordering:
   year_end_order:
   - 不良贷款率
@@ -480,11 +452,6 @@ ordering:
   - 研发费用率
   - 扣非净利润
   market_default_indicators:
-  - 营业收入
-  - 扣非净利润
-  - 毛利率
-  - 研发费用率
-  chart_defaults:
   - 营业收入
   - 扣非净利润
   - 毛利率

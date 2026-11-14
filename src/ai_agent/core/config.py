@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -246,7 +247,9 @@ class Settings(BaseSettings):
     # 单页识别的硬超时：整页图送视觉模型，慢页在 180s 上会白等三分钟。
     # 60s 足够正常页（实测 5–15s），超时就跳过这一页继续下一张。
     kb_ocr_page_timeout_seconds: float = 60.0
-    kb_ocr_max_failures: int = 2
+    # 整页 OCR 不再按「连续失败次数」熔断：超时只跳过该页（见 kb/ingest/ocr.py），
+    # 只有模型名写错 / key 无效这类配置错误才整体停用。旧的
+    # kb_ocr_max_failures 已无读取方，勿再加回来。
 
     # 知识图谱（P2）：切片入库后异步抽取实体关系（每批 = 一次 LLM 调用）。
     # 默认开启；关闭后新上传的文件不再生成图谱，已有图谱保留、仍可检索。
@@ -614,3 +617,51 @@ def tool_schema_reserve_tokens() -> int:
     return _measured_schema_tokens
 
 settings = Settings()
+
+# 部署 / 测试专用的非 Settings 环境变量：它们不是配置项，但会出现在项目根 .env 里。
+_EXTRA_ENV_ALLOWLIST = frozenset(
+    {
+        "POSTGRES_PASSWORD",  # docker-compose.yml 初始化 postgres
+        "ALMOST_AGENT_RELOAD",  # 开发模式热重启
+        "ALMOST_AGENT_SERVE",  # 生产模式
+        "REPORT_CJK_FONT",  # PDF 中文字体
+        "REPORT_DEEP_FACTS_DIR",  # 深度研报事实清单目录
+        "DYLD_FALLBACK_LIBRARY_PATH",  # macOS 动态库路径
+        "MEMORY_E2E_REQUIRED",  # 记忆 E2E 不允许 skip
+        "TEST_SCHEMA_TOKENS",  # 测试注入工具 schema 测量值
+    }
+)
+
+
+def unknown_dotenv_keys() -> list[str]:
+    """返回项目根 .env 里 Settings 不认识的键名（只读键名，绝不读值）。
+
+    ``extra="ignore"`` 让 POSTGRES_PASSWORD 这类外部变量不会炸启动，代价是
+    拼错键名会静默失效——上百个字段的规模下这很难靠肉眼发现。这里补一条
+    启动告警：不改 pydantic 的校验行为、不拒绝启动，只把可疑键名打出来。
+    只看项目根 .env，不扫 os.environ（系统变量会造成大量误报）。
+    """
+    path = _PROJECT_ROOT / ".env"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    known = {name.upper() for name in Settings.model_fields} | _EXTRA_ENV_ALLOWLIST
+    unknown: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key and key not in known:
+            unknown.add(key)
+    return sorted(unknown)
+
+
+_unknown_env_keys = unknown_dotenv_keys()
+if _unknown_env_keys:
+    logging.getLogger(__name__).warning(
+        ".env 里存在 Settings 不认识的配置键（会静默失效）：%s；"
+        "键名与默认值见 src/ai_agent/core/config.py 的 Settings",
+        ", ".join(_unknown_env_keys),
+    )

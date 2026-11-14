@@ -24,7 +24,7 @@ docker compose up -d          # pgvector/pgvector:pg17，端口 5432
 cp .env.example .env          # 填入必填项，.env 已被 gitignore
 ```
 
-必填 10 项（缺任一项启动即报错）：
+必填 9 项（缺任一项启动即报错）：
 
 | 变量 | 说明 |
 |---|---|
@@ -37,8 +37,10 @@ cp .env.example .env          # 填入必填项，.env 已被 gitignore
 另有 `POSTGRES_PASSWORD`：`docker-compose.yml` 里 postgres 服务用它初始化，
 须与 `DATABASE_URL` 中的密码一致。
 
-其余项均有默认值，完整清单见 `.env.example`（按 LLM / 服务 / 数据库 / 记忆 /
-知识库 / 图谱 / 检索质量分组注释）。
+其余项均有默认值。配置项的**唯一来源**是 `src/ai_agent/core/config.py` 的
+`Settings`（全部字段，默认值与说明都在字段上方注释里）；`.env.example`
+只列必填项、常用可选覆盖（注释示例）和按域分组的键名索引，不再重复抄写默认值。
+`.env` 里出现 `Settings` 不认识的键时，启动会打 WARNING 但不会拒绝启动。
 
 ### 3. 启动
 
@@ -346,7 +348,7 @@ uv run alembic revision -m "说明"    # 新增迁移
 
 | 脚本 | 用例集 | 条数 | 测什么 |
 |---|---|---|---|
-| `scripts/eval_retrieval.py` | `scripts/cases/retrieval_eval_cases_corpus.json` | 69 | 知识库检索：hit@1/@3、MRR、recall@10。一次只问一家 |
+| `scripts/eval_retrieval.py` | `scripts/cases/retrieval_eval_cases_corpus.json`（需 `--cases` 指定） | 69 | 知识库检索：hit@1/@3、MRR、recall@10。一次只问一家 |
 | `scripts/eval_graph_retrieval.py` | `scripts/cases/graph_eval_cases.json` | 29 | 图谱检索：问句能否查到正确的三元组，同时测**工具路径**与**预检索路径**两条 |
 | `scripts/eval_tool_route.py` | `scripts/cases/tool_route_eval_cases.json` | 11 | 模型选工具：科目走 `kb_search`，关系走 `kg_search`，两者都要时两个都调。不执行检索 |
 | `scripts/eval_graph.py` | `scripts/cases/gold_graph.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
@@ -355,11 +357,15 @@ uv run alembic revision -m "说明"    # 新增迁移
 | `tests/test_memory_e2e.py` | — | 1 条生命周期 | 写入 → 注入 → 晋升 → 归档 → 删除；真库 + 确定性桩，不调模型 |
 
 `eval_memory` 在 `eval/config.json` 里是 **blocking**：nightly 或显式
-`--allow-external` 跑，通过率跌破阈值会阻断发布。`memory_e2e` 是 T1 blocking，
-CI 每次 PR/push 用 pgvector 服务跑确定性生命周期，不依赖模型密钥。
+`--allow-external` 跑，通过率跌破阈值会阻断发布。三个评测脚本的通过线集中在
+`eval/config.json` 的 `thresholds`，由 runner 统一以 `--threshold` 注入；脚本里的
+同名常量只作本地直接运行时的默认值。记忆生命周期门禁由 CI 独立的
+`memory-e2e` job 承担（自带 pgvector 服务、不依赖模型密钥），不再在
+`config.json` 里重复注册 suite，避免 nightly 在两个 job 各跑一遍。
 
 另有 `scripts/cases/retrieval_eval_cases.json`（22 条，检索脚本的默认集）、
-`scripts/cases/retrieval_eval_cases_3f.json`（20 条）是早期小样本集，保留作对照。
+`scripts/cases/retrieval_eval_cases_3f.json`（20 条）是早期小样本集，保留作对照；
+上表第一行的 69 条 corpus 集需要显式 `--cases` 指定。
 
 ```bash
 # 知识库检索（默认关闭重排，跑得稳；--rerank 打开会调 LLM）

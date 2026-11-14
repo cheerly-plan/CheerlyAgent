@@ -47,14 +47,13 @@ def test_timeout_skips_page_without_disabling_ocr(monkeypatch):
 
 
 def test_timeout_does_not_raise_or_disable_after_threshold(monkeypatch):
-    """超过旧的 kb_ocr_max_failures 阈值也不再熔断。"""
+    """超过旧的失败次数阈值也不再熔断（该配置项已删除）。"""
     calls: list[dict] = []
     client = _TimeoutClient(calls, fail_pages={999})
     monkeypatch.setattr(ocr, "_client", client)
     monkeypatch.setattr(ocr, "_disabled_reason", None)
     monkeypatch.setattr(ocr, "_consecutive_failures", 0)
     monkeypatch.setattr(ocr.settings, "kb_ocr_model", "fake-ocr")
-    monkeypatch.setattr(ocr.settings, "kb_ocr_max_failures", 1)
 
     assert ocr._recognize(b"png") is None
     assert ocr.disabled_reason() is None

@@ -80,7 +80,6 @@ _ORDERING_TYPES: dict[str, type | tuple[type, ...]] = {
     "lead_max": int,
     "pdf_default_indicators": list,
     "market_default_indicators": list,
-    "chart_defaults": list,
     "indicator_keys": list,
     "segment_table_core": int,
     "ocf": str,

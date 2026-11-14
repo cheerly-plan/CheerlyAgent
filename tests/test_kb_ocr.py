@@ -22,7 +22,6 @@ def _reset_ocr_state(monkeypatch):
     monkeypatch.setattr(settings, "kb_ocr_model", "")
     monkeypatch.setattr(settings, "kb_ocr_max_pages", 0)
     monkeypatch.setattr(settings, "kb_ocr_concurrency", 1)
-    monkeypatch.setattr(settings, "kb_ocr_max_failures", 2)
 
 
 @pytest.fixture
@@ -132,7 +131,6 @@ def test_model_not_found_stops_later_pages(kb_tmp, monkeypatch):
 def test_timeouts_do_not_trip_breaker(kb_tmp, monkeypatch):
     """超时只跳过该页：一页卡住不该让后面几十页陪着一起放弃。"""
     monkeypatch.setattr(settings, "kb_ocr_model", "slow-ocr")
-    monkeypatch.setattr(settings, "kb_ocr_max_failures", 2)
     fake = _FakeClient(error=APITimeoutError(request=httpx2.Request("POST", "https://x")))
     monkeypatch.setattr(ocr, "_client", fake)
     monkeypatch.setattr(ocr, "_disabled_reason", None)
