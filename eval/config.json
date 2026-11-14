@@ -1,11 +1,22 @@
 {
   "version": 2,
-  "enabled_tiers": [0, 1, 2],
-  "base_env": ["BASE_URL", "API_KEY", "MODEL", "DATABASE_URL", "EMBEDDING_MODEL"],
+  "enabled_tiers": [
+    0,
+    1,
+    2
+  ],
+  "base_env": [
+    "BASE_URL",
+    "API_KEY",
+    "MODEL",
+    "DATABASE_URL",
+    "EMBEDDING_MODEL"
+  ],
   "thresholds": {
     "eval_retrieval": 0.85,
     "eval_memory": 0.8,
-    "eval_tool_route": 0.8
+    "eval_tool_route": 0.8,
+    "memory_health": 0.8
   },
   "timeouts_s": {
     "pytest_eval_selftest": 120,
@@ -14,11 +25,14 @@
     "eval_graph_retrieval_validate": 180,
     "eval_graph": 180,
     "eval_tool_route": 600,
-    "eval_memory": 600
+    "eval_memory": 600,
+    "memory_health": 120
   },
   "diff": {
     "metric_tolerance": 0.05,
-    "metric_keys": ["pass_rate"],
+    "metric_keys": [
+      "pass_rate"
+    ],
     "block_on_new_failures": true,
     "block_on_invalid_cases": true,
     "block_on_env_error": true
@@ -28,7 +42,11 @@
       "name": "eval_retrieval",
       "tier": 1,
       "command": "uv run python scripts/eval_retrieval.py",
-      "exit_map": {"0": "pass", "1": "regression", "2": "invalid_cases"},
+      "exit_map": {
+        "0": "pass",
+        "1": "regression",
+        "2": "invalid_cases"
+      },
       "policy": "blocking",
       "note": "默认关重排测纯检索质量；通过线见 thresholds；退出码 2 = 用例与语料对不上（main 里 validate_cases 前置）"
     },
@@ -36,7 +54,10 @@
       "name": "eval_graph_retrieval_validate",
       "tier": 1,
       "command": "uv run python scripts/eval_graph_retrieval.py --validate",
-      "exit_map": {"0": "pass", "1": "invalid_cases"},
+      "exit_map": {
+        "0": "pass",
+        "1": "invalid_cases"
+      },
       "policy": "blocking",
       "note": "全量评测 main() 恒返回 0、无质量语义，故只跑 --validate 做用例有效性门禁；质量指标待解析 --out 明细后接入"
     },
@@ -44,7 +65,10 @@
       "name": "eval_graph",
       "tier": 1,
       "command": "uv run python scripts/eval_graph.py",
-      "exit_map": {"0": "pass", "1": "env_error"},
+      "exit_map": {
+        "0": "pass",
+        "1": "env_error"
+      },
       "policy": "informational",
       "note": "退出码 1 = 找不到文件或图谱为空；脚本没有通过线，只挡环境数据缺失，指标仅记录不阻断"
     },
@@ -52,7 +76,11 @@
       "name": "eval_tool_route",
       "tier": 2,
       "command": "uv run python scripts/eval_tool_route.py",
-      "exit_map": {"0": "pass", "1": "advisory_fail", "2": "env_error"},
+      "exit_map": {
+        "0": "pass",
+        "1": "advisory_fail",
+        "2": "env_error"
+      },
       "policy": "advisory",
       "note": "要调模型、结果有抖动，失败只记趋势不阻断发布；通过线见 thresholds"
     },
@@ -60,9 +88,25 @@
       "name": "eval_memory",
       "tier": 2,
       "command": "uv run python scripts/eval_memory.py",
-      "exit_map": {"0": "pass", "1": "regression", "2": "env_error"},
+      "exit_map": {
+        "0": "pass",
+        "1": "regression",
+        "2": "env_error"
+      },
       "policy": "blocking",
       "note": "抽取会调模型，只在 nightly / 显式 --allow-external 时跑。通过率跌破 thresholds 会阻断发布；刻意不跑 --recall（会写库）"
+    },
+    {
+      "name": "memory_health",
+      "tier": 1,
+      "command": "uv run python scripts/eval_memory_health.py",
+      "exit_map": {
+        "0": "pass",
+        "1": "regression",
+        "2": "invalid_cases"
+      },
+      "policy": "blocking",
+      "note": "纯本地：噪声拦截率 / 召回 Recall+MRR / 排序健康度；不连库、不调模型，CI 可稳定跑"
     }
   ]
 }

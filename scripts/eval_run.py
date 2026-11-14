@@ -57,6 +57,7 @@ CASES_DIR = ROOT / "scripts" / "cases"
 SELFTEST_FILES = (
     "tests/test_eval_retrieval.py",
     "tests/test_eval_memory.py",
+    "tests/test_eval_memory_health.py",
 )
 EVAL_SCRIPTS = (
     "scripts/eval_retrieval.py",
@@ -65,6 +66,7 @@ EVAL_SCRIPTS = (
     "scripts/eval_graph.py",
     "scripts/eval_graph_retrieval.py",
     "scripts/eval_run.py",
+    "scripts/eval_memory_health.py",
 )
 
 # 用例集静态形状。深层语义（期望片段是否真在切片里）由各脚本自己的
@@ -78,6 +80,8 @@ QUERY_CASE_FILES = (
 )
 MEMORY_CASE_FILE = "memory_eval_cases.json"
 EPISODE_CASE_FILE = "episode_eval_cases.json"
+MEMORY_NOISE_CASE_FILE = "memory_noise_cases.json"
+MEMORY_RECALL_CASE_FILE = "memory_recall_cases.json"
 GOLD_GRAPH_FILE = "gold_graph.json"
 
 
@@ -291,6 +295,87 @@ def _validate_memory_cases(name: str, data: object) -> list[tuple[str, str, str]
     return out
 
 
+def _validate_memory_noise(name: str, data: object) -> list[tuple[str, str, str]]:
+    """记忆噪声用例集：每条要有 id + text，用来测「不该记的被拦住」。"""
+    if not isinstance(data, list) or not data:
+        return [(f"{name}::shape", "fail", "用例集必须是非空 JSON 数组")]
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(data):
+        cid = f"{name}::{index:02d}"
+        problems: list[str] = []
+        if not isinstance(item, dict):
+            problems.append("条目不是对象")
+        else:
+            ident = item.get("id")
+            if not isinstance(ident, str) or not ident.strip():
+                problems.append("id 缺失或不是非空字符串")
+            elif ident in seen:
+                problems.append(f"id 重复：{ident}")
+            else:
+                seen.add(ident)
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                problems.append("text 缺失或为空")
+        out.append((cid, "fail" if problems else "pass", "；".join(problems)))
+    return out
+
+
+def _validate_memory_recall(name: str, data: object) -> list[tuple[str, str, str]]:
+    """记忆召回用例集：items + queries；query 的 expect/demote 必须指向已存在 id。"""
+    if not isinstance(data, dict):
+        return [(f"{name}::shape", "fail", "用例集必须是 JSON 对象")]
+    out: list[tuple[str, str, str]] = []
+    items = data.get("items")
+    item_ids: set[str] = set()
+    if not isinstance(items, list) or not items:
+        out.append((f"{name}::items", "fail", "items 必须是非空数组"))
+    else:
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                out.append((f"{name}::item::{index:02d}", "fail", "条目不是对象"))
+                continue
+            ident = item.get("id")
+            if not isinstance(ident, str) or not ident.strip():
+                out.append((f"{name}::item::{index:02d}", "fail", "id 缺失"))
+            elif ident in item_ids:
+                out.append((f"{name}::item::{index:02d}", "fail", f"id 重复：{ident}"))
+            else:
+                item_ids.add(ident)
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                out.append((f"{name}::item::{index:02d}", "fail", "text 缺失或为空"))
+    queries = data.get("queries")
+    if not isinstance(queries, list) or not queries:
+        out.append((f"{name}::queries", "fail", "queries 必须是非空数组"))
+        return out
+    for index, query in enumerate(queries):
+        cid = f"{name}::q::{index:02d}"
+        problems: list[str] = []
+        if not isinstance(query, dict):
+            problems.append("条目不是对象")
+        else:
+            qid = query.get("id")
+            text = query.get("query")
+            if not isinstance(qid, str) or not qid.strip():
+                problems.append("id 缺失")
+            if not isinstance(text, str) or not text.strip():
+                problems.append("query 缺失或为空")
+            expect = query.get("expect") or []
+            demote = query.get("demote") or []
+            if not expect and not demote:
+                problems.append("expect / demote 至少要有其一")
+            for label, refs in (("expect", expect), ("demote", demote)):
+                if not isinstance(refs, list):
+                    problems.append(f"{label} 必须是数组")
+                    continue
+                unknown = [ref for ref in refs if ref not in item_ids]
+                if unknown:
+                    problems.append(f"{label} 指向不存在的 id：{unknown}")
+        out.append((cid, "fail" if problems else "pass", "；".join(problems)))
+    return out
+
+
 def _validate_episode(name: str, data: object) -> list[tuple[str, str, str]]:
     """情景召回用例集：episodes + queries 两个顶层键。"""
     if not isinstance(data, dict):
@@ -356,6 +441,8 @@ def collect_case_schema(_cfg: dict) -> SuiteResult:
     }
     validators[MEMORY_CASE_FILE] = _validate_memory_cases
     validators[EPISODE_CASE_FILE] = _validate_episode
+    validators[MEMORY_NOISE_CASE_FILE] = _validate_memory_noise
+    validators[MEMORY_RECALL_CASE_FILE] = _validate_memory_recall
     validators[GOLD_GRAPH_FILE] = _validate_gold_graph
 
     structural_failures = 0

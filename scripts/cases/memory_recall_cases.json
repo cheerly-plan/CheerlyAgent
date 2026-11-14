@@ -1,0 +1,117 @@
+{
+  "note": "召回质量用例：items 当作库内全集，queries 期望命中指定 id。contains_transient=true 的条目是故意混入的一次性噪声，用 demote 断言它应被挤出 top_k（而不是被命中）。",
+  "items": [
+    {
+      "id": "pref-unit",
+      "facet": "preference",
+      "text": "财报数字以亿元为单位",
+      "created_at": "2026-11-01T00:00:00+00:00"
+    },
+    {
+      "id": "pref-conclude",
+      "facet": "directive",
+      "text": "回答先给结论再展开",
+      "created_at": "2026-11-02T00:00:00+00:00"
+    },
+    {
+      "id": "constraint-source",
+      "facet": "constraint",
+      "text": "所有数字必须带出处",
+      "created_at": "2026-11-03T00:00:00+00:00"
+    },
+    {
+      "id": "occ",
+      "facet": "occupation",
+      "text": "我是通信行业的财务分析师",
+      "created_at": "2026-11-04T00:00:00+00:00"
+    },
+    {
+      "id": "ep-project",
+      "facet": "other",
+      "text": "我在做一个 A 股通信板块的研报系列，计划覆盖十家公司。",
+      "created_at": "2026-11-05T00:00:00+00:00"
+    },
+    {
+      "id": "noise-bank",
+      "facet": "other",
+      "text": "用户在查询中国银行的股东信息，已确认中央汇金持股64.02%。",
+      "created_at": "2026-11-06T00:00:00+00:00",
+      "transient": true
+    },
+    {
+      "id": "noise-job",
+      "facet": "other",
+      "text": "用户正在生成绿的谐波研报，job_id=32b54af91a4e，预计5-8分钟完成。",
+      "created_at": "2026-11-07T00:00:00+00:00",
+      "transient": true
+    },
+    {
+      "id": "noise-trip",
+      "facet": "other",
+      "text": "我下周要去深圳出差，报告里提到华南业务时可以提醒我。",
+      "created_at": "2026-11-08T00:00:00+00:00",
+      "transient": true
+    }
+  ],
+  "queries": [
+    {
+      "id": "q-unit",
+      "query": "财报数字用什么单位",
+      "expect": [
+        "pref-unit"
+      ]
+    },
+    {
+      "id": "q-conclude",
+      "query": "回答格式有什么要求",
+      "expect": [
+        "pref-conclude"
+      ]
+    },
+    {
+      "id": "q-source",
+      "query": "数字要不要出处",
+      "expect": [
+        "constraint-source"
+      ]
+    },
+    {
+      "id": "q-occ",
+      "query": "我是做什么工作的",
+      "expect": [
+        "occ"
+      ]
+    },
+    {
+      "id": "q-project",
+      "query": "我在做的研报系列",
+      "expect": [
+        "ep-project"
+      ]
+    },
+    {
+      "id": "q-demote-bank",
+      "query": "中国银行股东",
+      "demote": [
+        "noise-bank"
+      ],
+      "note": "查询类噪声：即使关键词高度匹配，也应被降权挤出 top_k"
+    },
+    {
+      "id": "q-demote-trip",
+      "query": "下周去深圳出差",
+      "demote": [
+        "noise-trip"
+      ],
+      "note": "短期行程：字面完全匹配，但仍是一次性内容"
+    },
+    {
+      "id": "q-demote-job",
+      "query": "研报生成进度 job_id",
+      "demote": [
+        "noise-job"
+      ],
+      "note": "任务状态：不该进入记忆召回"
+    }
+  ]
+}
