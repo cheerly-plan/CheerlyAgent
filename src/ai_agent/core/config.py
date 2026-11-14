@@ -483,9 +483,18 @@ class Settings(BaseSettings):
     # 低于 memory_gate_threshold 时跳过本轮抽取，省掉一次小模型调用。
     # 未配 key 时门控关闭，行为退化为每轮直接抽取；门控任何失败都
     # fail-open 放行，不影响记忆链路。阈值偏高：错记一轮问答比漏记更糟。
+    #
+    # 默认走阿里云百炼决策模型（decision-model-preview）：与 Jev 的
+    # System One 协议逐字段兼容，且国内直连、免代理、预览期免费。
+    # 若要切回官方 Jev，改回
+    #   jev_base_url = "https://api.typesafe.ai/v1/systemone"
+    #   jev_model = "jev-latest"
+    # jev_base_url 是完整 endpoint（含路径），不再在代码里拼 /v1/systemone。
     jev_api_key: str = ""
-    jev_base_url: str = "https://api.typesafe.ai"
-    jev_model: str = "jev-latest"
+    jev_base_url: str = (
+        "https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1/systemone"
+    )
+    jev_model: str = "decision-model-preview"
     memory_gate_threshold: float = 0.65
     jev_timeout_seconds: float = 4
     # 长期记忆抽取是否要求模型输出 JSON（response_format）。

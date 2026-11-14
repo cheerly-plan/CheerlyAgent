@@ -297,3 +297,53 @@ def test_capture_long_term_gate_passes_high_probability():
         capture_long_term("u1", TURN, "", TURN[0]["content"])
     extract.assert_called_once()
     write_episode.assert_called_once()
+
+
+# ---------- 出处闭环（数字事实不绕过晋升门禁）----------
+
+
+def test_capture_numeric_profile_without_source_downgrades_to_episode():
+    """带数字的 profile 事实无外部出处时不能直写画像，应降级为 episode 观察。"""
+    item = ExtractedMemory(
+        kind="profile",
+        content="公司营收 12.5 亿",
+        op="add",
+        facet="other",
+    )
+    with (
+        patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
+        patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
+        patch("ai_agent.memory.long_term.extract_turn_memories", return_value=[item]),
+        patch("ai_agent.memory.long_term.store.write_episode") as write_episode,
+        patch("ai_agent.memory.long_term.apply_profile_action") as apply_profile,
+        patch("ai_agent.memory.long_term.observe_episode") as observe,
+    ):
+        capture_long_term(
+            "u1", TURN, "", "公司营收 12.5 亿", chat_session_id="s1"
+        )
+    # 直写画像被拦截，降级为 episode
+    apply_profile.assert_not_called()
+    write_episode.assert_called_once_with(item.content, user_id="u1")
+    observe.assert_called_once()
+    # 普通对话派生不出外部出处，source 必须留空，交由 missing_source hold
+    assert observe.call_args.kwargs["source"] == ""
+
+
+def test_capture_non_numeric_profile_still_writes_directly():
+    """无数字的普通 profile 事实仍直写画像，行为不变。"""
+    item = ExtractedMemory(
+        kind="profile",
+        content="用户是后端工程师",
+        op="update",
+        facet="occupation",
+    )
+    with (
+        patch("ai_agent.memory.long_term.store.search_episode", return_value=[]),
+        patch("ai_agent.memory.long_term.store.list_profile", return_value=[]),
+        patch("ai_agent.memory.long_term.extract_turn_memories", return_value=[item]),
+        patch("ai_agent.memory.long_term.store.write_episode") as write_episode,
+        patch("ai_agent.memory.long_term.apply_profile_action") as apply_profile,
+    ):
+        capture_long_term("u1", TURN, "", "我是后端工程师")
+    write_episode.assert_not_called()
+    apply_profile.assert_called_once()

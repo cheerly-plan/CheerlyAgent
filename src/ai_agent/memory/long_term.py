@@ -19,7 +19,7 @@ from ai_agent.memory.gate import jev_noul
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.memory.llm_calls import complete_memory_chat
 from ai_agent.memory.profile import ProfileAction, apply_profile_action
-from ai_agent.memory.promotion import observe_episode
+from ai_agent.memory.promotion import needs_source, observe_episode
 from ai_agent.storage.store import store
 from ai_agent.prompts.memory import (
     EXTRACT_SYSTEM,
@@ -145,6 +145,28 @@ def _write_extracted(
 ) -> None:
     try:
         if item.kind == "profile":
+            # 出处门禁（与 episode→candidate 晋升路径同一纪律）：
+            # 含数字/量化词的 profile 事实不能无外部出处直写画像——否则一句
+            # 口误（「营收 12.5 亿」）就绕过晋升梯变成长期事实。source 只能
+            # 来自外部可核验文档（年报/公告/台账/链接），普通对话派生不出，
+            # 因此这里 source 恒为空时一律降级为 episode 观察，交给
+            # observe_episode 的 missing_source hold 决定去留。
+            if needs_source(item.content):
+                written = store.write_episode(item.content, user_id=user_id)
+                observe_episode(
+                    written,
+                    user_id=user_id,
+                    chat_session_id=chat_session_id,
+                    user_input=user_input,
+                    source="",
+                    facet=item.facet,
+                )
+                logger.info(
+                    "数字 profile 无外部出处，降级为 episode 观察 facet=%s text=%s",
+                    item.facet,
+                    item.content[:60],
+                )
+                return
             apply_profile_action(
                 ProfileAction(op=item.op, facet=item.facet, content=item.content),
                 user_id=user_id,

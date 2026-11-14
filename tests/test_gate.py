@@ -33,7 +33,9 @@ def test_jev_noul_parses_probability(monkeypatch):
     with patch("ai_agent.core.http._read_json", side_effect=fake_fetch):
         assert jev_noul("这条消息是否紧急？", "客户被重复扣款") == pytest.approx(0.87)
 
-    assert captured["url"].endswith("/v1/systemone")
+    # jev_base_url 现在是完整 endpoint（含路径），代码不再拼接 /v1/systemone
+    assert captured["url"] == gate.settings.jev_base_url.rstrip("/")
+    assert captured["url"].endswith("/compatible-mode/v1/systemone")
     assert captured["auth"] == "Bearer k-test"
     assert captured["body"]["questions"]["gate"]["type"] == "noul"
     assert captured["body"]["state"] == "客户被重复扣款"

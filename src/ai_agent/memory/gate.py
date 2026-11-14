@@ -16,12 +16,17 @@ Jev 不生成文本，只对预定义问题返回校准概率，适合 Agent 里
 - 摘要逐轮预过滤：一次请求并行 N 个 Noul，剔除低价值轮次（summarize.py）；
 - 画像语义去重：写入前并行比对同 facet 已有条目（profile.py）。
 
-API 契约（TypeSafe v1）：
-POST {base_url}/v1/systemone
+API 契约（TypeSafe System One 协议，Jev 与阿里云决策模型兼容）：
+POST {base_url}（``jev_base_url`` 为完整 endpoint，含路径）
   {"model": "...", "state": "...",
    "questions": {"<id>": {"type": "noul", "instructions": "..."}}}
 → {"answers": {"<id>": {"type": "noul", "noul": 0.87}}, ...}
 独立问题在同一请求内并行评估；只按输入 token 计费，输出不计费。
+
+国内部署：官方 ``api.typesafe.ai`` 需代理，可切换阿里云百炼决策模型
+（``decision-model-preview``，endpoint
+``https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1/systemone``），
+协议逐字段兼容，国内直连、免代理。
 """
 
 import time
@@ -68,7 +73,7 @@ def jev_noul_batch(
     started = time.perf_counter()
     try:
         data = http.request_json(
-            f"{settings.jev_base_url.rstrip('/')}/v1/systemone",
+            settings.jev_base_url.rstrip("/"),
             body=req_body,
             headers={"Authorization": f"Bearer {key}"},
             timeout=settings.jev_timeout_seconds,
