@@ -69,6 +69,16 @@ jobs:
               'SHORT_TERM_MEMORY_MAX_TOKENS=2000' > .env
             echo "EVAL_ENV_READY=false" >> "$GITHUB_ENV"
             echo "::warning::未配置 EVAL_DOTENV，本次只跑 T0 静态门禁"
+            # job 仍是 success，容易被误读成"全量评测通过"。把降级事实写进
+            # run summary，让 PR / nightly 页面上一眼能看见 T1/T2 没跑。
+            {
+              echo "### 评测门禁已降级"
+              echo ""
+              echo "- 本次只执行 **T0**：评测脚本自测、ruff、用例集 schema。"
+              echo "- **T1/T2 未执行**：仓库缺少 EVAL_DOTENV secret。"
+              echo "- 本次 PASS 只代表静态层，不代表检索 / 记忆 / 工具选择质量。"
+              echo "- nightly 与手动触发需配置该 secret 才会连库、调模型。"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           chmod 600 .env
 
@@ -137,6 +147,25 @@ jobs:
             'MEMORY_SCORE_THRESHOLD=0.5' \
             'SHORT_TERM_MEMORY_MAX_TOKENS=2000' > .env
           chmod 600 .env
+
+      - name: 初始化 pgvector 扩展
+        # ConnectionPool(open=True) 建池时就 configure → register_vector，要求
+        # vector 类型已存在；ensure_schema() 又要先拿到池连接才能建扩展，空库会
+        # 卡成 PoolTimeout（历史三次 nightly 红灯）。pg_isready 只探端口、不检查
+        # 扩展，所以跑测试前必须用一条不入池的短连接显式建一次。
+        run: |
+          uv run python - <<'PY'
+          import psycopg
+          from ai_agent.core.config import settings
+
+          with psycopg.connect(settings.database_url) as conn:
+              conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+              row = conn.execute(
+                  "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+              ).fetchone()
+          print("pgvector 扩展版本:", row[0] if row else "未安装")
+          assert row, "pgvector 扩展未安装，memory-e2e 会在连接池阶段超时"
+          PY
 
       - name: 运行记忆端到端门禁
         env:
