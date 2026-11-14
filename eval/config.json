@@ -97,6 +97,18 @@
       "note": "记忆规则层离线评测：不调模型、不连库，量化「该记未记」与「不该记记了」；退出码 1 = 低于 --min-remember/--min-forget 通过线"
     },
     {
+      "name": "eval_memory_rules_crossdomain",
+      "tier": 1,
+      "command": "uv run python scripts/eval_memory_rules.py --cases cases/memory_crossdomain_cases.json --min-forget 0.75",
+      "exit_map": {
+        "0": "pass",
+        "1": "regression",
+        "2": "invalid_cases"
+      },
+      "policy": "blocking",
+      "note": "跨领域（医疗/法律/教育/客服）规则评测：防止规则过拟合到金融+技术场景；open 类问句归 model 不计分"
+    },
+    {
       "name": "eval_memory",
       "tier": 2,
       "command": "uv run python scripts/eval_memory.py",

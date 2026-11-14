@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "created_at": "dc1c92e-20261114T202143Z",
-  "git_sha": "dc1c92e",
+  "created_at": "e68924e-20261114T210124Z",
+  "git_sha": "e68924e",
   "env_fingerprint": {
-    "cases_sha256": "3a07f34c9ad223ef",
+    "cases_sha256": "1f10557fcf5bfbd8",
     "eval_scripts_sha256": "f9ceb8b3a398e512",
     "selftests_sha256": "aa67aaa1063cce1d"
   },
@@ -301,6 +301,18 @@
     "memory_health": {
       "cases": {
         "memory_health::exit": "pass"
+      },
+      "metrics": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "eval_memory_rules_crossdomain": {
+      "cases": {
+        "eval_memory_rules_crossdomain::exit": "pass"
       },
       "metrics": {
         "total": 1,

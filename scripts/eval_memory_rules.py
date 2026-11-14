@@ -82,7 +82,11 @@ def _judge(case: dict) -> dict:
         )
         for entry in case.get("extracted") or []
     ]
-    kept = [item for item in items if _keep_extracted(item)]
+    # 必须传 user：生产中 facet 的「第一人称陈述」校验看用户原话，
+    # 只喂 extracted 会把 locale="北京朝阳区" 这类规范化输出误判成噪声，
+    # 让评测结果与线上行为不一致。
+    user_text = case.get("user", "")
+    kept = [item for item in items if _keep_extracted(item, user_text)]
     dropped = [item for item in items if item not in kept]
     expect = case.get("expect")
 
@@ -184,7 +188,12 @@ def main() -> int:
     parser.add_argument("--min-forget", type=float, default=0.80)
     args = parser.parse_args()
 
+    # --cases 可写相对路径：先按当前目录找，找不到再按 scripts/cases/ 找
     path = Path(args.cases)
+    if not path.is_absolute() and not path.exists():
+        candidate = ROOT / "scripts" / path
+        if candidate.exists():
+            path = candidate
     if not path.exists():
         print(f"用例集不存在: {path}", file=sys.stderr)
         return 2

@@ -1,0 +1,866 @@
+[
+  {
+    "domain": "医疗",
+    "user": "我是一名儿科医生，在社区卫生服务中心工作",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "第一人称职业陈述",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "儿科医生，在社区卫生服务中心工作"
+      }
+    ],
+    "id": 105
+  },
+  {
+    "domain": "医疗",
+    "user": "我看诊时习惯先问过敏史，再问用药史",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期工作习惯=偏好",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "看诊时先问过敏史再问用药史"
+      }
+    ],
+    "id": 106
+  },
+  {
+    "domain": "医疗",
+    "user": "我要求病例摘要按 SOAP 格式写",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "对回答方式的长期要求",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "病例摘要按 SOAP 格式写"
+      }
+    ],
+    "id": 107
+  },
+  {
+    "domain": "医疗",
+    "user": "我在做一个慢病随访管理平台，已经上线三个月",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "用户自己的长期项目",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "正在开发慢病随访管理平台，已上线三个月"
+      }
+    ],
+    "id": 108
+  },
+  {
+    "domain": "医疗",
+    "user": "我对青霉素类药物有过敏反应",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "用户本人的健康事实",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "对青霉素类药物过敏"
+      }
+    ],
+    "id": 109
+  },
+  {
+    "domain": "医疗",
+    "user": "我第一次回答这类问题先给结论，再列依据",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期交互要求",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "先给结论再列依据"
+      }
+    ],
+    "id": 110
+  },
+  {
+    "domain": "医疗",
+    "user": "患者对青霉素过敏，用药需谨慎",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象（病患）",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询患者对青霉素过敏的用药禁忌"
+      }
+    ],
+    "id": 111
+  },
+  {
+    "domain": "医疗",
+    "user": "该患者于2026年10月入院，诊断为急性阑尾炎",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象主语句",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "该患者于2026年10月入院，诊断为急性阑尾炎"
+      }
+    ],
+    "id": 112
+  },
+  {
+    "domain": "医疗",
+    "user": "查一下对乙酰氨基酚的单次推荐用量",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "一次性查询",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询对乙酰氨基酚的推荐用量"
+      }
+    ],
+    "id": 113
+  },
+  {
+    "domain": "医疗",
+    "user": "帮我整理今天上午门诊的病例摘要",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在整理今天上午门诊的病例摘要"
+      }
+    ],
+    "id": 114
+  },
+  {
+    "domain": "医疗",
+    "user": "帮我把这份病历翻译成英文",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在翻译病历文件"
+      }
+    ],
+    "id": 115
+  },
+  {
+    "domain": "医疗",
+    "user": "这个化验指标偏高说明什么",
+    "expect": "forget",
+    "owner": "model",
+    "note": "开放式医学提问",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "这个化验指标偏高说明什么"
+      }
+    ],
+    "id": 116
+  },
+  {
+    "domain": "医疗",
+    "user": "我最近在考虑换个科室",
+    "expect": "forget",
+    "owner": "either",
+    "note": "意向，两解皆可",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "我最近在考虑换个科室"
+      }
+    ],
+    "id": 117
+  },
+  {
+    "domain": "医疗",
+    "user": "今天查房发现三位患者血糖控制不佳",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "当前观测",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查房，发现三位患者血糖控制不佳"
+      }
+    ],
+    "id": 118
+  },
+  {
+    "domain": "医疗",
+    "user": "帮我算一下这个剂量的体重换算",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在按体重换算药物剂量"
+      }
+    ],
+    "id": 119
+  },
+  {
+    "domain": "法律",
+    "user": "我是一名执业律师，主要做商事诉讼",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "第一人称职业陈述",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "执业律师，主要做商事诉讼"
+      }
+    ],
+    "id": 120
+  },
+  {
+    "domain": "法律",
+    "user": "我起草合同时严格区分甲方乙方，不要混用",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期工作习惯",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "起草合同时严格区分甲方乙方"
+      }
+    ],
+    "id": 121
+  },
+  {
+    "domain": "法律",
+    "user": "我要求法律意见书先给结论，再列法条依据",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "对回答方式的长期要求",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "法律意见书先给结论再列法条依据"
+      }
+    ],
+    "id": 122
+  },
+  {
+    "domain": "法律",
+    "user": "我在跟进一个建设工程施工合同纠纷，标的额两千万",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "用户自己的长期案子",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "正在跟进建设工程施工合同纠纷，标的额两千万"
+      }
+    ],
+    "id": 123
+  },
+  {
+    "domain": "法律",
+    "user": "我在北京执业，常驻朝阳区",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "第一人称居住地",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "locale",
+        "content": "北京朝阳区"
+      }
+    ],
+    "id": 124
+  },
+  {
+    "domain": "法律",
+    "user": "我不接刑事辩护案件",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期约束",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "不接刑事辩护案件"
+      }
+    ],
+    "id": 125
+  },
+  {
+    "domain": "法律",
+    "user": "该案已于11月10日开庭，判决书已归档",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象主语句",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "该案已于11月10日开庭，判决书已归档"
+      }
+    ],
+    "id": 126
+  },
+  {
+    "domain": "法律",
+    "user": "帮我起草一份劳动合同解除通知书",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在起草劳动合同解除通知书"
+      }
+    ],
+    "id": 127
+  },
+  {
+    "domain": "法律",
+    "user": "帮我整理今天和当事人沟通的纪要",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在整理与当事人沟通的纪要"
+      }
+    ],
+    "id": 128
+  },
+  {
+    "domain": "法律",
+    "user": "这份违约金条款是否有效",
+    "expect": "forget",
+    "owner": "model",
+    "note": "开放式法律提问",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "这份违约金条款是否有效"
+      }
+    ],
+    "id": 129
+  },
+  {
+    "domain": "法律",
+    "user": "查一下民法典关于合同解除的规定",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "一次性查询",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询民法典关于合同解除的规定"
+      }
+    ],
+    "id": 130
+  },
+  {
+    "domain": "法律",
+    "user": "本合同第四条约定的逾期利率是多少",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象主语句",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "本合同第四条约定了逾期利率"
+      }
+    ],
+    "id": 131
+  },
+  {
+    "domain": "法律",
+    "user": "我最近想考个仲裁员资格",
+    "expect": "forget",
+    "owner": "either",
+    "note": "意向，两解皆可",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "我最近想考个仲裁员资格"
+      }
+    ],
+    "id": 132
+  },
+  {
+    "domain": "法律",
+    "user": "帮我把这份起诉状翻译成英文",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在翻译起诉状"
+      }
+    ],
+    "id": 133
+  },
+  {
+    "domain": "法律",
+    "user": "客户该客户已确认接受调解方案",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象主语句",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "客户已确认接受调解方案"
+      }
+    ],
+    "id": 134
+  },
+  {
+    "domain": "教育",
+    "user": "我是高中物理老师，带高三两个班",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "第一人称职业陈述",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "高中物理老师，带高三两个班"
+      }
+    ],
+    "id": 135
+  },
+  {
+    "domain": "教育",
+    "user": "我讲题习惯用类比引入，再推导公式",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期教学习惯",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "讲题用类比引入再推导公式"
+      }
+    ],
+    "id": 136
+  },
+  {
+    "domain": "教育",
+    "user": "我要求学生作业批语用鼓励性语言",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "对回答方式的长期要求",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "作业批语用鼓励性语言"
+      }
+    ],
+    "id": 137
+  },
+  {
+    "domain": "教育",
+    "user": "我在开发一套初中信息学奥赛课程",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "用户自己的长期项目",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "正在开发初中信息学奥赛课程"
+      }
+    ],
+    "id": 138
+  },
+  {
+    "domain": "教育",
+    "user": "我叫李明",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "第一人称姓名",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "name",
+        "content": "李明"
+      }
+    ],
+    "id": 139
+  },
+  {
+    "domain": "教育",
+    "user": "我不喜欢学生用背诵代替理解",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期偏好",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "不喜欢学生用背诵代替理解"
+      }
+    ],
+    "id": 140
+  },
+  {
+    "domain": "教育",
+    "user": "学生张三本次月考数学偏低，需要加强函数",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象（学生）",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "张三本次月考数学偏低，需加强函数"
+      }
+    ],
+    "id": 141
+  },
+  {
+    "domain": "教育",
+    "user": "该学生本学期缺勤三次，已通知家长",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象主语句",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "该学生本学期缺勤三次，已通知家长"
+      }
+    ],
+    "id": 142
+  },
+  {
+    "domain": "教育",
+    "user": "帮我出一套七年级数学期中试卷",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在出七年级数学期中试卷"
+      }
+    ],
+    "id": 143
+  },
+  {
+    "domain": "教育",
+    "user": "帮我统计这个班这次考试的平均分",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在统计班级考试平均分"
+      }
+    ],
+    "id": 144
+  },
+  {
+    "domain": "教育",
+    "user": "这道题应该怎么讲才能让学生理解",
+    "expect": "forget",
+    "owner": "model",
+    "note": "开放式教学提问",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "这道题应该怎么讲才能让学生理解"
+      }
+    ],
+    "id": 145
+  },
+  {
+    "domain": "教育",
+    "user": "查一下高考数学考纲的改动",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "一次性查询",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询高考数学考纲改动"
+      }
+    ],
+    "id": 146
+  },
+  {
+    "domain": "教育",
+    "user": "我最近在准备教师职称评审",
+    "expect": "forget",
+    "owner": "either",
+    "note": "意向，两解皆可",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "我最近在准备教师职称评审"
+      }
+    ],
+    "id": 147
+  },
+  {
+    "domain": "教育",
+    "user": "帮我把这份教案翻译成英文",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在翻译教案"
+      }
+    ],
+    "id": 148
+  },
+  {
+    "domain": "教育",
+    "user": "今天批改作业发现大部分学生步骤缺失",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "当前观测",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在批改作业，发现学生步骤缺失"
+      }
+    ],
+    "id": 149
+  },
+  {
+    "domain": "客服",
+    "user": "我是电商售后客服，负责退换货处理",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "第一人称职业陈述",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "电商售后客服，负责退换货处理"
+      }
+    ],
+    "id": 150
+  },
+  {
+    "domain": "客服",
+    "user": "我回复客户必须先道歉，再给解决方案",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "对回答方式的长期要求",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "回复客户先道歉再给解决方案"
+      }
+    ],
+    "id": 151
+  },
+  {
+    "domain": "客服",
+    "user": "我处理投诉时习惯先确认订单号再沟通",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期工作习惯",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "preference",
+        "content": "处理投诉先确认订单号"
+      }
+    ],
+    "id": 152
+  },
+  {
+    "domain": "客服",
+    "user": "我在维护一套退换货话术库，覆盖十二个场景",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "用户自己的长期项目",
+    "extracted": [
+      {
+        "kind": "episode",
+        "facet": "",
+        "content": "正在维护退换货话术库，覆盖十二个场景"
+      }
+    ],
+    "id": 153
+  },
+  {
+    "domain": "客服",
+    "user": "我的工号是 A1024",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "用户本人的稳定标识",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "工号 A1024"
+      }
+    ],
+    "id": 154
+  },
+  {
+    "domain": "客服",
+    "user": "我讨厌用括号补充说明，正文里不要出现",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "长期偏好",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "constraint",
+        "content": "正文不要用括号补充说明"
+      }
+    ],
+    "id": 155
+  },
+  {
+    "domain": "客服",
+    "user": "订单 A20261115 已发货，物流显示在途",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象主语句",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "订单 A20261115 已发货，物流在途"
+      }
+    ],
+    "id": 156
+  },
+  {
+    "domain": "客服",
+    "user": "客户对物流时效不满，要求赔偿",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务对象",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "客户对物流时效不满并要求赔偿"
+      }
+    ],
+    "id": 157
+  },
+  {
+    "domain": "客服",
+    "user": "帮我写一条回复客户的道歉话术",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在撰写回复客户的道歉话术"
+      }
+    ],
+    "id": 158
+  },
+  {
+    "domain": "客服",
+    "user": "帮我查一下这个订单的退款进度",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "一次性查询",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在查询订单退款进度"
+      }
+    ],
+    "id": 159
+  },
+  {
+    "domain": "客服",
+    "user": "客户说收到破损商品，该怎么处理",
+    "expect": "forget",
+    "owner": "model",
+    "note": "开放式流程提问",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "客户说收到破损商品，该怎么处理"
+      }
+    ],
+    "id": 160
+  },
+  {
+    "domain": "客服",
+    "user": "我现在正在处理一个批量退款工单",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "当前动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在处理批量退款工单"
+      }
+    ],
+    "id": 161
+  },
+  {
+    "domain": "客服",
+    "user": "我最近想转岗做运营",
+    "expect": "forget",
+    "owner": "either",
+    "note": "意向，两解皆可",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "我最近想转岗做运营"
+      }
+    ],
+    "id": 162
+  },
+  {
+    "domain": "客服",
+    "user": "帮我把这段客户对话翻译成英文",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "任务动作",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在翻译客户对话"
+      }
+    ],
+    "id": 163
+  },
+  {
+    "domain": "客服",
+    "user": "今天接到二十个投诉电话，都是物流问题",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "当前观测",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在统计今天的投诉电话"
+      }
+    ],
+    "id": 164
+  }
+]

@@ -97,3 +97,37 @@ def test_shipped_case_file_meets_thresholds(mod):
     report = mod.run(data)
     assert report["remember_rate"] >= 0.95
     assert report["forget_rate"] >= 0.80
+
+
+def test_rule_eval_passes_user_text_for_facet_checks(mod):
+    """评测必须把 user 传给 _keep_extracted，否则 locale/occupation 会假失败。"""
+    case = {
+        "id": 1,
+        "expect": "remember",
+        "user": "我在北京执业，常驻朝阳区",
+        "extracted": [
+            {"kind": "profile", "facet": "locale", "content": "北京朝阳区"}
+        ],
+    }
+    report = mod.run([case])
+    assert report["remember_rate"] == 1.0
+
+
+def test_crossdomain_suite_meets_threshold(mod):
+    """换领域（医疗/法律/教育/客服）不能退化——防止规则过拟合到金融+技术。"""
+    data = json.loads(
+        (ROOT / "scripts" / "cases" / "memory_crossdomain_cases.json").read_text()
+    )
+    report = mod.run(data)
+    assert report["remember_rate"] >= 0.95
+    assert report["forget_rate"] >= 0.75
+
+
+def test_crossdomain_rule_owned_cases_have_no_gaps(mod):
+    """owner=rule 的漏放必须为 0；model/either 归语义判断，不计入。"""
+    data = json.loads(
+        (ROOT / "scripts" / "cases" / "memory_crossdomain_cases.json").read_text()
+    )
+    rule_forget = [c for c in data if c["expect"] == "forget" and c["owner"] == "rule"]
+    report = mod.run(rule_forget)
+    assert report["forget_rate"] == 1.0, report["uncovered"]
