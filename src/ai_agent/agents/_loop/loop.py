@@ -1,0 +1,643 @@
+"""主循环：run_loop / run_stream / run 编排。
+
+由原 agents/loop.py 拆分而来，逻辑未改动。
+"""
+
+from __future__ import annotations
+
+from ai_agent.agents.budget import Budget
+from collections.abc import Iterator
+from ai_agent.core.exceptions import LLMError
+from concurrent.futures import ThreadPoolExecutor
+from ai_agent.llm.tokenizer import count_json_tokens
+from ai_agent.core.config import settings
+import uuid
+from ai_agent.agents.messages import _canonical_args, _dedupe_seam, _drop_empty_assistant, _fit_context, _keep_prefill_tail, _output_digest, _pop_incomplete_assistant, _stash_partial_assistant
+from ai_agent.agents.turn import _capture_turn, _checkpoint_create, _checkpoint_finish, _checkpoint_update, _compress_and_cache, _persist_turn, _replace_last_turn, _session_state
+from ai_agent.kb.retrieval.citations import collect_citations, merge_sources
+from ai_agent.kb.retrieval.scope import extract_prev_turn, reset_kb_question, reset_kb_scope, reset_rewrite_context, set_kb_question, set_kb_scope, set_rewrite_context
+from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
+from ai_agent.memory.short_term import assemble, short_term_memory
+from ai_agent.prompts.chat import RUNTIME_BUDGET_EXHAUSTED, RUNTIME_DUP_CALL, RUNTIME_DUP_OUTPUT, RUNTIME_EMPTY_ANSWER
+from ai_agent.storage.store import store, user_scope
+from ai_agent.tools.context import session_scope, tool_result_index, tool_results_scope
+
+from ai_agent.core.logging import get_logger
+
+from ai_agent.agents._loop.followup import (
+    _KB_RETRIEVAL_TOOLS,
+)
+
+from ai_agent.agents._loop.state import (
+    _tool_progress_pool,
+)
+
+from ai_agent.agents._loop.tools_exec import (
+    _PROGRESS_TOOLS,
+)
+
+logger = get_logger(__name__)
+
+
+# 测试 monkeypatch 打在 ``ai_agent.agents.loop`` 上；内部调用一律经
+# _public() 取当前属性，否则补丁会被本地绑定绕过（静默失效）。
+def _public():
+    import ai_agent.agents.loop as public
+
+    return public
+
+
+def shutdown_turn_finalizer(wait: bool = True) -> None:
+    """关闭 turn-finalize / 工具进度线程池。
+
+    wait=True 会等在途记忆抽取跑完（生产停机）；热重载必须 wait=False，
+    且 lifespan 还需 os._exit 跳过 ThreadPoolExecutor 的 atexit join，
+    否则长工具仍会钉死旧 worker。
+    """
+    _turn_finalizer.shutdown(wait=wait, cancel_futures=not wait)
+    _tool_progress_pool.shutdown(wait=wait, cancel_futures=not wait)
+
+def _fitted_context(
+    messages: list[ChatMessage], tools: list[dict] | None = None
+) -> list[ChatMessage]:
+    """按「硬上限 - 输出预留 - 工具 schema」和软水位裁剪送模型副本。"""
+    usable, soft = settings.context_token_limits()
+    if tools:
+        tool_tokens = count_json_tokens(tools)
+        usable = max(1, usable - tool_tokens)
+        soft = max(0, soft - tool_tokens)
+    return _fit_context(messages, usable, soft_limit=soft)
+
+def run_stream(
+    user_input: str,
+    user_id: str = "default",
+    chat_session_id: str = "default",
+    *,
+    finalize_background: bool = False,
+    regenerate: bool = False,
+    resume_run_id: str | None = None,
+    use_web_search: bool = True,
+    use_kb: bool = True,
+    use_report: bool = False,
+    kb_file_ids: tuple[str, ...] = (),
+    memory_enabled: bool = True,
+) -> Iterator[ChatEvent]:
+    if resume_run_id and regenerate:
+        raise ValueError("regenerate 与 resume_run_id 互斥")
+    run_id = str(uuid.uuid4())
+    replacing = False
+    # 本轮新追加的 user 消息：run_loop 可能删掉历史里的旧目录，下标会前移，
+    # finally 里用对象身份重定位落库起点，避免把这句问话切出 turn。
+    turn_anchor: ChatMessage | None = None
+    if resume_run_id:
+        # 断点续跑：上下文以 checkpoint 快照为准（热缓存里没有中间 tool 消息）。
+        # 旧行已被路由层预检、在这里原子认领（DELETE...RETURNING）。
+        try:
+            claimed = store.claim_resumable_checkpoint(resume_run_id)
+        except Exception:
+            _public().logger.exception("checkpoint 认领失败 run_id=%s", resume_run_id)
+            claimed = None
+        if claimed is None:
+            # 被另一个请求抢走 / 状态不符，走 SSE error 让前端提示
+            yield {"type": "error", "message": "对话无法恢复，请重新发送消息"}
+            return
+        chat_session_id = claimed["chat_session_id"]
+        # 断点续跑沿用原 run 的开关状态（智能搜索/知识库/研报）：中断时工具
+        # 列表是什么样，续跑就是什么样，不受前端当前开关影响
+        use_web_search = bool(claimed.get("use_web_search", True))
+        use_kb = bool(claimed.get("use_kb", True))
+        use_report = bool(claimed.get("use_report", False))
+        try:
+            summary = store.get_session_summary(user_id, chat_session_id)
+            summary_until_seq = 0
+        except Exception:
+            _public().logger.exception("会话摘要加载失败")
+            summary = ""
+            summary_until_seq = 0
+        messages = list(claimed["messages"])
+        user_input = next(
+            (
+                str(m.get("content") or "")
+                for m in reversed(messages)
+                if m.get("role") == "user"
+            ),
+            "",
+        )
+        if settings.resume_prefill:
+            # 半截留作种子并打上消息级 partial 标记（服务端从断点续写）
+            _keep_prefill_tail(messages)
+        else:
+            messages = _pop_incomplete_assistant(messages)
+        # 落库替换的边界 = 快照里最后一条 user 消息之后：尾部可能还保留着
+        # 前几轮已完成的 assistant/tool（带工具的 run 中断在后续轮），
+        # 它们属于本次 run 已产出内容，替换时必须写回历史，不能丢
+        persisted = len(messages)
+        while persisted > 0 and messages[persisted - 1].get("role") != "user":
+            persisted -= 1
+        # 关键：恢复成功走"替换"落库路径——中断那轮的 finally 已把半截
+        # turn 写进 agent_chat_history，成功后必须原子替换，失败则保留
+        replacing = True
+    else:
+        recent, summary, summary_until_seq = _session_state(
+            user_id, chat_session_id
+        )
+        if regenerate:
+            # 重新生成最后一条回答：仅从内存上下文里剔除旧 assistant 消息后重问，
+            # 数据库里的旧回答在生成成功前不动（失败不丢）
+            while recent and recent[-1].get("role") != "user":
+                recent.pop()
+            if not recent:
+                return
+            replacing = True
+            user_input = str(recent[-1].get("content") or "")
+            messages = assemble(
+                _public()._system_prompt(
+                    user_id,
+                    use_kb=use_kb,
+                    use_memory=memory_enabled,
+                    use_report=use_report,
+                    kb_file_ids=kb_file_ids,
+                    user_input=user_input,
+                    chat_session_id=chat_session_id,
+                ),
+                summary,
+                recent
+            )
+            persisted = len(messages)
+        else:
+            messages = assemble(
+                _public()._system_prompt(
+                    user_id,
+                    use_kb=use_kb,
+                    use_memory=memory_enabled,
+                    use_report=use_report,
+                    kb_file_ids=kb_file_ids,
+                    user_input=user_input,
+                    chat_session_id=chat_session_id,
+                ),
+                summary,
+                recent
+            )
+            persisted = len(messages)
+            turn_anchor = {"role": "user", "content": user_input}
+            messages.append(turn_anchor)
+    if not _checkpoint_create(
+        run_id, user_id, chat_session_id, messages, use_web_search, use_kb, use_report
+    ):
+        # DB 级互斥兜底：路由层预检之后另一条并发请求抢先开跑了
+        yield {"type": "error", "message": "该会话有正在进行的回复"}
+        return
+    # run_id 随首个事件发给前端：流异常断开后"继续生成"按钮靠它发起 resume
+    yield {"type": "run_started", "run_id": run_id}
+    failed = False
+    completed = False
+    terminal: str | None = None
+    try:
+        # 回放快照里已产出、且保留在替换边界之后的内容（如工具轮前的文本）：
+        # 前端用替换语义接流（首个文本事件覆盖旧半截）。不回放的话，替换
+        # 会把多轮场景里更早轮次的文本从气泡里冲掉。
+        for msg in messages[persisted:]:
+            if msg.get("role") == "assistant" and msg.get("content"):
+                yield {"type": "text", "content": str(msg["content"])}
+        for event in run_loop(
+            messages,
+            user_id,
+            run_id=run_id,
+            chat_session_id=chat_session_id,
+            use_web_search=use_web_search,
+            use_kb=use_kb,
+            use_report=use_report,
+            kb_file_ids=kb_file_ids,
+            use_memory=memory_enabled,
+        ):
+            if event.get("type") == "error":
+                failed = True
+            if event.get("type") == "done":
+                completed = True
+            yield event
+    except GeneratorExit:
+        # SSE 客户端断开 / 服务端关闭生成器
+        terminal = "interrupted"
+        raise
+    finally:
+        if terminal is None:
+            terminal = (
+                "completed" if completed else ("failed" if failed else "interrupted")
+            )
+        _checkpoint_finish(run_id, terminal)
+        if turn_anchor is not None:
+            try:
+                persisted = next(
+                    i for i, msg in enumerate(messages) if msg is turn_anchor
+                )
+            except StopIteration:
+                pass
+        turn = messages[persisted:]
+        # replacing（重新生成 / 断点恢复）只有成功完成才落库：
+        # 失败或中断保留库里已有内容（旧完整回答或上一轮已写入的半截）。
+        skip_persist = replacing and not completed
+        if not skip_persist:
+            if replacing:
+                _replace_last_turn(user_id, chat_session_id, turn)
+            else:
+                _persist_turn(user_id, chat_session_id, turn)
+            # 长期记忆只从完整回合抽取：中断/失败的半截回答进记忆库，
+            # 之后会被当成"用户说过的话"反复召回，污染长期画像。
+            # 摘要压缩照跑——它只是窗口管理，半截留在短期上下文里
+            # 让下一轮对话保持连续（历史里也看得到半截）。
+            if finalize_background:
+                # 先同步完成快路径（落库 + 热缓存），保证下一轮上下文连续；
+                # 慢路径（记忆抽取、摘要压缩，含多次 LLM 调用）交给后台线程。
+                # 先存全量窗口，避免后台摘要还没跑完时下一轮只看到被裁掉
+                # 但尚未进摘要的轮次；_compress_and_cache 完成后再存压缩窗口。
+                short_term_memory.save(
+                    chat_session_id,
+                    messages,
+                    user_id=user_id,
+                    summary=summary,
+                    summary_until_seq=summary_until_seq,
+                    trim=False,
+                )
+                if completed:
+                    _turn_finalizer.submit(
+                        _capture_turn,
+                        user_id,
+                        turn,
+                        summary,
+                        user_input,
+                        chat_session_id,
+                        memory_enabled=memory_enabled,
+                    )
+                _turn_finalizer.submit(
+                    _compress_and_cache,
+                    user_id,
+                    chat_session_id,
+                    messages,
+                    summary,
+                    summary_until_seq,
+                )
+            else:
+                if completed:
+                    _capture_turn(
+                        user_id,
+                        turn,
+                        summary,
+                        user_input,
+                        chat_session_id,
+                        memory_enabled=memory_enabled,
+                    )
+                _compress_and_cache(
+                    user_id,
+                    chat_session_id,
+                    messages,
+                    summary,
+                    summary_until_seq,
+                )
+
+def run_loop(
+    messages: list[ChatMessage],
+    user_id: str = "default",
+    *,
+    run_id: str | None = None,
+    chat_session_id: str = "",
+    use_web_search: bool = True,
+    use_kb: bool = True,
+    use_report: bool = False,
+    kb_file_ids: tuple[str, ...] = (),
+    use_memory: bool = True,
+    budget: Budget | None = None,
+) -> Iterator[ChatEvent]:
+    if budget is None:
+        budget = Budget.from_settings()
+    # 开关直接决定工具列表：智能搜索关闭 → 剔除 web_search；
+    # 知识库关闭 → 剔除 kb_search 和 kg_search（图谱检索同属知识库能力）。
+    # 研报关闭 → 只剔除 generate_report + report_job_status（生成研报重流程），
+    # report_extract_indicators / report_compare / report_validate 是「查业绩/
+    # 算数」的确定性积木，不是研报专属，保持可用。
+    # 研报生成与知识检索是两个独立开关：generate_report / report_extract_indicators
+    # 的抽数由服务端流水线直读知识库（不经过模型调用 kb_search），所以不受
+    # use_kb 影响；知识库开关只控制模型能否自主 kb_search/kg_search 检索原文。
+    # 模型这轮就没有对应能力，而不是靠 prompt 约定「别用」
+    excluded: set[str] = set()
+    if not use_web_search:
+        excluded.add("web_search")
+    if not use_kb:
+        # 只下线模型自主检索知识库的能力；研报抽数走服务端流水线，不受影响。
+        excluded.update({"kb_search", "kg_search"})
+    if not use_report:
+        excluded.update({"generate_report", "report_job_status"})
+    if not use_memory:
+        excluded.update({"search_memory", "write_memory", "expand_memory"})
+    tools = [s for s in _public().tool_schemas() if s["function"]["name"] not in excluded]
+    if use_kb:
+        _public()._attach_kg_prefetch(messages, kb_file_ids)
+    step = 0
+    # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
+    # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库
+    turn_sources: list[dict] = []
+    # 本轮提交的研报后台任务：挂在回答消息的 meta 上，刷新后卡片能续上
+    report_job_id = ""
+    # 本轮已执行过的 (工具, 参数)：完全相同的调用结果不会变，短路掉。
+    # 本地模型会陷入「再查一次试试」的循环——实测同一 kg_search 原样
+    # 调了 6 次，每次都返回同样的实体列表，把预算轮数烧光后没有轮次
+    # 留给最终回答，用户只看到「我即将检索」就断了
+    seen_calls: set[tuple[str, str]] = set()
+    # 本轮各工具的已返回结果摘要：参数不同但输出一字不差，说明这条路
+    # 已经走到头了（图谱永远返回同一个中心实体、向量库永远空结果）。
+    # 只在下次重复时追加一句系统提示，不阻断调用
+    seen_outputs: dict[tuple[str, str], int] = {}
+    for turn in range(budget.max_steps):
+        result: ChatResult | None = None
+        streamed = ""
+        tool_choice: str | dict = "auto"
+        step_tools = tools
+        # 点名了库内主体、而这句还没查过：这一步必须调 kb_search 或 kg_search。
+        # 工具返回后的下一步不再强制，模型可以继续查，也可以写答案。
+        if _public()._must_call_kb_tool(messages, tools, kb_file_ids):
+            tool_choice = "required"
+            step_tools = [
+                s for s in tools if s["function"]["name"] in _KB_RETRIEVAL_TOOLS
+            ]
+        try:
+            # 上下文预算：超限时裁剪的是送模型的副本，messages 本体不动
+            context = _public()._fitted_context(messages, step_tools)
+            for kind, payload in _public().stream_chat(
+                context, step_tools, tool_choice=tool_choice
+            ):
+                if kind == "text":
+                    streamed += payload
+                    yield {"type": "text", "content": payload}
+                else:
+                    result = payload
+        except LLMError as e:
+            # 详情只进日志；上游异常文本可能带出 URL/响应片段，不透传给客户端
+            _public().logger.error("LLM 调用失败: %s", e)
+            _stash_partial_assistant(messages, streamed, run_id, step)
+            yield {"type": "error", "message": _public()._llm_error_message(e)}
+            return
+        except GeneratorExit:
+            _stash_partial_assistant(messages, streamed, run_id, step)
+            raise
+        except Exception:
+            # 流已经建立、读到一半才炸（连接被掐、网关返回非 JSON 等）：
+            # 不兜住的话异常会穿透 SSE 生成器，前端只看到连接断掉，
+            # 半个回答留在气泡里且没有任何提示
+            _public().logger.exception("模型流式输出中断 run_id=%s", run_id)
+            _stash_partial_assistant(messages, streamed, run_id, step)
+            yield {"type": "error", "message": "模型输出中断，请稍后重试"}
+            return
+
+        if result is None:
+            _stash_partial_assistant(messages, streamed, run_id, step)
+            yield {"type": "error", "message": "模型没有返回结果"}
+            return
+        assistant: ChatMessage = {"role": "assistant", "content": result["content"]}
+        if result["tool_calls"]:
+            assistant["tool_calls"] = result["tool_calls"]
+        # 网关 usage 跟消息走：管理面板按消息展示，会话总量由 SUM 聚合
+        prompt_tokens = result.get("prompt_tokens")
+        completion_tokens = result.get("completion_tokens")
+        if prompt_tokens is not None:
+            assistant["prompt_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            assistant["completion_tokens"] = completion_tokens
+        last = messages[-1] if messages else None
+        if (
+            last
+            and last.get("role") == "assistant"
+            and not last.get("tool_calls")
+        ):
+            # prefill 续写：上下文尾部的半截 assistant 带 partial 标记，
+            # 服务端从断点续写。模型返回后摘掉标记、去重接缝、合并进同一条
+            # 消息（content + 可能的 tool_calls），历史与快照里都是一条
+            # 不带 partial 的完整回答
+            merged = _dedupe_seam(
+                str(last.get("content") or ""), str(result["content"] or "")
+            )
+            last.pop("partial", None)
+            if result["tool_calls"]:
+                last["tool_calls"] = result["tool_calls"]
+            last["content"] = str(last.get("content") or "") + merged
+            # 续写是两次请求：prompt 取后一次，completion 要累加，
+            # 否则面板上这一条会漏掉前半截的产出
+            if prompt_tokens is not None:
+                last["prompt_tokens"] = prompt_tokens
+            if completion_tokens is not None:
+                last["completion_tokens"] = (
+                    int(last.get("completion_tokens") or 0) + completion_tokens
+                )
+        else:
+            messages.append(assistant)
+        if run_id:
+            step += 1
+            _checkpoint_update(run_id, messages, step)
+        if not result["tool_calls"]:
+            text = str(result.get("content") or streamed or "").strip()
+            if not text:
+                # 工具已经跑完但模型没吐正文（本地小模型 / 思考链吃掉 content
+                # 时会出现）。再逼一轮不带工具，避免气泡里只有光标。
+                _public().logger.warning("最终回答为空，追加一轮强制作答 run_id=%s", run_id)
+                _drop_empty_assistant(messages)
+                messages.append(
+                    {"role": "system", "content": RUNTIME_EMPTY_ANSWER}
+                )
+                streamed = ""
+                result = None
+                try:
+                    context = _public()._fitted_context(messages, step_tools)
+                    for kind, payload in _public().stream_chat(context, []):
+                        if kind == "text":
+                            streamed += payload
+                            yield {"type": "text", "content": payload}
+                        else:
+                            result = payload
+                except LLMError as e:
+                    _public().logger.error("空回答收尾失败: %s", e)
+                    yield {"type": "error", "message": _public()._llm_error_message(e)}
+                    return
+                except GeneratorExit:
+                    _stash_partial_assistant(messages, streamed, run_id, step)
+                    raise
+                except Exception:
+                    _public().logger.exception("空回答收尾异常 run_id=%s", run_id)
+                    yield {"type": "error", "message": "模型输出中断，请稍后重试"}
+                    return
+                retry_text = str((result or {}).get("content") or "") or streamed
+                messages.append({"role": "assistant", "content": retry_text})
+                if run_id:
+                    step += 1
+                    _checkpoint_update(run_id, messages, step)
+            _public().logger.info(
+                "run_loop 完成 run_id=%s steps=%d budget=%d content_len=%d",
+                run_id,
+                turn + 1,
+                budget.max_steps,
+                len(str((messages[-1].get("content") if messages else "") or "")),
+            )
+            _public()._attach_sources(messages, turn_sources, report_job_id)
+            done_event: ChatEvent = {"type": "done"}
+            if turn_sources:
+                done_event["sources"] = turn_sources
+            yield done_event
+            return
+        for call in result["tool_calls"]:
+            dedupe_key = (call["name"], _canonical_args(call["name"], call["arguments"]))
+            if dedupe_key in seen_calls:
+                # 协议要求每个 tool_call 都有对应 tool 消息，用提示文本占位；
+                # 不发 tool_start/tool_end 事件——前端没开始过这次调用
+                _public().logger.info(
+                    "工具同参数重复调用已短路 run_id=%s tool=%s",
+                    run_id,
+                    call["name"],
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call["name"],
+                        "content": RUNTIME_DUP_CALL,
+                    }
+                )
+                continue
+            seen_calls.add(dedupe_key)
+            # 前端只用来清掉调用前的半截字，展示名不再下发
+            yield {"type": "tool_start", "name": call["name"]}
+            # 范围与查询改写上下文必须在工具执行这一层同栈设置：run_stream 的
+            # 生成器会被不同线程轮流 next() 推进，外层设的 contextvar 传不进来
+            if call["name"] in _PROGRESS_TOOLS:
+                output = ""
+                cited = []
+                for event in _public()._run_tool_with_progress(
+                    call["name"],
+                    call["arguments"],
+                    user_id=user_id,
+                    kb_file_ids=kb_file_ids,
+                    messages=messages,
+                    chat_session_id=chat_session_id,
+                ):
+                    if event.get("type") == "_tool_result":
+                        output = event.get("content") or ""
+                        cited = list(event.get("sources") or [])
+                        continue
+                    if event.get("type") == "report_job":
+                        report_job_id = str(event.get("job_id") or "")
+                    yield event  # type: ignore[misc]
+            else:
+                scope_token = set_kb_scope(kb_file_ids)
+                rewrite_token = set_rewrite_context(
+                    extract_prev_turn(messages, settings.kb_rewrite_history_turns)
+                )
+                question_token = set_kb_question(_public()._latest_user_text(messages))
+                try:
+                    with tool_results_scope(tool_result_index(messages)):
+                        with session_scope(chat_session_id):
+                            with collect_citations() as cited:
+                                with user_scope(user_id):
+                                    output = _public().execute_tool(
+                                        call["name"], call["arguments"]
+                                    )
+                finally:
+                    reset_kb_scope(scope_token)
+                    reset_rewrite_context(rewrite_token)
+                    reset_kb_question(question_token)
+            turn_sources = merge_sources(turn_sources, cited)
+            tool_meta = _public()._remember_tool_result(
+                user_id=user_id,
+                chat_session_id=chat_session_id,
+                call_id=str(call.get("id") or ""),
+                name=call["name"],
+                arguments=call["arguments"],
+                output=output,
+                cited=cited,
+            )
+            # 参数换了、结果却一字不差：模型在「换个说法再试一次」，
+            # 再试也不会变。追加一句系统提示把它推向换词/换工具/收尾
+            out_key = (call["name"], _output_digest(output))
+            if seen_outputs.get(out_key):
+                _public().logger.info(
+                    "工具返回结果与之前完全相同 run_id=%s tool=%s 次数=%d",
+                    run_id,
+                    call["name"],
+                    seen_outputs[out_key] + 1,
+                )
+                output += "\n\n" + RUNTIME_DUP_OUTPUT
+            seen_outputs[out_key] = seen_outputs.get(out_key, 0) + 1
+            end_event: ChatEvent = {"type": "tool_end", "name": call["name"]}
+            if turn_sources:
+                end_event["sources"] = turn_sources
+            yield end_event
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": call["name"],
+                    "content": output,
+                    "meta": tool_meta,
+                }
+            )
+            if run_id:
+                step += 1
+                _checkpoint_update(run_id, messages, step)
+    _public().logger.warning(
+        "run_loop 超出预算 run_id=%s steps=%d（工具循环疑似失控），强制收尾",
+        run_id,
+        budget.max_steps,
+    )
+    # 预算耗尽不直接报错：前面几轮检索已经花了成本，用户手里只有模型
+    # 说「我即将检索」的半截话。剥掉工具再问最后一次，强制它基于已
+    # 拿到的结果给出回答——收尾消息用 system（前端不渲染、不污染气泡）。
+    # 这次也失败才真正报错。
+    messages.append({"role": "system", "content": RUNTIME_BUDGET_EXHAUSTED})
+    streamed = ""
+
+    def _stash_final(content: str) -> None:
+        # 收尾场景 messages 尾部是 tool 消息，_stash_partial_assistant
+        # 只认「最后一条是 assistant」的 prefill 场景，这里手动落
+        if content:
+            messages.append({"role": "assistant", "content": content})
+
+    try:
+        context = _public()._fitted_context(messages, step_tools)
+        result: ChatResult | None = None
+        for kind, payload in _public().stream_chat(context, []):
+            if kind == "text":
+                streamed += payload
+                yield {"type": "text", "content": payload}
+            else:
+                result = payload
+        final_content = str((result or {}).get("content") or "") or streamed
+        _stash_final(final_content)
+        if run_id:
+            step += 1
+            _checkpoint_update(run_id, messages, step)
+        _public()._attach_sources(messages, turn_sources, report_job_id)
+        done_event: ChatEvent = {"type": "done"}
+        if turn_sources:
+            done_event["sources"] = turn_sources
+        yield done_event
+    except GeneratorExit:
+        _stash_final(streamed)
+        raise
+    except LLMError as e:
+        _public().logger.error("预算收尾回答失败: %s", e)
+        _stash_final(streamed)
+        yield {"type": "error", "message": _public()._llm_error_message(e)}
+    except Exception:
+        _public().logger.exception("预算收尾回答异常 run_id=%s", run_id)
+        _stash_final(streamed)
+        yield {"type": "error", "message": "模型输出中断，请稍后重试"}
+
+def run(
+    user_input: str, user_id: str = "default", chat_session_id: str = "default"
+) -> str:
+    parts: list[str] = []
+    for event in run_stream(user_input, user_id, chat_session_id):
+        if event["type"] == "text":
+            parts.append(event.get("content") or "")
+        elif event["type"] == "error":
+            return event.get("message") or "ERROR"
+    return "".join(parts)
+
+# 流结束后的收尾工作（长期记忆抽取/摘要压缩含多次 LLM 调用）放到后台线程，
+# 不再阻塞 SSE 尾部延迟；进程退出时由 lifespan 调 shutdown_turn_finalizer 等待。
+_turn_finalizer = ThreadPoolExecutor(max_workers=4, thread_name_prefix="turn-finalize")
