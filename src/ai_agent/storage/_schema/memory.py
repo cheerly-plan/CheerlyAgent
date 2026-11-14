@@ -147,6 +147,9 @@ def ensure_episode_more1(conn, *, dim: int) -> None:
             ("last_seen_at", "TIMESTAMPTZ"),
             ("last_decay_at", "TIMESTAMPTZ"),
             ("sessions_seen", "TEXT[] NOT NULL DEFAULT '{}'"),
+            # A-MEM 风格关联：相似但不合并的 episode 之间保留链接，
+            # 召回时一跳扩展。不存 text 副本，只存 id。
+            ("related_ids", "TEXT[] NOT NULL DEFAULT '{}'"),
         ):
             conn.execute(
                 f"ALTER TABLE agent_episode "

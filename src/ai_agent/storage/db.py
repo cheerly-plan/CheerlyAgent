@@ -81,6 +81,8 @@ class MemoryItem:
     last_seen: str | None = None
     # 命中次数（episode 的观察证据；画像恒为 0）
     hits: int = 0
+    # 关联的 episode id（A-MEM 风格链接；召回时一跳扩展）
+    related: tuple[str, ...] = ()
 
 
 @dataclass

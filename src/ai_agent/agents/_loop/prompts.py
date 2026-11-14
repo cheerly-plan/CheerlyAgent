@@ -99,6 +99,19 @@ def _recall_block(
         hits = rerank_items(
             hits, user_input, top_k=settings.memory_auto_recall_top_k
         )
+        # 一跳扩展：命中的条目若有关联（如「去深圳出差」↔「华南业务提醒」），
+        # 把它们一起带出来；扩展项不参与 rerank，排在命中项之后。
+        try:
+            extra = store.expand_related(
+                hits,
+                user_id=user_id,
+                limit=settings.memory_link_expand_top_k,
+            )
+            if extra:
+                hits = [*hits, *extra]
+                _public().logger.info("memory_recall related=%d", len(extra))
+        except Exception:
+            _public().logger.exception("情景记忆关联扩展失败，忽略")
         block = _public().format_recall_block(
             hits, max_chars=settings.memory_auto_recall_max_chars
         )

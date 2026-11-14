@@ -440,6 +440,13 @@ class Settings(BaseSettings):
     memory_top_k: int
     memory_score_threshold: float
     memory_merge_threshold: float = 0.7
+    # 关联链接（A-MEM 风格）：相似度落在 [link_threshold, merge_threshold)
+    # 的条目互相记 id，召回时一跳扩展。0 = 关闭链接。
+    memory_link_threshold: float = 0.45
+    # 每条 episode 最多记多少个关联
+    memory_link_max_per_item: int = 3
+    # 召回时最多展开多少条关联条目
+    memory_link_expand_top_k: int = 3
     memory_merge_timeout_seconds: float = 30
     memory_model: str = ""
     # 情景记忆存活时间（秒）。episode 是「当前阶段近况」，不是画像：过期后

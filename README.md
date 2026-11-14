@@ -244,7 +244,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 |---|---|---|
 | 短期 | `short_term.py` | 会话窗口的最近历史；超 token 预算才滚动摘要（不按固定轮数提前摘要）；摘要伪装成一轮 user/assistant 注入 |
 | 长期 | `long_term.py` | 向量化的事实与偏好，召回按相似度阈值过滤；写入走门控 → 抽取 → 噪声过滤 → 三层去重 |
-| 情景 | `episode_store.py` / `episode_merge.py` | 带 TTL 的事件片段，支持相近情节合并 |
+| 情景 | `episode_store.py` / `episode_merge.py` | 带 TTL 的事件片段；相近情节合并，相似但不同的事互相链接（召回一跳扩展） |
 | 画像 | `profile.py` / `facets.py` / `profile_store.py` | 用户维度的稳定画像与分面；分面分互斥（覆盖）与累积（追加）两类，删除语义按分面区分 |
 | 候选 | `promotion.py` / `promotion_store.py` | 观察态证据、跨会话复现、候选审核与自动晋升；候选 facet 由抽取结果或确定性线索词推断 |
 | 归档 | `archive.py` / `archive_store.py` | L1/L2 的只读副本，按需展开；重复蒸馏会更新文本/证据，不会产生副本 |

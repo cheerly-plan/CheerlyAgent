@@ -45,6 +45,7 @@ class EpisodeStore(Database):
             with self._get_pool().connection() as conn:
                 self._upsert_episode(conn, item, src_vector)
                 conn.commit()
+            self._link_related(uid, item.id, src_vector)
             return item
 
         keeper = hits[0]
@@ -76,6 +77,7 @@ class EpisodeStore(Database):
                 )
                 self._upsert_episode(conn, item, src_vector)
                 conn.commit()
+                self._link_related(uid, item.id, src_vector)
                 return item
             # 合并前先把所有被并掉的 episode 的证据聚到 keeper 上：
             # hit_count 求和、sessions_seen 取并集。此前只删 stale 行，
@@ -137,6 +139,7 @@ class EpisodeStore(Database):
                     merged_text,
                 )
             conn.commit()
+            self._link_related(uid, keeper.id, merged_vector)
             return MemoryItem(
                 id=keeper.id,
                 user_id=uid,
@@ -212,6 +215,7 @@ class EpisodeStore(Database):
                 created_at::text AS created_at,
                 COALESCE(last_seen_at, created_at)::text AS last_seen,
                 COALESCE(hit_count, 0) AS hit_count,
+                related_ids,
                 1 - (embedding <=> %s) AS score
             FROM agent_episode
             WHERE user_id = %s
@@ -237,6 +241,7 @@ class EpisodeStore(Database):
                 score=float(row["score"]),
                 last_seen=row.get("last_seen"),
                 hits=int(row.get("hit_count") or 0),
+                related=tuple(row.get("related_ids") or ()),
             )
             for row in rows
         ]
@@ -262,6 +267,122 @@ class EpisodeStore(Database):
         except Exception:
             logger.exception("渐进式情景记忆清理失败，本轮不删除")
             return 0
+
+    # ---- 关联链接：相似但不合并的条目互相记 id ----
+
+    def _link_related(self, user_id: str, item_id: str, vector: Vector) -> int:
+        """给 item 建「相关但不重复」的链接，双向写入。
+
+        相似度落到 [memory_link_threshold, memory_merge_threshold) 的条目
+        不会被合并（它们讲的是不同的事，只是相关），但一起被召回才有用。
+        任何异常只记日志：链接是增强，不能影响写入主链路。
+        """
+        link_threshold = float(settings.memory_link_threshold)
+        merge_threshold = float(settings.memory_merge_threshold)
+        limit = max(0, int(settings.memory_link_max_per_item))
+        if link_threshold <= 0 or limit == 0:
+            return 0
+        try:
+            with self._get_pool().connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id::text AS id, 1 - (embedding <=> %s) AS score
+                    FROM agent_episode
+                    WHERE user_id = %s
+                      AND id::text <> %s
+                      AND 1 - (embedding <=> %s) >= %s
+                      AND 1 - (embedding <=> %s) < %s
+                    ORDER BY embedding <=> %s
+                    LIMIT %s
+                    """,
+                    (
+                        vector,
+                        user_id,
+                        item_id,
+                        vector,
+                        link_threshold,
+                        vector,
+                        merge_threshold,
+                        vector,
+                        limit,
+                    ),
+                ).fetchall()
+                if not rows:
+                    return 0
+                related = [str(row["id"]) for row in rows]
+                for other in related:
+                    # 双向：A 记 B，B 也记 A；数组去重后截断
+                    conn.execute(
+                        """
+                        UPDATE agent_episode
+                        SET related_ids = (
+                            SELECT array_agg(DISTINCT entry)
+                            FROM unnest(related_ids || %s::text[]) AS entry
+                        )
+                        WHERE user_id = %s AND id::text = %s
+                        """,
+                        ([other], user_id, item_id),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE agent_episode
+                        SET related_ids = (
+                            SELECT array_agg(DISTINCT entry)
+                            FROM unnest(related_ids || %s::text[]) AS entry
+                        )
+                        WHERE user_id = %s AND id::text = %s
+                        """,
+                        ([item_id], user_id, other),
+                    )
+                conn.commit()
+            logger.info("episode_linked item=%s related=%d", item_id, len(related))
+            return len(related)
+        except Exception:
+            logger.warning("episode 关联链接失败 item=%s", item_id, exc_info=True)
+            return 0
+
+    def expand_related(
+        self, hits: list[MemoryItem], *, user_id: str, limit: int = 3
+    ) -> list[MemoryItem]:
+        """召回时一跳扩展：把命中条目的关联一起带出（不重复命中项）。"""
+        if not hits or limit <= 0:
+            return []
+        ids = {item.id for item in hits}
+        wanted: list[str] = []
+        for item in hits:
+            for related in item.related or []:
+                if related not in ids and related not in wanted:
+                    wanted.append(related)
+        if not wanted:
+            return []
+        try:
+            with self._get_pool().connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id::text AS id, user_id, text,
+                           created_at::text AS created_at,
+                           COALESCE(last_seen_at, created_at)::text AS last_seen,
+                           COALESCE(hit_count, 0) AS hit_count
+                    FROM agent_episode
+                    WHERE user_id = %s AND id::text = ANY(%s::text[])
+                    LIMIT %s
+                    """,
+                    (user_id, wanted[: max(1, limit)], max(1, limit)),
+                ).fetchall()
+        except Exception:
+            logger.warning("episode 关联扩展失败", exc_info=True)
+            return []
+        return [
+            MemoryItem(
+                id=row["id"],
+                user_id=row["user_id"],
+                text=row["text"],
+                created_at=row["created_at"],
+                last_seen=row.get("last_seen"),
+                hits=int(row.get("hit_count") or 0),
+            )
+            for row in rows
+        ]
 
     def _upsert_episode(
         self, conn: Connection, item: MemoryItem, vector: Vector
