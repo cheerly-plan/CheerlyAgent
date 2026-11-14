@@ -111,7 +111,7 @@ def complete_chat_once(prompt: str) -> str:
     enable_thinking 必须关：主模型带思考链，20 秒的预算全花在推理上，
     实测直接超时；重排只需要输出一组编号，不需要想。
     """
-    from ai_agent.llm.client import complete_chat
+    from ai_agent.llm.client import THINKING_OFF, complete_chat
 
     return complete_chat(
         [{"role": "user", "content": prompt}],
@@ -121,10 +121,7 @@ def complete_chat_once(prompt: str) -> str:
         max_tokens=120,
         # 重排要的是可复现的排序，不是措辞多样性
         temperature=settings.kb_rerank_temperature,
-        extra_body={
-            "enable_thinking": False,
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
+        extra_body=THINKING_OFF,
     )
 
 def _parse_order(answer: str, size: int) -> list[int]:

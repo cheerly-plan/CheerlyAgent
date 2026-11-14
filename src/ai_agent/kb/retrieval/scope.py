@@ -21,7 +21,7 @@ from contextvars import ContextVar, Token
 
 from ai_agent.core.config import settings
 from ai_agent.core.logging import get_logger
-from ai_agent.llm.client import LLMError, complete_chat, lightweight_llm
+from ai_agent.llm.client import THINKING_OFF, LLMError, complete_chat, lightweight_llm
 
 logger = get_logger(__name__)
 
@@ -343,11 +343,7 @@ def _rewrite_query(user_input: str, prev_turn: list[str]) -> str:
             max_retries=0,
             max_tokens=256,
             client=client,
-            extra_body={
-                "enable_thinking": False,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "think": False,
-            },
+            extra_body=THINKING_OFF,
         )
     except LLMError as e:
         logger.warning("kb 对话改写失败，退回原话：%s", e)
@@ -402,11 +398,7 @@ def expand_queries(query: str, count: int | None = None) -> list[str]:
             max_retries=0,
             max_tokens=256,
             client=client,
-            extra_body={
-                "enable_thinking": False,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "think": False,
-            },
+            extra_body=THINKING_OFF,
         )
     except Exception:
         logger.warning("kb multi-query 扩展失败，退回原 query：%s", q[:60])

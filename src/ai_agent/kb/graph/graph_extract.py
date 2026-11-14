@@ -26,7 +26,7 @@ from ai_agent.kb.ingest.chunking import Chunk, html_tables_to_markdown
 from ai_agent.kb.graph.graph_names import _doc_title
 from ai_agent.kb.graph.graph_schema import _Extraction, _parse_extraction
 from ai_agent.kb.ingest.otsl import render_otsl
-from ai_agent.llm.client import complete_chat, graph_client, graph_model
+from ai_agent.llm.client import THINKING_OFF, complete_chat, graph_client, graph_model
 from ai_agent.llm.types import ChatMessage
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.prompts.kb import GRAPH_TAIL_INSTRUCTION, build_graph_head
@@ -118,7 +118,7 @@ def _extract_batch(
         max_tokens=4096,
         # 0 温：同一批切片两次跑出不同实体是「图谱不稳定」的主因
         temperature=settings.kb_graph_temperature,
-        extra_body={"enable_thinking": False},
+        extra_body=THINKING_OFF,
     )
     # repair=True：坏输出里能救的部分先救回来（裸词补引号、截断补括号）。
     # 这里和实体对齐不同——对齐结果是直接拿去合并实体的，猜错代价大；

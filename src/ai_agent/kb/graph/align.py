@@ -37,6 +37,7 @@ from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
 from ai_agent.kb.graph.graph_names import is_metric_like, normalize_name
 from ai_agent.llm.client import (
+    THINKING_OFF,
     complete_chat,
     graph_client,
     graph_model,
@@ -406,7 +407,7 @@ def judge_pairs(pairs: list[dict]) -> list[bool]:
             max_tokens=256,
             # 裁决共用抽取温度（0）：并错一对就丢一个实体，且合并不可逆
             temperature=settings.kb_graph_temperature,
-            extra_body={"enable_thinking": False},
+            extra_body=THINKING_OFF,
             response_format=fmt,
         )
 

@@ -77,3 +77,31 @@ def test_lightweight_llm_without_small_model_uses_main(monkeypatch):
 
     assert model == "qwen3.7-plus"
     assert chat is llm_client._client
+
+
+def test_thinking_off_constant_never_sends_top_level_enable_thinking():
+    """部分网关把顶层 enable_thinking 限制为 True，传 False 会 400。
+
+    所有关思考的调用点必须共用同一个常量，且不含该顶层字段。
+    """
+    from ai_agent.llm.client import THINKING_OFF
+
+    assert "enable_thinking" not in THINKING_OFF
+    assert THINKING_OFF["chat_template_kwargs"] == {"enable_thinking": False}
+    assert THINKING_OFF["think"] is False
+
+
+def test_no_module_inlines_top_level_enable_thinking():
+    """回归：不允许任何模块重新内联顶层 enable_thinking。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "ai_agent"
+    offenders = []
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for line in text.splitlines():
+            stripped = line.strip()
+            # 允许出现在 chat_template_kwargs 内部的写法
+            if stripped.startswith('"enable_thinking"') and "chat_template_kwargs" not in stripped:
+                offenders.append(f"{path.name}: {stripped}")
+    assert not offenders, offenders

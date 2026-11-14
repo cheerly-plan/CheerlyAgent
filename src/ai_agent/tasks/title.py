@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.llm.client import complete_chat, lightweight_llm
+from ai_agent.llm.client import THINKING_OFF, complete_chat, lightweight_llm
 from ai_agent.llm import metrics
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.llm.types import ChatEvent
@@ -93,11 +93,7 @@ def generate_session_title(question: str, answer: str = "") -> str:
             max_tokens=128,
             client=client,
             response_format={"type": "json_object"},
-            extra_body={
-                "enable_thinking": False,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "think": False,
-            },
+            extra_body=THINKING_OFF,
         )
     except LLMError as e:
         # JSON 模式不被网关支持时退回纯文本提示词，再失败才用压缩主题

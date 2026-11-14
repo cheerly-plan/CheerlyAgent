@@ -80,12 +80,18 @@ StreamItem = tuple[Literal["text"], str] | tuple[Literal["result"], ChatResult]
 
 # 主对话也必须关思考链：Qwen3 等模型开着会把正文写进 reasoning，
 # delta.content 一直是空，前端就只有光标、没有回答。
-_THINKING_OFF = {
-    "enable_thinking": False,
+#
+# 顶层 ``enable_thinking`` **不能下发**：部分网关（如 auto 路由）把它
+# 限制为 True，传 False 直接 400 invalid_parameter_error。
+# ``chat_template_kwargs`` 与 ``think`` 在 DashScope 兼容口、这类网关和
+# 本地 Ollama 上都可用，关思考效果相同。
+THINKING_OFF: dict[str, Any] = {
     "chat_template_kwargs": {"enable_thinking": False},
     # Ollama / Qwen3 原生字段；vLLM 会忽略
     "think": False,
 }
+# 兼容旧名
+_THINKING_OFF = THINKING_OFF
 
 
 def json_response_format(mode: str) -> dict[str, Any] | None:
