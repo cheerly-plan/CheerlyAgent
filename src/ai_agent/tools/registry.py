@@ -25,7 +25,6 @@ from ai_agent.tools.misc import (
     read_history_tool,
     read_tool_result_tool,
     search_history_tool,
-    weather_tool,
     web_search_tool,
 )
 from ai_agent.tools.base import ToolOutput
@@ -43,7 +42,6 @@ logger = get_logger(__name__)
 # 积木无路径参数、不写盘，分别承担「抂数、算增减、校验」三个确定性环节。
 # report_pdf 仍不注册——渲染含落盘与 M2 审核门禁，只能由服务端流水线触发。
 TOOLS = [
-    weather_tool,
     web_search_tool,
     read_tool_result_tool,
     search_history_tool,

@@ -214,14 +214,14 @@ def test_delete_session_invalidates_hot_cache(monkeypatch):
 def test_execute_tool_clips_output_with_marker(monkeypatch):
     from ai_agent.tools.registry import TOOLS_MAP, execute_tool
 
-    tool = TOOLS_MAP["get_weather"]
+    tool = TOOLS_MAP["web_search"]
     long_text = (
         "开头关键结论\n"
         + "中间内容" * 1000
         + "\n结尾下载链接 /v1/report/files/a.pdf"
     )
     monkeypatch.setattr(tool, "run", lambda **_: long_text)
-    out = execute_tool("get_weather", {})
+    out = execute_tool("web_search", {})
     assert len(out) <= tool.max_output_chars
     assert "已省略" in out
     assert "开头关键结论" in out

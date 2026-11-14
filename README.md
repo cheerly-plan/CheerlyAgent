@@ -79,7 +79,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
  llm/   │ client.py 流式   │   │ tools/  工具（模型自主调用）      │
         │ OpenAI 兼容      │   │ kb_search · kb_list_files · kg_search│
         └──────────────────┘   │ search_memory · write_memory      │
-                               │ web_search · get_weather           │
+                               │ web_search                        │
                                │ generate_report · report_job_status│
                                │ report_extract / compare / validate│
                                └─────┬─────────────────────────────┘
@@ -155,7 +155,6 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `read_history` | `tools/misc/history.py` | 按 seq 读取命中处前后上下文 |
 | `search_memory` / `write_memory` | `tools/memory/memory.py` | 长期/情景记忆的检索与写入 |
 | `web_search` | `tools/misc/web_search.py` | 联网搜索（`ddgs`） |
-| `get_weather` | `tools/misc/weather.py` | 天气查询 |
 | `generate_report` | `tools/report/report_generate.py` | 提交研报后台任务，返回 `job_id`（不阻塞 SSE） |
 | `report_job_status` | `tools/report/report_status.py` | 按 `job_id` 查进度与交付链接 |
 | `report_extract_indicators` | `tools/report/report_extract.py` | 积木：从已入库财报抽指标 |

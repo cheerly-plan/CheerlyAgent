@@ -190,7 +190,6 @@ def test_facet_rules_are_injected_once():
 @pytest.mark.parametrize(
     "name,text",
     [
-        ("weather", tools.WEATHER_DESC),
         ("web_search", tools.WEB_SEARCH_DESC),
         ("memory_search", tools.MEMORY_SEARCH_DESC),
         ("memory_write", tools.MEMORY_WRITE_DESC),

@@ -54,7 +54,6 @@ _STUB = {
     "kg_search": "图谱：本题问到的实体关系已列出。",
     "web_search": "网页结果：已列出与问题对应的公开信息。",
     "kb_list_files": "知识库里有若干已就绪文件。",
-    "get_weather": "天气：已查到。",
     "search_memory": "没有相关记忆。",
     "write_memory": "已记下。",
 }

@@ -5,14 +5,12 @@
 
 from ai_agent.tools.misc.history import read_history_tool, search_history_tool
 from ai_agent.tools.misc.tool_result import read_tool_result_tool
-from ai_agent.tools.misc.weather import weather_tool
 from ai_agent.tools.misc.web_search import web_search_tool
 
 __all__ = [
     "read_history_tool",
     "read_tool_result_tool",
     "search_history_tool",
-    "weather_tool",
     "web_search_tool",
 ]
 

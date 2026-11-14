@@ -16,17 +16,6 @@ from __future__ import annotations
 
 from ai_agent.prompts.builder import assert_rendered, render
 
-# ——— 天气 ———
-
-WEATHER_DESC = (
-    "查询指定城市的实时天气和每日预报（温度、体感、湿度、风速、降水概率）。"
-    "用户问天气、穿什么、要不要带伞、出行安排时调用。"
-)
-WEATHER_CITY_DESC = "城市名称，可用中文。重名城市可带国家或省份，如「剑桥 英国」"
-WEATHER_DAYS_DESC = (
-    "预报天数：1=只看今天，2=到明天，最多 7 天。用户问周末/未来安排时适当加大"
-)
-
 # ——— 联网搜索 ———
 
 WEB_SEARCH_DESC = (
