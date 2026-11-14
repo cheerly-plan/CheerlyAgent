@@ -97,8 +97,20 @@ def default_complete(
                 messages, response_format={"type": "json_object"},
                 diagnostics=diag, **kwargs
             )
-        except LLMError:
-            logger.warning("深度分析 JSON mode 不被支持，去掉 response_format 重试")
+        except LLMError as exc:
+            # 只有网关明确拒绝 JSON mode（400）才是「不支持」；429/5xx/超时等
+            # 是临时故障，去掉 response_format 重试能过，但原因要如实记录，
+            # 别让日志误导成「模型不支持 JSON」。
+            if exc.status_code == 400:
+                logger.warning(
+                    "深度分析 JSON mode 不被网关支持（400），去掉 response_format 重试"
+                )
+            else:
+                logger.warning(
+                    "深度分析首次调用失败（status=%s）：%s；去掉 response_format 重试",
+                    exc.status_code,
+                    str(exc)[:200],
+                )
             raw = complete_chat(messages, diagnostics=diag, **kwargs)
         return raw or "", name, diag
 
