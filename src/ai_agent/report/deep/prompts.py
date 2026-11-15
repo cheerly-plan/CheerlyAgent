@@ -171,6 +171,62 @@ CONVERGENCE_USER = """标的与报告期：{{TARGET}} / {{PERIOD}}
 """
 
 
+# 章节输出的 strict JSON Schema：模型常无视提示词里的格式要求，直接把输入
+# 台账转成 JSON 返回（实测每章都如此，全部 fallback）。提示词已经写明形状
+# 也没用，只能在网关侧用 schema 卡死。字段与 CHAPTER_SYSTEM 里的示例一致。
+CHAPTER_RESPONSE_FORMAT: dict = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "chapter_analysis",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string"},
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "claim_type": {
+                                "type": "string",
+                                "enum": ["known", "inferred", "uncertain"],
+                            },
+                            "tier": {"type": "string"},
+                            "evidence_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "confidence": {"type": "number"},
+                        },
+                        "required": [
+                            "text", "claim_type", "tier", "evidence_ids", "confidence",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "gaps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "item": {"type": "string"},
+                            "impact": {"type": "string"},
+                            "handling": {"type": "string"},
+                        },
+                        "required": ["item", "impact", "handling"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["verdict", "claims", "gaps"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def render_chapter_user(**slots: str) -> str:
     return assert_rendered(render(CHAPTER_USER, **slots))
 

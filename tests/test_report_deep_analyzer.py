@@ -258,3 +258,23 @@ def test_ledger_echo_is_not_accepted_as_claims():
     )
     assert result.status == "fallback"
     assert result.claims == []
+
+
+def test_chapter_uses_strict_json_schema():
+    """章节调用必须带 strict JSON Schema。
+
+    模型会无视提示词里的输出格式要求，直接把输入台账转成 JSON 返回
+    （实测每章都如此、每章 fallback）。加警告、加格式示例都拦不住，
+    只能靠网关侧 schema 约束。
+    """
+    from ai_agent.report.deep.prompts import CHAPTER_RESPONSE_FORMAT
+
+    schema = CHAPTER_RESPONSE_FORMAT["json_schema"]
+    assert CHAPTER_RESPONSE_FORMAT["type"] == "json_schema"
+    assert schema["strict"] is True
+    body = schema["schema"]
+    # 顶层必须是对象且只认 verdict/claims/gaps——台账条目（id/source）
+    # 因此不可能通过校验
+    assert body["type"] == "object"
+    assert set(body["required"]) == {"verdict", "claims", "gaps"}
+    assert body["additionalProperties"] is False

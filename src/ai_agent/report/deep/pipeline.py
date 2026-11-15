@@ -50,6 +50,7 @@ from ai_agent.report.deep.chapters import (
     spec_of,
 )
 from ai_agent.report.deep.ledger import SourceLedger
+from ai_agent.report.deep.prompts import CHAPTER_RESPONSE_FORMAT
 from ai_agent.report.deep.schema import (
     ChapterResult,
     ChecklistItem,
@@ -621,6 +622,9 @@ def run_deep_analysis(
             cfg.max_tokens, cfg.temperature, cfg.timeout, plan.chapter_model,
             escalation_model="" if plan.primary_channel else plan.convergence_model,
             events=model_events,
+            # strict schema：模型会无视提示词里的格式要求、直接把输入台账
+            # 转成 JSON 返回，只能靠网关侧约束卡死
+            response_format=CHAPTER_RESPONSE_FORMAT,
         ))
         converge_call = budget.wrap(default_complete(
             cfg.max_tokens, cfg.temperature, cfg.timeout, plan.convergence_model,

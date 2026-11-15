@@ -63,8 +63,13 @@ def default_complete(
     escalation_model: str = "",
     events: list[str] | None = None,
     circuit_break_after: int = 2,
+    response_format: dict[str, Any] | None = None,
 ) -> Complete:
     """构造默认补全函数：JSON mode 不被网关支持时去掉该参数重试一次。
+
+    ``response_format`` 可传 strict JSON Schema：实测模型会无视提示词里的
+    输出格式要求、直接把输入台账转成 JSON 返回（每章都 fallback），
+    而 schema 约束是确定性的——网关侧就不接受别的形状。
 
     思考型小模型会把 ``max_tokens`` 全部消耗在 reasoning 上并返回空 content
     （本地 Ollama qwen3 实测：completion_tokens=1600 / finish_reason=length /
@@ -100,8 +105,10 @@ def default_complete(
         diag: dict[str, Any] = {}
         try:
             raw = complete_chat(
-                messages, response_format={"type": "json_object"},
-                diagnostics=diag, **kwargs
+                messages,
+                response_format=response_format or {"type": "json_object"},
+                diagnostics=diag,
+                **kwargs,
             )
         except LLMError as exc:
             # 只有网关明确拒绝 JSON mode（400）才是「不支持」；429/5xx/超时等
