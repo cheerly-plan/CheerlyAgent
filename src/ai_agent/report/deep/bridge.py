@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Sequence
 
+from ai_agent.core.config import settings
 from ai_agent.report.deep.pipeline import DeepConfig, run_deep_analysis
 from ai_agent.report.deep.schema import DeepAnalysisResult
 from ai_agent.report.deep.sources import (
@@ -160,6 +161,7 @@ def attach_deep(result: "ReportResult", options: DeepOptions) -> DeepAnalysisRes
         chapter_concurrency=options.chapter_concurrency,
         review_round_concurrency=options.review_round_concurrency,
         chapter_channel=options.chapter_channel or "small",
+        max_tokens=settings.report_deep_max_tokens,
     )
     deep = run_deep_analysis(
         target,

@@ -260,3 +260,17 @@ def test_resolve_target_mode():
 def test_cleanup_recognizes_deep_artifacts():
     for suffix in (".md", ".pdf", ".provenance.md", ".review.json", ".deep.md", ".deep.json"):
         assert _ARTIFACT.match(f"标题_abcdef1234{suffix}") is not None
+
+
+def test_entry_config_uses_configured_max_tokens():
+    """对外入口的输出上限要来自配置，不能写死 1600。
+
+    1600 太紧：实测模型复读台账写不到一半就被截断成未闭合 JSON
+    （finish_reason=length），整章降级 fallback。库级 DeepConfig 默认
+    仍是 1600，不影响既有调用方与测试。
+    """
+    from ai_agent.core.config import settings
+    from ai_agent.report.deep.pipeline import DeepConfig
+
+    assert settings.report_deep_max_tokens >= 3000
+    assert DeepConfig().max_tokens == 1600  # 库级默认不变

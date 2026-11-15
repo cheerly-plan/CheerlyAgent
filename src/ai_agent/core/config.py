@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     # 对外入口章节/评审通道：primary=直接主模型（默认）；small=小模型优先、
     # 空 content 自动升级主模型。
     report_deep_chapter_channel: str = "primary"
+    # 深度分析单次调用输出上限。1600 太紧：实测模型复读台账时写不到一半就被
+    # 截断成未闭合 JSON（finish_reason=length），整章降级为 fallback。
+    # 章节要输出 verdict + 最多 6 条 claims + gaps，3000 留足余量。
+    report_deep_max_tokens: int = 3000
     # 数据库连接池上限，需 ≥ 聊天并发 + 标题线程池 + 收尾线程池之和
     db_pool_max_size: int = 28
     # 允许的跨域来源，逗号分隔，如 "http://localhost:5173,https://chat.example.com"
