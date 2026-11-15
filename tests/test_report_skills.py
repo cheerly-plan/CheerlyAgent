@@ -304,7 +304,7 @@ def test_skills_load_from_skill_md_files():
 def test_extract_tool_returns_facts_with_basis_and_missing(monkeypatch):
     from ai_agent.report.extract import Evidence, ExtractResult, IndicatorFact
 
-    def fake_extract(subjects, period, indicators):
+    def fake_extract(subjects, period, indicators, *, basis="cumulative"):
         return ExtractResult(
             facts=[
                 IndicatorFact(
@@ -350,7 +350,7 @@ def test_extract_tool_default_indicators_use_skill_template(monkeypatch):
 
     captured: dict = {}
 
-    def fake_extract(subjects, period, indicators):
+    def fake_extract(subjects, period, indicators, *, basis="cumulative"):
         captured["indicators"] = list(indicators)
         return ExtractResult(missing=[])
 
@@ -512,7 +512,7 @@ def test_run_report_skill_id_reaches_parse(monkeypatch):
             skill_id=skill_id or "industry_report",
         )
 
-    def fake_extract(subjects, period, indicators):
+    def fake_extract(subjects, period, indicators, *, basis="cumulative"):
         return ExtractResult(
             facts=[
                 IndicatorFact(

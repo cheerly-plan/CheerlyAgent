@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from ai_agent.prompts.tools import REPORT_EXTRACT_DESC
 from ai_agent.report.basis import label as basis_label
-from ai_agent.report.extract import extract_indicators
+from ai_agent.report.extract import ExtractResult, extract_indicators
 from ai_agent.report.industry import company_type_of, default_indicators
 from ai_agent.tools.base import Tool
 
@@ -43,6 +43,15 @@ class ReportExtractArgs(BaseModel):
             "留空时按公司细类型路由默认指标集（银行／Fabless／制造等）"
         ),
     )
+    basis: str = Field(
+        default="both",
+        description=(
+            "口径列：both=单季与累计都给（默认，推荐）；cumulative=只要累计；"
+            "single=只要单季。季报的「本报告期」和「年初至报告期末」两列"
+            "覆盖的科目并不完全相同（总资产、现金余额只出现在期末列），"
+            "只给一种口径时正文里的另一组数字会缺出处"
+        ),
+    )
     compare_to: str = Field(
         default="",
         description=(
@@ -57,18 +66,21 @@ def _report_extract(
     period: str,
     indicators: list[str],
     compare_to: str = "",
+    basis: str = "cumulative",
 ) -> str:
     wanted = [item for item in (indicators or []) if item and item.strip()]
     if not wanted:
         # 指标留空 → 按公司细类型模板（bank/fabless/foundry…），禁止跨行业通吃。
         wanted = default_indicators(company_type_of(subjects))
-    result = extract_indicators(subjects, period, wanted)
+    requested = (basis or "").strip().lower()
+    chosen = requested if requested in {"single", "cumulative", "both"} else "both"
+    result = _extract_by_basis(subjects, period, wanted, chosen)
     base = _render(result)
     other = (compare_to or "").strip()
     if not other or other == (period or "").strip():
         return base
     # 再抽一期：环比需要上一期的原值，工具层补齐比让模型多调一次更省轮次。
-    previous = extract_indicators(subjects, other, wanted)
+    previous = _extract_by_basis(subjects, other, wanted, chosen)
     prev_text = _render(previous)
     from ai_agent.report.compare import compare_measures, format_compare
 
@@ -80,6 +92,30 @@ def _report_extract(
     if compare_text:
         parts.extend(["两次抽取的增减（可直接转述，不要口算）：", compare_text])
     return "\n".join(parts)
+
+
+def _extract_by_basis(
+    subjects: list[str], period: str, wanted: list[str], basis: str
+) -> "ExtractResult":
+    """按口径抽取。``both`` = 单季与累计各抽一遍并合并。
+
+    两列覆盖的科目并不相同：营业收入、净利润两列都有（累计优先本来会盖掉
+    单季），而总资产、存货这类只有期末列。正文通常两种口径都会写，只给
+    一种，另一种就全成了「未核对数字」。
+    """
+    if basis != "both":
+        return extract_indicators(subjects, period, wanted, basis=basis)
+    single = extract_indicators(subjects, period, wanted, basis="single")
+    cumulative = extract_indicators(subjects, period, wanted, basis="cumulative")
+    merged = ExtractResult(facts=list(single.facts), missing=list(single.missing))
+    seen = {(f.subject, f.name, f.period, f.value) for f in merged.facts}
+    for fact in cumulative.facts:
+        key = (fact.subject, fact.name, fact.period, fact.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.facts.append(fact)
+    return merged
 
 
 def _render(result) -> str:

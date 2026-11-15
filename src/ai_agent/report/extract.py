@@ -198,11 +198,18 @@ def extract_indicators(
     subjects: list[str],
     period: str,
     indicators: list[str],
+    *,
+    basis: str = "cumulative",
 ) -> ExtractResult:
     """在指定公司、指定报告期的季报里抽取指标。
 
     subjects 是公司名或简称，period 形如 2025Q3。一家都没圈到、或表格里没有
     这一行时，写进 missing，不补一个看起来像的数字。
+
+    ``basis`` 选口径列：``"cumulative"``（默认，年初至报告期末）或
+    ``"single"``（本报告期单季）。用户问「某公司某季度业绩」时该用 single，
+    否则拿回的是累计值、和正文里的单季数字对不上，校验会报一堆
+    「未核对数字」，模型只能再 kb_read 读原文补。
     """
     result = ExtractResult()
     names = [item.strip() for item in subjects if item and item.strip()]
@@ -242,7 +249,7 @@ def extract_indicators(
                 result.missing.append(f"{indicator}：检索失败")
                 continue
             picked = _pick_facts(
-                rows, by_id, aliases, indicator, period, requested=names
+                rows, by_id, aliases, indicator, period, requested=names, basis=basis
             )
         if not picked and (
             registry.narrative_entry(indicator) or _NARRATIVE_PATTERNS.get(indicator)
@@ -260,7 +267,7 @@ def extract_indicators(
                 logger.exception("兜底表格抽取失败 indicator=%s", indicator)
                 rows = []
             picked = _pick_facts(
-                rows, by_id, aliases, indicator, period, requested=names
+                rows, by_id, aliases, indicator, period, requested=names, basis=basis
             )
         if not picked:
             result.missing.append(f"{indicator}：表格和正文里都没有对上的一行")
@@ -274,6 +281,7 @@ def read_indicator(
     aliases: tuple[str, ...] | list[str],
     *,
     period: str = "",
+    basis: str = "cumulative",
 ) -> dict | None:
     """从一张表里读出指标的本期数字。读不到或数字不在原文里就返回 None。"""
     tables = _tables(text or "")
@@ -286,7 +294,7 @@ def read_indicator(
             rank = _row_rank(cells[0], aliases)
             if rank <= best_rank:
                 continue
-            picked = _pick_value_column(headers, cells, period)
+            picked = _pick_value_column(headers, cells, period, basis)
             if not picked:
                 continue
             index, column, value, cumulative = picked
@@ -387,11 +395,14 @@ def _pick_facts(
     period: str,
     *,
     requested: list[str] | None = None,
+    basis: str = "cumulative",
 ) -> list[IndicatorFact]:
     """同一份文件只留一条。科目本行优先于明细，合并口径优先于母公司。"""
     found: dict[str, tuple[tuple[int, int], IndicatorFact]] = {}
     for row in rows:
-        parsed = read_indicator(str(row.get("text") or ""), aliases, period=period)
+        parsed = read_indicator(
+            str(row.get("text") or ""), aliases, period=period, basis=basis
+        )
         if not parsed:
             continue
         file_id = str(row.get("file_id") or "")
@@ -675,14 +686,19 @@ def _label_rank(label: str, aliases: tuple[str, ...] | list[str]) -> int:
 
 
 def _pick_value_column(
-    headers: list[str], cells: list[str], period: str
+    headers: list[str], cells: list[str], period: str, basis: str = "cumulative"
 ) -> tuple[int, str, str, bool] | None:
     """在同一行里挑出本期的数值列，返回 (列下标, 列表头, 数值, 是否累计)。
 
-    优先级：累计列 > 本期列 > 未标明的数字列。季报常把「本报告期」(单季)
+    默认优先级：累计列 > 本期列 > 未标明的数字列。季报常把「本报告期」(单季)
     和「年初至报告期末」(累计) 并排，研报默认说的是累计值，取错列会差好几倍。
     上年同期、同比增减、以及表头里写着另一个年份的列一律不参与挑选。
     同优先级保留靠前的列，这样原来只有单列「本报告期」的表格行为不变。
+
+    ``basis="single"`` 时反过来优先单季列：用户问「某公司某季度业绩」时，
+    自然理解是这一季怎么样，而默认给的累计值对不上，模型只能再去 kb_read
+    读原文补单季（实测一次季报分析因此多读 2 页）。表里没有单季列时自动
+    回落到累计值，不会抽空。
 
     「是否累计」随数值一起带出去：compare 只有确认三期都是累计口径，
     才允许用相邻累计值相减还原单季，避免把单季数当累计去减。
@@ -707,7 +723,16 @@ def _pick_value_column(
             and _CURRENT_COL.search(header)
         ):
             cumulative = True
-        if cumulative:
+        if basis == "single":
+            # 优先单季列；一季报被标成累计的那一列例外（Q1 单季 ≡ 累计）
+            single = not cumulative or period.endswith("Q1")
+            if single and ((year and year in header) or _CURRENT_COL.search(header)):
+                priority = 3
+            elif cumulative:
+                priority = 2
+            else:
+                priority = 1
+        elif cumulative:
             priority = 3
         elif (year and year in header) or _CURRENT_COL.search(header):
             priority = 2

@@ -241,6 +241,9 @@ REPORT_EXTRACT_DESC = (
     "还得自己找数字，这里直接返回带口径与出处的原值；indicators 留空则返回该行业默认指标集。"
     "问环比/同比时填 compare_to（如 period=2026Q3、compare_to=2026Q2），"
     "工具会同时抽两期并给出增减，不需要自己调两次。"
+    "口径由 basis 决定：问「某季度业绩」时填 basis=single 取单季值；"
+    "问「累计/前三季度/年初至今」时才用默认的 cumulative，"
+    "否则拿回累计值会和单季数字对不上。"
     "【禁止条件】不要用它代替 generate_report 生成整份报告；"
     "返回的数字必须原样转述或传给 report_compare，禁止换算、四舍五入或口算。"
 )
