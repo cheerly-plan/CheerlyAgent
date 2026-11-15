@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from ai_agent.core.exceptions import LLMError
 from ai_agent.core.logging import get_logger
-from ai_agent.llm.client import complete_chat, lightweight_llm
+from ai_agent.llm.client import THINKING_OFF, complete_chat, lightweight_llm
 from ai_agent.llm.json_utils import load_llm_json
 from ai_agent.report.deep.chapters import ChapterSpec, EXPERT_VIEWS
 from ai_agent.report.deep.ledger import NUMBER_RE, SourceLedger, normalize_number
@@ -90,6 +90,12 @@ def default_complete(
             "temperature": temperature,
             "max_tokens": max_tokens,
             "timeout": timeout,
+            # 显式关思考：章节输出本就是结构化 JSON，思考会把 max_tokens
+            # 全耗在 reasoning 上，content 为空、finish_reason=length。
+            # 实测主模型 qwen4-max-preview 下 29 次调用全部如此，整份
+            # 深度解析所有章节降级成 fallback。原来只是「空响应就升级模型」，
+            # 但主模型自己就是思考型，升级后仍是空。
+            "extra_body": dict(THINKING_OFF),
         }
         diag: dict[str, Any] = {}
         try:

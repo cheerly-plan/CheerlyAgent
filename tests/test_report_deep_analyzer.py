@@ -160,3 +160,31 @@ def test_converge_parses_chain_moat_falsifiers_and_scenarios():
     assert len(scenarios) == 3
     assert falsifiers[0]["severity"] == "高"
     assert tracking[0].indicator == "单位成本"
+
+
+def test_deep_completer_disables_thinking():
+    """深度分析必须显式关思考。
+
+    实测主模型 qwen4-max-preview（思考型）：29 次章节调用全部返回
+    content=""、finish_reason=length、completion_tokens=1600——max_tokens
+    被 reasoning 吃满，整份深度解析每个章节都降级成 fallback。
+    原来只有「空响应升级模型」，但主模型自己就是思考型，升级后照样空。
+    """
+    from unittest.mock import patch
+
+    from ai_agent.report.deep import analyzer
+
+    captured: dict = {}
+
+    def fake_complete(messages, **kwargs):
+        captured.update(kwargs)
+        return '{"ok": 1}'
+
+    with (
+        patch.object(analyzer, "complete_chat", side_effect=fake_complete),
+        patch.object(analyzer, "lightweight_llm", return_value=("m", None)),
+    ):
+        analyzer.default_complete(1600, 0.1, 90, "qwen4-max-preview")("sys", "user")
+
+    assert captured["extra_body"]["think"] is False
+    assert captured["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
