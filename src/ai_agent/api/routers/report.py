@@ -38,7 +38,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from ai_agent.api.dependencies import get_current_user
-from ai_agent.api.schemas import ReportDecisionRequest, ReportRequest
+from ai_agent.api.schemas import (
+    ReportBatchDecisionRequest,
+    ReportDecisionRequest,
+    ReportRequest,
+)
 from ai_agent.core.config import settings
 from ai_agent.storage.db import UserRecord, user_scope
 from ai_agent.report.pipeline import ReportResult, run_report
@@ -468,6 +472,33 @@ def decide_review(
     except ReviewError as exc:
         raise _review_http_error(exc) from exc
     return _record_payload(record)
+
+
+@router.post("/reviews/batch-approve")
+def batch_approve_reviews(
+    req: ReportBatchDecisionRequest,
+    user: UserRecord = Depends(get_current_user),
+) -> dict:
+    """跨报告批量确认（仅限可整批确认的条目，如推断层 PDF）。
+
+    含具体数字/出处问题的报告会进 skipped 并说明原因——那类必须逐条核对。
+    """
+    owner = None if _is_review_admin(user) else user.user_id
+    allowed: list[str] = []
+    blocked: list[dict] = []
+    for report_id in req.report_ids:
+        record = review_store.get_record(report_id)
+        if record is None:
+            blocked.append({"report_id": report_id, "reason": "没有该审核记录"})
+            continue
+        # 普通用户只能批自己生成的
+        if owner and record.owner != owner:
+            blocked.append({"report_id": report_id, "reason": "只能审核自己生成的研报"})
+            continue
+        allowed.append(report_id)
+    result = review_store.approve_batch(allowed, user.username)
+    result["skipped"] = blocked + list(result.get("skipped") or [])
+    return result
 
 
 @router.post("/reviews/{report_id}/finalize")

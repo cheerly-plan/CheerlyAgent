@@ -318,6 +318,17 @@ class ReportRequest(BaseModel):
     )
 
 
+class ReportBatchDecisionRequest(BaseModel):
+    """跨报告批量确认。
+
+    只对**可整批确认**的条目生效（目前是推断层 PDF 的整体确认）。
+    含具体数字/出处问题的报告会被跳过并说明原因，不会被静默放行——
+    那类必须逐条核对。
+    """
+
+    report_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
 class ReportDecisionRequest(BaseModel):
     """处置一份研报的人工审核队列（M2）。
 

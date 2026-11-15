@@ -60,6 +60,37 @@ DEEP_REVIEW_REASON = (
     "独立深度分析 PDF：含大模型推断结论，需人工确认推断标注、"
     "证据边界与免责声明完整性（不得自动定稿）"
 )
+# 审核条目的种类。前端按它决定怎么展示、能不能「整批确认」：
+#   deep_pdf      推断层 PDF 的整体确认（不是某条数字出错），一次确认即可
+#   number        正文出现未核对数字            需要看具体是哪个数
+#   citation      数字缺出处                    需要看正文和出处
+#   other         其它
+ITEM_KIND_DEEP_PDF = "deep_pdf"
+ITEM_KIND_NUMBER = "number"
+ITEM_KIND_CITATION = "citation"
+ITEM_KIND_OTHER = "other"
+# 可以整批确认的种类：整份文档级的确认，逐条没有意义
+BATCHABLE_KINDS = frozenset({ITEM_KIND_DEEP_PDF})
+
+
+def item_kind(entry: "ReviewEntry") -> str:
+    """审核条目的种类（供列表分组与「能否整批确认」判断）。"""
+    reason = entry.reason or ""
+    if reason.startswith("独立深度分析 PDF"):
+        return ITEM_KIND_DEEP_PDF
+    if reason.startswith("正文出现未核对数字"):
+        return ITEM_KIND_NUMBER
+    if "看不到出处标记" in reason:
+        return ITEM_KIND_CITATION
+    return ITEM_KIND_OTHER
+
+
+def entry_payload(entry: "ReviewEntry") -> dict:
+    """列表里一条待审的完整信息：前端不点进去也能判断该不该批。"""
+    payload = asdict(entry)
+    payload["kind"] = item_kind(entry)
+    payload["batchable"] = payload["kind"] in BATCHABLE_KINDS
+    return payload
 
 
 class ReviewError(ValueError):
@@ -507,11 +538,70 @@ def list_records(
         payload = checked.to_dict()
         payload["finalizable"] = allowed
         payload["gate_reason"] = reason
-        payload["pending_items"] = len(checked.pending_items)
+        pending = checked.pending_items
+        payload["pending_items"] = len(pending)
+        # 待审条目本身也带出来：列表页据此直接展示「在审什么」，
+        # 不必点进详情才知道。只给个计数时，用户看到的是
+        # 「研报 · 待处置 1 项」，完全无从判断该不该批。
+        payload["pending_list"] = [entry_payload(item) for item in pending]
+        payload["batch_approvable"] = bool(pending) and all(
+            item_kind(item) in BATCHABLE_KINDS for item in pending
+        )
         payload["queue_url"] = f"/v1/report/reviews/{checked.report_id}"
         payload["final_url"] = f"/v1/report/reviews/{checked.report_id}/final"
         output.append(payload)
     return output
+
+
+def approve_batch(
+    report_ids: list[str],
+    actor: str,
+    *,
+    output_dir: Path | str | None = None,
+) -> dict:
+    """跨报告批量批准**仅限可整批确认的条目**（如推断层 PDF 的整体确认）。
+
+    「待处置 1 项」但要点进详情才看得见是什么的情况，实测六条全是同一种
+    推断层确认——逐份点进去没有任何信息增量。这里支持一次批完。
+
+    **只批 BATCHABLE_KINDS**：number / citation 这类条目是具体的数字或出处
+    问题，必须逐条看过再决定，混进批量批准等于盲批。含此类条目的报告会被
+    跳过并在 ``skipped`` 里说明原因，不会被静默放行。
+    """
+    approved: list[str] = []
+    skipped: list[dict] = []
+    for report_id in dict.fromkeys(report_ids or []):
+        record = get_record(report_id, output_dir)
+        if record is None:
+            skipped.append({"report_id": report_id, "reason": "没有该审核记录"})
+            continue
+        pending = record.pending_items
+        if not pending:
+            skipped.append({"report_id": report_id, "reason": "没有待审条目"})
+            continue
+        blocked = [item for item in pending if item_kind(item) not in BATCHABLE_KINDS]
+        if blocked:
+            skipped.append(
+                {
+                    "report_id": report_id,
+                    "reason": f"含 {len(blocked)} 条需要逐条核对的条目，不能批量确认",
+                }
+            )
+            continue
+        try:
+            decide(
+                report_id,
+                "approve",
+                actor,
+                item_ids=[item.id for item in pending],
+                note="批量确认",
+                output_dir=output_dir,
+            )
+        except ReviewError as exc:
+            skipped.append({"report_id": report_id, "reason": str(exc)})
+            continue
+        approved.append(report_id)
+    return {"approved": approved, "skipped": skipped}
 
 
 def decide(
