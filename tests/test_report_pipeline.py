@@ -260,6 +260,10 @@ def test_generate_report_tool_returns_links_not_body_numbers(monkeypatch):
     assert "/v1/report/files/bank.deep.pdf" in text
     assert "底稿 PDF" in text
     assert "深度解析 PDF" in text
+    # 工具结果必须自己说清「这次成功了」：对话历史里可能还留着上一轮
+    # 「需要打开研报开关」的回答，实测模型会采信历史而否定本次成功
+    assert "本次 generate_report 已成功执行" in text
+    assert "不要再说「需要打开研报开关」" in text
     assert "/v1/report/files/bank.provenance.md" in text
     assert "校验通过" in text
     assert "缺口（如实转述，不要补数）" in text
