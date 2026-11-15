@@ -137,3 +137,77 @@ def test_repeated_identical_output_blocks_tool():
 
     # 第 RETRY_LIMIT 次拿到相同输出后封掉工具，之后的调用不再真正执行
     assert len(executed) == RETRY_LIMIT, executed
+
+
+# ——— 方案 D：单工具调用次数上限 ———
+
+def _run_with_budget(limit: int, *, same_output: bool = False) -> list[str]:
+    """一直要求调 web_search，返回实际执行过的工具序列。"""
+    from ai_agent.agents.budget import Budget
+    from ai_agent.agents.loop import run_loop
+
+    schemas = [{"function": {"name": "web_search"}}]
+    executed: list[str] = []
+    calls = {"n": 0}
+
+    def fake_execute(name, arguments, **kwargs):
+        executed.append(name)
+        # 结果各不相同，避开方案 C 的「相同结果封禁」，只测次数预算
+        return f"结果{calls['n']}" if not same_output else "完全相同"
+
+    def fake_stream(messages, tools, **kwargs):
+        calls["n"] += 1
+        yield (
+            "result",
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"c{calls['n']}",
+                        "name": "web_search",
+                        "arguments": {"query": f"关键词{calls['n']}"},
+                    }
+                ],
+            },
+        )
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
+        patch("ai_agent.agents.loop.execute_tool", side_effect=fake_execute),
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value=set()),
+    ):
+        list(
+            run_loop(
+                [{"role": "user", "content": "一周热点新闻"}],
+                budget=Budget(max_steps=20, max_tool_calls=limit),
+            )
+        )
+    return executed
+
+
+def test_tool_call_budget_stops_single_tool():
+    """结果各不相同（不触发方案 C）时，次数预算仍然兜住打转。"""
+    executed = _run_with_budget(4)
+    assert len(executed) == 4
+
+
+def test_tool_call_budget_zero_means_unlimited():
+    executed = _run_with_budget(0)
+    # 上限 0 = 不限，只受 max_steps=20 约束
+    assert len(executed) == 20
+
+
+def test_retry_limit_fires_before_budget_when_output_identical():
+    """相同结果时方案 C 先触发（3 次），不必等到次数预算。"""
+    executed = _run_with_budget(10, same_output=True)
+    assert len(executed) == 3
+
+
+def test_budget_defaults_from_settings():
+    from ai_agent.agents.budget import Budget
+    from ai_agent.core.config import settings
+
+    budget = Budget.from_settings()
+    assert budget.max_steps == settings.max_turns
+    assert budget.max_tool_calls == settings.max_tool_calls_per_run

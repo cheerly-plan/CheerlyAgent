@@ -24,6 +24,7 @@ from ai_agent.prompts.chat import (
     RUNTIME_DUP_CALL,
     RUNTIME_DUP_OUTPUT,
     RUNTIME_EMPTY_ANSWER,
+    RUNTIME_TOOL_BUDGET,
     RUNTIME_TOOL_EXHAUSTED,
 )
 from ai_agent.storage.store import store, user_scope
@@ -355,6 +356,8 @@ def run_loop(
     # 已判定「查不出新东西」的工具：本轮不再执行，直接回一条终止提示。
     # 只按工具粒度禁用，不影响同轮其它工具
     exhausted: dict[str, int] = {}
+    # 每个工具在本 run 内已执行的次数，用于 max_tool_calls 预算
+    executed: dict[str, int] = {}
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
@@ -526,6 +529,30 @@ def run_loop(
                     }
                 )
                 continue
+            limit = budget.max_tool_calls
+            used = executed.get(call["name"], 0)
+            if limit and used >= limit:
+                # max_steps 管步数，这里管单个工具的次数：一个步骤里模型可以
+                # 并行发起多次调用，只靠步数上限兜不住打转。
+                _public().logger.info(
+                    "工具调用次数达上限 run_id=%s tool=%s using=%d limit=%d",
+                    run_id,
+                    call["name"],
+                    used,
+                    limit,
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call["name"],
+                        "content": RUNTIME_TOOL_BUDGET.format(
+                            tool=call["name"], limit=limit
+                        ),
+                    }
+                )
+                continue
+            executed[call["name"]] = used + 1
             seen_calls.add(dedupe_key)
             # 前端用它清掉调用前的半截字，同时把「在查什么」显示出来。
             # 只有工具名时，用户只能看到「正在处理…」转圈——实测一次

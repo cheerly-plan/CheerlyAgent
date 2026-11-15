@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     model: str
     small_model: str = ""
     max_turns: int = 10
+    # 单工具调用次数上限（每次 run 内，按工具分别计数）。max_turns 管的是
+    # 模型决策步数，一轮里可能并行发起多个工具调用，光靠它兜不住——
+    # 实测「一周热点新闻」在 10 步预算内调了 13 次工具。
+    # 0 = 不限制。
+    max_tool_calls_per_run: int = 6
     log_level: str = "INFO"
     # 流式对话的 HTTP 超时（秒）：openai 客户端默认 600s 且自动重试 2 次，
     # LLM 挂死会占住并发槽与 SSE 线程最久 10 分钟（20 槽全满 → 全站 429）。
