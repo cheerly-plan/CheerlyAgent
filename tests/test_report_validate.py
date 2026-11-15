@@ -1,5 +1,7 @@
 """研报校验只对照抽取值和计算结果，不调用模型。"""
 
+import re
+
 from ai_agent.report.compare import Change, SeriesCompare
 from ai_agent.report.compose import ReportDocument, compose_report
 from ai_agent.report.extract import Evidence, IndicatorFact, sanitize_evidence_quote
@@ -127,11 +129,32 @@ def test_quote_must_contain_value():
 
 
 def test_missing_citation_marker_fails():
+    """正文既没文件名/file_id，也没有能覆盖事实页码的「第N页」时才算缺出处。
+
+    只去掉文件名、保留页码是**够**的：表格形式的分折会把出处统一写在表下
+    （「〔以上均出自该季报第1–2页〕」），单元格里不再逐条挂文件名。
+    """
     facts = [_fact("2025Q3", "100,924,954"), _fact("2024Q3", "111,000,000")]
     document = compose_report(_plan(), facts)
-    document.markdown = document.markdown.replace("file-1", "").replace(
+
+    # 只有文件名被替换、页码还在 → 仍算有出处
+    keep_page = document.markdown.replace("file-1", "").replace(
         "中国能源建设2025年第三季度报告.pdf", "某份文件"
     )
+    assert validate_report(
+        ReportDocument(
+            title=document.title,
+            markdown=keep_page,
+            html="",
+            deliverable="markdown",
+        ),
+        facts,
+        plan=_plan(),
+    ).passed
+
+    # 文件名和页码一起去掉 → 判缺出处
+    no_marker = re.sub(r"第\s*\d+(?:\s*[–-]\s*\d+)?\s*页", "", keep_page)
+    document.markdown = no_marker
     result = validate_report(document, facts, plan=_plan())
     assert not result.passed
     assert any("看不到出处标记" in item.message for item in result.findings)
@@ -262,3 +285,44 @@ def test_tool_returns_summary_and_stays_off_chat_loop():
     # 渲染工具（含落盘与 M2 审核门禁）仍只能由服务端流水线触发。
     assert "report_validate" in [tool.name for tool in TOOLS]
     assert "report_pdf" not in [tool.name for tool in TOOLS]
+
+
+def test_security_code_is_not_an_unchecked_number():
+    """证券代码是标识符，不是财务数字。
+
+    实测一条季报分析里，正文的「中科飞测（688361）」被判成
+    「未核对数字 688361」，凭空多出一条 error。
+    """
+    from ai_agent.report.validate import _body_security_codes
+
+    assert _body_security_codes("中科飞测（688361）2026Q3") == {"688361"}
+    assert _body_security_codes("证券代码：688361") == {"688361"}
+    assert _body_security_codes("没有代码的句子") == set()
+
+
+def test_security_code_does_not_require_plan():
+    """report_validate 由模型直接调用时没有 plan，白名单不能因此失效。"""
+    facts = [_fact("2025Q3", "100,924,954")]
+    document = compose_report(_plan(), facts)
+    document.markdown = (
+        document.markdown.replace("file-1", "")
+        .replace("中国能源建设2025年第三季度报告.pdf", "某份文件")
+        .replace("第12页", "〔以上均出自该季报第12页〕")
+        + "\n\n中国能源建设（601868）2025Q3 营收 100,924,954 元。\n"
+    )
+    result = validate_report(document, facts, plan=None)
+    numbers = [f.message for f in result.findings if "未核对数字 601868" in f.message]
+    assert numbers == []
+
+
+def test_page_level_citation_is_enough():
+    """表格形式的分折把出处统一写在表下，单元格里不再逐个挂文件名。"""
+    from ai_agent.report.validate import _page_cited_in_body
+
+    fact = _fact("2025Q3", "100,924,954")
+    assert fact.evidence.page == 12
+    assert _page_cited_in_body(fact, "| 营业收入 | 100,924,954 |\n\n〔以上均出自该季报第1–12页〕")
+    assert _page_cited_in_body(fact, "见第12页")
+    # 页码覆盖不到该事实时不认
+    assert not _page_cited_in_body(fact, "见第3页")
+    assert not _page_cited_in_body(fact, "没有任何页码")

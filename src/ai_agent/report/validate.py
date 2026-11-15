@@ -23,6 +23,12 @@ _SPACE = re.compile(r"\s+")
 _NUMBER = re.compile(r"-?\d[\d,，]*(?:[ \t\u00a0]\d{3})*(?:\.\d+)?%?")
 _PAGE = re.compile(r"第\s*(\d+)(?:\s*[–-]\s*(\d+))?\s*页")
 _PERIOD_YEAR = re.compile(r"((?:19|20)\d{2})")
+# 证券代码：正文常以「中科飞测（688361）」或「证券代码：688361」出现。
+# 它是标识符，不是财务数字，不该要求「行内出处标记」。
+_SECURITY_CODE = re.compile(
+    r"(?:证券代码|股票代码|代码)[：: ]*([0-9]{6})"
+    r"|[（(]([0-9]{6})[）)]"
+)
 # 短锚点形如 [7b75379b]；经营解读也可能引用非本期指标表里的同文件片段。
 _SHORT_ANCHOR = re.compile(r"\[[0-9a-fA-F]{6,12}\]")
 # 归因词：有则同句须见页码或短锚点，否则进审核队列（warning，不直接 error）。
@@ -603,10 +609,27 @@ def _check_attribution_anchors(result: ValidationResult, body: str) -> None:
         _review(result, f"归因句缺少出处锚点：{text[:60]}", value=text[:80])
 
 
+def _body_security_codes(body: str) -> set[str]:
+    """正文里出现的证券代码。
+
+    原来是靠 ``plan.skill_id`` 去技能名单里取，但 ``report_validate`` 由
+    模型直接调用时没有 plan，白名单失效，股票代码就被判成「未核对数字」
+    （实测一条季报分析因此报了 33 条错误）。
+    """
+    codes: set[str] = set()
+    for match in _SECURITY_CODE.finditer(body):
+        code = match.group(1) or match.group(2)
+        if code:
+            codes.add(code)
+    return codes
+
+
 def _check_body_numbers(result: ValidationResult, body: str, allowed: set[str]) -> None:
     if not body.strip():
         # 原文可能只剩出处被剥掉后的空串；真正空正文在外层已有事实检查兜底
         return
+    # 正文自己标明的证券代码不算未核对数字
+    allowed = allowed | _body_security_codes(body)
     for match in _NUMBER.finditer(body):
         raw = match.group(0)
         key = _compact(raw)
@@ -621,6 +644,24 @@ def _check_body_numbers(result: ValidationResult, body: str, allowed: set[str]) 
         if re.fullmatch(r"-?\d{1,2}", key):
             continue
         _error(result, "number", f"正文出现未核对数字 {raw}", value=raw)
+
+
+def _page_of(fact: IndicatorFact) -> int | None:
+    page = fact.evidence.page
+    return page if isinstance(page, int) and page > 0 else None
+
+
+def _page_cited_in_body(fact: IndicatorFact, body: str) -> bool:
+    """正文里的「第N页」「第N–M页」是否覆盖了该事实的页码。"""
+    page = _page_of(fact)
+    if page is None:
+        return False
+    for match in _PAGE.finditer(body):
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else start
+        if start <= page <= end:
+            return True
+    return False
 
 
 def _check_citations_in_body(
@@ -659,6 +700,11 @@ def _check_citations_in_body(
         if not markers:
             continue
         if any(marker in body for marker in markers):
+            continue
+        # 表格形式的分析会把出处统一写在表下（「〔以上均出自该季报第1–2页〕」），
+        # 单元格里不再逐个挂文件名。只要同一事实的页码在正文里出现，就算有出处：
+        # 正文里出现的页码集合是有限的，指不到别的文件去。
+        if _page_of(fact) and _page_cited_in_body(fact, body):
             continue
         _review(
             result,

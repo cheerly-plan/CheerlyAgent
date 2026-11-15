@@ -101,9 +101,16 @@ def test_anchor_digits_are_not_reported_as_unchecked_numbers():
 
 
 def test_citation_gate_still_requires_a_marker():
+    """锚点、文件名、页码全部去掉，才判缺出处（单有页码也够）。"""
+    import re as _re
+
     facts = [_fact(), _fact("491,204,000,000", "2025Q3")]
     document = compose_report(_plan(), facts)
-    document.markdown = document.markdown.replace(ANCHOR, "").replace(FILENAME, "某份文件")
+    document.markdown = _re.sub(
+        r"第\s*\d+(?:\s*[–-]\s*\d+)?\s*页",
+        "",
+        document.markdown.replace(ANCHOR, "").replace(FILENAME, "某份文件"),
+    )
     result = validate_report(document, facts, plan=_plan())
     assert not result.passed
     assert any("看不到出处标记" in item.message for item in result.findings)
