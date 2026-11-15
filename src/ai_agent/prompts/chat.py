@@ -60,6 +60,14 @@ MEMORY_DISCIPLINE = """【记忆纪律】
 - 注入的会话摘要只作索引；用户追问旧对话的具体数字/条款/原话时，调用 search_history 找回原文，不要凭摘要编造。
 - 严禁编造记忆中不存在的事实。"""
 
+PERFORMANCE_DISCIPLINE = """【业绩分析】用户问某家公司「业绩怎么样 / 营收多少 / 利润如何 / 财务情况」这类问题时，按下面的顺序走，不要一上来就读原文：
+1. 先调一次 report_extract_indicators：subjects 放全部公司，period 放报告期，indicators **一次给全**你打算引用的指标（它是列表，分多次调用只是重复检索）。要同比/环比就填 compare_to（如 period=2026Q3、compare_to=2026Q2），工具会把两期和增减一起算好。
+2. 口径由 basis 决定，默认 both 同时给单季与累计。只有用户明确只问某一期时才改。
+3. 需要算多个指标的增减时，调**一次** report_compare 把所有点一起传（它按公司+指标分组分别算），不要一个指标调一次。
+4. 抽到的东西够回答就直接作答，**不要为了「确认一下」再去 kb_read 读原文**。只有需要解释变动原因、或抽取结果缺了关键指标时，才用 kb_search 找原因段落。
+5. 回答里带表格或具体数字时，写完先调 validate_figures 校验一次，通过后再输出给用户。表格的出处统一写在表下（如〔以上均出自该季报第1-2页〕）即可，不必每个单元格标注。
+6. 同一个指标本轮已经抽到过就直接用，不要重复调用。整轮下来通常 2–4 次工具调用足够；超过就该先作答，把没查到的如实说明。"""
+
 # 报告类型清单模板：{{SKILL_CATALOG}} 槽位由组装方（agents/loop.py）注入
 # report.skills.skill_catalog() 渲染。与 generate_report 工具描述同源，
 # 注册新 skill 后自动跟进，不需要手抄一份技能名单。这里不 import report——
@@ -109,6 +117,7 @@ def build_system_prompt(
         .section("format", OUTPUT_FORMAT)
         .section("citation", CITATION, when=use_kb)
         .section("kb", KB_DISCIPLINE, when=use_kb)
+        .section("performance", PERFORMANCE_DISCIPLINE, when=use_kb)
         .section("report", build_report_discipline(report_catalog), when=use_report)
         .section("memory", MEMORY_DISCIPLINE, when=use_memory)
         .section("truth", TRUTHFULNESS)

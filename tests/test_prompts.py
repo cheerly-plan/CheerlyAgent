@@ -328,3 +328,32 @@ def test_builder_messages_wraps_as_system():
 def test_json_response_format(mode, expected):
     """不认识的取值一律当 off，保证不会给网关下发它不支持的字段。"""
     assert json_response_format(mode) == expected
+
+
+def test_performance_discipline_present_with_kb():
+    """问业绩时的调用顺序写在系统提示里；关掉知识检索时不注入。"""
+    from ai_agent.prompts.chat import build_system_prompt
+
+    with_kb = build_system_prompt(use_kb=True)
+    assert "【业绩分析】" in with_kb
+    # 关键约束都在
+    for must in ("report_extract_indicators", "compare_to", "report_compare",
+                 "validate_figures", "一次给全", "不要一个指标调一次"):
+        assert must in with_kb, must
+
+    without_kb = build_system_prompt(use_kb=False)
+    assert "【业绩分析】" not in without_kb
+
+
+def test_compare_description_says_batch():
+    """report_compare 的 points 要说明「多个指标一起传」。
+
+    描述原写「同一指标的多期数字」，模型就每次只传一个指标——
+    实测 6 个指标调了 6 次。
+    """
+    from ai_agent.prompts.tools import REPORT_COMPARE_DESC
+    from ai_agent.tools.registry import TOOLS_MAP
+
+    assert "一次性传" in REPORT_COMPARE_DESC or "一次传完" in REPORT_COMPARE_DESC
+    points = TOOLS_MAP["report_compare"].args_model.model_json_schema()["properties"]["points"]
+    assert "一起传" in points["description"]

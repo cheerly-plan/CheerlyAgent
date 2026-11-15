@@ -310,3 +310,9 @@ def test_rerank_emits_progress():
         finally:
             reset_progress(token)
     assert captured == ["正在重排 12 条候选结果…"]
+
+
+def test_kb_read_label_uses_location():
+    """kb_read 的参数名是 location，不是 target/query。"""
+    label = _tool_call_label("kb_read", {"location": "绿的谐波2026Q3 · 第2页"})
+    assert label == "绿的谐波2026Q3 · 第2页"

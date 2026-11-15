@@ -34,7 +34,10 @@ class ComparePoint(BaseModel):
 class ReportCompareArgs(BaseModel):
     points: list[ComparePoint] = Field(
         ...,
-        description="同一指标的多期数字。只填抽取结果里出现过的值。",
+        description=(
+            "要计算的全部点，**多个指标一起传**：工具按（公司, 指标, 口径）"
+            "分组分别算。只填抽取结果里出现过的值。"
+        ),
     )
 
 

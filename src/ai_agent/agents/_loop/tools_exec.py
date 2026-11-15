@@ -220,7 +220,7 @@ _LABEL_KEYS: dict[str, tuple[str, ...]] = {
     "web_search": ("query",),
     "kb_search": ("query",),
     "kg_search": ("query",),
-    "kb_read": ("target", "query", "file"),
+    "kb_read": ("location", "target", "query"),
     "kb_list_files": (),
     "generate_report": ("subject", "company", "title"),
     "report_extract_indicators": ("subjects", "indicators"),
