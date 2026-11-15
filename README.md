@@ -224,7 +224,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
    - **作用域收窄**（`kb/scope.py`）：按报告期与主体收敛。**精确实体只在旧文件里时改查那份文件**，避免「没提年份就只看最新一期」把历史期实体切掉
    - **混合召回**：关键词 + 向量 RRF，按主体保底配额（够近的主体各先占一个名额，「A 和 B 的营收」两家都出得来）→ 重排 → 距离阈值 → 带引用片段
 6. **输出**：增量 token 流式下发，同时写入消息、更新摘要
-7. **记忆落库**（后台线程池，不阻塞 SSE）：门控判断本轮值不值得抽取 → LLM 抽取（每轮 ≤ 2 条）→ 噪声过滤 → 三层去重 → 写入长期记忆 / 情景记忆 / 画像
+7. **记忆落库**（后台线程池，不阻塞 SSE）：LLM 抽取（每轮 ≤ 2 条）→ 噪声过滤 → 三层去重 → 写入长期记忆 / 情景记忆 / 画像。Jev 门控默认关闭（见「记忆系统」）
 8. **中断恢复**：连接断开后凭 `run_id` 调 `POST /v1/chat/resume` 续跑（`checkpoint_store`）
 
 ## 知识库管线
@@ -241,7 +241,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 
 | 层 | 模块 | 内容 |
 |---|---|---|
-| 抽取纪律 | `prompts/memory.py` + `memory/long_term.py` | 领域中立：只记「用户本人的长期事实」，任务对象（公司/病患/订单/合同…）一律不记。规则层不含行业词，靠结构特征判定（本轮动作 / 任务对象主语句 / 文档事实 / 祈使任务），医疗/法律/教育/客服四域各有黄金集守护 |
+| 抽取纪律 | `prompts/memory.py` + `memory/long_term.py` | 领域中立：只记「用户本人的长期事实」，任务对象（公司/病患/订单/合同…）一律不记。规则层**不含任何行业词**，只靠结构特征判定（见下方「抽取规则」） |
 | 短期 | `short_term.py` | 会话窗口的最近历史；超 token 预算才滚动摘要（不按固定轮数提前摘要）；摘要伪装成一轮 user/assistant 注入 |
 | 长期 | `long_term.py` | 向量化的事实与偏好，召回按相似度阈值过滤；写入走门控 → 抽取 → 噪声过滤 → 三层去重 |
 | 情景 | `episode_store.py` / `episode_merge.py` | 带 TTL 的事件片段；相近情节合并，相似但不同的事互相链接（召回一跳扩展） |
@@ -251,14 +251,50 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | 开关 | `setting_store.py` | 用户级记忆开关：关闭后不写、不注入、不挂记忆工具；已有数据保留，可查看/导出/删除 |
 
 写入链路每轮最多产出 2 条，跑在 `_turn_finalizer` 线程池里，不阻塞 SSE。
-门控（`gate.py`）用外部概率模型判断「本轮值不值得抽取」，低于
-`memory_gate_threshold` 就跳过，省掉一次抽取调用；该服务不可用时 fail-open
-（宁可多抽一次，不可静默丢记忆）。
+
+**Jev 门控（`gate.py`）默认关闭**（`MEMORY_GATE_ENABLED=false`）。它用外部概率
+模型判断「本轮值不值得抽取」，设计意图是省掉一次小模型调用；端到端评测
+（104 条黄金集）实测它是**净负收益**：
+
+| 配置 | 放行正例 | 拦截负例 |
+|---|---|---|
+| 开（阈值 0.65，原措辞） | 1/40 | 44/44 |
+| 开（最佳措辞 + 阈值 0.10） | 36/40 | 29/44 |
+| **关** | **40/40** | **43/44** |
+
+「放行正例」= 该记的没被门控拦掉。用户说「我叫魏佳楠」时门控概率只有 0.05
+（阈值 0.65）——根因不是阈值，而是把「值得记」与「不值得记」写在同一句里问，
+决策模型无法回答。抽取模型本身已能拒掉 43/44 的噪声，门控只是多丢一次。
+代码与开关保留，换决策模型后可用同一套评测重测再决定。
 
 L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 L1–L4 全量数据；
 `DELETE /v1/memory` 清空长期记忆。删除 L1/L2 单条时会同步清理同文候选与归档副本，
 避免删掉后又被后台晋升/蒸馏带回来。归档重复蒸馏走 `ON CONFLICT DO UPDATE`，
 文本、出处与证据会随源数据刷新；查询支持 `limit` / `offset`。
+
+### 抽取规则（领域中立）
+
+判断标准只有一条：**这是关于用户本人的长期事实，还是本次任务的对象？**
+这条 prompt 原则适用于任何领域，规则层则用结构特征把它落地：
+
+| 规则 | 命中即丢 | 覆盖的形态 |
+|---|---|---|
+| `_ONGOING` | `(用户)?(正在\|已\|刚刚)(动词)` | 本轮动作：查询、翻译、排查、运行… |
+| `_OBJECT_SUBJECT` | 句首是 `患者\|该案\|订单\|客户\|本合同\|该学生…` | 任务对象主语句（任何领域） |
+| `_DOC_FACT` | 主语是文档本身 + 记载/披露/显示 | 「病历记载」「判决书载明」「工单显示」 |
+| `_IMPERATIVE_TASK` | 「帮我写」「把X翻译」 | 一次性任务请求 |
+| `_TEMPORAL` / `_NOW_ACTING` | 下周出差、我正在跑 | 短期安排与当前状态 |
+| `_ASSISTANT_RECAP` | 助手建议/回答/决定 | 对话纪要 |
+| `_MEMORY_QUESTION` | 「你还记得我是谁吗」 | 询问记忆本身 |
+
+历史：早期这套规则按金融 + 知识库写成（股东、招股书、年报、股票代码、
+`MEMORY_DOMAIN_NOISE_ENABLED` 开关），换领域要手动关。三组金融词在 169 条
+用例上命中 0 次后删除，改由 `_DOC_FACT` 一条通用规则承接——它天然覆盖
+医疗的病历、法律的判决书、客服的工单。
+
+**规则边界**：同一结构不同含义（「我在做一份研报」vs「我在做仓库盘点」）、
+领域特有的隐私边界、模糊定义，规则都判不了，交给抽取模型；这也是为什么
+评测用例要按 `owner=rule|model` 分组，而不是把失败一律算给规则。
 
 ### 上下文管理
 
@@ -356,9 +392,65 @@ uv run alembic revision -m "说明"    # 新增迁移
 | `scripts/eval_graph_retrieval.py` | `scripts/cases/graph_eval_cases.json` | 29 | 图谱检索：问句能否查到正确的三元组，同时测**工具路径**与**预检索路径**两条 |
 | `scripts/eval_tool_route.py` | `scripts/cases/tool_route_eval_cases.json` | 11 | 模型选工具：科目走 `kb_search`，关系走 `kg_search`，两者都要时两个都调。不执行检索 |
 | `scripts/eval_graph.py` | `scripts/cases/gold_graph.json` | 1 份文件金标 | 图谱**构建**质量：实体/别名/关系召回率、孤立点比例、最大连通分量 |
-| `scripts/eval_memory.py` | `scripts/cases/memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写 |
+| `scripts/eval_memory.py` | `scripts/cases/memory_eval_cases.json` | 15 | 长期记忆抽取：该写的写对、不该写的不写（需模型） |
 | `scripts/eval_memory.py --recall` | `scripts/cases/episode_eval_cases.json` | 2 | 情景记忆召回（写入后检索，用完删除） |
+| `scripts/eval_memory_rules.py` | `scripts/cases/memory_rule_cases.json` | 69 | **规则层离线**：该记未记 / 不该记记了，含逐规则归因 |
+| `scripts/eval_memory_rules.py --cases cases/memory_crossdomain_cases.json` | 同左 | 60 | 跨领域（医疗/法律/教育/客服），防止规则过拟合 |
+| `scripts/eval_memory_rules.py --cases cases/memory_realworld_cases.json` | 同左 | 10 | **真实对话**（线上 170 条用户消息里的自述片段） |
+| `scripts/eval_memory_golden.py` | `scripts/cases/memory_golden_cases.json` | 104 | 端到端（模型 + 规则），按 `owner=rule/model/either` 分组 |
+| `scripts/eval_multiturn_compress.py` | `scripts/cases/multiturn_compress_cases.json` | 28 | 多轮压缩：历史被压掉后，追问指向的事实还在不在 |
 | `tests/test_memory_e2e.py` | — | 1 条生命周期 | 写入 → 注入 → 晋升 → 归档 → 删除；真库 + 确定性桩，不调模型 |
+
+### 记忆评测的四个层次
+
+记忆质量不能只测一层。现在的分工：
+
+| 层 | 套件 | 需要 | 能测什么 |
+|---|---|---|---|
+| 规则层 | `eval_memory_rules` | 无 | 过滤逻辑有没有误杀/漏放；脚本输出**逐规则归因**（哪条正则拦的 / 根本没覆盖） |
+| 跨领域 | `eval_memory_rules_crossdomain` | 无 | 医疗/法律/教育/客服四域，防止规则过拟合到金融+技术 |
+| 真实分布 | `eval_memory_rules_realworld` | 无 | 线上真实对话：混合意图、撤回指令、意向 vs 事实 |
+| 端到端 | `eval_memory_golden` | 模型 | 模型 + 规则的整体行为，按 `owner` 分组 |
+
+**为什么要分层**：`memory_health` 的「噪声拦截 100%」是规则验证规则，同义反复，
+证明不了规则本身对不对。规则层用人工标注的 `extracted` 做独立真值；端到端层
+再验证模型实际输出。两者互不掩盖。
+
+用例字段（规则层）：
+
+```json
+{"id": 1, "expect": "remember", "owner": "rule", "user": "原始问句",
+ "extracted": [{"kind": "profile", "facet": "name", "content": "模型抽出的值"}]}
+```
+
+- `expect`: `remember` 全部保留 / `forget` 全部拦掉 / `split` 混合意图（配
+  `expect_keep` + `expect_drop`）/ `either` 不计分
+- `owner`: `rule` 归确定性规则；`model` 是开放式提问，规则不该管，放进规则层
+  评测只会制造假失败
+
+```bash
+# 规则层（零依赖，CI 里跑的就是这三条）
+uv run python scripts/eval_memory_rules.py
+uv run python scripts/eval_memory_rules.py --cases cases/memory_crossdomain_cases.json --min-forget 0.75
+uv run python scripts/eval_memory_rules.py --cases cases/memory_realworld_cases.json --verbose
+
+# 端到端（需要模型；按 owner 分组看哪一层在出错）
+uv run python scripts/eval_memory_golden.py --owner rule
+uv run python scripts/eval_memory_golden.py --verbose
+
+# 多轮压缩（确定性模式进 CI；--summarize llm 看真实摘要的事实保留率）
+uv run python scripts/eval_multiturn_compress.py --keep-last 1
+uv run python scripts/eval_multiturn_compress.py --sweep 1,2 --summarize llm
+```
+
+**写评测的三条经验**（都是踩过的坑）：
+
+1. **断言不能用字面匹配**。摘要把「关索引」写成「关闭索引」是正常改写，
+   字面匹配会假报丢失；用同义组 `must_any: [["关索引", "关闭索引"]]`。
+2. **用例要有防呆**。第一版多轮压缩用例 23/28 条的关键事实恰好落在保留窗口里，
+   根本测不出问题；现在 `test_facts_live_in_early_turns` 会断言这一点。
+3. **标注错了和代码错了同样要修**。真实数据那次 2 条「误杀」其实是标注写了
+   不该写的期待（短期行程当常住地）。
 
 `eval_memory` 在 `eval/config.json` 里是 **blocking**：nightly 或显式
 `--allow-external` 跑，通过率跌破阈值会阻断发布。三个评测脚本的通过线集中在
