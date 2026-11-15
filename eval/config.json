@@ -109,6 +109,18 @@
       "note": "跨领域（医疗/法律/教育/客服）规则评测：防止规则过拟合到金融+技术场景；open 类问句归 model 不计分"
     },
     {
+      "name": "eval_memory_rules_realworld",
+      "tier": 1,
+      "command": "uv run python scripts/eval_memory_rules.py --cases cases/memory_realworld_cases.json --min-forget 0.5 --min-remember 0.95",
+      "exit_map": {
+        "0": "pass",
+        "1": "regression",
+        "2": "invalid_cases"
+      },
+      "policy": "blocking",
+      "note": "真实对话用例（来自线上 170 条用户消息中的自述片段）：覆盖混合意图、撤回指令、意向 vs 事实等自造用例缺失的分布"
+    },
+    {
       "name": "eval_memory",
       "tier": 2,
       "command": "uv run python scripts/eval_memory.py",

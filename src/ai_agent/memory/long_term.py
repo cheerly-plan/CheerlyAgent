@@ -359,7 +359,7 @@ _ONGOING = re.compile(
     r"(查询|查|查看|查了|确认|对比|分析|生成|想了解|了解|寻找|找|写|翻译|整理|"
     r"统计|排查|算|计算|定位|修改|改|转|提取|转换|解读|总结|搜索|搜|画|检查|"
     r"提交|测试|调试|阅读|看|跑|运行|执行|启动|部署|安装|"
-    r"起草|撰写|批改|处理|出|做|按|统计|核对)"
+    r"起草|撰写|批改|处理|出|做|按|统计|核对|询问|问|表示|提到|说)"
     r"|(正在|在)把.{0,40}?(翻译|转成|改成|提取|整理|统计)"
 )
 # 后台任务状态：job_id、预计耗时、进度。
@@ -381,6 +381,8 @@ _OBJECT_SUBJECT = re.compile(
 # 文档事实陈述：主语是「文档/公告/报告」本身，讲的是文件内容而非用户本人。
 # 这条替代了原先硬编码的行业词（招股、年报披露）：医疗的「病历记载」、
 # 法律的「判决书载明」、客服的「工单显示」是同一类，不必逐领域加词。
+# 出现这些词说明句尾是「对助手的要求」，不是文档陈述
+_REQUEST_HINT = re.compile(r"提醒|告诉|记得|帮我|麻烦|希望|请")
 _DOC_FACT = re.compile(
     r"^(招股|年报|财报|季报|公告|报告|文件|文档|病历|判决书|合同|工单|订单|"
     r"记录|表格|附件|协议|说明|章程|条例|规范)"
@@ -395,6 +397,9 @@ _LIST_OF_OBJECTS = re.compile(
     r"(?:[^，。]{0,4}[：:][^。]{3,}$"
     r"|.{0,20}(和|与|、|及).{0,20}(状况|情况|变化|数据|信息|进展))"
 )
+
+# 询问记忆本身（「你还记得我是谁吗」）不是新事实，也不是任务动作
+_MEMORY_QUESTION = re.compile(r"记得(我|我是|我说|之前)|我还记得|我是谁")
 
 # 短期行程：下周/明天出差这类不能当居住地。
 _TEMPORAL = re.compile(
@@ -425,7 +430,9 @@ _OWNER = r"(?:我|用户)"
 
 # 用户明确陈述居住地的句式；只有命中才允许写 locale。
 _LOCALE_STATEMENT = re.compile(
-    _OWNER + r"(住在|住|常驻|长期在|在.{0,10}(工作|生活|执业|执业|上班)|是.{0,10}人)"
+    # 人称与动词之间允许时间副词：「我现在住在深圳」「我目前常驻杭州」
+    _OWNER + r"(现在|目前|一直都|一直|长期)?"
+    r"(住在|住|常驻|长期在|在.{0,10}(工作|生活|执业|上班)|是.{0,10}人)"
     # 「我在北京执业」也是工作地陈述
     + r"|^在[\u4e00-\u9fa5]{2,6}(执业|工作|生活|上班)"
 )
@@ -496,11 +503,13 @@ def is_transient_text(text: str) -> bool:
         return True
     if _NOW_ACTING.search(body):
         return True
+    if _MEMORY_QUESTION.search(body):
+        return True
     if any(mark in body for mark in _TOOL_MARK):
         return True
     if _ASSISTANT_RECAP.search(body):
         return True
-    if _DOC_FACT.match(body):
+    if _DOC_FACT.match(body) and not _REQUEST_HINT.search(body):
         return True
     return False
 

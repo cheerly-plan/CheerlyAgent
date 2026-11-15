@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "created_at": "e69e43c-20261114T211943Z",
-  "git_sha": "e69e43c",
+  "created_at": "4777694-20261115T045628Z",
+  "git_sha": "4777694",
   "env_fingerprint": {
-    "cases_sha256": "2ce91e79a1ea86d4",
+    "cases_sha256": "f1253cd40653ca66",
     "eval_scripts_sha256": "926c719174a29936",
     "selftests_sha256": "aa67aaa1063cce1d"
   },
@@ -325,6 +325,18 @@
     "multiturn_compress": {
       "cases": {
         "multiturn_compress::exit": "pass"
+      },
+      "metrics": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 1.0
+      }
+    },
+    "eval_memory_rules_realworld": {
+      "cases": {
+        "eval_memory_rules_realworld::exit": "pass"
       },
       "metrics": {
         "total": 1,

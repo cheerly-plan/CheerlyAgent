@@ -1,0 +1,177 @@
+[
+  {
+    "id": "real-zip-weather",
+    "user": "我住在深圳，想问下明天出门需要带伞吗",
+    "expect": "split",
+    "owner": "rule",
+    "note": "一句话里既有居住地（该记）又有一次性查询（不该记）。真实分布里这种混合很常见，现有用例全是单一意图。",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "locale",
+        "content": "深圳"
+      },
+      {
+        "kind": "episode",
+        "content": "用户正在查询明天是否需要带伞"
+      }
+    ],
+    "expect_keep": [
+      "深圳"
+    ],
+    "expect_drop": [
+      "带伞"
+    ]
+  },
+  {
+    "id": "real-occupation-directive",
+    "user": "你好，我是做半导体行业研究的，以后回答尽量简洁，不要客套话。",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "职业 + 长期指令各一条",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "从事半导体行业研究"
+      },
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "回答尽量简洁，不要客套话"
+      }
+    ]
+  },
+  {
+    "id": "real-unit-directive",
+    "user": "对了，以后财报数字都用亿元为单位，别再给我写元了。",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "纯格式类长期要求",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "财报数字统一用亿元为单位"
+      }
+    ]
+  },
+  {
+    "id": "real-retract",
+    "user": "刚才说的\"不要客套话\"这条，我收回，以后正常说话就行。",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "撤回指令是 delete 语义，不能因为含「不要」被判成新约束",
+    "extracted": [
+      {
+        "kind": "profile",
+        "op": "delete",
+        "facet": "directive",
+        "content": "不要客套话"
+      }
+    ]
+  },
+  {
+    "id": "real-trip-plus",
+    "user": "记住：我下周要去深圳出差，报告里提到华南业务时可以提醒我。",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "短期行程（下周出差）不得写成 locale——规则拦掉是正确的，用例里只保留该记的长期要求",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "directive",
+        "content": "报告里提到华南业务时提醒用户"
+      }
+    ]
+  },
+  {
+    "id": "real-name-short",
+    "user": "hello,我是小魏",
+    "expect": "remember",
+    "owner": "rule",
+    "note": "英文打招呼后自报姓名",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "name",
+        "content": "小魏"
+      }
+    ]
+  },
+  {
+    "id": "real-locale-lang",
+    "user": "以后都要中文回答问题，我现在住在深圳",
+    "expect": "split",
+    "owner": "rule",
+    "note": "「以后都要中文回答」写入语言是系统默认值、不记；「我现在住在深圳」要记。混合意图",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "language",
+        "content": "中文"
+      },
+      {
+        "kind": "profile",
+        "facet": "locale",
+        "content": "深圳"
+      }
+    ],
+    "expect_keep": [
+      "深圳"
+    ],
+    "expect_drop": [
+      "中文"
+    ]
+  },
+  {
+    "id": "real-recall-name",
+    "user": "你还记得我是谁吗",
+    "expect": "forget",
+    "owner": "rule",
+    "note": "询问记忆本身，不是新事实",
+    "extracted": [
+      {
+        "kind": "episode",
+        "content": "用户正在询问助手是否记得自己"
+      }
+    ]
+  },
+  {
+    "id": "real-playful-name",
+    "user": "我是懒羊羊",
+    "expect": "either",
+    "owner": "either",
+    "note": "可能是玩笑也可能是昵称；两解皆可，不计分",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "name",
+        "content": "懒羊羊"
+      }
+    ]
+  },
+  {
+    "id": "real-career-intent",
+    "user": "我是一名前端开发，但是由于AI影响，没有啥岗位了，打算转行Agent开发",
+    "expect": "split",
+    "owner": "rule",
+    "note": "现职是事实（该记 occupation=前端开发），转行是意向（不得写成现职）",
+    "extracted": [
+      {
+        "kind": "profile",
+        "facet": "occupation",
+        "content": "前端开发"
+      },
+      {
+        "kind": "profile",
+        "facet": "other",
+        "content": "计划转行做 Agent 开发"
+      }
+    ],
+    "expect_keep": [
+      "前端开发"
+    ],
+    "expect_drop": []
+  }
+]

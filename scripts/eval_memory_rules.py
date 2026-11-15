@@ -7,6 +7,9 @@
 
 * **误杀**（remember 用例被拦掉）：用户明确说过的长期事实没入库
 * **漏放**（forget 用例被放行）：任务动作、一次性查询被当成长期记忆
+* **混合**（split 用例）：一句话里既有该记的、也有不该记的；
+  要求该记的部分全部保留、不该记的部分全部拦掉。真实对话里这种
+  最常见——「我住在深圳，想问下明天带伞吗」
 
 用例集 ``cases/memory_rule_cases.json`` 只收「规则该管」的条目——开放式技术
 提问（「这个报错怎么修」）需要语义判断，归模型层评测，放进这里只会制造假失败。
@@ -90,6 +93,21 @@ def _judge(case: dict) -> dict:
     if expect == "remember":
         # 全部保留才算对：只要有一条被拦就是误杀
         ok = bool(items) and len(kept) == len(items)
+    elif expect == "split":
+        # 混合意图：记该记的、拦不该记的。用例用 expect_keep / expect_drop
+        # 标注哪些子串该留哪些该拦，按内容匹配核对。
+        keep_marks = case.get("expect_keep") or []
+        drop_marks = case.get("expect_drop") or []
+        kept_all = all(
+            any(mark in item.content for item in kept) for mark in keep_marks
+        )
+        dropped_all = all(
+            any(
+                mark in item.content for item in kept
+            ) is False
+            for mark in drop_marks
+        )
+        ok = kept_all and dropped_all
     else:
         ok = not kept
 
@@ -109,11 +127,16 @@ def _judge(case: dict) -> dict:
 
 def run(cases: list[dict]) -> dict:
     results = [_judge(case) for case in cases]
-    stat: dict[str, Counter] = {"remember": Counter(), "forget": Counter()}
+    stat: dict[str, Counter] = {
+        "remember": Counter(), "forget": Counter(), "split": Counter()
+    }
     rule_hits: Counter = Counter()
     uncovered: list[dict] = []
 
     for result in results:
+        if result["expect"] not in stat:
+            # either：两种解读都合理，只记录不计分
+            continue
         bucket = stat[result["expect"]]
         bucket["total"] += 1
         if result["ok"]:
@@ -136,6 +159,7 @@ def run(cases: list[dict]) -> dict:
         "forget": dict(stat["forget"]),
         "remember_rate": rate(stat["remember"]),
         "forget_rate": rate(stat["forget"]),
+        "split": dict(stat["split"]),
         "rule_attribution": dict(rule_hits.most_common()),
         "uncovered": uncovered,
         "results": results,
@@ -152,6 +176,9 @@ def format_report(report: dict, *, verbose: bool = False) -> str:
         f"forget {fg.get('pass', 0)}/{fg.get('total', 0)}"
         f"（漏放 {fg.get('false_keep', 0)}）"
     )
+    sp = report.get("split") or {}
+    if sp.get("total"):
+        lines.append(f"split    {sp.get('pass', 0)}/{sp.get('total', 0)}（混合意图）")
     lines.append("")
     lines.append(f"该记未记率 {1 - report['remember_rate']:.1%}   "
                  f"不该记记了率 {1 - report['forget_rate']:.1%}")

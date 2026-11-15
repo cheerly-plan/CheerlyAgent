@@ -131,3 +131,70 @@ def test_crossdomain_rule_owned_cases_have_no_gaps(mod):
     rule_forget = [c for c in data if c["expect"] == "forget" and c["owner"] == "rule"]
     report = mod.run(rule_forget)
     assert report["forget_rate"] == 1.0, report["uncovered"]
+
+
+def test_split_case_requires_both_sides(mod):
+    """split 用例：该记的保留、不该记的拦掉，缺一边都不算通过。"""
+    case = {
+        "id": 900,
+        "expect": "split",
+        "user": "我住在深圳，想问下明天出门需要带伞吗",
+        "expect_keep": ["深圳"],
+        "expect_drop": ["带伞"],
+        "extracted": [
+            {"kind": "profile", "facet": "locale", "content": "深圳"},
+            {"kind": "episode", "content": "用户正在查询明天是否需要带伞"},
+        ],
+    }
+    report = mod.run([case])
+    assert report["split"]["pass"] == 1
+
+
+def test_split_case_fails_when_noise_kept(mod):
+    case = {
+        "id": 901,
+        "expect": "split",
+        "user": "我住在深圳，想问下明天出门需要带伞吗",
+        "expect_keep": ["深圳"],
+        "expect_drop": ["带伞"],
+        "extracted": [
+            {"kind": "profile", "facet": "locale", "content": "深圳"},
+            # 这条本该拦住
+            {"kind": "episode", "content": "用户想了解明天带伞的情况"},
+        ],
+    }
+    report = mod.run([case])
+    assert report["split"].get("pass", 0) == 0
+
+
+def test_realworld_suite_meets_threshold(mod):
+    data = json.loads(
+        (ROOT / "scripts" / "cases" / "memory_realworld_cases.json").read_text()
+    )
+    report = mod.run(data)
+    assert report["remember_rate"] >= 0.95
+    assert report["split"].get("pass", 0) == report["split"].get("total", 0)
+
+
+def test_locale_allows_adverb_between_pronoun_and_verb():
+    """「我现在住在深圳」是合法居住地陈述。"""
+    from ai_agent.memory.long_term import ExtractedMemory, _keep_extracted
+
+    item = ExtractedMemory(kind="profile", facet="locale", content="深圳", op="add")
+    assert _keep_extracted(item, "以后都要中文回答问题，我现在住在深圳") is True
+
+
+def test_doc_fact_does_not_eat_user_requests():
+    """「报告里提到 X 时提醒我」是用户要求，不是文档事实。"""
+    from ai_agent.memory.long_term import ExtractedMemory, _keep_extracted
+
+    item = ExtractedMemory(
+        kind="profile",
+        facet="directive",
+        content="报告里提到华南业务时提醒用户",
+        op="add",
+    )
+    assert _keep_extracted(item, "记住：报告里提到华南业务时可以提醒我") is True
+    # 纯文档陈述仍要拦住
+    doc = ExtractedMemory(kind="episode", content="年报披露的应收账款")
+    assert _keep_extracted(doc) is False
