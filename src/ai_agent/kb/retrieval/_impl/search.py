@@ -79,6 +79,19 @@ def search_knowledge(
         )
     return hits
 
+def _rerank_with_progress(query: str, head: list[dict], top_k: int) -> list[dict]:
+    """重排前推一条进度。
+
+    重排是一次 LLM 调用，实测占 kb_search 端到端耗时的大头（冷态 9s、热态
+    2.7s，其中向量召回只要 0.1s 以内）。不推进度时，前端在「正在检索知识库…」
+    这条文案上干等近十秒。``emit_progress`` 未绑定（评measure/离线调用）时是空操作。
+    """
+    from ai_agent.tools.progress import emit_progress
+
+    emit_progress(f"正在重排 {len(head)} 条候选结果…")
+    return _public()._rerank(query, head, top_k)
+
+
 def search_knowledge_multi(
     queries: list[str],
     *,
@@ -136,7 +149,7 @@ def search_knowledge_multi(
     if settings.kb_rerank_enabled and len(ranked) > top_k:
         # 重排用主查询（queries[0]，即改写后的原始问句）做排序
         head = ranked[:_RERANK_LIMIT]
-        ranked = _public()._rerank(queries[0], head, top_k) + ranked[_RERANK_LIMIT:]
+        ranked = _rerank_with_progress(queries[0], head, top_k) + ranked[_RERANK_LIMIT:]
     ranked = _public()._diversify(
         diversify_query or queries[0], ranked, top_k, per_file=per_file
     )
@@ -208,7 +221,7 @@ def _core_search(
         # 只把前 _RERANK_LIMIT 条交给模型：候选再多，提示词变长、延迟也变高，
         # 而排在第 13 名之外的本来也进不了 top_k
         head = rows[:_RERANK_LIMIT]
-        rows = _public()._rerank(query, head, top_k) + rows[_RERANK_LIMIT:]
+        rows = _rerank_with_progress(query, head, top_k) + rows[_RERANK_LIMIT:]
     rows = _public()._diversify(
         diversify_query or query, rows, top_k, per_file=per_file
     )

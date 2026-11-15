@@ -200,9 +200,13 @@ def _attach_sources(
     if meta:
         messages[-1]["meta"] = meta
 
-# 会长时间阻塞的工具：丢到工作线程，边跑边推 tool_progress。generate_report
-# 现在只提交后台任务（秒回），留在集合里是为了统一 user_scope / 引用收集的调用路径。
-_PROGRESS_TOOLS = frozenset({"generate_report"})
+# 会长时间阻塞的工具：丢到工作线程，边跑边推 tool_progress。
+#
+#   generate_report  现在只提交后台任务（秒回），留在集合里是为了统一
+#                    user_scope / 引用收集的调用路径
+#   kb_search        实测冷态 9.3s、热态 2.7s，耗时全在 search_knowledge_multi
+#                    的重排上；不走这个通道就只能推一句「正在检索…」然后干等
+_PROGRESS_TOOLS = frozenset({"generate_report", "kb_search"})
 
 
 # ——— tool_start 的可读标签 ———

@@ -280,3 +280,33 @@ def test_tool_progress_absent_when_hint_empty():
     from ai_agent.agents._loop.tools_exec import _tool_progress_hint
 
     assert _tool_progress_hint("web_search", "", 1) == "正在搜索…"
+
+
+# ——— kb_search 走线程通道并推重排进度 ———
+
+def test_kb_search_is_a_progress_tool():
+    """kb_search 冷态 9s、热态 2.7s，必须走线程通道才能推中途进度。"""
+    from ai_agent.agents._loop.tools_exec import _PROGRESS_TOOLS
+
+    assert "kb_search" in _PROGRESS_TOOLS
+
+
+def test_rerank_emits_progress():
+    """重排前推一条；未绑定回调时是空操作，不能抛异常。"""
+    from unittest.mock import patch
+
+    from ai_agent.kb.retrieval._impl import search as search_mod
+    from ai_agent.tools.progress import reset_progress, set_progress
+
+    rows = [{"file_id": "f", "seq": i} for i in range(12)]
+    with patch.object(search_mod._public(), "_rerank", return_value=rows[:3]):
+        # 未绑定：静默通过
+        assert search_mod._rerank_with_progress("q", rows, 3) == rows[:3]
+
+        captured: list[str] = []
+        token = set_progress(captured.append)
+        try:
+            search_mod._rerank_with_progress("q", rows, 3)
+        finally:
+            reset_progress(token)
+    assert captured == ["正在重排 12 条候选结果…"]

@@ -561,7 +561,7 @@ def test_run_loop_applies_kb_scope_around_tool_execution(monkeypatch):
             yield "text", "好的"
             yield "result", {"content": "好的", "tool_calls": []}
 
-    def fake_execute(name, arguments):
+    def fake_execute(name, arguments, *, timeout=None):
         seen.append(kb_scope())
         return "检索结果"
 

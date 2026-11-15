@@ -168,7 +168,7 @@ def test_run_loop_streams_sources_and_attaches_them_to_answer(monkeypatch):
             yield "text", "迟到三次算旷工。"
             yield "result", {"content": "迟到三次算旷工。", "tool_calls": []}
 
-    def fake_execute(name, arguments):
+    def fake_execute(name, arguments, *, timeout=None):
         # 工具把引用塞进执行点的收集器
         add_citations([_citation(4)])
         return "检索结果"
@@ -252,7 +252,7 @@ def test_run_loop_keeps_sources_from_every_tool_round(monkeypatch):
 
     seqs = iter([1, 2])
 
-    def fake_execute(name, arguments):
+    def fake_execute(name, arguments, *, timeout=None):
         add_citations([_citation(next(seqs))])
         return "结果"
 
