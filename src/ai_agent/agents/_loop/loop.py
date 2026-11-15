@@ -335,6 +335,20 @@ def run_loop(
     tools = [s for s in _public().tool_schemas() if s["function"]["name"] not in excluded]
     if use_kb:
         _public()._attach_kg_prefetch(messages, kb_file_ids)
+        # 业绩分析 skill：命中「问某公司业绩」时按固定顺序预取数据，把结果作为
+        # 一段上下文交给模型。脚本只负责取数，之后模型仍可自由调工具补充；
+        # 预取失败（主体识别不到、抽不到数据）直接降级为模型自主决策。
+        prefetched = _public()._prefetch_performance_once(
+            messages, enabled=use_kb, already_retrieved=_public()._question_already_retrieved(messages)
+        )
+        if prefetched is not None:
+            # 预取已把「查业绩」这一步做完。再把 report_extract_indicators 挂在
+            # 工具列表里，模型仍会调一遍（实测三轮全都调了）——prompt 说「不要
+            # 重复抽」也拦不住。直接摘掉工具，确定性生效。
+            tools = [
+                s for s in tools
+                if s["function"]["name"] != "report_extract_indicators"
+            ]
     step = 0
     # 本轮的知识库引用：跨多次工具调用累积、按切片去重。
     # 它既随 SSE 下发（前端即时展示），也在收尾时挂到回答消息上落库

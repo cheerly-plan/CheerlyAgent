@@ -100,6 +100,10 @@ from ai_agent.tools.context import (
 from ai_agent.tools.registry import execute_tool, tool_schemas
 from ai_agent.tools.result_pool import tool_result_pool
 
+from ai_agent.agents._loop.performance import inject as _inject_performance
+from ai_agent.agents._loop.performance import prefetch_once as _prefetch_performance_once
+from ai_agent.agents._loop.performance import prefetch as _performance_prefetch
+from ai_agent.agents._loop.performance import wants_performance as _wants_performance
 from ai_agent.agents._loop.state import (
     _tool_progress_pool,
 )
@@ -201,6 +205,10 @@ __all__ = [
     "_remember_tool_result",
     "_replace_last_turn",
     "_run_tool_with_progress",
+    "_performance_prefetch",
+    "_wants_performance",
+    "_inject_performance",
+    "_prefetch_performance_once",
     "_tool_call_label",
     "_tool_progress_hint",
     "_tool_call_index_factory",

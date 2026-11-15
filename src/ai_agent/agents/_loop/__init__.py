@@ -1,5 +1,9 @@
 """agents 主循环的实现层（内部）。对外请用 ai_agent.agents.loop。"""
 
+from ai_agent.agents._loop.performance import inject as _inject_performance
+from ai_agent.agents._loop.performance import prefetch_once as _prefetch_performance_once
+from ai_agent.agents._loop.performance import prefetch as _performance_prefetch
+from ai_agent.agents._loop.performance import wants_performance as _wants_performance
 from ai_agent.agents._loop.state import (
     _tool_progress_pool,
 )
@@ -68,6 +72,10 @@ __all__ = [
     "_REPORT_VERB",
     "_REPORT_NOUN",
     "_run_tool_with_progress",
+    "_performance_prefetch",
+    "_wants_performance",
+    "_inject_performance",
+    "_prefetch_performance_once",
     "_tool_call_label",
     "_tool_progress_hint",
     "_tool_call_index_factory",
