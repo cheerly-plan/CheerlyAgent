@@ -159,7 +159,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `report_job_status` | `tools/report/report_status.py` | 按 `job_id` 查进度与交付链接 |
 | `report_extract_indicators` | `tools/report/report_extract.py` | 积木：从已入库财报抽指标 |
 | `report_compare` | `tools/report/report_compare.py` | 积木：同比／环比等确定性对比 |
-| `report_validate` | `tools/report/report_validate.py` | 积木：正文数字白名单校验 |
+| `validate_figures` | `tools/report/report_validate.py` | 积木：正文数字白名单与出处校验。名字不带 `report_` 前缀——对话里答一段业绩分析同样要过它 |
 
 > `report_pdf` 仍在仓库里，但不注册进 `TOOLS`——渲染含落盘与审核门禁，只能由服务端流水线触发。
 

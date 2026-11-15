@@ -1,4 +1,8 @@
-"""研报校验工具。模型只传入已写正文和抽取数字，是否通过由代码判定。
+"""数据校验工具：核对一段财务分析里的数字与引用能否溯源到抽取事实。
+
+名字不带 ``report_`` 前缀——它的用途不只是正式研报。问「某公司业绩怎么样」
+时模型在对话里直接答一段分析，同样必须先过这一步；带前缀会让模型以为这是
+研报专用工具，普通问答就跳过了校验。
 
 返回摘要和人工审核队列，不改写正文，也不生成 PDF。
 """
@@ -29,7 +33,7 @@ class ValidateFact(BaseModel):
 
 class ReportValidateArgs(BaseModel):
     markdown: str = Field(..., description="撰写步骤产出的 Markdown 正文")
-    title: str = Field(default="研报", description="报告标题")
+    title: str = Field(default="", description="标题，可留空")
     period: str = Field(default="", description="主报告期，用于核对本期指标是否写入正文")
     facts: list[ValidateFact] = Field(..., description="抽取结果。校验只对照这些事实和由其算出的增减。")
 
@@ -70,7 +74,7 @@ def _report_validate(markdown: str, title: str, period: str, facts: list[dict]) 
 
 
 report_validate_tool = Tool(
-    name="report_validate",
+    name="validate_figures",
     description=REPORT_VALIDATE_DESC,
     func=_report_validate,
     args_model=ReportValidateArgs,

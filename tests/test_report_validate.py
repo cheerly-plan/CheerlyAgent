@@ -283,7 +283,7 @@ def test_tool_returns_summary_and_stays_off_chat_loop():
     assert "溯源附件" in text
     # 分层契约：校验积木（无路径参数、不写盘）已注册进聊天循环；
     # 渲染工具（含落盘与 M2 审核门禁）仍只能由服务端流水线触发。
-    assert "report_validate" in [tool.name for tool in TOOLS]
+    assert "validate_figures" in [tool.name for tool in TOOLS]
     assert "report_pdf" not in [tool.name for tool in TOOLS]
 
 
@@ -301,7 +301,7 @@ def test_security_code_is_not_an_unchecked_number():
 
 
 def test_security_code_does_not_require_plan():
-    """report_validate 由模型直接调用时没有 plan，白名单不能因此失效。"""
+    """validate_figures 由模型直接调用时没有 plan，白名单不能因此失效。"""
     facts = [_fact("2025Q3", "100,924,954")]
     document = compose_report(_plan(), facts)
     document.markdown = (
@@ -326,3 +326,30 @@ def test_page_level_citation_is_enough():
     # 页码覆盖不到该事实时不认
     assert not _page_cited_in_body(fact, "见第3页")
     assert not _page_cited_in_body(fact, "没有任何页码")
+
+
+def test_tool_name_does_not_say_report():
+    """工具名不带 report_ 前缀：它在对话里答业绩分析时也要用，不是研报专用。
+
+    带前缀 + 「校验研报」的进度文案，会让只开知识检索的场景也显示研报字样。
+    """
+    names = [tool.name for tool in TOOLS]
+    assert "validate_figures" in names
+    assert "report_validate" not in names
+
+
+def test_progress_hint_has_no_report_wording():
+    from ai_agent.agents._loop.tools_exec import _tool_progress_hint
+
+    hint = _tool_progress_hint("validate_figures", "", 1)
+    assert "研报" not in hint
+    assert hint == "正在校验数据与出处…"
+
+
+def test_description_covers_plain_chat_analysis():
+    """描述要说清「对话里直接答一段分析」也要先校验，否则模型只在研报时用。"""
+    from ai_agent.prompts.tools import REPORT_VALIDATE_DESC
+
+    assert "研报" in REPORT_VALIDATE_DESC  # 仍是合法的触发场景之一
+    assert "对话" in REPORT_VALIDATE_DESC  # 但不再是唯一场景
+    assert "第N页" in REPORT_VALIDATE_DESC  # 页码级出处也算

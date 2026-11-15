@@ -13,7 +13,7 @@
   GET    /v1/report/reviews/{id}/final           定稿文件下载（已定稿才放行）
 
 工具分层（见 tools/registry.py）：抽数 / 算增减 / 校验三块确定性积木以
-report_extract_indicators / report_compare / report_validate 注册进聊天循环，
+report_extract_indicators / report_compare / validate_figures 注册进聊天循环，
 均无路径参数、不写盘；report_pdf 仍不注册——渲染含落盘与 M2 审核门禁，
 只能由服务端流水线触发，模型不参与落盘路径。
 

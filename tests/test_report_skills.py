@@ -555,6 +555,6 @@ def test_run_report_skill_id_reaches_parse(monkeypatch):
 
 
 def test_registry_contains_granular_tools_without_path_params():
-    for name in ("report_extract_indicators", "report_compare", "report_validate"):
+    for name in ("report_extract_indicators", "report_compare", "validate_figures"):
         props = TOOLS_MAP[name].schema()["function"]["parameters"]["properties"]
         assert "output_path" not in props

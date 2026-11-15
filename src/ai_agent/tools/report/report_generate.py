@@ -6,7 +6,7 @@
   ``report_type``。skill 决定大纲与指标集；抽数、计算、校验、渲染仍是
   流水线里的确定性积木，不因报告类型放宽防幻觉门禁。
 * 抽数/算增减/校验三块积木另以 ``report_extract_indicators`` /
-  ``report_compare`` / ``report_validate`` 单独注册，供模型做轻量查询，
+  ``report_compare`` / ``validate_figures`` 单独注册，供模型做轻量查询，
   它们无路径参数、不写盘。
 * ``report_pdf`` 仍不注册：渲染含落盘与 M2 审核门禁（校验不过不出 PDF、
   下载须过定稿门禁），只能由服务端流水线触发，不能交给模型自主调用。

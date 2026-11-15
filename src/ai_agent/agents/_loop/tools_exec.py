@@ -276,7 +276,7 @@ _TOOL_VERBS: dict[str, str] = {
     "generate_report": "生成研报",
     "report_extract_indicators": "抽取财务指标",
     "report_compare": "对比指标",
-    "report_validate": "校验研报",
+    "validate_figures": "校验数据与出处",
     "report_job_status": "查询研报进度",
     "search_memory": "检索记忆",
     "write_memory": "写入记忆",

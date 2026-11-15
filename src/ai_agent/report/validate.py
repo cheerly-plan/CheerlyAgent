@@ -612,7 +612,7 @@ def _check_attribution_anchors(result: ValidationResult, body: str) -> None:
 def _body_security_codes(body: str) -> set[str]:
     """正文里出现的证券代码。
 
-    原来是靠 ``plan.skill_id`` 去技能名单里取，但 ``report_validate`` 由
+    原来是靠 ``plan.skill_id`` 去技能名单里取，但 ``validate_figures`` 由
     模型直接调用时没有 plan，白名单失效，股票代码就被判成「未核对数字」
     （实测一条季报分析因此报了 33 条错误）。
     """

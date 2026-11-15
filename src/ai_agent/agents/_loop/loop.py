@@ -316,7 +316,7 @@ def run_loop(
     # 开关直接决定工具列表：智能搜索关闭 → 剔除 web_search；
     # 知识库关闭 → 剔除 kb_search 和 kg_search（图谱检索同属知识库能力）。
     # 研报关闭 → 只剔除 generate_report + report_job_status（生成研报重流程），
-    # report_extract_indicators / report_compare / report_validate 是「查业绩/
+    # report_extract_indicators / report_compare / validate_figures 是「查业绩/
     # 算数」的确定性积木，不是研报专属，保持可用。
     # 研报生成与知识检索是两个独立开关：generate_report / report_extract_indicators
     # 的抽数由服务端流水线直读知识库（不经过模型调用 kb_search），所以不受

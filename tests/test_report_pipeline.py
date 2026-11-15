@@ -198,7 +198,7 @@ def test_only_the_safe_facade_is_exposed_to_the_chat_loop():
     assert "report_pdf" not in names
     # 抽数/算增减/校验三块积木不写盘、无路径参数，允许模型直接调用；
     # 它们的参数里同样不允许出现 output_path。
-    for name in ("report_extract_indicators", "report_compare", "report_validate"):
+    for name in ("report_extract_indicators", "report_compare", "validate_figures"):
         assert name in names
         props = TOOLS_MAP[name].schema()["function"]["parameters"]["properties"]
         assert "output_path" not in props

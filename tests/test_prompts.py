@@ -198,7 +198,7 @@ def test_facet_rules_are_injected_once():
         ("generate_report", _rendered_prompts()[0]),
         ("report_extract_indicators", tools.REPORT_EXTRACT_DESC),
         ("report_compare", tools.REPORT_COMPARE_DESC),
-        ("report_validate", tools.REPORT_VALIDATE_DESC),
+        ("validate_figures", tools.REPORT_VALIDATE_DESC),
     ],
 )
 def test_tool_descriptions_are_non_empty(name, text):

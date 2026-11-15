@@ -1034,7 +1034,7 @@ def test_run_loop_use_report_false_keeps_indicator_blocks():
         {"function": {"name": "report_job_status"}},
         {"function": {"name": "report_extract_indicators"}},
         {"function": {"name": "report_compare"}},
-        {"function": {"name": "report_validate"}},
+        {"function": {"name": "validate_figures"}},
     ]
     seen_tools = []
 
@@ -1057,7 +1057,7 @@ def test_run_loop_use_report_false_keeps_indicator_blocks():
         "get_weather",
         "report_extract_indicators",
         "report_compare",
-        "report_validate",
+        "validate_figures",
     ]
     assert seen_tools[1] == [
         "get_weather",
@@ -1065,7 +1065,7 @@ def test_run_loop_use_report_false_keeps_indicator_blocks():
         "report_job_status",
         "report_extract_indicators",
         "report_compare",
-        "report_validate",
+        "validate_figures",
     ]
     assert seen_tools[2] == seen_tools[0]
 
