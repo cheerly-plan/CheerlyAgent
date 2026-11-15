@@ -9,6 +9,7 @@ from unittest.mock import patch
 from ai_agent.agents._loop.tools_exec import (
     _tool_call_index_factory,
     _tool_call_label,
+    _tool_progress_hint,
 )
 
 
@@ -316,3 +317,41 @@ def test_kb_read_label_uses_location():
     """kb_read 的参数名是 location，不是 target/query。"""
     label = _tool_call_label("kb_read", {"location": "绿的谐波2026Q3 · 第2页"})
     assert label == "绿的谐波2026Q3 · 第2页"
+
+
+def test_label_never_renders_python_literal():
+    """dict 元素不能把 Python 字面量漏进进度文案。
+
+    实测前端状态栏出现了
+    「正在对比指标「{'subject': '中科飞测', 'name': '营业收入'…」…」
+    ——report_compare 的 points 是 dict 列表，原实现直接 str() 了元素。
+    """
+    points = [
+        {"subject": "中科飞测", "name": "营业收入", "period": "2026Q3",
+         "value": "673,041,663.13"},
+        {"subject": "中科飞测", "name": "营业收入", "period": "2025Q3",
+         "value": "500,000,000"},
+    ]
+    label = _tool_call_label("report_compare", {"points": points})
+    assert "{" not in label and "'" not in label
+    assert label == "营业收入"
+
+    hint = _tool_progress_hint("report_compare", label, 1)
+    assert "{" not in hint
+    assert hint == "正在对比指标「营业收入」…"
+
+
+def test_label_dedupes_repeated_items():
+    """同一指标的多个期次去重，不拼成「营业收入、营业收入」。"""
+    points = [
+        {"name": "营业收入", "period": "2026Q3"},
+        {"name": "营业收入", "period": "2025Q3"},
+        {"name": "净利润"},
+    ]
+    assert _tool_call_label("report_compare", {"points": points}) == "营业收入、净利润"
+
+
+def test_label_without_readable_fields_falls_back():
+    """dict 里一个可读字段都没有时，别把整段 dict 打出来。"""
+    assert _tool_call_label("report_compare", {"points": [{"x": 1}]}) == "…"
+    assert _tool_call_label("report_compare", {"points": []}) == ""

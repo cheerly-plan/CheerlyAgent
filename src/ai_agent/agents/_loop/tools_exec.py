@@ -233,18 +233,45 @@ _LABEL_KEYS: dict[str, tuple[str, ...]] = {
     "read_tool_result": ("tool_call_id",),
 }
 _LABEL_MAX = 48
+# dict 元素里优先当标签的字段，按可读性排序
+_DICT_LABEL_KEYS = ("name", "query", "location", "title", "subject", "value")
+
+
+def _item_text(item: object) -> str:
+    """把一个列表元素压成可读文本。
+
+    元素本身可能是 dict（如 report_compare 的 points 是
+    ``{"subject","name","period","value"}``），直接 ``str()`` 得到的是
+    ``{'subject': 'X', 'name': 'Y'}`` 这种 Python 字面量，原样进了进度文案
+    ——实测前端状态栏就是这么显示出 JSON 的。这里优先取人能读的字段。
+    """
+    if isinstance(item, dict):
+        for key in _DICT_LABEL_KEYS:
+            value = item.get(key)
+            if value not in (None, "", [], {}):
+                return str(value)
+        # 一个可读字段都没有：至少别把整段 dict 打出来
+        return ""
+    if isinstance(item, (list, tuple)):
+        return _item_text(item[0]) if item else ""
+    return str(item)
 
 
 def _tool_call_label(name: str, args: dict) -> str:
     """把工具参数压成一句可展示的短句。取不到关键参数时返回空串。"""
     for key in _LABEL_KEYS.get(name, ()):
         value = args.get(key)
-        if value is None or value == "":
+        if value is None or value == "" or value == [] or value == {}:
             continue
         if isinstance(value, (list, tuple)):
-            value = "、".join(str(item) for item in value[:3])
+            # 去重后再截断：report_compare 的 points 是「同一指标的多期」，
+            # 不去重会拼成「营业收入、营业收入、净利润」
+            seen = list(dict.fromkeys(
+                text for text in (_item_text(item) for item in value) if text
+            ))
+            value = "、".join(seen[:3]) or "…"
         elif isinstance(value, dict):
-            value = "、".join(str(item) for item in list(value)[:3])
+            value = _item_text(value) or "…"
         elif isinstance(value, bool):
             continue
         text = " ".join(str(value).split())
