@@ -45,6 +45,7 @@ from ai_agent.agents.turn import (
     _session_state,
 )
 
+from ai_agent.prompts.chat import wants_report as wants_report
 from ai_agent.prompts.chat import (
     RUNTIME_BUDGET_EXHAUSTED,
     RUNTIME_DUP_CALL,
@@ -221,6 +222,7 @@ __all__ = [
     "assemble",
     "build_memory_index",
     "build_system_prompt",
+    "wants_report",
     "clip_text",
     "collect_citations",
     "count_json_tokens",

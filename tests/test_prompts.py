@@ -381,3 +381,42 @@ def test_report_prompt_does_not_expose_implementation_details():
 
     prompt = build_system_prompt(use_kb=True, use_report=True, report_catalog="x")
     assert "不是要讲给用户听的内容" in prompt
+
+
+def test_report_unavailable_when_tool_not_mounted():
+    """用户要研报但开关关着时，明确说做不到，别静默拼一段文字冒充研报。
+
+    实测「生成【双环传动 2026Q3研报】」在开关关闭时，模型抽了 13 条指标、
+    自己拼了 2100 字：「# 双环传动 2026Q3 研报 …」——没有 PDF、没有任务
+    卡片、没有审核记录，用户以为生成了，实际什么都没有。
+    """
+    from ai_agent.prompts.chat import build_system_prompt, wants_report
+
+    assert wants_report("生成【双环传动 2026Q3研报】")
+    assert wants_report("给我一份财报深度分析")
+    assert not wants_report("双环传动业绩怎么样")
+    assert not wants_report("生成一段总结")
+
+    prompt = build_system_prompt(
+        use_kb=True, use_report=False, wants_report_input=True
+    )
+    assert "本轮没有生成能力" in prompt
+    assert "不要假装已经生成" in prompt
+
+
+def test_report_unavailable_not_injected_when_tool_available():
+    from ai_agent.prompts.chat import build_system_prompt
+
+    prompt = build_system_prompt(
+        use_kb=True, use_report=True, wants_report_input=True
+    )
+    assert "本轮没有生成能力" not in prompt
+
+
+def test_report_unavailable_not_injected_for_plain_questions():
+    from ai_agent.prompts.chat import build_system_prompt
+
+    prompt = build_system_prompt(
+        use_kb=True, use_report=False, wants_report_input=False
+    )
+    assert "本轮没有生成能力" not in prompt
