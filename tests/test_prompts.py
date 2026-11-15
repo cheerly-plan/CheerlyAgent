@@ -357,3 +357,27 @@ def test_compare_description_says_batch():
     assert "一次性传" in REPORT_COMPARE_DESC or "一次传完" in REPORT_COMPARE_DESC
     points = TOOLS_MAP["report_compare"].args_model.model_json_schema()["properties"]["points"]
     assert "一起传" in points["description"]
+
+
+def test_report_prompt_forbids_leaking_internal_ids():
+    """job_id / 接口路径是内部实现，不能写进给用户的回答。
+
+    实测回答里出现「任务已提交（job_id: 6c782336322f）」和
+    「/v1/report/jobs/xxx」，界面上明明已有任务卡片。
+    """
+    from ai_agent.prompts.chat import build_system_prompt, STYLE
+
+    assert "不要把内部 id" in STYLE
+    prompt = build_system_prompt(use_kb=True, use_report=True, report_catalog="x")
+    assert "不要写进回答" in prompt
+    assert "不要写内部接口路径" in prompt
+    # 不再出现让模型「告诉用户 job_id」的指令
+    assert "拿到 job_id 后告诉用户" not in prompt
+
+
+def test_report_prompt_does_not_expose_implementation_details():
+    """「服务端流水线/校验门禁」是行为约束，不该被复述成给用户的话术。"""
+    from ai_agent.prompts.chat import build_system_prompt
+
+    prompt = build_system_prompt(use_kb=True, use_report=True, report_catalog="x")
+    assert "不是要讲给用户听的内容" in prompt
