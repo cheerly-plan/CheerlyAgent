@@ -215,11 +215,6 @@ def _system_prompt(
         use_memory=use_memory,
         use_report=use_report,
         report_catalog=_public().skill_catalog(),
-        # 用户要研报但开关关着：注入「做不到」的说明，别让模型自己拼一段
-        # 文字冒充研报（实测抽 13 条指标拼 2100 字，没有任何产物）
-        wants_report_input=bool(
-            user_input and _public().wants_report(user_input)
-        ),
     )
     # 只注入文档类型能覆盖的实体和关系。文件清单不进提示词，模型用
     # kb_list_files 现查；检索范围由问句里的主体和文档路由决定。

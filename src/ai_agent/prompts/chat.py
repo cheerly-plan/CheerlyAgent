@@ -87,23 +87,6 @@ _REPORT_DISCIPLINE_TEMPLATE = """【研报生成】用户要求生成研报、�
 6. 任务在服务端后台跑，聊天断线不会中断；不要因为用户催就问一次查一次，也不要重复提交同一份需求（会复用同一任务）。"""
 
 
-# 用户明确要研报、但本轮没挂 generate_report 时注入：宁可说清做不到，
-# 也不要静默给一份"看起来像研报"的分析文字。实测「生成【双环传动 2026Q3
-# 研报】」在研报开关关闭时，模型抽了 13 条指标、自己拼了 2100 字，
-# 没有 PDF、没有任务卡片、没有审核记录——用户以为生成了，实际什么都没有。
-REPORT_UNAVAILABLE = """【用户要研报，但本轮没有生成能力】用户这轮要求生成研报／PDF 报告，但「研报」开关没打开，generate_report 工具不可用。请用一两句话如实说明：需要打开「研报」开关才能生成正式报告（含 PDF 与校验门禁）；如果用户还想要点东西，可以先给一份基于知识库的分析，并在结尾说明这不是正式研报、没有产物文件。
-不要假装已经生成，不要说"报告已生成""稍后查看"，也不要给任何下载链接。"""
-
-
-def wants_report(text: str) -> bool:
-    """问句是否在要一份正式研报（与 followup 的研报意图判定同源）。"""
-    import re
-
-    verb = re.search(r"生成|出一份|做一份|写一份|制作|导出|来一份|给我一份", text or "")
-    noun = re.search(r"研报|财报深度分析|分析报告|PDF", text or "", re.IGNORECASE)
-    return bool(verb and noun)
-
-
 def build_report_discipline(catalog: str) -> str:
     """渲染研报纪律节；catalog 传 report.skills.skill_catalog()。"""
     return assert_rendered(render(_REPORT_DISCIPLINE_TEMPLATE, SKILL_CATALOG=catalog))
@@ -118,7 +101,6 @@ def build_system_prompt(
     use_memory: bool = True,
     use_report: bool = False,
     report_catalog: str = "",
-    wants_report_input: bool = False,
 ) -> str:
     """按本轮实际挂载的能力组装 system prompt。
 
@@ -143,12 +125,6 @@ def build_system_prompt(
         .section("kb", KB_DISCIPLINE, when=use_kb)
         .section("performance", PERFORMANCE_DISCIPLINE, when=use_kb)
         .section("report", build_report_discipline(report_catalog), when=use_report)
-        # 用户要研报却没挂工具：明说做不到，别静默降级成一段分析文字
-        .section(
-            "report_unavailable",
-            REPORT_UNAVAILABLE,
-            when=wants_report_input and not use_report,
-        )
         .section("memory", MEMORY_DISCIPLINE, when=use_memory)
         .section("truth", TRUTHFULNESS)
         .build()
