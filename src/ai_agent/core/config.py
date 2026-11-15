@@ -610,6 +610,16 @@ class Settings(BaseSettings):
     title_model: str = ""
     short_term_summary_model: str = ""
     short_term_summary_timeout_seconds: float = 30
+    # 摘要与记忆抽取温度：结构化任务取 0，与 kb_graph_temperature 同理。
+    # 不传时走服务端默认（OpenAI 系 1.0），措辞会在「核心原因 / 核心在于
+    # 区分离职动因」之间来回变。
+    #
+    # 注意：**设成 0 也不保证逐字可复现**。实测 qwen3.8-flash 与
+    # qwen4-max-preview 在同一输入下连跑 4 次都给出 3~4 种不同措辞，
+    # 差异来自服务端推理本身（批处理/浮点非确定性），不是采样温度。
+    # 所以评测断言必须按「语义是否保留」设计（同义组匹配），不能指望
+    # 两次运行输出一致。
+    memory_temperature: float = 0.0
     title_timeout_seconds: float = 20
     session_cleanup_interval_seconds: int = 300
     session_empty_max_age_seconds: int = 3600

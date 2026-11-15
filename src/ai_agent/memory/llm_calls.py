@@ -46,6 +46,9 @@ def complete_memory_chat(
         max_retries=0,
         max_tokens=max_tokens,
         client=client,
+        # 0 温：抽取是结构化任务，措辞抖动会让「该记的记没记住」的评测
+        # 拿不到可复现的数字（与 kb_graph_temperature 同一理由）
+        temperature=settings.memory_temperature,
         extra_body=_MEMORY_EXTRA_BODY,
         response_format=response_format,
         force_json=force_json,

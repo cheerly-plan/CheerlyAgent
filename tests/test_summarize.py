@@ -188,3 +188,44 @@ def test_summarize_session_falls_back_on_llm_error():
         )
     assert "旧摘要" in text
     assert "我叫小明" in text
+
+
+def test_summary_uses_zero_temperature(monkeypatch):
+    """摘要与抽取显式传 temperature：不传会走服务端默认（1.0）。
+
+    注意 0 温也不保证逐字复现（线上推理本身非确定），这里只验证参数
+    确实下发了——这是唯一能把「采样随机」这一层去掉的地方。
+    """
+    from unittest.mock import patch
+
+    from ai_agent.memory import summarize as summarize_mod
+
+    seen: list[float | None] = []
+
+    def fake_complete(messages, **kwargs):
+        seen.append(kwargs.get("temperature"))
+        return '{"summary": "用户在咨询离职应对。"}'
+
+    with patch.object(summarize_mod, "complete_chat", side_effect=fake_complete):
+        summarize_mod.summarize_session(
+            "", [{"role": "user", "content": "提离职怎么回应"}, {"role": "assistant", "content": "先感谢"}]
+        )
+    assert seen and seen[0] == 0.0
+
+
+def test_memory_extraction_uses_zero_temperature():
+    from unittest.mock import patch
+
+    from ai_agent.memory import llm_calls
+
+    captured: dict = {}
+
+    def fake_complete(messages, **kwargs):
+        captured.update(kwargs)
+        return '{"memories":[]}'
+
+    with patch.object(llm_calls, "complete_chat", side_effect=fake_complete):
+        llm_calls.complete_memory_chat(
+            [{"role": "user", "content": "测试"}], max_tokens=64
+        )
+    assert captured.get("temperature") == 0.0

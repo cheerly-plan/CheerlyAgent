@@ -71,6 +71,9 @@ def summarize_session(previous: str, overflow: list[ChatMessage]) -> str:
                 max_retries=0,
                 max_tokens=512,
                 client=client,
+                # 0 温：同一段对话连跑多次给出不同措辞，会让「摘要有没有丢
+                # 事实」这类回归评测拿不到可复现的数字
+                temperature=settings.memory_temperature,
                 response_format={"type": "json_object"},
                 # 顶层 enable_thinking 在部分网关（如 auto 路由）被限制为
                 # True，传 False 直接 400；chat_template_kwargs / think
@@ -147,6 +150,7 @@ def _summary_plain(client, model: str, user_content: str) -> str:
             timeout=settings.short_term_summary_timeout_seconds,
             max_retries=0,
             max_tokens=512,
+            temperature=settings.memory_temperature,
             client=client,
         )
     except LLMError as e:
