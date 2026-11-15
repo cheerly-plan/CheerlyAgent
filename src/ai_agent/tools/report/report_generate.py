@@ -122,14 +122,16 @@ def _report_text(request: str, report_type: str = "", write_pdf: bool = True) ->
     ]
     # M2：审核状态决定 PDF 链接是否可点，必须让模型如实转述，别让用户白点。
     review_status = getattr(result, "review_status", PENDING)
-    report_id = getattr(result, "report_id", "")
     if review_status == FINALIZED:
         lines.append("审核：事实层底稿已定稿，底稿 PDF 可直接下载。")
     else:
+        # 不写内部接口路径：模型会把它原样抄进回答（曾经出现过
+        # 「需要管理员在 /v1/report/reviews/xxx 处置」这种日志式文案）。
         lines.append(
-            f"审核：事实层尚未定稿（{review_status}），底稿 PDF 链接需要管理员在"
-            f" /v1/report/reviews/{report_id} 处置审核项并定稿后才能下载；"
-            "Markdown 正文与溯源附件可先预览。请如实告知用户。"
+            f"审核：事实层尚未定稿（{review_status}），底稿 PDF 要等审核项处置并"
+            "定稿后才能下载；Markdown 正文与溯源附件可先预览。"
+            "（系统说明）如实说明「还需审核后才能下载 PDF」即可，"
+            "不要写内部接口路径或审核记录的 id。"
         )
     downloads = [
         ("底稿 PDF", artifacts.pdf),
@@ -159,9 +161,12 @@ def _report_text(request: str, report_type: str = "", write_pdf: bool = True) ->
             lines.append(f"- [{label}](/v1/report/files/{quote(name, safe='')})")
     deep_review_id = getattr(result, "deep_pdf_review_id", "") or ""
     if deep_review_id:
+        # 这行前端会正则提取 review_id 用来直连审核面板，格式不能改；
+        # 但对模型要说明它只是给界面用的，别抄进回答。
         lines.append(
             f"深度 PDF 审核队列：/v1/report/reviews/{deep_review_id}"
             "（与事实层底稿分开审核，互不影响）。"
+            "（系统说明）这一行是给界面解析用的，回答里不要写出该路径。"
         )
     if deep_error:
         lines.append(f"深度解析失败（不影响底稿）：{deep_error[:180]}")

@@ -397,3 +397,18 @@ def test_report_tool_desc_avoids_dismissive_wording():
     assert "不要用命令式的口吻" in desc
     # job_id 仍可用于调 report_job_status，但不该回显给用户
     assert "也不要把 job_id 写进回答" in desc
+
+
+def test_tool_outputs_do_not_leak_internal_ids():
+    """工具返回文本会进模型上下文，内部 id / 接口路径不该写在里面。
+
+    模型会把它们原样抄进回答（实测出现过
+    「需要管理员在 /v1/report/reviews/xxx 处置」「任务 #999664de」）。
+    """
+    from ai_agent.tools.report.report_status import _MISSING
+
+    assert "job_id=" not in _MISSING
+    assert "/v1/report/" not in _MISSING
+    # 给出判断依据，但要求模型用自己的话说
+    assert "系统说明" in _MISSING
+    assert "不要照抄" in _MISSING
