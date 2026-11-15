@@ -18,7 +18,14 @@ from ai_agent.kb.retrieval.citations import collect_citations, merge_sources
 from ai_agent.kb.retrieval.scope import extract_prev_turn, reset_kb_question, reset_kb_scope, reset_rewrite_context, set_kb_question, set_kb_scope, set_rewrite_context
 from ai_agent.llm.types import ChatEvent, ChatMessage, ChatResult
 from ai_agent.memory.short_term import assemble, short_term_memory
-from ai_agent.prompts.chat import RUNTIME_BUDGET_EXHAUSTED, RUNTIME_DUP_CALL, RUNTIME_DUP_OUTPUT, RUNTIME_EMPTY_ANSWER
+from ai_agent.prompts.chat import (
+    RETRY_LIMIT,
+    RUNTIME_BUDGET_EXHAUSTED,
+    RUNTIME_DUP_CALL,
+    RUNTIME_DUP_OUTPUT,
+    RUNTIME_EMPTY_ANSWER,
+    RUNTIME_TOOL_EXHAUSTED,
+)
 from ai_agent.storage.store import store, user_scope
 from ai_agent.tools.context import session_scope, tool_result_index, tool_results_scope
 
@@ -342,6 +349,12 @@ def run_loop(
     # 已经走到头了（图谱永远返回同一个中心实体、向量库永远空结果）。
     # 只在下次重复时追加一句系统提示，不阻断调用
     seen_outputs: dict[tuple[str, str], int] = {}
+    # 本轮每个工具被调用了几次：前端用它显示「第 N 次」，服务端用它兜底
+    # 阻断无意义的重试（见下方 MAX_RETRY 逻辑）
+    _call_index = _public()._tool_call_index_factory()
+    # 已判定「查不出新东西」的工具：本轮不再执行，直接回一条终止提示。
+    # 只按工具粒度禁用，不影响同轮其它工具
+    exhausted: dict[str, int] = {}
     for turn in range(budget.max_steps):
         result: ChatResult | None = None
         streamed = ""
@@ -494,9 +507,38 @@ def run_loop(
                     }
                 )
                 continue
+            if call["name"] in exhausted:
+                # 该工具已连续返回相同结果，继续调只会烧预算、让前端干等
+                _public().logger.info(
+                    "工具已判定查不出新结果，本轮禁用 run_id=%s tool=%s 相同次数=%d",
+                    run_id,
+                    call["name"],
+                    exhausted[call["name"]],
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call["name"],
+                        "content": RUNTIME_TOOL_EXHAUSTED.format(
+                            tool=call["name"], count=exhausted[call["name"]]
+                        ),
+                    }
+                )
+                continue
             seen_calls.add(dedupe_key)
-            # 前端只用来清掉调用前的半截字，展示名不再下发
-            yield {"type": "tool_start", "name": call["name"]}
+            # 前端用它清掉调用前的半截字，同时把「在查什么」显示出来。
+            # 只有工具名时，用户只能看到「正在处理…」转圈——实测一次
+            # 「一周热点新闻」模型连调 13 次工具，前端全程无信息。
+            yield {
+                "type": "tool_start",
+                "name": call["name"],
+                "args": call["arguments"] or {},
+                "label": _public()._tool_call_label(
+                    call["name"], call["arguments"] or {}
+                ),
+                "call_index": _call_index(call["name"]),
+            }
             # 范围与查询改写上下文必须在工具执行这一层同栈设置：run_stream 的
             # 生成器会被不同线程轮流 next() 推进，外层设的 contextvar 传不进来
             if call["name"] in _PROGRESS_TOOLS:
@@ -556,6 +598,10 @@ def run_loop(
                     seen_outputs[out_key] + 1,
                 )
                 output += "\n\n" + RUNTIME_DUP_OUTPUT
+                count = seen_outputs[out_key] + 1
+                if count >= RETRY_LIMIT:
+                    # 同一份内容第 N 次回来：这条路走到底了，本轮封掉这个工具
+                    exhausted[call["name"]] = count
             seen_outputs[out_key] = seen_outputs.get(out_key, 0) + 1
             end_event: ChatEvent = {"type": "tool_end", "name": call["name"]}
             if turn_sources:

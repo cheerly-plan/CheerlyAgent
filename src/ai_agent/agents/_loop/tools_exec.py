@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 import queue
 from ai_agent.core.config import settings
 import time
@@ -203,3 +203,59 @@ def _attach_sources(
 # 会长时间阻塞的工具：丢到工作线程，边跑边推 tool_progress。generate_report
 # 现在只提交后台任务（秒回），留在集合里是为了统一 user_scope / 引用收集的调用路径。
 _PROGRESS_TOOLS = frozenset({"generate_report"})
+
+
+# ——— tool_start 的可读标签 ———
+#
+# 只下发工具名时，前端除了「正在处理…」什么也显示不了。实测一次
+# 「一周热点新闻」模型连调 13 次工具，用户全程看不到进展。
+# 这里把参数里**最关键的一两个字**抽成一句话，前端直接展示。
+
+# 每个工具从哪个参数取标签，取不到就不显示（不要拼一长串 JSON）
+_LABEL_KEYS: dict[str, tuple[str, ...]] = {
+    "web_search": ("query",),
+    "kb_search": ("query",),
+    "kg_search": ("query",),
+    "kb_read": ("target", "query", "file"),
+    "kb_list_files": (),
+    "generate_report": ("subject", "company", "title"),
+    "report_extract_indicators": ("subjects", "indicators"),
+    "report_compare": ("points",),
+    "search_memory": ("query",),
+    "write_memory": ("content",),
+    "expand_memory": ("query",),
+    "search_history": ("query",),
+    "read_history": (),
+    "read_tool_result": ("tool_call_id",),
+}
+_LABEL_MAX = 48
+
+
+def _tool_call_label(name: str, args: dict) -> str:
+    """把工具参数压成一句可展示的短句。取不到关键参数时返回空串。"""
+    for key in _LABEL_KEYS.get(name, ()):
+        value = args.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, (list, tuple)):
+            value = "、".join(str(item) for item in value[:3])
+        elif isinstance(value, dict):
+            value = "、".join(str(item) for item in list(value)[:3])
+        elif isinstance(value, bool):
+            continue
+        text = " ".join(str(value).split())
+        if not text:
+            continue
+        return text if len(text) <= _LABEL_MAX else text[: _LABEL_MAX - 1] + "…"
+    return ""
+
+
+def _tool_call_index_factory() -> "Callable[[str], int]":
+    """返回「这一轮里某工具第几次被调用」的计数器（从 1 开始）。"""
+    counts: dict[str, int] = {}
+
+    def call_index(name: str) -> int:
+        counts[name] = counts.get(name, 0) + 1
+        return counts[name]
+
+    return call_index

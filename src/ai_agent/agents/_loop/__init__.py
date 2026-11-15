@@ -29,6 +29,8 @@ from ai_agent.agents._loop.followup import (
 )
 from ai_agent.agents._loop.tools_exec import (
     _run_tool_with_progress,
+    _tool_call_index_factory,
+    _tool_call_label,
     _remember_tool_result,
     _attach_sources,
     _PROGRESS_TOOLS,
@@ -65,6 +67,8 @@ __all__ = [
     "_REPORT_VERB",
     "_REPORT_NOUN",
     "_run_tool_with_progress",
+    "_tool_call_label",
+    "_tool_call_index_factory",
     "_remember_tool_result",
     "_attach_sources",
     "_PROGRESS_TOOLS",

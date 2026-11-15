@@ -132,6 +132,8 @@ from ai_agent.agents._loop.followup import (
 
 from ai_agent.agents._loop.tools_exec import (
     _run_tool_with_progress,
+    _tool_call_index_factory,
+    _tool_call_label,
     _remember_tool_result,
     _attach_sources,
     _PROGRESS_TOOLS,
@@ -198,6 +200,8 @@ __all__ = [
     "_remember_tool_result",
     "_replace_last_turn",
     "_run_tool_with_progress",
+    "_tool_call_label",
+    "_tool_call_index_factory",
     "_session_state",
     "_stash_partial_assistant",
     "_system_prompt",
