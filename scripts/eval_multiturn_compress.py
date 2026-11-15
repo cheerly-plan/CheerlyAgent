@@ -9,7 +9,8 @@
 
 * ``setup``    前几轮对话（会被压缩进摘要的那部分）
 * ``followup`` 压缩后仍要回答的追问
-* ``must``     回答必须能溯源到的关键事实（子串，来自 setup）
+* ``must_any`` 回答必须能溯源到的关键事实；每组是**同义写法**，命中任一即算
+               保留（摘要会改写措辞：「关索引」→「关闭索引」，字面匹配会假报丢）
 
 评测方式（纯确定性，不调模型、不连库）：
 
@@ -81,14 +82,19 @@ def run_case(
         " ".join(str(m.get("content") or "") for m in context)
     )
 
-    missing = [token for token in case.get("must") or [] if _norm(token) not in haystack]
+    groups = case.get("must_any") or [[t] for t in case.get("must") or []]
+    missing = [
+        group
+        for group in groups
+        if not any(_norm(token) in haystack for token in group)
+    ]
     return {
         "id": case.get("id"),
         "topic": case.get("topic", ""),
         "kind": case.get("kind", ""),
         "ok": not missing,
         "missing": missing,
-        "must": list(case.get("must") or []),
+        "must_any": groups,
         "setup_messages": before,
         "kept_messages": len(recent),
         "summarized": before - len(recent),
@@ -140,7 +146,8 @@ def format_report(report: dict, *, verbose: bool = False) -> str:
         lines += ["", "## 丢事实"]
         for item in report["failures"]:
             lines.append(f"- #{item['id']} {item['topic']}")
-            lines.append(f"    丢失: {', '.join(item['missing'])}")
+            lost = [" / ".join(group) for group in item["missing"]]
+            lines.append(f"    丢失: {', '.join(lost)}")
             lines.append(
                 f"    消息 {item['setup_messages']} → 保留 {item['kept_messages']}"
                 f"，摘要 {item['summary_chars']} 字"

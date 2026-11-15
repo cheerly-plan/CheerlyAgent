@@ -26,7 +26,7 @@ def test_shipped_cases_are_wellformed():
     for case in data:
         assert case["setup"], case["id"]
         assert case["followup"], case["id"]
-        assert case["must"], case["id"]
+        assert case["must_any"], case["id"]
         # setup 必须是偶数条（成对的 user/assistant）
         assert len(case["setup"]) % 2 == 0, case["id"]
 
@@ -47,8 +47,11 @@ def test_facts_live_in_early_turns():
         recent, _summary, _cursor = compress(messages, max_tokens=1)
         kept = set(range(len(messages) - len(recent), len(messages)))
         if all(
-            any(token in messages[index]["content"] for index in kept)
-            for token in case["must"]
+            any(
+                any(token in messages[index]["content"] for index in kept)
+                for token in group
+            )
+            for group in case["must_any"]
         ):
             trivial.append(case["id"])
     # 允许少数天然只有一轮的用例，但不能占多数

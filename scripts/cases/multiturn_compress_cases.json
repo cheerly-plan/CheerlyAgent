@@ -29,11 +29,15 @@
       }
     ],
     "followup": "我之前问你长上下文怎么处理，你提到的两个关键做法是什么？",
-    "must": [
-      "meta",
-      "裁剪"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "meta"
+      ],
+      [
+        "裁剪"
+      ]
+    ]
   },
   {
     "id": "git-http2",
@@ -65,11 +69,15 @@
       }
     ],
     "followup": "刚才那个代理把帧截断的问题，你给的具体配置项是什么？",
-    "must": [
-      "http.version",
-      "HTTP/1.1"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "http.version"
+      ],
+      [
+        "HTTP/1.1"
+      ]
+    ]
   },
   {
     "id": "pgvector-index",
@@ -101,11 +109,15 @@
       }
     ],
     "followup": "我上次问的索引选型，你给的两个判断依据分别是什么？",
-    "must": [
-      "插入",
-      "查询"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "插入"
+      ],
+      [
+        "查询"
+      ]
+    ]
   },
   {
     "id": "router-skill",
@@ -137,11 +149,15 @@
       }
     ],
     "followup": "新增一个 skill 要不要改路由代码？权限靠什么过滤？",
-    "must": [
-      "YAML",
-      "scope"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "YAML"
+      ],
+      [
+        "scope"
+      ]
+    ]
   },
   {
     "id": "optimistic-lock",
@@ -173,11 +189,15 @@
       }
     ],
     "followup": "并发冲突和断线重连这两件事，你分别说的是靠什么标识和机制？",
-    "must": [
-      "版本号",
-      "thread_id"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "版本号"
+      ],
+      [
+        "thread_id"
+      ]
+    ]
   },
   {
     "id": "tracking",
@@ -209,11 +229,15 @@
       }
     ],
     "followup": "批量埋点用什么机制实现？脏数据怎么避免？",
-    "must": [
-      "路由守卫",
-      "onUnmounted"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "路由守卫"
+      ],
+      [
+        "onUnmounted"
+      ]
+    ]
   },
   {
     "id": "ollama-quant",
@@ -245,11 +269,15 @@
       }
     ],
     "followup": "你上次推荐的量化格式是什么？为什么不用另一个？",
-    "must": [
-      "AWQ",
-      "q4_k_m"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "AWQ"
+      ],
+      [
+        "q4_k_m"
+      ]
+    ]
   },
   {
     "id": "cherry-abort",
@@ -281,10 +309,12 @@
       }
     ],
     "followup": "多个 commit 逐个 cherry-pick 时中断了，退出靠哪条命令？",
-    "must": [
-      "--abort"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "--abort"
+      ]
+    ]
   },
   {
     "id": "hallucination",
@@ -316,11 +346,15 @@
       }
     ],
     "followup": "除了 RAG，你列的降幻觉手段里，输出侧和兜底侧各有哪些？",
-    "must": [
-      "JSON",
-      "拒绝回答"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "JSON"
+      ],
+      [
+        "拒绝回答"
+      ]
+    ]
   },
   {
     "id": "hnsw-bulk",
@@ -352,11 +386,16 @@
       }
     ],
     "followup": "大批量导入的时候，索引该怎么处理？",
-    "must": [
-      "关索引",
-      "重建"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "关索引",
+        "关闭索引"
+      ],
+      [
+        "重建"
+      ]
+    ]
   },
   {
     "id": "docker-volume",
@@ -388,11 +427,15 @@
       }
     ],
     "followup": "持久化和备份这两件事，你分别给的结论是什么？",
-    "must": [
-      "volume",
-      "pg_dump"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "volume"
+      ],
+      [
+        "pg_dump"
+      ]
+    ]
   },
   {
     "id": "bff-circuit",
@@ -424,11 +467,15 @@
       }
     ],
     "followup": "雪崩防护你列了哪几个手段？熔断用的哪个库？",
-    "must": [
-      "降级",
-      "opossum"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "降级"
+      ],
+      [
+        "opossum"
+      ]
+    ]
   },
   {
     "id": "agent-mq",
@@ -460,10 +507,12 @@
       }
     ],
     "followup": "异步任务那套通信，可靠投递靠什么机制？",
-    "must": [
-      "ack"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "ack"
+      ]
+    ]
   },
   {
     "id": "resign",
@@ -495,10 +544,14 @@
       }
     ],
     "followup": "加薪挽留的时候，判断该不该留的标准是什么？",
-    "must": [
-      "核心原因"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "核心原因",
+        "核心在于",
+        "离职动因"
+      ]
+    ]
   },
   {
     "id": "vh-keyboard",
@@ -530,11 +583,15 @@
       }
     ],
     "followup": "软键盘导致 vh 错乱，修复思路是什么？",
-    "must": [
-      "resize",
-      "可视高度"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "resize"
+      ],
+      [
+        "可视高度"
+      ]
+    ]
   },
   {
     "id": "storage-cycle",
@@ -566,10 +623,12 @@
       }
     ],
     "followup": "你提到的这个板块的风险点具体是什么？",
-    "must": [
-      "新增产能"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "新增产能"
+      ]
+    ]
   },
   {
     "id": "vscroll",
@@ -601,11 +660,15 @@
       }
     ],
     "followup": "高度不固定的列表，虚拟滚动怎么处理？",
-    "must": [
-      "预估高度",
-      "校准"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "预估高度"
+      ],
+      [
+        "校准"
+      ]
+    ]
   },
   {
     "id": "fncall",
@@ -637,10 +700,12 @@
       }
     ],
     "followup": "模型不按 schema 输出时，兜底方案是什么？",
-    "must": [
-      "正则"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "正则"
+      ]
+    ]
   },
   {
     "id": "review",
@@ -672,11 +737,16 @@
       }
     ],
     "followup": "对方坚持不改的时候，你的处理方式是什么？",
-    "must": [
-      "架构",
-      "测试 case"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "架构"
+      ],
+      [
+        "测试",
+        "case"
+      ]
+    ]
   },
   {
     "id": "graphrag-cost",
@@ -708,11 +778,15 @@
       }
     ],
     "followup": "小业务有必要上图谱吗？成本卡在哪？",
-    "must": [
-      "实体抽取",
-      "关系标注"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "实体抽取"
+      ],
+      [
+        "关系标注"
+      ]
+    ]
   },
   {
     "id": "harness-cons",
@@ -744,11 +818,16 @@
       }
     ],
     "followup": "这个框架的短板具体是什么？",
-    "must": [
-      "状态扩展",
-      "源码"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "状态扩展",
+        "状态管"
+      ],
+      [
+        "源码"
+      ]
+    ]
   },
   {
     "id": "proxy-pull",
@@ -780,11 +859,13 @@
       }
     ],
     "followup": "不想走网络拉取的话，有什么替代做法？",
-    "must": [
-      "gguf",
-      "本地导入"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "gguf",
+        "本地导入"
+      ]
+    ]
   },
   {
     "id": "resume",
@@ -816,11 +897,15 @@
       }
     ],
     "followup": "HR 看不懂技术词的话，简历该怎么分段？",
-    "must": [
-      "业务价值",
-      "技术栈"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "业务价值"
+      ],
+      [
+        "技术栈"
+      ]
+    ]
   },
   {
     "id": "rebase-reset",
@@ -852,10 +937,12 @@
       }
     ],
     "followup": "怎么找回 rebase 之前的状态？",
-    "must": [
-      "reflog"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "reflog"
+      ]
+    ]
   },
   {
     "id": "retry-backoff",
@@ -887,10 +974,12 @@
       }
     ],
     "followup": "重试这块要注意什么？",
-    "must": [
-      "退避"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "退避"
+      ]
+    ]
   },
   {
     "id": "team-manage",
@@ -922,12 +1011,18 @@
       }
     ],
     "followup": "代码质量差的情况，处理步骤是什么？",
-    "must": [
-      "规范",
-      "示例",
-      "技术方案"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "规范"
+      ],
+      [
+        "示例"
+      ],
+      [
+        "技术方案"
+      ]
+    ]
   },
   {
     "id": "uniapp-tap",
@@ -959,10 +1054,12 @@
       }
     ],
     "followup": "不建议自己手写哪个事件？为什么？",
-    "must": [
-      "touchstart"
-    ],
-    "kind": "referential"
+    "kind": "referential",
+    "must_any": [
+      [
+        "touchstart"
+      ]
+    ]
   },
   {
     "id": "interview-ask",
@@ -994,10 +1091,14 @@
       }
     ],
     "followup": "哪些问题不适合在技术面问？",
-    "must": [
-      "加班",
-      "年终奖"
-    ],
-    "kind": "state"
+    "kind": "state",
+    "must_any": [
+      [
+        "加班"
+      ],
+      [
+        "年终奖"
+      ]
+    ]
   }
 ]
