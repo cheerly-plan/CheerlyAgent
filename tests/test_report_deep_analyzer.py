@@ -188,3 +188,25 @@ def test_deep_completer_disables_thinking():
 
     assert captured["extra_body"]["think"] is False
     assert captured["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_fallback_keeps_raw_length_visible():
+    """解析失败时，「原始 N 字符」的数字不能被 guard_numbers 遮蔽。
+
+    原来整串 fallback_reason 都过 guard_numbers，连长度数字都被换成
+    〔未溯源〕，报告里只剩「原始 〔未溯源〕 字符」，事后无法判断是
+    截断还是别的原因。
+    """
+    from ai_agent.report.deep.analyzer import analyze_chapter
+    from ai_agent.report.deep.chapters import CHAPTERS
+    from ai_agent.report.deep.ledger import SourceLedger
+
+    spec = next(c for c in CHAPTERS if c.number == 2)
+    raw = '[{"id": "e0"}, {"id": "e1"}]'
+    result = analyze_chapter(
+        spec, SourceLedger(), target="X", period="2026Q3", mode="company",
+        prior="", complete=lambda s, u: raw,
+    )
+    assert result.status == "fallback"
+    assert f"原始 {len(raw)} 字符" in result.fallback_reason
+    assert "〔未溯源〕 字符" not in result.fallback_reason

@@ -357,6 +357,19 @@ def analyze_chapter(
     if not isinstance(payload, dict):
         result.status = "fallback"
         result.verdict = "本章输出无法解析，结论从略"
+        # 诊断：完整原始输出只进日志，不进读给模型/用户看的文本。
+        # 报告里只留 120 字符摘要，且会被 guard_numbers 把数字遮蔽成
+        # 〔未溯源〕——连「原始 N 字符」都看不出来，事后无法定位是截断、
+        # 复读输入还是别的原因。
+        logger.warning(
+            "第 %s 章输出未解析成 JSON 对象 payload=%s parse_error=%s len=%d "
+            "finish_reason 见上；原始输出前 2000 字符：%r",
+            spec.number,
+            type(payload).__name__,
+            parse_error or "(无异常，结构不符)",
+            len(raw or ""),
+            (raw or "")[:2000],
+        )
         if not (raw or "").strip():
             result.fallback_reason = (
                 "模型返回空 content：思考型模型的 reasoning 可能耗尽 max_tokens；"
@@ -366,12 +379,13 @@ def analyze_chapter(
             excerpt = guard_numbers(
                 (raw or "").strip()[:120], ledger.allowed_numbers
             )[0]
-            result.fallback_reason = guard_numbers(
+            # 只用 guard_numbers 处理摘要本身；外层拼接不走它，否则连
+            # 「原始 N 字符」里的数字都会被当成未溯源数字遮蔽掉
+            result.fallback_reason = (
                 f"输出未解析成 JSON 对象（得到 {type(payload).__name__}；"
                 f"{parse_error or '结构不符'}）；原始 {len(raw or '')} 字符，"
-                f"摘要：{excerpt!r}",
-                ledger.allowed_numbers,
-            )[0]
+                f"摘要：{excerpt!r}"
+            )
         return result
 
     result.verdict, number_gap = guard_conclusion(
