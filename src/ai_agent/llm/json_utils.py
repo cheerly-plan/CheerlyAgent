@@ -31,6 +31,21 @@ def load_llm_json(raw: str, *, repair: bool = False) -> object | None:
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
+    brace = text.find("{")
+    bracket = text.find("[")
+    # 数组在前（如 [{"text":...}, {...}]）时必须整段按数组解析。
+    # 原来无条件先找 "{", 会在 [{...}] 里截出 "{...},{...}"——不是合法
+    # JSON，解析失败返回 None，多元素数组因此一律判失败。
+    if 0 <= bracket < brace if brace >= 0 else bracket >= 0:
+        start = bracket
+        end = text.rfind("]")
+        if start < 0 or end <= start:
+            return None
+        blob = text[start : end + 1]
+        try:
+            return json.loads(blob)
+        except json.JSONDecodeError:
+            return repair_json(text) if repair else None
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:

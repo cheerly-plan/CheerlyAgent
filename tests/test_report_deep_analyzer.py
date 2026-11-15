@@ -210,3 +210,51 @@ def test_fallback_keeps_raw_length_visible():
     assert result.status == "fallback"
     assert f"原始 {len(raw)} 字符" in result.fallback_reason
     assert "〔未溯源〕 字符" not in result.fallback_reason
+
+
+def test_bare_claims_array_is_accepted():
+    """模型常把 claims 数组当成整个答案（内容对、只差外层对象）。"""
+    from ai_agent.report.deep.analyzer import analyze_chapter
+    from ai_agent.report.deep.chapters import CHAPTERS
+    from ai_agent.report.deep.ledger import SourceLedger
+
+    from ai_agent.report.deep.ledger import SourceRecord
+
+    spec = next(c for c in CHAPTERS if c.number == 2)
+    # 台账里要有 e0，否则 inferred 会因「无证据」被正确丢弃，
+    # 测不到容错逻辑本身
+    ledger = SourceLedger(
+        records=[
+            SourceRecord(
+                source_id="e0", item="营业收入", value="1000元", unit="元",
+                subject="X", period="2026Q3", filename="f.pdf", file_id="f1",
+                page=1, section="一", quote="营业收入 1000",
+            )
+        ]
+    )
+    raw = (
+        '[{"text": "现金流覆盖利润良好", "claim_type": "inferred", '
+        '"tier": "Tier 1", "evidence_ids": ["e0"], "confidence": 0.7}]'
+    )
+    result = analyze_chapter(
+        spec, ledger, target="X", period="2026Q3", mode="company",
+        prior="", complete=lambda s, u: raw,
+    )
+    assert result.status != "fallback"
+    assert result.claims
+
+
+def test_ledger_echo_is_not_accepted_as_claims():
+    """台账条目（id/source/quote）是输入不是答案，不能被当成结论收下。"""
+    from ai_agent.report.deep.analyzer import analyze_chapter
+    from ai_agent.report.deep.chapters import CHAPTERS
+    from ai_agent.report.deep.ledger import SourceLedger
+
+    spec = next(c for c in CHAPTERS if c.number == 2)
+    raw = '[{"id": "e0", "source": "某报告第2页", "quote": "营业收入 ...", "tier": "Tier 1/L1"}]'
+    result = analyze_chapter(
+        spec, SourceLedger(), target="X", period="2026Q3", mode="company",
+        prior="", complete=lambda s, u: raw,
+    )
+    assert result.status == "fallback"
+    assert result.claims == []

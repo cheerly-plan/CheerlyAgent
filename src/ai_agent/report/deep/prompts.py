@@ -68,7 +68,19 @@ CHAPTER_USER = """标的与报告期：{{TARGET}} / {{PERIOD}}
 【已知数据缺口】
 {{GAPS}}
 
-请只输出本章 JSON。
+【输出格式】只输出一个 JSON 对象，就按下面的形状填（把示例值换成你的结论）：
+{
+  "verdict": "本章一句话结论",
+  "claims": [
+    {"text": "结论句", "claim_type": "known|inferred|uncertain",
+     "tier": "Tier 1", "evidence_ids": ["e0"], "confidence": 0.8}
+  ],
+  "gaps": [{"item": "缺失数据", "impact": "影响什么判断", "handling": "怎么处置"}]
+}
+
+注意：**不要**把【已授权事实台账】里的记录转成 JSON 输出（不要输出 id/source/quote
+这类条目数组），那是输入不是答案。claims 里写的是你的分析结论，每条用
+evidence_ids 回指台账编号。
 """
 
 REVIEW_SYSTEM = """你是章节评审专家组。你是**审查者不是作者**：只发现问题、质疑结论，

@@ -354,6 +354,25 @@ def analyze_chapter(
     except Exception as exc:
         payload = None
         parse_error = f"{type(exc).__name__}: {exc}"
+    # 模型常把 claims 数组当成整个答案返回（内容正确、只差外层
+    # {"verdict", "claims", "gaps"}）。判断依据是元素字段：claims 有 text/
+    # claim_type，台账条目有 id/source/quote——后者是输入不是答案，不能当
+    # 结论收下。
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        keys = set(payload[0])
+        if {"text", "claim_type"} & keys and "id" not in keys:
+            logger.info(
+                "第 %s 章返回裸 claims 数组（%d 条），按 claims 收下并补外层字段",
+                spec.number,
+                len(payload),
+            )
+            first = payload[0].get("text") or ""
+            payload = {
+                # 没有顶层 verdict 时用第一条结论兜底，不留空结论
+                "verdict": str(first)[:300],
+                "claims": payload,
+                "gaps": [],
+            }
     if not isinstance(payload, dict):
         result.status = "fallback"
         result.verdict = "本章输出无法解析，结论从略"
