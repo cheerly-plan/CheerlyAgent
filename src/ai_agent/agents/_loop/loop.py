@@ -237,6 +237,11 @@ def run_stream(
             except StopIteration:
                 pass
         turn = messages[persisted:]
+        # 把本轮开关记到回答消息的 meta 上：重新生成要从这里读回 use_report。
+        # 「研报」在前端是一次性标签——发送后立刻重置，所以重新生成时前端
+        # 拿不到当初的开关状态，会把研报请求当成普通问答，导致重生成不产出
+        # 研报、只剩一段文字。
+        _tag_switches_on_turn(turn, use_report=use_report)
         # replacing（重新生成 / 断点恢复）只有成功完成才落库：
         # 失败或中断保留库里已有内容（旧完整回答或上一轮已写入的半截）。
         skip_persist = replacing and not completed
@@ -297,6 +302,20 @@ def run_stream(
                     summary,
                     summary_until_seq,
                 )
+
+def _tag_switches_on_turn(turn: list[ChatMessage], *, use_report: bool) -> None:
+    """给本轮的助手回答打上开关标记（目前只需 use_report）。
+
+    只标助手消息：用户消息是用户原话，不该混进运行参数。meta 会随
+    agent_chat_history.meta 一路落库，前端重新生成时由后端读回。
+    """
+    for msg in reversed(turn):
+        if msg.get("role") == "assistant":
+            meta = dict(msg.get("meta") or {})
+            meta["use_report"] = bool(use_report)
+            msg["meta"] = meta
+            return
+
 
 def run_loop(
     messages: list[ChatMessage],

@@ -228,12 +228,17 @@ def chat(
             logger.exception("刷新会话活跃时间失败")
     _acquire_chat_slot()
     if req.regenerate:
+        # 重新生成沿用「被重新生成那一轮」的开关，而不是前端此刻的值。
+        # 「研报」在前端是一次性标签：发送后立刻重置，所以重新生成时前端
+        # 只会传 false，研报请求会被当成普通问答——实测重生成一份已成功
+        # 生成的研报，结果只给了一段文字、没有任何产物。
+        use_report = _report_flag_of_last_turn(user.user_id, req.chat_session_id)
         return _stream_regenerate(
             user.user_id,
             req.chat_session_id,
             req.web_search,
             req.use_kb,
-            req.use_report,
+            use_report,
             tuple(req.kb_file_ids),
             memory_enabled=user.memory_enabled,
         )
@@ -247,6 +252,33 @@ def chat(
         tuple(req.kb_file_ids),
         memory_enabled=user.memory_enabled,
     )
+
+
+def _report_flag_of_last_turn(
+    user_id: str, chat_session_id: str, fallback: bool = False
+) -> bool:
+    """重新生成时读回「上一轮生成时」的研报开关。
+
+    前端把「研报」做成一次性标签（发送后立即重置），所以重新生成时传上来的
+    永远是 false。真实开关值在生成成功那一轮已随回答落进
+    ``agent_chat_history.meta``，这里按「最后一条用户消息之后的回答」读回。
+
+    读不到（老数据 meta 为空、或这轮没有回答）时返回 ``fallback``，
+    退回前端传值，不改变没打过标记的历史行为。
+    """
+    try:
+        turns = store.load_all_turns(user_id, chat_session_id)
+    except Exception:
+        logger.exception("重新生成：读取历史开关失败，退回前端传值")
+        return fallback
+    for msg in reversed(turns):
+        if msg.get("role") == "user":
+            # 越过最后一条用户消息就停：那是本轮问句，前面的回答不属于它
+            break
+        meta = msg.get("meta") or {}
+        if isinstance(meta, dict) and "use_report" in meta:
+            return bool(meta["use_report"])
+    return fallback
 
 
 def _stream_regenerate(

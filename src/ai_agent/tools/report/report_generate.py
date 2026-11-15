@@ -104,12 +104,6 @@ def _report_text(request: str, report_type: str = "", write_pdf: bool = True) ->
     emit_progress(msg_report_done(gaps=gaps))
     artifacts = result.artifacts
     lines = [
-        # 这一轮的结论必须由工具自己说清：模型看到的对话历史里可能还留着上一轮
-        # 「需要打开研报开关」的回答（那次开关确实没开）。两条信息冲突时，实测
-        # 模型会采信历史，把已经生成好的研报说成「仍需打开开关」。
-        "（系统）本次 generate_report 已成功执行，研报产物已落盘。"
-        "不要再说「需要打开研报开关」「无法生成正式研报」之类的话——"
-        "本次调用本身就是生成成功的证据。",
         "研报已由服务端确定性流水线生成（正文数字只来自知识库表格，已过校验门禁）。",
         "默认同时交付：事实层底稿 + 独立深度解析（推断层，不并入底稿正文）。",
         f"标题：{result.document.title or '（未识别到标题）'}",
