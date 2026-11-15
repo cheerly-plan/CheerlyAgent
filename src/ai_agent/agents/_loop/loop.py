@@ -557,15 +557,26 @@ def run_loop(
             # 前端用它清掉调用前的半截字，同时把「在查什么」显示出来。
             # 只有工具名时，用户只能看到「正在处理…」转圈——实测一次
             # 「一周热点新闻」模型连调 13 次工具，前端全程无信息。
+            label = _public()._tool_call_label(call["name"], call["arguments"] or {})
+            index = _call_index(call["name"])
             yield {
                 "type": "tool_start",
                 "name": call["name"],
                 "args": call["arguments"] or {},
-                "label": _public()._tool_call_label(
-                    call["name"], call["arguments"] or {}
-                ),
-                "call_index": _call_index(call["name"]),
+                "label": label,
+                "call_index": index,
             }
+            # tool_start 只带结构化字段，前端渲染的是 tool_progress.message
+            # （useChat.ts 里 tool_start 给静态文案，tool_progress 覆盖它）。
+            # 只有 generate_report 原本会发 tool_progress，其余工具全程停在
+            # 「正在处理…」。这里补一条，前端已有的渲染路径直接用。
+            hint = _public()._tool_progress_hint(call["name"], label, index)
+            if hint:
+                yield {
+                    "type": "tool_progress",
+                    "name": call["name"],
+                    "message": hint,
+                }
             # 范围与查询改写上下文必须在工具执行这一层同栈设置：run_stream 的
             # 生成器会被不同线程轮流 next() 推进，外层设的 contextvar 传不进来
             if call["name"] in _PROGRESS_TOOLS:

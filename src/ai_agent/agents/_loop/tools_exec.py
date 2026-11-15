@@ -259,3 +259,37 @@ def _tool_call_index_factory() -> "Callable[[str], int]":
         return counts[name]
 
     return call_index
+
+
+# 工具名的中文动词，拼进「正在搜索「X」…」这类进度文案。
+# 只放最常用的几个，没收录的回退成通用文案（见下方）。
+_TOOL_VERBS: dict[str, str] = {
+    "web_search": "搜索",
+    "kb_search": "检索知识库",
+    "kg_search": "检索图谱",
+    "kb_read": "读取原文",
+    "kb_list_files": "查看文件清单",
+    "generate_report": "生成研报",
+    "report_extract_indicators": "抽取财务指标",
+    "report_compare": "对比指标",
+    "report_validate": "校验研报",
+    "report_job_status": "查询研报进度",
+    "search_memory": "检索记忆",
+    "write_memory": "写入记忆",
+    "expand_memory": "展开记忆",
+    "search_history": "搜索历史对话",
+    "read_history": "读取历史对话",
+    "read_tool_result": "读取工具结果",
+}
+
+
+def _tool_progress_hint(name: str, label: str, index: int) -> str:
+    """给前端 status 用的一句进度文案。
+
+    形如「正在搜索「本周热点新闻」（第 2 次）…」。``label`` 为空时只说做什么，
+    不硬凑参数；``index`` 为 1 时不显示「第 1 次」，避免噪音。
+    """
+    verb = _TOOL_VERBS.get(name) or "处理"
+    part = f"{verb}「{label}」" if label else verb
+    times = f"（第 {index} 次）" if index > 1 else ""
+    return f"正在{part}{times}…"

@@ -211,3 +211,72 @@ def test_budget_defaults_from_settings():
     budget = Budget.from_settings()
     assert budget.max_steps == settings.max_turns
     assert budget.max_tool_calls == settings.max_tool_calls_per_run
+
+
+# ——— 修法 1：补发 tool_progress（前端实际渲染的就是它）———
+
+
+def test_hint_formats_verb_label_and_index():
+    from ai_agent.agents._loop.tools_exec import _tool_progress_hint
+
+    assert _tool_progress_hint("web_search", "本周热点新闻", 1) == "正在搜索「本周热点新闻」…"
+    assert (
+        _tool_progress_hint("web_search", "本周热点新闻", 3)
+        == "正在搜索「本周热点新闻」（第 3 次）…"
+    )
+    # label 为空时只说做什么，不硬凑参数
+    assert _tool_progress_hint("kb_list_files", "", 1) == "正在查看文件清单…"
+    # 未收录的工具回退成通用动词，仍带 label
+    assert _tool_progress_hint("weird_tool", "x", 1) == "正在处理「x」…"
+
+
+def test_tool_start_is_followed_by_tool_progress():
+    """前端渲染的是 tool_progress.message；tool_start 只给静态文案。"""
+    from ai_agent.agents.loop import run_loop
+
+    schemas = [{"function": {"name": "web_search"}}]
+    calls = {"n": 0}
+
+    def fake_stream(messages, tools, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield (
+                "result",
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "name": "web_search",
+                            "arguments": {"query": "本周热点新闻"},
+                        }
+                    ],
+                },
+            )
+            return
+        yield ("text", "ok")
+        yield ("result", {"content": "ok", "tool_calls": []})
+
+    with (
+        patch("ai_agent.agents.loop.tool_schemas", return_value=schemas),
+        patch("ai_agent.agents.loop.stream_chat", side_effect=fake_stream),
+        patch("ai_agent.agents.loop.execute_tool", return_value="搜索结果"),
+        patch("ai_agent.kb.retrieval.mentioned_subjects", return_value=set()),
+    ):
+        events = list(run_loop([{"role": "user", "content": "一周热点新闻"}]))
+
+    kinds = [e.get("type") for e in events]
+    assert "tool_start" in kinds
+    start = kinds.index("tool_start")
+    # tool_progress 紧跟在 tool_start 之后，且带可读文案
+    assert kinds[start + 1] == "tool_progress"
+    progress = events[start + 1]
+    assert progress["message"] == "正在搜索「本周热点新闻」…"
+    assert progress["name"] == "web_search"
+
+
+def test_tool_progress_absent_when_hint_empty():
+    """hint 恒非空（最差也是「正在处理…」），保证前端一定有文案可显示。"""
+    from ai_agent.agents._loop.tools_exec import _tool_progress_hint
+
+    assert _tool_progress_hint("web_search", "", 1) == "正在搜索…"

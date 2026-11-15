@@ -240,9 +240,20 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 ```
 
 `label` 是从该工具的关键参数里抽的一句话（`tools_exec._tool_call_label`），
-`call_index` 是本轮里这个工具第几次被调用。只下发工具名时，前端除了
-「正在处理…」什么也画不出来——实测一次「一周热点新闻」模型连调 13 次工具，
-用户全程无反馈。
+`call_index` 是本轮里这个工具第几次被调用。
+
+**`tool_start` 之后紧跟一条 `tool_progress`**：前端（`ai_chat` 的 `useChat.ts`）
+渲染的其实是 `tool_progress.message`，`tool_start` 只会套一句静态文案
+（`toolStatusHint`）。原来只有 `generate_report` 会发 `tool_progress`，
+其余工具全程停在「正在处理…」。现在每次调用前统一补一条：
+
+```json
+{"type": "tool_progress", "name": "web_search",
+ "message": "正在搜索「本周热点新闻」（第 3 次）…"}
+```
+
+文案由 `_tool_progress_hint(name, label, index)` 拼：工具→中文动词、参数摘要、
+第几次（首次不显示「第 1 次」避免噪音）。未收录的工具回退成「正在处理「X」…」。
 
 **防打转**：同一工具返回**完全相同的结果**累计 `RETRY_LIMIT`（默认 3）次后，
 本轮不再执行它，改为回一条终止提示（`RUNTIME_TOOL_EXHAUSTED`），让模型基于
