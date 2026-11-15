@@ -381,3 +381,19 @@ def test_report_prompt_does_not_expose_implementation_details():
 
     prompt = build_system_prompt(use_kb=True, use_report=True, report_catalog="x")
     assert "不是要讲给用户听的内容" in prompt
+
+
+def test_report_tool_desc_avoids_dismissive_wording():
+    """工具描述不能把「不用再问」这种命令式措辞递给模型照抄。
+
+    实测回答里出现了「结果会直接显示在这条回答下方，不用再问」——
+    来源就是 generate_report 的描述逐字写了这句话，模型直接照搬。
+    """
+    from ai_agent.tools.registry import TOOLS_MAP
+
+    desc = TOOLS_MAP["generate_report"].description
+    # 禁止性描述可以提，但不能以「告诉用户「…不用再问」」的形式出现
+    assert "必须告诉用户" not in desc
+    assert "不要用命令式的口吻" in desc
+    # job_id 仍可用于调 report_job_status，但不该回显给用户
+    assert "也不要把 job_id 写进回答" in desc
