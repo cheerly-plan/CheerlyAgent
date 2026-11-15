@@ -114,3 +114,50 @@ def test_approve_batch_skips_records_without_pending(outdir):
     result = R.approve_batch(["r3"], "tester", output_dir=outdir)
     assert result["approved"] == []
     assert result["skipped"][0]["reason"] == "没有待审条目"
+
+
+# ——— 按报告聚合 ———
+
+def test_groups_pair_base_and_deep(outdir):
+    """底稿与推断层合成一条：用户眼里是同一份报告。"""
+    R._write_index(
+        {
+            "r1": _record("r1", []).to_dict(),
+            "r1-deep": _record("r1-deep", [_entry(R.DEEP_REVIEW_REASON)]).to_dict(),
+        },
+        outdir,
+    )
+    # 底稿定稿，推断层仍在待审
+    rows = R.list_report_groups(output_dir=outdir)
+    assert len(rows) == 1
+    group = rows[0]
+    assert group["report_id"] == "r1"
+    assert group["base"]["status"] == "pending"
+    assert group["deep"]["status"] == "pending"
+    assert group["deep"]["pending_items"] == 1
+    assert group["next_action"] == "approve_deep"
+
+
+def test_group_next_action_finalize_when_deep_approved(outdir):
+    deep = _record("r2-deep", [])
+    deep.status = R.APPROVED
+    R._write_index({"r2": _record("r2", []).to_dict(), "r2-deep": deep.to_dict()}, outdir)
+    rows = R.list_report_groups(output_dir=outdir)
+    assert rows[0]["next_action"] == "finalize"
+    assert rows[0]["finalizable"] is True
+
+
+def test_group_next_action_rejected(outdir):
+    deep = _record("r3-deep", [])
+    deep.status = R.REJECTED
+    R._write_index({"r3": _record("r3", []).to_dict(), "r3-deep": deep.to_dict()}, outdir)
+    assert R.list_report_groups(output_dir=outdir)[0]["next_action"] == "rejected"
+
+
+def test_group_without_deep_layer(outdir):
+    """只有底稿（单 PDF 档）也要能正常成组。"""
+    R._write_index({"r4": _record("r4", []).to_dict()}, outdir)
+    rows = R.list_report_groups(output_dir=outdir)
+    assert len(rows) == 1
+    assert rows[0]["deep"] is None
+    assert rows[0]["base"] is not None

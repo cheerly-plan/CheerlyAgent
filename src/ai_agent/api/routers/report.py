@@ -440,6 +440,19 @@ def list_reviews(
     return {"total": len(items), "items": items}
 
 
+@router.get("/review-groups")
+def list_review_groups(user: UserRecord = Depends(get_current_user)) -> dict:
+    """按报告聚合的审核视图：一份报告一条，底稿与推断层各一层。
+
+    审核记录本身分层（``xxx`` 与 ``xxx-deep`` 各有独立门禁：底稿可自动定稿，
+    推断层必须人工审），但用户眼里是同一份报告。平铺列表会看到一堆同名条目，
+    也看不出下一步该做什么；这里合并并给出 ``next_action``。
+    """
+    owner = None if _is_review_admin(user) else user.user_id
+    items = review_store.list_report_groups(owner=owner)
+    return {"total": len(items), "items": items}
+
+
 @router.get("/reviews/{report_id}")
 def get_review(report_id: str, user: UserRecord = Depends(get_current_user)) -> dict:
     """单条审核详情：管理员或该报告的生成者。"""

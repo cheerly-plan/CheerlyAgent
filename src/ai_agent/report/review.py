@@ -604,6 +604,96 @@ def approve_batch(
     return {"approved": approved, "skipped": skipped}
 
 
+def list_report_groups(
+    output_dir: Path | str | None = None,
+    owner: str | None = None,
+) -> list[dict]:
+    """按**报告**聚合的审核视图：一份报告一条，底稿与推断层作为两层。
+
+    审核记录本身是分层的（``xxx`` 与 ``xxx-deep`` 各有独立 gate，底稿可
+    自动定稿而推断层必须人工审），但用户眼里它们是同一份报告。列表按记录
+    平铺会看到一堆同名条目，分不清谁是谁、也不知道下一步该做什么。
+
+    这里把它们合成一条，并给出 ``next_action`` 告诉前端下一个动作是什么。
+    """
+    records = list_records(output_dir=output_dir, owner=owner)
+    groups: dict[str, dict] = {}
+    for row in records:
+        report_id = str(row.get("report_id") or "")
+        is_deep = report_id.endswith(DEEP_SUFFIX)
+        base_id = report_id[: -len(DEEP_SUFFIX)] if is_deep else report_id
+        group = groups.setdefault(
+            base_id,
+            {
+                "report_id": base_id,
+                "title": "",
+                "created_at": "",
+                "base": None,
+                "deep": None,
+            },
+        )
+        layer = "deep" if is_deep else "base"
+        group[layer] = _layer_payload(row)
+        # 标题取底稿的（推断层是「xxx（推断层）」，去掉后缀即同源）
+        if not is_deep:
+            group["title"] = row.get("title") or group["title"]
+        elif not group["title"]:
+            group["title"] = str(row.get("title") or "").replace("（推断层）", "")
+        group["created_at"] = max(
+            group["created_at"] or "", str(row.get("created_at") or "")
+        )
+
+    out = []
+    for group in groups.values():
+        group["next_action"] = _next_action(group)
+        group["finalizable"] = group["next_action"] == "finalize"
+        out.append(group)
+    out.sort(key=lambda g: g.get("created_at") or "", reverse=True)
+    return out
+
+
+def _layer_payload(row: dict) -> dict:
+    """一层（底稿或推断层）的审核状态。"""
+    return {
+        "review_id": row.get("report_id"),
+        "status": row.get("status"),
+        "finalizable": bool(row.get("finalizable")),
+        "gate_reason": row.get("gate_reason") or "",
+        "pending_items": row.get("pending_items") or 0,
+        "pending_list": row.get("pending_list") or [],
+        "batch_approvable": bool(row.get("batch_approvable")),
+        "decisions": row.get("decisions") or [],
+        "finalized_by": row.get("finalized_by") or "",
+    }
+
+
+def _next_action(group: dict) -> str:
+    """这份报告下一步该做什么，供前端决定显示哪个按钮。
+
+    approve_deep  推断层有待审项         → 显示「批准」
+    approve_base  底稿有待审项           → 显示「批准」
+    finalize      有层可定稿             → 显示「定稿」
+    finalized     全部定稿               → 不显示动作
+    rejected      有层被驳回             → 显示「退回待审」
+    """
+    layers = [group.get("base"), group.get("deep")]
+    alive = [layer for layer in layers if layer]
+    if not alive:
+        return "none"
+    if any(layer["status"] == "rejected" for layer in alive):
+        return "rejected"
+    if any(layer["pending_items"] for layer in alive):
+        # 推断层优先：底稿通常已自动定稿，人工审的主要是推断层
+        if group.get("deep") and group["deep"]["pending_items"]:
+            return "approve_deep"
+        return "approve_base"
+    if all(layer["status"] == "finalized" for layer in alive):
+        return "finalized"
+    if any(layer["finalizable"] and layer["status"] != "finalized" for layer in alive):
+        return "finalize"
+    return "waiting"
+
+
 def decide(
     report_id: str,
     action: str,
