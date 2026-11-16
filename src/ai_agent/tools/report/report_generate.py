@@ -145,6 +145,18 @@ def _report_entry(
             "（系统说明）如实说明「还需审核后才能下载 PDF」即可，"
             "不要写内部接口路径或审核记录的 id。"
         )
+        # 事实层也要给前端一行可解析的审核队列链接：前端 ReportJobCard 靠正则
+        # 从交付文本提取 /v1/report/reviews/<id> 来直连审核面板。之前只有深度层
+        # 会写这行，事实层校验失败（如「正文未核对数字」）时 deep_review_id 为空、
+        # 这行不出现，前端就提取不到 review_id，点「人工审核队列」打不开面板，
+        # PDF 永远卡在待审。这里用事实层的 report_id（就是这条待审记录的 id）。
+        report_id = getattr(result, "report_id", "") or ""
+        if report_id:
+            lines.append(
+                f"事实层审核队列：/v1/report/reviews/{report_id}"
+                "（与深度解析分开审核，互不影响）。"
+                "（系统说明）这一行是给界面解析用的，回答里不要写出该路径。"
+            )
     downloads = [
         ("底稿 PDF", artifacts.pdf),
         ("底稿 Markdown", artifacts.markdown),

@@ -271,6 +271,42 @@ def test_generate_report_tool_returns_links_not_body_numbers(monkeypatch):
     assert len(text) <= 3000  # execute_tool 的截断上限
 
 
+def test_fact_layer_pending_still_emits_review_id_for_panel(monkeypatch):
+    """事实层校验失败（未定稿、深度层没生成）时，交付文本仍要带可解析的
+    审核队列链接：前端 ReportJobCard 靠正则从交付文本提取 /v1/report/reviews/<id>
+    直连审核面板。否则「正文未核对数字」这类事实层待审项永远没有入口处置，
+    PDF 卡在待审。"""
+    fake = SimpleNamespace(
+        document=SimpleNamespace(title="中国银行股份有限公司 2026Q3 财报深度分析"),
+        status="ok",
+        deliverable="markdown",
+        pdf_status="not_generated",
+        report_id="deadbeef01",
+        review_status="pending",
+        validation=SimpleNamespace(
+            summary="校验未通过", findings=[], review_queue=["r001"]
+        ),
+        artifacts=SimpleNamespace(
+            pdf="", markdown="bank.md", provenance="bank.provenance.md", review="bank.review.json"
+        ),
+        deep_artifacts={},
+        deep_error="",
+        deep_pdf_error="",
+        deep_pdf_review_id="",  # 事实层没过，深度层没生成，无 deep 审核记录
+        pdf_error="正文出现未核对数字",
+        gaps=[],
+    )
+    monkeypatch.setattr("ai_agent.tools.report.report_generate.run_report", lambda *a, **k: fake)
+    from ai_agent.tools.report.report_generate import _report_text
+
+    text = _report_text("生成中国银行2026Q3财报深度分析PDF研报")
+
+    # 事实层 review_id 必须出现，前端才能直连面板
+    assert "/v1/report/reviews/deadbeef01" in text
+    # 不谎称 PDF 可下载
+    assert "尚未定稿" in text
+
+
 def test_markdown_keeps_table_rows_contiguous():
     """表格行之间不能插空行，否则 Markdown 表格散架（PDF/HTML 路径不受影响）。"""
     document = compose_report(_plan(), [_fact("2026Q3", "100,924,954")])
