@@ -68,7 +68,8 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
                     └─────────┬──────────┘
    api/routers      ┌─────────▼──────────────────────────────────────────┐
                     │ /v1/auth · /user · /v1/session · /v1/chat          │
-                    │ /v1/kb · /v1/kg · /v1/report · /v1/inspect         │
+                    │ /v1/kb · /v1/kg · /v1/report · /v1/wecom            │
+                    │ /v1/inspect                                       │
                     └─────────┬──────────────────────────────────────────┘
                     ┌─────────▼──────────┐
    agents/          │ loop.py 工具循环   │  max_turns 上限 · 并发信号量
@@ -114,6 +115,7 @@ LLM 重排）→ 把上次进程异常退出卡住的知识库文件标 failed�
 | `prompts/` | 提示词：系统提示与工具描述（`chat.py` / `tools.py`）、知识库提示（`kb.py`）、记忆抽取（`memory.py`）、后台任务（`tasks.py`）、装配器（`builder.py`） |
 | `migrations/` | Alembic 迁移脚本（见下方「数据库与迁移」） |
 | `core/` | 配置（`config.py`）、异常、HTTP 客户端、日志 |
+| `wecom/` | 企业微信自建应用推送：access_token 缓存、上传临时素材、发文本/文件消息、研报完成通知（见下方「企业微信推送」） |
 | `tasks/` | 后台任务：会话标题生成、定期清理 |
 | `scripts/` | 运维与评测脚本。日常维护走 `kb.py`，评测用例在 `scripts/cases/` |
 
@@ -442,10 +444,46 @@ L1/L2 支持分页查看与单条/全部删除，`GET /v1/memory/export` 导出 
 | GET | `/v1/report/jobs/{id}` | 轮询任务进度 |
 | GET | `/v1/report/files/{name}` | 研报附件下载／`?preview=1` 在线预览 |
 |  | `/v1/report/reviews/**` | 审核队列、批准／驳回、定稿 |
+| POST | `/v1/wecom/message` | 发一条文本消息给指定成员 |
+| POST | `/v1/wecom/push` | 把一份研报产物（PDF/Markdown）推给指定成员 |
 |  | `/v1/inspect/**` | 管理员回看用户会话与每轮工具调用 |
 
 > 普通用户只能操作自己的记忆，管理员可通过 `user_id` 指定用户；关闭记忆开关
 > 只停止读写与工具挂载，不会隐式删除已有数据。
+
+---
+
+## 企业微信推送（`wecom/`）
+
+把研报产物或文本消息推给企业微信成员。基于自建应用（agent）API，零第三方依赖
+（标准库 `urllib` 经 `core.http` 手拼请求与 multipart）。
+
+| 能力 | 入口 | 说明 |
+|---|---|---|
+| 发文本消息 | `POST /v1/wecom/message` | 正文 ≤ 2048 字节（UTF-8，中文 3 字节/字，端点内按字节校验）；`touser` 可 `\|` 分隔多人 |
+| 推研报文件 | `POST /v1/wecom/push` | 只推已落盘报告目录内的 PDF（优先）或 Markdown，文件名经 `report.artifact_path` 收敛（挡 `../` 穿越与非法后缀） |
+| 研报完成通知 | 自动（后台任务成功分支） | 研报出链接后给发起用户发一条文本通知，带标题（「研报《标题》已生成完成…」） |
+
+**设计边界**：
+
+- 文件推送不自己拼路径，复用 `report.artifact_path` 的「文件名 → 报告目录内文件」收敛逻辑；
+- 文件 ≤ `wecom_max_file_bytes`（默认 20MB）发文件消息，超限降级为返回下载链接提示（413），不硬发被企业微信拒绝的文件；
+- `access_token` 进程内缓存（7200 秒），带锁 + 提前失效（`wecom_token_expire_buffer_seconds`，默认 120 秒）主动刷新；接口返回 40014/42001（token 失效）时自动失效重试一次；
+- 凭据只走 env，绝不进日志与异常文本；未配凭据返回 503（可重试的配置错误），业务失败返回 502 并带 `errcode`；
+- **自动通知是旁路能力**：`notify_report_done` fire-and-forget，凭据未配、用户查不到、企业微信报错都只记日志静默跳过，绝不阻塞研报主流程。
+
+**配置**（均在 `src/ai_agent/core/config.py`，env 同名）：
+
+| 变量 | 说明 |
+|---|---|
+| `WECOM_CORP_ID` / `WECOM_AGENT_SECRET` / `WECOM_AGENT_ID` | 企业微信 corp id / 自建应用 secret / agentid，三字段缺一即视为未配置 |
+| `WECOM_MAX_FILE_BYTES` | 单文件消息上限（默认 20MB），0 = 不做本地预检 |
+| `WECOM_TOKEN_EXPIRE_BUFFER_SECONDS` | access_token 提前失效缓冲秒数（默认 120） |
+| `WECOM_REPORT_NOTIFY_ENABLED` | 研报完成自动通知开关（默认 `false`） |
+
+**接收人约定**：通知的 `touser` 取发起用户的 `username`（当前账号体系下
+`username` == 企业微信 userid），**不是** `display_name`（可能是中文显示名，
+企业微信 `touser` 不接受）。手动推送端点由调用方显式传 `touser`。
 
 ---
 
