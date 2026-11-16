@@ -17,6 +17,7 @@ from functools import lru_cache
 from ai_agent.core.logging import get_logger
 from ai_agent.report import registry
 from ai_agent.report.basis import CUMULATIVE, basis_of, cumulative_months
+from ai_agent.report.compare import yoy_period
 from ai_agent.report.extract import Evidence, IndicatorFact
 from ai_agent.report.parse import ReportPlan
 from ai_agent.report.skills import get_skill
@@ -89,10 +90,21 @@ def supplement_facts_from_market(
         else frozenset()
     )
 
+    # 比率类指标（毛利率等）需要去年同期基期值才能算同比；金额类走季报
+    # 原文 reported_yoy，不缺基期。基期列只在有比率类缺口时才可能用到。
+    base_period = yoy_period(plan.period)
+    base_col = period_column(base_period) if base_period else None
+
     have = {
         (_canon_subject(fact.subject), fact.name)
         for fact in facts
         if fact.period == plan.period
+    }
+    # 已补的基期（subject, indicator）→ 避免同公司同指标重复抽。
+    have_base: set[tuple[str, str]] = {
+        (_canon_subject(fact.subject), fact.name)
+        for fact in facts
+        if base_period and fact.period == base_period
     }
     added: list[IndicatorFact] = []
     replaced: set[tuple[str, str]] = set()
@@ -114,6 +126,13 @@ def supplement_facts_from_market(
                 replaced.add(key)
             added.append(fact)
             have.add(key)
+            # 比率类指标额外抽去年同期基期：让 compare 能算同比，基期值进白名单，
+            # 正文「从 X% 降至 Y%」这类对比句才有出处，不再被零幻觉门禁误拦。
+            if base_col and _is_ratio_indicator(indicator) and key not in have_base:
+                base_fact = _fetch_one(name, code, base_period, base_col, indicator)
+                if base_fact is not None:
+                    added.append(base_fact)
+                    have_base.add(key)
 
     if not added:
         return facts, missing
@@ -196,6 +215,22 @@ def _canon_subject(name: str) -> str:
     for alias in ("股份有限公司", "有限公司", "集团"):
         text = text.replace(alias, "")
     return text
+
+
+_RATIO_SUFFIX = re.compile(r"(率|比率)$")
+
+
+def _is_ratio_indicator(indicator: str) -> bool:
+    """比率类指标（名称以「率」结尾，或摘要单位是 %）。
+
+    这类指标季报原文通常不披露「比上年同期增减%」，且跨期绝对值算同比
+    需要基期值（如毛利率 39.44% 需去年同期 41.41%）。金额类指标
+    （营收／净利润等）走季报原文的 reported_yoy 兜底，不缺基期，不额外抽。
+    """
+    if _RATIO_SUFFIX.search((indicator or "").strip()):
+        return True
+    entry = registry.abstract_entry(indicator)
+    return bool(entry and (entry[2] or "").strip() == "%")
 
 
 def _fetch_one(
