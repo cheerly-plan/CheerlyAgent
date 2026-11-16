@@ -21,6 +21,7 @@ from ai_agent.api.routers.memory import router as memory_router
 from ai_agent.api.routers.report import router as report_router
 from ai_agent.api.routers.session import router as session_router
 from ai_agent.api.routers.user import router as user_router
+from ai_agent.api.routers.wecom import router as wecom_router
 from ai_agent.core.config import settings
 from ai_agent.core.exceptions import AgentError
 from ai_agent.core.logging import setup_logging
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
     app.include_router(kb_router)
     app.include_router(kg_router)
     app.include_router(report_router)
+    app.include_router(wecom_router)
     # 渐进式记忆第 5 步：候选人工审核 + L4 归档查询。路由常驻，但端点
     # 内部各自检查开关，默认全关时零 DB 访问、不影响既有响应契约。
     app.include_router(memory_router)

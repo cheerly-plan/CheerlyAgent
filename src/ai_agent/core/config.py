@@ -557,6 +557,22 @@ class Settings(BaseSettings):
     # 链路 400。先在支持 JSON 模式的网关上实测后再打开。
     memory_extract_json_mode: str = "json_object"
 
+    # 企业微信自建应用推送（研报文件手动推给指定成员）。三个字段缺一即视为
+    # 未配置：推送端点返回 503 而不是发一半。凭据只走 env，绝不进日志。
+    wecom_corp_id: str = ""
+    wecom_agent_secret: str = ""
+    wecom_agent_id: str = ""
+    # 单个文件消息上限：企业微信普通文件 ≤20MB；超过时降级为发图文（带下载链接），
+    # 不丢信息。0 = 不设本地预检，交给企业微信侧拒绝。
+    wecom_max_file_bytes: int = 20 * 1024 * 1024
+    # access_token 提前失效的缓冲（秒）：缓存里剩这么多秒就视为过期，主动刷新，
+    # 避免拿到一个「还剩 1 秒」的 token 去发消息撞上过期。
+    wecom_token_expire_buffer_seconds: int = 120
+    # 研报生成完成（任务跑完出链接）后，自动给发起用户发一条文本通知。
+    # touser 取该用户 username（约定 username == 企业微信 userid）。默认关，
+    # 凭据未配或用户查不到时静默跳过，绝不影响研报主流程。
+    wecom_report_notify_enabled: bool = False
+
     def local_llm(self) -> tuple[str, str]:
         """向量、整页 OCR 和轻量任务的网关。未单独配置时跟主网关。"""
         url = (self.local_base_url or "").strip() or self.base_url

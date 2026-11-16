@@ -11,6 +11,7 @@ urllib 样板。错误语义与各调用方一致：网络/解析失败直接抛
 from __future__ import annotations
 
 import json
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -83,6 +84,59 @@ def request_form(
         data=data,
         headers={
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept": "application/json",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    return _read_json(req, read_timeout)
+
+
+def request_upload(
+    url: str,
+    *,
+    field_name: str,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    extra_fields: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30,
+) -> dict:
+    """multipart/form-data 文件上传，响应按 JSON 解析。
+
+    企业微信 ``media/upload`` 这类接口需要真正的 multipart 体（``filename``
+    控制对方展示的文件名）。标准库手拼 boundary，零第三方依赖；文件标识名
+    用 ``field_name``（企业微信固定 ``media``）。
+    """
+    read_timeout = max(timeout, 1.0)
+    boundary = f"----workbuddy-{uuid.uuid4().hex}"
+    parts: list[bytes] = []
+    for name, value in (extra_fields or {}).items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
+        )
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field_name}"; '
+            f'filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode()
+        + content
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Accept": "application/json",
             **(headers or {}),
         },
