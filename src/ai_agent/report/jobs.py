@@ -139,6 +139,15 @@ class ReportJobManager:
                     job.job_id, status="succeeded", stage="已完成", progress=100,
                     result=payload, finished_at=time.time(),
                 )
+                # 研报跑完出链接后，异步给发起用户发一条企业微信文本通知
+                # （开关控制，尽力而为，失败不影响主流程）。
+                if isinstance(payload, dict) and payload.get("kind") == "chat_report":
+                    try:
+                        from ai_agent.wecom.notify import notify_report_done
+
+                        notify_report_done(job.owner, str(payload.get("title") or ""))
+                    except Exception:
+                        logger.exception("触发研报完成通知失败 job_id=%s", job.job_id)
                 # 聊天任务把交付文本写回发起它的那条回答：任务表是内存的，
                 # 进程重启后前端仍能从历史消息里拿到下载链接。
                 if isinstance(payload, dict) and payload.get("kind") == "chat_report":

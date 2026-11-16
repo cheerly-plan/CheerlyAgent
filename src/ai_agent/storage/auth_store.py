@@ -180,6 +180,26 @@ class AuthStore:
             for row in rows
         ]
 
+    def get_user_by_id(self, user_id: str) -> UserRecord | None:
+        """按服务端 UUID 查用户；查不到返回 None。不含密码哈希。"""
+        with self._get_pool().connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id, username, display_name, created_at
+                FROM agent_user
+                WHERE id = %s
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return UserRecord(
+            user_id=str(row["id"]),
+            username=row["username"],
+            display_name=row["display_name"] or row["username"],
+            created_at=row["created_at"].isoformat(),
+        )
+
     def revoke_token(self, token: str) -> None:
         with self._get_pool().connection() as conn:
             conn.execute(

@@ -70,6 +70,18 @@ class GenerateReportArgs(BaseModel):
 
 def _report_text(request: str, report_type: str = "", write_pdf: bool = True) -> str:
     """同步跑完整条研报链路，返回给模型的摘要 + 下载链接。"""
+    text, _title = _report_entry(request, report_type, write_pdf)
+    return text
+
+
+def _report_entry(
+    request: str, report_type: str = "", write_pdf: bool = True
+) -> tuple[str, str]:
+    """跑完整条研报链路，返回 ``(text, title)``。
+
+    ``text`` 是给模型的摘要 + 下载链接；``title`` 是研报标题（用于企业微信
+    完成通知等旁路能力，避免再从 text 里正则抠标题）。
+    """
     from ai_agent.report.deep import (
         ENTRY_CHAPTER_CHANNEL,
         ENTRY_CHAPTER_CONCURRENCY,
@@ -182,7 +194,8 @@ def _report_text(request: str, report_type: str = "", write_pdf: bool = True) ->
             lines.append(f"（另有 {len(result.gaps) - _MAX_GAPS} 条缺口未列出）")
     if result.status != "ok":
         lines.append("状态不是 ok：请如实说明没有生成有效研报及原因，不要补写数字。")
-    return "\n".join(lines)
+    title = result.document.title or ""
+    return "\n".join(lines), title
 
 
 def _job_event(job) -> dict:
@@ -213,6 +226,16 @@ def _submitted_text(job, *, reused: bool = False) -> str:
     )
 
 
+def _report_entry_runner(request: str, report_type: str, write_pdf: bool):
+    """后台任务 runner：跑研报链路，把 text + title 一起塞进 payload。"""
+
+    def _run() -> dict:
+        text, title = _report_entry(request, report_type, write_pdf)
+        return {"kind": "chat_report", "text": text, "title": title}
+
+    return _run
+
+
 def _generate_report(request: str, report_type: str = "", write_pdf: bool = True) -> str:
     """聊天入口：提交后台任务并立刻返回 job_id。
 
@@ -232,10 +255,7 @@ def _generate_report(request: str, report_type: str = "", write_pdf: bool = True
     job = job_manager.submit(
         owner=owner,
         request_text=request,
-        runner=lambda: {
-            "kind": "chat_report",
-            "text": _report_text(request, report_type, write_pdf),
-        },
+        runner=_report_entry_runner(request, report_type, write_pdf),
     )
     # 前端据此渲染「研报任务卡片」：轮询 /v1/report/jobs/{id} 直到出链接。
     # 没有订阅者（非聊天入口）时 emit_event 静默丢弃，不影响同步调用方。
